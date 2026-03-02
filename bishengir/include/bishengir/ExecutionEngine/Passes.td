@@ -105,4 +105,20 @@ def ExecutionEngineHIVMToUpstreamConversion : Pass<"execution-engine-convert-hiv
   ];
 }
 
+def ExecutionEngineHFusionToUpstreamConversion : Pass<"execution-engine-convert-hfusion-to-upstream"> {
+  let summary = "Convert HFusion operations to upstream dialect's equivalent";
+  let description = [{
+    Convert selected HFusion operations into upstream dialects to make them
+    compatible with the CPU runner lowering pipeline.
+  }];
+  let constructor = "mlir::execution_engine::createConvertHFusionToUpstreamPass()";
+  let dependentDialects = [
+    "arith::ArithDialect",
+    "hfusion::HFusionDialect",
+    "linalg::LinalgDialect",
+    "math::MathDialect",
+    "tensor::TensorDialect",
+  ];
+}
+
 #endif // BISHENGIR_EXECUTION_ENGINE_TRANSFORMS_PASSES

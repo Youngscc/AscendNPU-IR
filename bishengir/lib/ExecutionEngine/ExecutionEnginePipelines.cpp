@@ -44,6 +44,7 @@ void execution_engine::buildCPURunnerPipeline(
   pm.addPass(execution_engine::createCreateHostMainPass(hostFuncWrapperOpts));
 
   // Conversion to upstream dialect Passes
+  pm.addPass(createConvertHFusionToUpstreamPass());
   pm.addPass(createConvertHIVMToUpstreamPass());
 
   // Decompose tensor.concat into slices before bufferization

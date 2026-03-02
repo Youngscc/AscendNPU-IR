@@ -1,5 +1,5 @@
 // REQUIRES: execution-engine
-// RUN: bishengir-opt --execution-engine-convert-hivm-to-upstream %s --split-input-file | FileCheck %s
+// RUN: bishengir-opt --execution-engine-convert-hfusion-to-upstream --execution-engine-convert-hivm-to-upstream %s --split-input-file | FileCheck %s
 // RUN: bishengir-opt --lower-for-cpu-runner-pipeline %s --split-input-file
 
 func.func @tensor_direct_linalg_lowering(%a: tensor<1x?x10xf32>, %b: tensor<?x5x10xf32>, %c: tensor<5x?x10xf32>) -> tensor<5x?x10xf32> attributes {hacc.function_kind = #hacc.function_kind<HOST>, hacc.host_func_type = #hacc.host_func_type<host_entry>} {
@@ -116,6 +116,17 @@ func.func @memref_direct_linalg_lowering(%a: memref<1x?x10xf32>, %b: memref<?x5x
     hivm.hir.vtranspose ins(%b: memref<?x5x10xf32>) outs(%c: memref<5x?x10xf32>) permutation = [1, 0, 2]
 
     func.return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @hfusion_isfinite_to_linalg
+func.func @hfusion_isfinite_to_linalg(%arg0: tensor<4xf32>) -> tensor<4xi1> attributes {hacc.function_kind = #hacc.function_kind<HOST>, hacc.host_func_type = #hacc.host_func_type<host_entry>} {
+  // CHECK: linalg.generic
+  // CHECK: math.absf
+  // CHECK: arith.cmpf olt
+  %0 = hfusion.isfinite %arg0 : tensor<4xf32> -> tensor<4xi1>
+  func.return %0 : tensor<4xi1>
 }
 
 // -----
