@@ -98,3 +98,10 @@ std::unique_ptr<Pass>
 mlir::hfusion::createDecomposePass(const DecomposeOptions &options) {
   return std::make_unique<DecomposePass>(options);
 }
+
+
+
+namespace {
+#define GEN_PASS_REGISTRATION
+#include "bishengir/Dialect/HFusion/Transforms/Passes.h.inc"
+} // namespace

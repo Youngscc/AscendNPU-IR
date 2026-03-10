@@ -31,6 +31,7 @@ include "bishengir/Interfaces/AggregatedOpInterface.td"
 include "bishengir/Dialect/HFusion/IR/HFusionBase.td"
 include "bishengir/Dialect/HFusion/IR/HFusionAttrs.td"
 
+
 // Base class for HFusion dialect ops that do not correspond to library calls.
 class HFusion_Op<string mnemonic, list<Trait> traits = []> :
     Op<HFusion_Dialect, mnemonic, traits>;
@@ -218,7 +219,8 @@ def FlipOp : HFusion_Op<"flip", [Pure, Commutative, AllTypesMatch<["output"]>]> 
 //===----------------------------------------------------------------------===//
 
 def IsInfOp : HFusion_Op<"isinf", [Pure, SameOperandsAndResultRank,
-                                   AllTypesMatch<["output"]>]> {
+                                   AllTypesMatch<["output"]>, 
+                                   ]> {   // 添加了这一行
   let summary = [{
     Calculates whether elements of a float type tensor equal positive
     infinity or negative infinity.
