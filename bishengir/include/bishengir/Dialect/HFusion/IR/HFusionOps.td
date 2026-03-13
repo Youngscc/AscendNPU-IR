@@ -218,7 +218,7 @@ def FlipOp : HFusion_Op<"flip", [Pure, Commutative, AllTypesMatch<["output"]>]> 
 //===----------------------------------------------------------------------===//
 
 def IsInfOp : HFusion_Op<"isinf", [Pure, SameOperandsAndResultRank,
-                                   AllTypesMatch<["output"]>, ]> {
+                                   AllTypesMatch<["output"]>]> {
   let summary = [{
     Calculates whether elements of a float type tensor equal positive
     infinity or negative infinity.
