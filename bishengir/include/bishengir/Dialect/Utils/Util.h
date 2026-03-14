@@ -38,6 +38,7 @@ constexpr const uint8_t kBitsToByte = 8;
 constexpr static unsigned int INTR_BITS_PER_BYTE = 8;
 constexpr static unsigned int INTR_BYTES_PER_BLOCK = 32;
 constexpr static unsigned int FRACTAL_BLOCK_NUM = 16;
+constexpr static int64_t kUBAlignSizeInBits = 32 * 8;
 static constexpr llvm::StringLiteral kEnableAutoMarkBufferSize =
     "enable_auto_mark_buffer_size";
 static constexpr llvm::StringLiteral kMemrefAsPtr = "memref.memref_as_ptr";
@@ -359,9 +360,14 @@ func::ReturnOp getAssumedUniqueReturnOp(func::FuncOp funcOp);
 bool areShapesAligned(ArrayRef<int64_t> staticShapes, int64_t alignment);
 /// Check if op's users all satisfy the condition function.
 std::optional<bool>
-checkUsersAllWithCondition(Value v, Operation *rootOp, DenseSet<Value> &visited,
+checkUsersAllWithCondition(Value v, Operation *rootOp,
                            const std::function<bool(Operation *op)> &condFn,
                            const std::function<bool(Operation *op)> &skipFn);
+
+std::optional<bool> checkUsersAllWithConditionImpl(
+    Value v, Operation *rootOp,
+    const std::function<bool(Operation *op)> &condFn,
+    const std::function<bool(Operation *op)> &skipFn);
 
 int checkDefsAllWithCondition(Value v,
                               const std::function<int(Operation *op)> &condFn);
@@ -509,6 +515,8 @@ Value getSlice(OpBuilder &b, Location loc, Value source,
                ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes,
                ArrayRef<OpFoldResult> strides);
 
+bool isAlignedInUB(Type type);
+
 } // namespace utils
 
 namespace reshape_utils {
@@ -565,18 +573,6 @@ SmallVector<SmallVector<int64_t, 2>>
 getReAssociation(ArrayRef<int64_t> expandDims, int64_t outRank);
 
 } // namespace reshape_utils
-
-namespace version_utils {
-
-// Currently, we only handle compatibility between two hivmc versons
-// 1. early version: empty or fail to parse version
-// 2. new version: has meaningful version number
-//
-// TODO: support semantic version compatibility check in the future,
-// e.g. check compatibility between 1.0.0 and 2.0.0
-bool isCompatibleHIVMCVersion(StringRef versionStr);
-
-} // namespace version_utils
 
 } // namespace mlir
 

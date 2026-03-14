@@ -23,6 +23,7 @@
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/PatternMatch.h"
@@ -347,66 +348,315 @@ private:
 //===----------------------------------------------------------------------===//
 // SynBlockOpLowering
 //===----------------------------------------------------------------------===//
-void appendBlockSyncOperations(PatternRewriter &rewriter, Location loc,
-                               TCoreTypeAttr tCoreTypeAttr,
-                               hivm::SyncBlockInstrModeAttr modeAttr,
-                               PipeAttr tpipe, PipeAttr pipe,
-                               IntegerAttr flagID, Value fftsBaseAddr) {
-  rewriter.create<SyncBlockSetOp>(loc, tCoreTypeAttr, tpipe, pipe, flagID,
-                                  fftsBaseAddr, modeAttr);
-  rewriter.create<SyncBlockWaitOp>(loc, tCoreTypeAttr, tpipe, pipe, flagID);
-}
 
 struct SyncBlockOpLowering : public OpRewritePattern<SyncBlockOp> {
-  using OpRewritePattern<SyncBlockOp>::OpRewritePattern;
+  struct SyncBlockOpLoweringOptions {
+    bool isMixCore{false};
+    TFuncCoreType funcCoreType{TFuncCoreType::AIC_OR_AIV};
+  } options;
 
-  LogicalResult matchAndRewrite(SyncBlockOp op,
-                                PatternRewriter &rewriter) const override {
+  const int64_t interCubeSyncFlagId = 15;
+  const int64_t interVectorSyncFlagId = 14;
+  const int64_t blockAllInterCubeSyncFlagId = 13;
+  const int64_t blockAllInterVectorSyncFlagId = 12;
+  const int64_t blockAllIntraSyncFlagId1 = 11;
+  const int64_t blockAllIntraSyncFlagId2 = 10;
+
+  explicit SyncBlockOpLowering(MLIRContext *context, bool isMixCore,
+                               TFuncCoreType funcCoreType)
+      : OpRewritePattern<SyncBlockOp>(context, /*benefit=*/1),
+        options({isMixCore, funcCoreType}) {}
+
+  void insertBlockSyncOperations(
+      PatternRewriter &rewriter, Location loc, TCoreTypeAttr tCoreTypeAttr,
+      TCoreTypeAttr coreTypeAttr, hivm::SyncBlockInstrModeAttr modeAttr,
+      PipeAttr tpipe, PipeAttr pipe, IntegerAttr flagID, Value fftsBaseAddr,
+      bool insertSetOp = true, bool insertWaitOp = true) const {
+    if (insertSetOp) {
+      rewriter.create<SyncBlockSetOp>(loc, tCoreTypeAttr, tpipe, pipe, flagID,
+                                      fftsBaseAddr, modeAttr);
+    }
+    if (insertWaitOp) {
+      rewriter.create<SyncBlockWaitOp>(loc, coreTypeAttr, tpipe, pipe, flagID);
+    }
+  }
+
+  void insertBlockAll(SyncBlockOp op, PatternRewriter &rewriter) const {
     auto loc = op.getLoc();
     auto *ctx = op->getContext();
     Value fftsBaseAddr = op.getFftsBaseAddr();
+
+    auto tcubePipeAttr = op.getTcubePipeAttr();
+    auto cubePipeAttr = op.getTcubePipeAttr();
+    auto tvectorPipeAttr = op.getTvectorPipeAttr();
+    auto vectorPipeAttr = op.getTvectorPipeAttr();
+
+    auto cubeCoreAttr = TCoreTypeAttr::get(ctx, TCoreType::CUBE);
+    auto vectorCoreAttr = TCoreTypeAttr::get(ctx, TCoreType::VECTOR);
+    auto interBlockSyncAttr = SyncBlockInstrModeAttr::get(
+        ctx, SyncBlockInstrMode::INTER_BLOCK_SYNCHRONIZATION);
+    auto intraBlockSyncAttr = SyncBlockInstrModeAttr::get(
+        ctx, SyncBlockInstrMode::INTRA_BLOCK_SYNCHRONIZATION);
+
+    const auto interCubeSyncFlagIdAttr = IntegerAttr::get(
+        IntegerType::get(ctx, 64), blockAllInterCubeSyncFlagId);
+    const auto interVectorSyncFlagIdAttr = IntegerAttr::get(
+        IntegerType::get(ctx, 64), blockAllInterVectorSyncFlagId);
+    const auto intraBlockSyncFlagIdAttr1 =
+        IntegerAttr::get(IntegerType::get(ctx, 64), blockAllIntraSyncFlagId1);
+    const auto intraBlockSyncFlagIdAttr2 =
+        IntegerAttr::get(IntegerType::get(ctx, 64), blockAllIntraSyncFlagId2);
+
+    if (options.funcCoreType == TFuncCoreType::AIC) {
+      rewriter.create<PipeBarrierOp>(loc, tcubePipeAttr);
+    }
+    if (options.funcCoreType == TFuncCoreType::AIV) {
+      rewriter.create<PipeBarrierOp>(loc, tvectorPipeAttr);
+    }
+
+    if (tcubePipeAttr.getPipe() == PIPE::PIPE_ALL) {
+      tcubePipeAttr = PipeAttr::get(ctx, PIPE::PIPE_FIX);
+    }
+    if (cubePipeAttr.getPipe() == PIPE::PIPE_ALL) {
+      cubePipeAttr = PipeAttr::get(ctx, PIPE::PIPE_S);
+    }
+    if (tvectorPipeAttr.getPipe() == PIPE::PIPE_ALL) {
+      tvectorPipeAttr = PipeAttr::get(ctx, PIPE::PIPE_MTE3);
+    }
+    if (vectorPipeAttr.getPipe() == PIPE::PIPE_ALL) {
+      vectorPipeAttr = PipeAttr::get(ctx, PIPE::PIPE_S);
+    }
+
+    if (!options.isMixCore) {
+      if (options.funcCoreType == TFuncCoreType::AIC) {
+        insertBlockSyncOperations(
+            rewriter, loc, cubeCoreAttr, cubeCoreAttr, interBlockSyncAttr,
+            tcubePipeAttr, cubePipeAttr, interCubeSyncFlagIdAttr, fftsBaseAddr);
+      }
+      if (options.funcCoreType == TFuncCoreType::AIV) {
+        insertBlockSyncOperations(rewriter, loc, vectorCoreAttr, vectorCoreAttr,
+                                  interBlockSyncAttr, tvectorPipeAttr,
+                                  vectorPipeAttr, interVectorSyncFlagIdAttr,
+                                  fftsBaseAddr);
+      }
+    } else {
+      if (options.funcCoreType == TFuncCoreType::AIC) {
+        insertBlockSyncOperations(rewriter, loc, vectorCoreAttr, cubeCoreAttr,
+                                  intraBlockSyncAttr, tvectorPipeAttr,
+                                  cubePipeAttr, intraBlockSyncFlagIdAttr2,
+                                  fftsBaseAddr,
+                                  /*insertSetOp=*/false, /*insertWaitOp=*/true);
+
+        insertBlockSyncOperations(
+            rewriter, loc, cubeCoreAttr, cubeCoreAttr, interBlockSyncAttr,
+            tcubePipeAttr, cubePipeAttr, interCubeSyncFlagIdAttr, fftsBaseAddr);
+
+        insertBlockSyncOperations(rewriter, loc, cubeCoreAttr, vectorCoreAttr,
+                                  intraBlockSyncAttr, tcubePipeAttr,
+                                  vectorPipeAttr, intraBlockSyncFlagIdAttr1,
+                                  fftsBaseAddr,
+                                  /*insertSetOp=*/true, /*insertWaitOp=*/false);
+      }
+      if (options.funcCoreType == TFuncCoreType::AIV) {
+        insertBlockSyncOperations(rewriter, loc, vectorCoreAttr, cubeCoreAttr,
+                                  intraBlockSyncAttr, tvectorPipeAttr,
+                                  cubePipeAttr, intraBlockSyncFlagIdAttr2,
+                                  fftsBaseAddr,
+                                  /*insertSetOp=*/true, /*insertWaitOp=*/false);
+
+        insertBlockSyncOperations(rewriter, loc, cubeCoreAttr, vectorCoreAttr,
+                                  intraBlockSyncAttr, tcubePipeAttr,
+                                  vectorPipeAttr, intraBlockSyncFlagIdAttr1,
+                                  fftsBaseAddr,
+                                  /*insertSetOp=*/false, /*insertWaitOp=*/true);
+      }
+    }
+  }
+
+  void insertBlockAllCube(SyncBlockOp op, PatternRewriter &rewriter) const {
+    auto loc = op.getLoc();
+    auto *ctx = op->getContext();
+    auto fftsBaseAddr = op.getFftsBaseAddr();
+    auto flagIdAttrOpt = op.getFlagId();
+    auto cubeCoreAttr = TCoreTypeAttr::get(ctx, TCoreType::CUBE);
+    auto interBlockSyncAttr = SyncBlockInstrModeAttr::get(
+        ctx, SyncBlockInstrMode::INTER_BLOCK_SYNCHRONIZATION);
+    auto interCubeSyncFlagIdAttr =
+        flagIdAttrOpt.has_value()
+            ? flagIdAttrOpt.value()
+            : IntegerAttr::get(IntegerType::get(ctx, 64), interCubeSyncFlagId);
+    auto tpipeAttr = op.getTcubePipeAttr();
+    auto pipeAttr = op.getTcubePipeAttr();
+    rewriter.create<PipeBarrierOp>(loc, tpipeAttr);
+    if (tpipeAttr.getPipe() == PIPE::PIPE_ALL) {
+      tpipeAttr = PipeAttr::get(ctx, PIPE::PIPE_FIX);
+      pipeAttr = PipeAttr::get(ctx, PIPE::PIPE_S);
+    }
+    insertBlockSyncOperations(rewriter, loc, cubeCoreAttr, cubeCoreAttr,
+                              interBlockSyncAttr, tpipeAttr, pipeAttr,
+                              interCubeSyncFlagIdAttr, fftsBaseAddr);
+  }
+
+  void insertBlockAllVector(SyncBlockOp op, PatternRewriter &rewriter) const {
+    auto loc = op.getLoc();
+    auto *ctx = op->getContext();
+    auto fftsBaseAddr = op.getFftsBaseAddr();
+    auto flagIdAttrOpt = op.getFlagId();
+    auto vectorCoreAttr = TCoreTypeAttr::get(ctx, TCoreType::VECTOR);
+    auto interBlockSyncAttr = SyncBlockInstrModeAttr::get(
+        ctx, SyncBlockInstrMode::INTER_BLOCK_SYNCHRONIZATION);
+    auto interVectorSyncFlagIdAttr =
+        flagIdAttrOpt.has_value() ? flagIdAttrOpt.value()
+                                  : IntegerAttr::get(IntegerType::get(ctx, 64),
+                                                     interVectorSyncFlagId);
+    auto tpipeAttr = op.getTvectorPipeAttr();
+    auto pipeAttr = op.getTvectorPipeAttr();
+    rewriter.create<PipeBarrierOp>(loc, tpipeAttr);
+    if (tpipeAttr.getPipe() == PIPE::PIPE_ALL) {
+      tpipeAttr = PipeAttr::get(ctx, PIPE::PIPE_MTE3);
+      pipeAttr = PipeAttr::get(ctx, PIPE::PIPE_S);
+    }
+    insertBlockSyncOperations(rewriter, loc, vectorCoreAttr, vectorCoreAttr,
+                              interBlockSyncAttr, tpipeAttr, pipeAttr,
+                              interVectorSyncFlagIdAttr, fftsBaseAddr);
+  }
+
+  void insertBlockAllSubVector(SyncBlockOp op,
+                               PatternRewriter &rewriter) const {
+    auto loc = op.getLoc();
+    auto *ctx = op->getContext();
+    auto fftsBaseAddr = op.getFftsBaseAddr();
+    auto flagIdAttrOpt = op.getFlagId();
+    auto vectorCoreAttr = TCoreTypeAttr::get(ctx, TCoreType::VECTOR);
+    auto interSubBlockSyncAttr = SyncBlockInstrModeAttr::get(
+        ctx, SyncBlockInstrMode::INTER_SUBBLOCK_SYNCHRONIZATION);
+    auto interVectorSyncFlagIdAttr =
+        flagIdAttrOpt.has_value() ? flagIdAttrOpt.value()
+                                  : IntegerAttr::get(IntegerType::get(ctx, 64),
+                                                     interVectorSyncFlagId);
+    auto tpipeAttr = op.getTvectorPipeAttr();
+    auto pipeAttr = op.getTvectorPipeAttr();
+    rewriter.create<PipeBarrierOp>(loc, tpipeAttr);
+    if (tpipeAttr.getPipe() == PIPE::PIPE_ALL) {
+      tpipeAttr = PipeAttr::get(ctx, PIPE::PIPE_MTE3);
+      pipeAttr = PipeAttr::get(ctx, PIPE::PIPE_S);
+    }
+    insertBlockSyncOperations(rewriter, loc, vectorCoreAttr, vectorCoreAttr,
+                              interSubBlockSyncAttr, tpipeAttr, pipeAttr,
+                              interVectorSyncFlagIdAttr, fftsBaseAddr);
+  }
+
+  void insertBarrierAllVector(SyncBlockOp op, PatternRewriter &rewriter) const {
+    auto loc = op.getLoc();
+    auto *ctx = op->getContext();
+    rewriter.create<PipeBarrierOp>(loc, PipeAttr::get(ctx, PIPE::PIPE_ALL));
+  }
+
+  LogicalResult matchAndRewrite(SyncBlockOp op,
+                                PatternRewriter &rewriter) const override {
     auto syncBlockMode = op.getSyncBlockModeAttr().getSyncMode();
-    IntegerAttr flagID = op.getFlagIdAttr();
     if (syncBlockMode == SyncBlockMode::BARRIER_CUBE ||
         syncBlockMode == SyncBlockMode::BARRIER_VECTOR) {
-      rewriter.create<PipeBarrierOp>(loc, PipeAttr::get(ctx, PIPE::PIPE_ALL));
+      insertBarrierAllVector(op, rewriter);
     } else if (syncBlockMode == SyncBlockMode::ALL_CUBE) {
-      auto pipe = op.getTcubePipeAttr();
-      appendBlockSyncOperations(
-          rewriter, loc, TCoreTypeAttr::get(ctx, TCoreType::CUBE),
-          SyncBlockInstrModeAttr::get(
-              ctx, SyncBlockInstrMode::INTER_BLOCK_SYNCHRONIZATION),
-          pipe, pipe, flagID, fftsBaseAddr);
+      insertBlockAllCube(op, rewriter);
     } else if (syncBlockMode == SyncBlockMode::ALL_VECTOR) {
-      auto pipe = op.getTvectorPipeAttr();
-      appendBlockSyncOperations(
-          rewriter, loc, TCoreTypeAttr::get(ctx, TCoreType::VECTOR),
-          SyncBlockInstrModeAttr::get(
-              ctx, SyncBlockInstrMode::INTER_BLOCK_SYNCHRONIZATION),
-          pipe, pipe, flagID, fftsBaseAddr);
+      insertBlockAllVector(op, rewriter);
+    } else if (syncBlockMode == SyncBlockMode::ALL_SUB_VECTOR) {
+      insertBlockAllSubVector(op, rewriter);
     } else if (syncBlockMode == SyncBlockMode::ALL) {
-      auto tcubePipe = op.getTcubePipeAttr();
-      auto tvectorPipe = op.getTvectorPipeAttr();
-      appendBlockSyncOperations(
-          rewriter, loc, TCoreTypeAttr::get(ctx, TCoreType::CUBE),
-          SyncBlockInstrModeAttr::get(
-              ctx, SyncBlockInstrMode::INTER_BLOCK_SYNCHRONIZATION),
-          tcubePipe, tcubePipe, flagID, fftsBaseAddr);
-      appendBlockSyncOperations(
-          rewriter, loc, TCoreTypeAttr::get(ctx, TCoreType::CUBE_OR_VECTOR),
-          SyncBlockInstrModeAttr::get(
-              ctx, SyncBlockInstrMode::INTRA_BLOCK_SYNCHRONIZATION),
-          tcubePipe, tvectorPipe, flagID, fftsBaseAddr);
-      appendBlockSyncOperations(
-          rewriter, loc, TCoreTypeAttr::get(ctx, TCoreType::VECTOR),
-          SyncBlockInstrModeAttr::get(
-              ctx, SyncBlockInstrMode::INTER_BLOCK_SYNCHRONIZATION),
-          tvectorPipe, tvectorPipe, flagID, fftsBaseAddr);
+      insertBlockAll(op, rewriter);
     } else {
       llvm_unreachable("unsupported sync mode");
     }
     rewriter.eraseOp(op);
     return success();
+  }
+};
+
+struct HIVMSetAtomicOpLowering : public OpRewritePattern<SetAtomicOp> {
+  using OpRewritePattern<SetAtomicOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(SetAtomicOp op,
+                                PatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto kind = op.getKind();
+    auto typeAttr = op.getTypeAttr();
+
+    std::map<int64_t, bool> ctrlIdxEnableMap;
+    Type type = typeAttr.getValue();
+
+    const int64_t kAtomicTypeBit0 = 6;
+    const int64_t kAtomicTypeBit1 = 7;
+    const int64_t kAtomicTypeBit2 = 8;
+    const int64_t kAtomicKindBit0 = 9;
+    const int64_t kAtomicKindBit1 = 10;
+
+    switch (kind) {
+    case AtomicKind::NONE:
+      ctrlIdxEnableMap[kAtomicTypeBit0] = false;
+      ctrlIdxEnableMap[kAtomicTypeBit1] = false;
+      ctrlIdxEnableMap[kAtomicTypeBit2] = false;
+      generateSetCtrlOps(ctrlIdxEnableMap, loc, rewriter, op);
+      return success();
+    case AtomicKind::ADD:
+      ctrlIdxEnableMap[kAtomicKindBit0] = false;
+      ctrlIdxEnableMap[kAtomicKindBit1] = false;
+      break;
+    case AtomicKind::MAX:
+      ctrlIdxEnableMap[kAtomicKindBit0] = true;
+      ctrlIdxEnableMap[kAtomicKindBit1] = false;
+      break;
+    case AtomicKind::MIN:
+      ctrlIdxEnableMap[kAtomicKindBit0] = false;
+      ctrlIdxEnableMap[kAtomicKindBit1] = true;
+      break;
+    default:
+      llvm_unreachable("unsupported atomic kind");
+    }
+
+    if (type.isF32()) {
+      ctrlIdxEnableMap[kAtomicTypeBit0] = true;
+      ctrlIdxEnableMap[kAtomicTypeBit1] = false;
+      ctrlIdxEnableMap[kAtomicTypeBit2] = false;
+    } else if (type.isF16()) {
+      ctrlIdxEnableMap[kAtomicTypeBit0] = false;
+      ctrlIdxEnableMap[kAtomicTypeBit1] = true;
+      ctrlIdxEnableMap[kAtomicTypeBit2] = false;
+    } else if (type.isInteger(8)) {
+      ctrlIdxEnableMap[kAtomicTypeBit0] = true;
+      ctrlIdxEnableMap[kAtomicTypeBit1] = false;
+      ctrlIdxEnableMap[kAtomicTypeBit2] = true;
+    } else if (type.isInteger(16)) {
+      ctrlIdxEnableMap[kAtomicTypeBit0] = true;
+      ctrlIdxEnableMap[kAtomicTypeBit1] = true;
+      ctrlIdxEnableMap[kAtomicTypeBit2] = false;
+    } else if (type.isInteger(32)) {
+      ctrlIdxEnableMap[kAtomicTypeBit0] = false;
+      ctrlIdxEnableMap[kAtomicTypeBit1] = false;
+      ctrlIdxEnableMap[kAtomicTypeBit2] = true;
+    } else if (type.isBF16()) {
+      ctrlIdxEnableMap[kAtomicTypeBit0] = false;
+      ctrlIdxEnableMap[kAtomicTypeBit1] = true;
+      ctrlIdxEnableMap[kAtomicTypeBit2] = true;
+    } else {
+      llvm_unreachable("unsupported atomic type");
+    }
+
+    generateSetCtrlOps(ctrlIdxEnableMap, loc, rewriter, op);
+    return success();
+  }
+
+private:
+  void generateSetCtrlOps(const std::map<int64_t, bool> &ctrlIdxEnableMap,
+                          Location loc, PatternRewriter &rewriter,
+                          SetAtomicOp op) const {
+    for (auto &pair : ctrlIdxEnableMap) {
+      int64_t idx = pair.first;
+      bool enable = pair.second;
+      rewriter.create<hivm::SetCtrlOp>(loc, enable, idx);
+    }
+    rewriter.eraseOp(op);
   }
 };
 
@@ -841,7 +1091,7 @@ struct DecomposeCastScalarToVecOp<arith::TruncFOp>
     // cast src tensor to target tensor
     auto resType = op.getType();
     auto roundingAttr =
-        rewriter.getAttr<hivm::RoundModeAttr>(hivm::RoundMode::ROUND);
+        rewriter.getAttr<hivm::RoundModeAttr>(hivm::RoundMode::RINT);
     hivm::VCastOp castOp =
         castTo(rewriter, loc, src, roundingAttr, getElementTypeOrSelf(resType));
 
@@ -963,6 +1213,12 @@ class AtomicStoreOpLowering : public OpRewritePattern<hivm::StoreOp> {
         assert(elemType.getIntOrFloatBitWidth() == 8);
         return decomposeEltwiseAtomic(op, rewriter, loc, /*isUnsigned=*/true);
       }
+      if ((*atomicKind == hivm::AtomicKind::ADD ||
+           *atomicKind == hivm::AtomicKind::MAX ||
+           *atomicKind == hivm::AtomicKind::MIN) &&
+           isAtomicOpHaveReturnedValue(op)) {
+        return addSyncForReturnedValue(op, rewriter, loc);
+      }
     }
     if (!op.isSWAtomic()) {
       return failure();
@@ -978,6 +1234,59 @@ class AtomicStoreOpLowering : public OpRewritePattern<hivm::StoreOp> {
   }
 
 private:
+  /// Find the load operation used to save the returned value before atomic operation being calculated
+  /// e.g. hivm.hir.load ins(%reinterpret_cast) outs(%alloc)
+  /// hivm.hir.store ins(%cast) outs(%reinterpret_cast)
+  ///
+  /// The load operation whose outs operand is same as store's ins operand is required
+  Operation* findReturnedValueLoadOp(hivm::StoreOp storeOp, Value targetValue) const {
+    if (!targetValue) return nullptr;
+
+    Operation* op = storeOp->getPrevNode();
+    while (op) {
+      if (auto loadOp = dyn_cast<hivm::LoadOp>(op)) {
+        if (loadOp->getOperand(0) == targetValue) {
+          return loadOp;
+        }
+      }
+      op = op->getPrevNode();
+    }
+
+    return nullptr;
+  }
+
+  bool isAtomicOpHaveReturnedValue(hivm::StoreOp storeOp) const {
+    Operation* returnedValueLoadOp = findReturnedValueLoadOp(storeOp, storeOp.getDst());
+    if (auto LoadOp = dyn_cast_or_null<hivm::LoadOp>(returnedValueLoadOp)) {
+      auto dst = LoadOp.getDst();
+      // If the dst of loadOp just be used for this loadop, the returned value dead code. 
+      size_t usersCnt = 0;
+      for (auto *user : dst.getUsers()) {
+        ++usersCnt;
+      }
+      return usersCnt > 1;
+    }
+    return false;
+  }
+
+  LogicalResult addSyncForReturnedValue(hivm::StoreOp op, 
+                                        PatternRewriter &rewriter, Location loc) const {
+    static constexpr llvm::StringLiteral kAlreadySync =
+        "already_sync";
+    if (op->hasAttr(kAlreadySync)) {
+      return failure();
+    }
+    Operation* returnedValueLoadOp = findReturnedValueLoadOp(op, op.getDst());
+    PatternRewriter::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(returnedValueLoadOp);
+    auto lockVar = createSyncBlockLockVar(rewriter, op->getLoc());
+    rewriter.create<hivm::SyncBlockLockOp>(loc, lockVar);
+    rewriter.setInsertionPointAfter(op);
+    rewriter.create<hivm::SyncBlockUnlockOp>(loc, lockVar);
+    op->setAttr(kAlreadySync, UnitAttr::get(op->getContext()));
+    return success();
+  }
+  
   /// implement atomic by software way
   /// e.g.store ins(% res_ub) outs(% res_gm) with atomic XOR is converted to
   /// % lock_var = create_sync_lock()
@@ -1048,6 +1357,136 @@ private:
   }
 };
 
+class AtomicRMWOpLowering : public OpRewritePattern<hivm::AtomicRMWOp> {
+  using OpRewritePattern<hivm::AtomicRMWOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(hivm::AtomicRMWOp op,
+                                PatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    // If RMW don't have return args -> replace it to store
+    if (op.getNumResults() == 0) {
+      // convert hivm::AtomicRMWOp to hivm::StoreOp
+      Value src = op.getSrc();
+      Value dst = op.getDst();
+
+      auto newStoreOp =
+          rewriter.create<hivm::StoreOp>(loc, TypeRange(), src, dst);
+
+      // Add atomic attr to hivm.store
+      auto hsAtomicKind = op.getAtomicKind();
+      newStoreOp.setAtomicKind(hsAtomicKind);
+
+      rewriter.replaceOp(op, newStoreOp);
+      return success();
+    }
+    // If RMW has return value we should always use software lock
+
+    return decomposeEltwiseAtomic(op, rewriter, loc);
+  }
+
+private:
+  bool shouldCastOperation(hivm::AtomicRMWOp op) const {
+    switch (op.getAtomicKind()) {
+    case hivm::AtomicKind::ADD:
+    case hivm::AtomicKind::MIN:
+    case hivm::AtomicKind::MAX:
+      return true;
+    default:
+      return false;
+    }
+  }
+
+  Value processCastTo(PatternRewriter &rewriter, Location loc, Value val,
+                      Type initType) const {
+    if (initType.isInteger(8)) {
+      auto roundingAttr =
+          rewriter.getAttr<hivm::RoundModeAttr>(hivm::RoundMode::RINT);
+
+      val = castTo(rewriter, loc, val, roundingAttr, rewriter.getF16Type())
+                .getSingleDst();
+      val = castTo(rewriter, loc, val, roundingAttr, rewriter.getF32Type())
+                .getSingleDst();
+    } else if (initType.isBF16()) {
+      auto roundingAttr =
+          rewriter.getAttr<hivm::RoundModeAttr>(hivm::RoundMode::RINT);
+
+      val = castTo(rewriter, loc, val, roundingAttr, rewriter.getF32Type())
+                .getSingleDst();
+    }
+
+    return val;
+  }
+
+  Value processCastFrom(PatternRewriter &rewriter, Location loc, Value val,
+                        Type initType) const {
+    if (initType.isInteger(8)) {
+      auto truncAttr =
+          rewriter.getAttr<hivm::RoundModeAttr>(hivm::RoundMode::TRUNC);
+      val = castTo(rewriter, loc, val, truncAttr, rewriter.getI32Type())
+                .getSingleDst();
+
+      auto truncOverflowAttr = rewriter.getAttr<hivm::RoundModeAttr>(
+          hivm::RoundMode::TRUNCWITHOVERFLOW);
+      val = castTo(rewriter, loc, val, truncOverflowAttr, rewriter.getI8Type())
+                .getSingleDst();
+    } else if (initType.isBF16()) {
+      auto roundingAttr =
+          rewriter.getAttr<hivm::RoundModeAttr>(hivm::RoundMode::RINT);
+
+      val = castTo(rewriter, loc, val, roundingAttr, rewriter.getBF16Type())
+                .getSingleDst();
+    }
+
+    return val;
+  }
+
+  LogicalResult decomposeEltwiseAtomic(hivm::AtomicRMWOp op,
+                                       PatternRewriter &rewriter,
+                                       Location loc) const {
+    auto lockVar = createSyncBlockLockVar(rewriter, op->getLoc());
+    // 1. insert sync_block_lock
+    rewriter.create<hivm::SyncBlockLockOp>(loc, lockVar);
+
+    // 2. create tmp memref alloc and load dst to tmp
+    auto src = op.getSrc();
+    auto tmpUB = createTmpBufferOrTensorWithTargetType(rewriter, loc,
+                                                       op.getResults()[0]);
+    rewriter.replaceAllUsesWith(op.getResults()[0], tmpUB);
+
+    auto dst = op.getDst();
+    rewriter.create<hivm::LoadOp>(loc, TypeRange{}, dst, tmpUB);
+
+    auto elementType = getElementTypeOrSelf(src);
+    bool shouldCast = shouldCastOperation(op);
+    if (shouldCast) {
+      src = processCastTo(rewriter, op.getLoc(), src, elementType);
+      tmpUB = processCastTo(rewriter, op.getLoc(), tmpUB, elementType);
+    }
+
+    // 3. do eltwise vv between src and tmp(and/or/xor)
+    auto resUB = createTmpBufferOrTensorWithTargetType(rewriter, loc, src);
+    auto eltwiseOp = createEltwiseOpByAtomicKind(
+        rewriter, loc, TypeRange{}, ValueRange{src, tmpUB}, ValueRange{resUB},
+        op.getAtomicKind());
+    if (!eltwiseOp.has_value()) {
+      return op.emitError("not support block-sync atomic kind!!");
+    }
+
+    if (shouldCast) {
+      resUB = processCastFrom(rewriter, loc, resUB, elementType);
+    }
+
+    // 4. store tmp to dst
+    rewriter.create<hivm::StoreOp>(loc, TypeRange{}, resUB, dst);
+
+    // 5. insert sync_block_unlock
+    rewriter.create<hivm::SyncBlockUnlockOp>(loc, lockVar);
+
+    rewriter.eraseOp(op);
+
+    return success();
+  }
+};
+
 /// implement atomic cas in software way
 /// e.g. hivm.hir.atomic_cas ins(%src0_ub, src1_ub) outs(%dst_gm) is converted
 /// to
@@ -1071,7 +1510,10 @@ class AtomicCasOpLowering : public OpRewritePattern<hivm::AtomicCasOp> {
     // step1: load old val in gm to ub
     // create memref.alloc op
     auto src0 = op.getSrc()[0];
-    auto tmpUB = createTmpBufferOrTensorWithTargetType(rewriter, loc, src0);
+
+    bool hasReturn = !op.getResults().empty();
+    auto tmpUB = createTmpBufferOrTensorWithTargetType(
+        rewriter, loc, hasReturn ? op.getResults()[0] : src0);
 
     auto dst = op.getDst();
     rewriter.create<hivm::LoadOp>(loc, TypeRange{}, dst, tmpUB);
@@ -1083,20 +1525,56 @@ class AtomicCasOpLowering : public OpRewritePattern<hivm::AtomicCasOp> {
                                                         rewriter.getI1Type());
     auto compareAttr =
         rewriter.getAttr<hivm::CompareModeAttr>(hivm::CompareMode::EQ);
+    auto elemType = getElementTypeOrSelf(src0);
+    auto src1 = op.getSrc()[1];
+    hivm::RoundMode rounding = hivm::RoundMode::RINT;
+    auto roundingAttr = rewriter.getAttr<hivm::RoundModeAttr>(rounding);
+    if (elemType.isInteger(8)) {
+      src0 = castTo(rewriter, src0.getLoc(), src0, roundingAttr,
+                    rewriter.getF16Type())
+                 .getSingleDst();
+      src1 = castTo(rewriter, src1.getLoc(), src1, roundingAttr,
+                    rewriter.getF16Type())
+                 .getSingleDst();
+      tmpUB = castTo(rewriter, tmpUB.getLoc(), tmpUB, roundingAttr,
+                     rewriter.getF16Type())
+                  .getSingleDst();
+    } else if (elemType.isBF16()) {
+      src0 = castTo(rewriter, src0.getLoc(), src0, roundingAttr,
+                    rewriter.getF32Type())
+                 .getSingleDst();
+      src1 = castTo(rewriter, src1.getLoc(), src1, roundingAttr,
+                    rewriter.getF32Type())
+                 .getSingleDst();
+      tmpUB = castTo(rewriter, tmpUB.getLoc(), tmpUB, roundingAttr,
+                     rewriter.getF32Type())
+                  .getSingleDst();
+    }
     rewriter.create<hivm::VCmpOp>(op.getLoc(), TypeRange(),
                                   ValueRange({tmpUB, src0}), Value(condUB),
                                   compareAttr);
 
     auto resUB = createTmpBufferOrTensorWithTargetType(rewriter, loc, src0);
-    auto src1 = op.getSrc()[1];
     rewriter.create<hivm::VSelOp>(op.getLoc(), TypeRange(),
                                   ValueRange({condUB, src1, tmpUB}),
                                   ValueRange({resUB}), Value());
+    if (elemType.isInteger(8)) {
+      resUB = castTo(rewriter, resUB.getLoc(), resUB, roundingAttr,
+                     rewriter.getI8Type())
+                  .getSingleDst();
+    } else if (elemType.isBF16()) {
+      resUB = castTo(rewriter, resUB.getLoc(), resUB, roundingAttr,
+                     rewriter.getBF16Type())
+                  .getSingleDst();
+    }
 
     // step3: store res_ub to dst
     rewriter.create<hivm::StoreOp>(loc, TypeRange{}, resUB, dst);
 
     rewriter.create<hivm::SyncBlockUnlockOp>(loc, lockVar);
+    if (hasReturn) {
+      rewriter.replaceAllUsesWith(op.getResults()[0], tmpUB);
+    }
     rewriter.eraseOp(op);
     return success();
   }
@@ -1116,24 +1594,42 @@ class AtomicXchgOpLowering : public OpRewritePattern<hivm::AtomicXchgOp> {
                                 PatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
     auto lockVar = createSyncBlockLockVar(rewriter, op->getLoc());
+    auto src = op.getSrc();
+    auto dst = op.getDst();
+    auto mask = op.getMask();
 
     // insert sync_block_lock
     rewriter.create<hivm::SyncBlockLockOp>(loc, lockVar);
 
     // step1: load old val in dst gm to ub
-    auto src = op.getSrc()[0];
-    auto tmpUB = createTmpBufferOrTensorWithTargetType(rewriter, loc, src);
 
-    auto dst = op.getDst();
-    rewriter.create<hivm::LoadOp>(loc, TypeRange{}, dst, tmpUB);
-
-    // step2: store new val to dst gm
-    rewriter.create<hivm::StoreOp>(loc, TypeRange{}, src, dst);
-
-    // step3: copy old val to src ub
-    rewriter.create<hivm::CopyOp>(loc, TypeRange{}, tmpUB, src);
+    bool hasReturn = !op.getResults().empty();
+    auto tmpUB_dst = createTmpBufferOrTensorWithTargetType(
+        rewriter, loc, hasReturn ? op.getResults()[0] : src);
+    rewriter.create<hivm::LoadOp>(loc, TypeRange{}, dst, tmpUB_dst);
+    if (mask) {
+      // step2: select according to the mask
+      auto tmpUB_masked_dst =
+          createTmpBufferOrTensorWithTargetType(rewriter, loc, src);
+      rewriter.create<hivm::VSelOp>(loc, TypeRange{},
+                                    ValueRange({mask, src, tmpUB_dst}),
+                                    ValueRange({tmpUB_masked_dst}), Value());
+      rewriter.create<hivm::VSelOp>(loc, TypeRange{},
+                                    ValueRange({mask, tmpUB_dst, src}),
+                                    ValueRange({src}), Value());
+      // step3: copy/store the selected value
+      rewriter.create<hivm::StoreOp>(loc, TypeRange{}, tmpUB_masked_dst, dst);
+    } else {
+      // step2: store new val to dst gm
+      rewriter.create<hivm::StoreOp>(loc, TypeRange{}, src, dst);
+      // step3: copy old val to src ub
+      rewriter.create<hivm::CopyOp>(loc, TypeRange{}, tmpUB_dst, src);
+    }
 
     rewriter.create<hivm::SyncBlockUnlockOp>(loc, lockVar);
+    if (hasReturn) {
+      rewriter.replaceAllUsesWith(op.getResults()[0], tmpUB_dst);
+    }
     rewriter.eraseOp(op);
     return success();
   }
@@ -1151,22 +1647,28 @@ void HIVMDecomposeOpPass::runOnOperation() {
     return;
 
   RewritePatternSet patterns(&getContext());
-  patterns
-      .add<MultiAxesVBrcLowering, VCastLowering, VAbsIntegerLowering,
-           VRecOpHighPrecisionLowering, VReduceAnyLowering, VReduceAllLowering,
-           VReduceInitInitializing, SyncBlockOpLowering, VCmpOpLowering,
-           DecomposeCastScalarToVecOp<arith::ExtFOp>,
-           DecomposeCastScalarToVecOp<arith::ExtSIOp>,
-           DecomposeCastScalarToVecOp<arith::ExtUIOp>,
-           DecomposeCastScalarToVecOp<arith::FPToSIOp>,
-           DecomposeCastScalarToVecOp<arith::FPToUIOp>,
-           DecomposeCastScalarToVecOp<arith::SIToFPOp>,
-           DecomposeCastScalarToVecOp<arith::TruncFOp>,
-           DecomposeScalarOpToVecOp<math::LogOp, hivm::VLnOp>,
-           DecomposeI32ScalarExtOp<arith::MulUIExtendedOp>,
-           DecomposeVSubScalarOp, DecomposeVDeinterleaveOp,
-           AtomicStoreOpLowering, AtomicCasOpLowering, AtomicXchgOpLowering>(
-          &getContext());
+  patterns.add<MultiAxesVBrcLowering, VCastLowering, VAbsIntegerLowering,
+               VRecOpHighPrecisionLowering, VReduceAnyLowering,
+               VReduceAllLowering, VReduceInitInitializing, VCmpOpLowering,
+               DecomposeCastScalarToVecOp<arith::ExtFOp>,
+               DecomposeCastScalarToVecOp<arith::ExtSIOp>,
+               DecomposeCastScalarToVecOp<arith::ExtUIOp>,
+               DecomposeCastScalarToVecOp<arith::FPToSIOp>,
+               DecomposeCastScalarToVecOp<arith::FPToUIOp>,
+               DecomposeCastScalarToVecOp<arith::SIToFPOp>,
+               DecomposeCastScalarToVecOp<arith::TruncFOp>,
+               DecomposeScalarOpToVecOp<math::LogOp, hivm::VLnOp>,
+               DecomposeI32ScalarExtOp<arith::MulUIExtendedOp>,
+               DecomposeVSubScalarOp, DecomposeVDeinterleaveOp,
+               AtomicStoreOpLowering, AtomicCasOpLowering, AtomicXchgOpLowering,
+               AtomicRMWOpLowering, HIVMSetAtomicOpLowering>(&getContext());
+
+  bool isMixModule =
+      mlir::hivm::isMixModule(funcOp->getParentOfType<ModuleOp>());
+  auto funcCoreTypeOpt = queryFuncCoreType(funcOp);
+  auto funcCoreType = funcCoreTypeOpt.has_value() ? funcCoreTypeOpt.value()
+                                                  : TFuncCoreType::AIC_OR_AIV;
+  patterns.add<SyncBlockOpLowering>(&getContext(), isMixModule, funcCoreType);
   (void)applyPatternsGreedily(funcOp, std::move(patterns));
 }
 

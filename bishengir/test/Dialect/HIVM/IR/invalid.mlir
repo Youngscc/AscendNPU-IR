@@ -30,7 +30,7 @@ func.func @test_invalid_convert_layout(%arg : memref<128x128xf16, strided<[?, ?]
   %alloc = memref.alloc() : memref<128x128xf16>
   memref.copy %arg, %alloc : memref<128x128xf16, strided<[?, ?], offset: ?>> to memref<128x128xf16>
   // expected-error@+1 {{'hivm.hir.convert_layout' op requires the same element type for all operands and results}}
-  %alloc_new_layout = hivm.hir.convert_layout %alloc {srcLayout = #dot_a_layout, dstLayout = #nZ_layout} : (memref<128x128xf16>) -> memref<8x8x16x16xf32>
+  %alloc_new_layout = hivm.hir.convert_layout %alloc output_shape [8, 8, 16, 16] {srcLayout = #dot_a_layout, dstLayout = #nZ_layout} : (memref<128x128xf16>) -> memref<8x8x16x16xf32>
   "some_use"(%alloc_new_layout) : (memref<8x8x16x16xf32>) -> ()
   return
 }
@@ -275,7 +275,7 @@ func.func @hivm_store_dims(%src: tensor<16x16x2xf16>, %dst: tensor<16x16xf16>) {
 func.func @hivm_memref_store_gm_to_gm_fail() {
   %src = memref.alloc() : memref<16x16xf16, #hivm.address_space<gm>>
   %dst = memref.alloc() : memref<16x16xf16, #hivm.address_space<gm>>
-  // expected-error@+1 {{'hivm.hir.store' op only support copy gm to ub or copy ub to gm or copy ub to ub currently!}}
+  // expected-error@+1 {{'hivm.hir.store' op only support store ub to gm currently!}}
   hivm.hir.store ins(%src : memref<16x16xf16, #hivm.address_space<gm>>)
                 outs(%dst : memref<16x16xf16, #hivm.address_space<gm>>)
   return

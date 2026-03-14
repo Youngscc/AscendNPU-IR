@@ -65,33 +65,30 @@ private:
   void insertSetFFTSBaseAddrOp(Value baseAddr) {
     auto funcOp = getOperation();
     OpBuilder opBuilder(funcOp);
-
     Block *firstBlock = &(funcOp.getBlocks().front());
     assert(firstBlock != nullptr);
     Operation *firstOperation = &(firstBlock->front());
     assert(firstOperation != nullptr);
     opBuilder.setInsertionPoint(firstOperation);
-
     opBuilder.create<hivm::SetFFTSBaseAddrOp>(firstOperation->getLoc(),
                                               baseAddr);
   }
 
   LogicalResult checkWorkSpaceValidity() {
     auto funcOp = getOperation();
-    auto funcParamSize = funcOp.getNumArguments();
-    for (size_t i = 0; i < funcParamSize; i++) {
+    for (auto [i, arg] : llvm::enumerate(funcOp.getArguments())) {
       if (!hacc::utils::isKernelArg(funcOp, i,
                                     hacc::KernelArgType::kWorkspace)) {
         continue;
       }
-      for (Operation *user : funcOp.getArgument(i).getUsers()) {
-        auto allocWorkUser =
-            dyn_cast<bishengir::memref_ext::AllocWorkspaceOp>(user);
-        if (!allocWorkUser) {
-          user->emitError(
-              "All users of workspace arg must be AllocWorkspaceOp!");
-          return failure();
-        }
+      auto argUsers = arg.getUsers();
+      auto noneAllocWorkSpaceUserIter =
+          llvm::find_if(argUsers, [](Operation *user) {
+            return !isa<bishengir::memref_ext::AllocWorkspaceOp>(user);
+          });
+      if (noneAllocWorkSpaceUserIter != argUsers.end()) {
+        return noneAllocWorkSpaceUserIter->emitError(
+            "All users of workspace arg must be AllocWorkspaceOp!");
       }
     }
     return success();
@@ -230,16 +227,11 @@ void SyncBlockIRTranslator::SyncBlockBuild() {
 
 void SyncBlockIRTranslator::RecursionIR(Region *region) {
   auto result = region->walk<WalkOrder::PreOrder>([&](Operation *op) {
-    auto aliasPairs = getOperationAliasInfo(op);
-    if (!aliasPairs.empty()) {
-      for (auto aliasPair : aliasPairs) {
-        UpdateAliasBufferInfo(aliasPair.first, aliasPair.second);
-      }
-    } else if (auto forOp = dyn_cast<scf::ForOp>(op)) {
+    if (auto forOp = dyn_cast<scf::ForOp>(op)) {
       UpdateForOpInfo(forOp);
       std::unique_ptr<InstanceElement> &forEndElement = syncIR.back();
       assert(forEndElement->GetKind() == InstanceElement::KindTy::LOOP);
-      auto *forPtr = static_cast<LoopInstanceElement *>(forEndElement.get());
+      auto *forPtr = dyn_cast<LoopInstanceElement>(forEndElement.get());
       assert(forPtr != nullptr);
       auto multibufferAttr =
           op->getAttrOfType<IntegerAttr>(kMultibufferUnrollAttrName);
@@ -255,8 +247,7 @@ void SyncBlockIRTranslator::RecursionIR(Region *region) {
       return WalkResult::skip();
     } else if (scf::YieldOp yieldOp = dyn_cast<scf::YieldOp>(op)) {
       UpdateYieldOpInform(yieldOp);
-    } else if (auto allocWorkspaceOp =
-                   dyn_cast<bishengir::memref_ext::AllocWorkspaceOp>(op)) {
+    } else if (isa<bishengir::memref_ext::AllocWorkspaceOp>(op)) {
       if (failed(UpdateAllocLikeOpMemInfo(op))) {
         return WalkResult::interrupt();
       }
@@ -266,13 +257,18 @@ void SyncBlockIRTranslator::RecursionIR(Region *region) {
       UpdateInitAndResAlias(dstStyleOp);
       UpdateDestinationStyleOpInform(op, dstStyleOp);
     } else if (auto loadOp = dyn_cast<memref::LoadOp>(op)) {
-      updateStoreOrLoadOpInfoBlockSync(loadOp);
+      UpdateStoreOrLoadOpInfoBlockSync(loadOp);
     } else if (auto storeOp = dyn_cast<memref::StoreOp>(op)) {
-      updateStoreOrLoadOpInfoBlockSync(storeOp);
+      UpdateStoreOrLoadOpInfoBlockSync(storeOp);
     } else if (auto affineLoadOp = dyn_cast<affine::AffineLoadOp>(op)) {
-      updateStoreOrLoadOpInfoBlockSync(affineLoadOp);
+      UpdateStoreOrLoadOpInfoBlockSync(affineLoadOp);
     } else if (auto affineStoreOp = dyn_cast<affine::AffineStoreOp>(op)) {
-      updateStoreOrLoadOpInfoBlockSync(affineStoreOp);
+      UpdateStoreOrLoadOpInfoBlockSync(affineStoreOp);
+    } else if (auto aliasPairs = getOperationAliasInfo(op);
+               !aliasPairs.empty()) {
+      for (auto aliasPair : aliasPairs) {
+        UpdateAliasBufferInfo(aliasPair.first, aliasPair.second);
+      }
     }
     return WalkResult::advance();
   });
@@ -298,16 +294,6 @@ void SyncBlockIRTranslator::UpdateYieldOpInform(scf::YieldOp yieldOp) {
   }
 }
 
-void SyncBlockIRTranslator::UpdateAliasBufferInfo(Value buffer,
-                                                  Value aliasBuffer) {
-  if (buffer2MemInfoMap.contains(aliasBuffer)) {
-    auto &bufferMemInfoVec = buffer2MemInfoMap[buffer];
-    for (auto &memInfo : buffer2MemInfoMap[aliasBuffer]) {
-      bufferMemInfoVec.emplace_back(memInfo->clone(buffer));
-    }
-  }
-}
-
 void SyncBlockIRTranslator::UpdateDestinationStyleOpInform(
     Operation *op, DestinationStyleOpInterface dstStyleOp) {
   auto pipeOp = dyn_cast<hivm::OpPipeInterface>(op);
@@ -326,16 +312,14 @@ void SyncBlockIRTranslator::UpdateDestinationStyleOpInform(
   SmallVector<const BaseMemInfo *> useVec;
   UpdateDefUseVec(dstStyleOp.getDpsInputs(), useVec);
   assert(static_cast<unsigned int>(pipe) < getPipeNum());
-  auto copPrt =
-      std::make_unique<CompoundInstanceElement>(CompoundInstanceElement{
-          index, defVec, useVec, pipe, dstStyleOp->getName()});
-  assert(copPrt != nullptr);
-  copPrt->elementOp = op;
+  auto copPtr = std::make_unique<CompoundInstanceElement>(
+      index, defVec, useVec, pipe, dstStyleOp->getName());
+  copPtr->elementOp = op;
   auto coreType = getCoreType(op);
   assert(succeeded(coreType));
   assert(coreType.value() != TCoreType::CUBE_OR_VECTOR);
-  copPrt->compoundCoreType = coreType.value();
-  syncIR.emplace_back(std::move(copPrt));
+  copPtr->compoundCoreType = coreType.value();
+  syncIR.emplace_back(std::move(copPtr));
   index++;
 }
 
@@ -351,10 +335,8 @@ void SyncBlockIRTranslator::UpdateTensorExtractOpInform(
   SmallVector<const BaseMemInfo *> defVec;
   SmallVector<const BaseMemInfo *> useVec;
   UpdateDefUseVec({extractOp.getTensor()}, useVec);
-  auto compoundElement =
-      std::make_unique<CompoundInstanceElement>(CompoundInstanceElement{
-          index, defVec, useVec, pipe, extractOp->getName()});
-  assert(compoundElement != nullptr);
+  auto compoundElement = std::make_unique<CompoundInstanceElement>(
+      index, defVec, useVec, pipe, extractOp->getName());
   compoundElement->elementOp = op;
   compoundElement->compoundCoreType = coreTypeVal;
   UpdateAliasBufferInfo(extractOp->getResult(0), extractOp.getTensor());
@@ -363,12 +345,7 @@ void SyncBlockIRTranslator::UpdateTensorExtractOpInform(
 }
 
 template <typename OP>
-typename std::enable_if<std::is_same_v<OP, memref::LoadOp> ||
-                            std::is_same_v<OP, affine::AffineLoadOp> ||
-                            std::is_same_v<OP, affine::AffineStoreOp> ||
-                            std::is_same_v<OP, memref::StoreOp>,
-                        void>::type
-SyncBlockIRTranslator::updateStoreOrLoadOpInfoBlockSync(OP op) {
+void SyncBlockIRTranslator::UpdateStoreOrLoadOpInfoBlockSync(OP op) {
   Value memRef = op.getMemRef();
   llvm::SmallVector<const BaseMemInfo *> memInfoVec;
   if (buffer2MemInfoMap.contains(memRef)) {
@@ -504,7 +481,11 @@ void InjectBlockSyncPass::runOnOperation() {
   assert(baseAddr.has_value() &&
          "The mix kernel parameter must have a ffts_addr value");
   insertSetFFTSBaseAddrOp(baseAddr.value());
-
+  // If module has attribute to disable auto inject block sync, skip injection.
+  auto moduleOp = funcOp->getParentOfType<ModuleOp>();
+  if (moduleOp && moduleOp->hasAttr(hivm::DisableAutoInjectBlockSyncAttr::name)) {
+    return;
+  }
   if (this->disableAutoInjectBlockSync)
     return;
 

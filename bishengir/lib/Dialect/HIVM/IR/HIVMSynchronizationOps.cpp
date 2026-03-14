@@ -16,8 +16,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
-
-#include <set>
+#include "llvm/Support/LogicalResult.h"
 
 using namespace mlir;
 using namespace mlir::hivm;
@@ -151,7 +150,7 @@ void SyncBlockSetOp::build(OpBuilder &odsBuilder, OperationState &odsState,
           /*tsync_instr_mode=*/{});
   } else {
     build(odsBuilder, odsState, tcore_type, tpipe, pipe, nullptr,
-          flag_id.get<Value>(), nullptr, /*tsync_instr_mode=*/{});
+          cast<Value>(flag_id), nullptr, /*tsync_instr_mode=*/{});
   }
 }
 
@@ -165,7 +164,7 @@ void SyncBlockSetOp::build(OpBuilder &odsBuilder, OperationState &odsState,
           cast<IntegerAttr>(attr), nullptr, ffts_base_addr, tsync_instr_mode);
   } else {
     build(odsBuilder, odsState, tcore_type, tpipe, pipe, nullptr,
-          flag_id.get<Value>(), ffts_base_addr, tsync_instr_mode);
+          cast<Value>(flag_id), ffts_base_addr, tsync_instr_mode);
   }
 }
 
@@ -201,7 +200,7 @@ void SyncBlockWaitOp::build(OpBuilder &odsBuilder, OperationState &odsState,
           cast<IntegerAttr>(attr), nullptr);
   } else {
     build(odsBuilder, odsState, tcore_type, tpipe, pipe, nullptr,
-          flag_id.get<Value>());
+          cast<Value>(flag_id));
   }
 }
 
@@ -220,32 +219,30 @@ LogicalResult SyncBlockOp::verify() {
       return emitOpError("tcube_pipe should not be defined!");
     }
   }
-  if (synBlockMode == SyncBlockMode::ALL_CUBE) {
+  if (synBlockMode == SyncBlockMode::ALL_CUBE ||
+      synBlockMode == SyncBlockMode::ALL) {
     if (getTcubePipeAttr() == nullptr) {
       return emitOpError("tcube_pipe should be defined!");
     }
-    if (getTcubePipeAttr().getPipe() != PIPE::PIPE_FIX) {
-      return emitOpError("TPipe is illegal. TPipe of ALL_CUBE is PIPE_FIX!");
+    if (!checkPipeInferredCoreType(getTcubePipeAttr().getPipe(),
+                                   TCoreType::CUBE)) {
+      return emitOpError("tcube_pipe of should match CUBE core type!");
     }
   }
-  if (synBlockMode == SyncBlockMode::ALL_VECTOR) {
+  if (synBlockMode == SyncBlockMode::ALL_VECTOR ||
+      synBlockMode == SyncBlockMode::ALL) {
     if (getTvectorPipeAttr() == nullptr) {
       return emitOpError("tvector_pipe should be defined!");
     }
-    if (getTvectorPipeAttr().getPipe() != PIPE::PIPE_MTE3) {
-      return emitOpError("TPipe is illegal. TPipe of ALL_VECTOR is PIPE_MTE3!");
+    if (!checkPipeInferredCoreType(getTvectorPipeAttr().getPipe(),
+                                   TCoreType::VECTOR)) {
+      return emitOpError(
+          "tvector_pipe of ALL_VECTOR should match VECTOR core type!");
     }
   }
-
-  if (synBlockMode == SyncBlockMode::ALL) {
-    if (getTcubePipeAttr() == nullptr || getTvectorPipeAttr() == nullptr) {
-      return emitOpError("tvector_pipe and  tcube_pipe should be defined!");
-    }
-    if (getTcubePipeAttr().getPipe() != PIPE::PIPE_FIX) {
-      return emitOpError("Cube Pipe is illegal. Cube pipe is PIPE_FIX!");
-    }
-    if (getTvectorPipeAttr().getPipe() != PIPE::PIPE_MTE3) {
-      return emitOpError("Vector Pipe is illegal. Vector pipe is PIPE_MTE3!");
+  if (synBlockMode == SyncBlockMode::ALL_SUB_VECTOR) {
+    if (getTvectorPipeAttr() == nullptr) {
+      return emitOpError("tvector_pipe should be defined!");
     }
   }
   return success();

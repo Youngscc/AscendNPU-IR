@@ -20,12 +20,17 @@
 #include "bishengir/Dialect/HIVM/Utils/Utils.h"
 #include "bishengir/Dialect/Utils/Util.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/IR/Value.h"
+#include "mlir/IR/ValueRange.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -47,7 +52,9 @@ namespace {
 // Design for 1D bias specially
 constexpr size_t kDimOne = 1;
 constexpr size_t kDimTwo = 2;
+constexpr size_t kDimThree = 3;
 constexpr size_t kDimFour = 4;
+constexpr size_t kDimFive = 5;
 
 FailureOr<size_t> getRankFromShapedTypeValue(Value val) {
   auto valType = dyn_cast<ShapedType>(val.getType());
@@ -162,6 +169,40 @@ bool isInitConstantForLocalMmadOp(LocalMmadTy *localMatmulOp,
   return false;
 }
 
+static std::optional<int64_t> getConstantFromDefine(Value constVal) {
+  if (auto constOp = dyn_cast_or_null<arith::ConstantOp>(constVal.getDefiningOp())) {
+    return getConstantIntValue(constOp.getValue());
+  }
+
+  return std::nullopt;
+}
+
+// Checks if matmul which is in loop
+// clears the C buffer only in the first iteration
+template <typename LocalMmadTy>
+bool isInitFirstLoopIterForLocalMmadOp(LocalMmadTy *localMatmulOp) {
+  Value initCond = localMatmulOp->getInitCondition();
+  if (auto cmpOp = dyn_cast<arith::CmpIOp>(initCond.getDefiningOp())) {
+    if (auto forOp = cmpOp->template getParentOfType<scf::ForOp>()) {
+      auto cmpConst = getConstantFromDefine(cmpOp.getRhs());
+      bool isConstantRhs = true;
+      // If rhs of cmpOp is not a constant, check if lhs is constant
+      if (cmpConst.has_value()) {
+        cmpConst = getConstantFromDefine(cmpOp.getLhs());
+        isConstantRhs = false;
+      }
+      auto forLowerConst = getConstantFromDefine(forOp.getLowerBound());
+      
+      if (cmpConst.has_value() && forLowerConst.has_value()) {
+        return isConstantRhs 
+               ? (cmpConst.value() == forLowerConst.value()) && (cmpOp.getLhs() == forOp.getInductionVar())
+               : (cmpConst.value() == forLowerConst.value()) && (cmpOp.getRhs() == forOp.getInductionVar());
+      }
+    }
+  }
+  return false;
+}
+
 Value mlir::hivm::extractMmadBiasFromPotentialUnitDimExpand(Value bias) {
   // It assumes that there only exists expand op in mmad bias defining chain,
   // while other reshape op like collapse op seems unlikely
@@ -195,8 +236,8 @@ void MmadL1Op::build(OpBuilder &odsBuilder, OperationState &odsState,
                      UnitAttr enable_HF32) {
   build(odsBuilder, odsState, result_tensors, a, b, init_condition, real_m,
         real_k, real_n, c, /*sync_related_args*/ ValueRange{},
-        /*unit_flag_cond*/ Value{}, per_channel_bias, a_transpose, b_transpose,
-        enable_HF32, /*unit_flag_mode*/ UnitFlagAttr{});
+        /*unit_flag_cond*/ ValueRange{}, per_channel_bias, a_transpose, b_transpose,
+        enable_HF32, /*unit_flag_mode*/ ArrayAttr{});
 }
 
 int MmadL1Op::getNumSyncRelatedArgs() { return 7; }
@@ -331,6 +372,19 @@ static bool isPerChannelSplitKPattern(OpOperand &mmOut) {
   return false;
 }
 
+static bool isElementwiseAddCrossLoopPattern(OpOperand &mmOut) {
+  if (auto blockArg = dyn_cast_if_present<BlockArgument>(mmOut.get())) {
+    if (auto scfForOp = dyn_cast_if_present<scf::ForOp>(
+            blockArg.getOwner()->getParentOp())) {
+      auto correspondYieldVal = scfForOp.getTiedLoopYieldedValue(blockArg)->get();
+
+      return !traceDefOp<tensor::EmptyOp>(correspondYieldVal).has_value();
+    }
+  }
+
+  return false;
+}
+
 /// NoBias:
 /// %1 = tensor.empty()
 /// mmadL1 dst(%1)
@@ -352,6 +406,14 @@ static bool isPerChannelSplitKPattern(OpOperand &mmOut) {
 /// %1 = ops // not 0 const
 /// mmadL1 dst(%1)
 
+/// ElementwiseCrossLoopAdd
+/// %init = tensor.empty()
+/// %mat = for (%iterator = %init) {
+///   %acc_mad = mmadL1 dst(%iterator)
+///   %vec_res = VectorOp %acc_mad 
+//    yield %vec_res
+/// }
+
 /// Well, both per-channel modes are optimization and related pattern is a
 /// little customized, whatever ElementwiseAdd mode will be final standby for
 /// all adding bias scenario
@@ -367,8 +429,15 @@ MatmulBiasMode getMatmulLikeBiasMode(LocalMmadTy localMatmulOp) {
     return MatmulBiasMode::PerChannelAddWithSplitK;
 
   auto emptyOp = traceDefOp<tensor::EmptyOp>(matmulOutput.get());
-  return emptyOp.has_value() ? MatmulBiasMode::NoBias
-                             : MatmulBiasMode::ElementwiseAdd;
+  if (!emptyOp.has_value()) {
+    return MatmulBiasMode::ElementwiseAdd;
+  }
+
+  if (isElementwiseAddCrossLoopPattern(matmulOutput)) {
+    return MatmulBiasMode::ElementwiseCrossLoopAdd;
+  }
+
+  return MatmulBiasMode::NoBias;
 }
 
 FailureOr<DataLayoutAttr> MmadL1Op::getOperandALayout() {
@@ -440,6 +509,10 @@ bool MmadL1Op::isInitConstant(std::optional<bool> cst) {
   return isInitConstantForLocalMmadOp<MmadL1Op>(this, cst);
 }
 
+bool MmadL1Op::isInitFirstLoopIter() {
+  return isInitFirstLoopIterForLocalMmadOp<MmadL1Op>(this);
+}
+
 void MmadL1Op::setInitCondition(Value init) {
   getInitConditionMutable().assign(init);
 }
@@ -469,6 +542,23 @@ bool MmadL1Op::shouldDecomposeBiasByElementAdd() {
   return true;
 }
 
+bool MmadL1Op::shouldDecomposeBiasByCrossLoopElementAdd() {
+  if (this->getMatmulBiasMode() != MatmulBiasMode::ElementwiseCrossLoopAdd ||
+      !isInitFirstLoopIter()) {
+    return false;
+  }
+
+  if (isSingleChainCrossLoopMmadToMmad<MmadL1Op>(*this)) {
+    // One of accumulating situation is cross loop C to C:
+    // the C can be stored in L0c and directly be the init operand of local
+    // matmul like op, so no need decomposing by mmad op and additionally vector
+    // add.
+    return false;
+  }
+
+  return true;
+}
+
 //===----------------------------------------------------------------------===//
 // BatchMmadL1Op
 //===----------------------------------------------------------------------===//
@@ -481,8 +571,8 @@ void BatchMmadL1Op::build(OpBuilder &odsBuilder, OperationState &odsState,
                           UnitAttr enable_HF32) {
   build(odsBuilder, odsState, result_tensors, a, b, init_condition, real_m,
         real_k, real_n, c, /*sync_related_args*/ ValueRange{},
-        /*unit_flag_cond*/ Value{}, per_channel_bias, a_transpose, b_transpose,
-        enable_HF32, /*unit_flag_mode*/ UnitFlagAttr{});
+        /*unit_flag_cond*/ ValueRange{}, per_channel_bias, a_transpose, b_transpose,
+        enable_HF32, /*unit_flag_mode*/ ArrayAttr{});
 }
 
 int BatchMmadL1Op::getNumSyncRelatedArgs() { return 7; }
@@ -501,6 +591,11 @@ LogicalResult BatchMmadL1Op::verify() {
 
 bool BatchMmadL1Op::isInitConstant(std::optional<bool> cst) {
   return isInitConstantForLocalMmadOp<BatchMmadL1Op>(this, cst);
+}
+
+
+bool BatchMmadL1Op::isInitFirstLoopIter() {
+  return isInitFirstLoopIterForLocalMmadOp<BatchMmadL1Op>(this);
 }
 
 void BatchMmadL1Op::setInitCondition(Value init) {
@@ -529,6 +624,23 @@ bool BatchMmadL1Op::shouldDecomposeBiasByElementAdd() {
   // The other of accumulating situation is :
   // should decompose local matmul like op with bias to local matmul like op and
   // additional vector add op.
+  return true;
+}
+
+bool BatchMmadL1Op::shouldDecomposeBiasByCrossLoopElementAdd() {
+  if (this->getMatmulBiasMode() != MatmulBiasMode::ElementwiseCrossLoopAdd ||
+      !isInitFirstLoopIter()) {
+    return false;
+  }
+
+  if (isSingleChainCrossLoopMmadToMmad<BatchMmadL1Op>(*this)) {
+    // One of accumulating situation is cross loop C to C:
+    // the C can be stored in L0c and directly be the init operand of local
+    // matmul like op, so no need decomposing by mmad op and additionally vector
+    // add.
+    return false;
+  }
+
   return true;
 }
 
@@ -614,4 +726,86 @@ LogicalResult MixGroupMatmulOp::verify() {
     return failure();
 
   return success();
+}
+
+//===----------------------------------------------------------------------===//
+// Conv1DL1Op
+//===----------------------------------------------------------------------===//
+
+bool Conv1DL1Op::isInitConstant(std::optional<bool> cst) {
+  return isInitConstantForLocalMmadOp<Conv1DL1Op>(this, cst);
+}
+
+void Conv1DL1Op::setInitCondition(Value init) {
+  getInitConditionMutable().assign(init);
+}
+
+FailureOr<DataLayoutAttr> Conv1DL1Op::getInputLayout() {
+  auto rank = getRankFromShapedTypeValue(getInput());
+  if (failed(rank)) {
+    return failure();
+  }
+  switch (*rank) {
+  case kDimTwo:
+    return DataLayoutAttr::get(getContext(), DataLayout::NCHW);
+  case kDimThree:
+    return DataLayoutAttr::get(getContext(), DataLayout::NCHW);
+  case kDimFive:
+    return DataLayoutAttr::get(getContext(), DataLayout::NC1HWC0);
+  default:
+    return failure();
+  }
+}
+
+FailureOr<DataLayoutAttr> Conv1DL1Op::getWeightLayout() {
+  auto rank = getRankFromShapedTypeValue(getWeight());
+  if (failed(rank)) {
+    return failure();
+  }
+  switch (*rank) {
+  case kDimThree:
+    return DataLayoutAttr::get(getContext(), DataLayout::NCHW);
+  case kDimFive:
+    return DataLayoutAttr::get(getContext(), DataLayout::C1HWNC0);
+  default:
+    return failure();
+  }
+}
+
+FailureOr<DataLayoutAttr> Conv1DL1Op::getBiasLayout() {
+  return DataLayoutAttr::get(getContext(), DataLayout::ND);
+}
+
+FailureOr<DataLayoutAttr> Conv1DL1Op::getInitLayout() {
+  auto rank = getRankFromShapedTypeValue(getInit());
+  if (failed(rank)) {
+    return failure();
+  }
+  switch (*rank) {
+  case kDimTwo:
+    return DataLayoutAttr::get(getContext(), DataLayout::DOTC_ND);
+  case kDimFour:
+    return DataLayoutAttr::get(getContext(), DataLayout::zN);
+  default:
+    return failure();
+  }
+}
+
+int Conv1DL1Op::getNumSyncRelatedArgs() { return 6; }
+
+SmallVector<Value>
+Conv1DL1Op::getInputOperands(bool includeSyncRelatedArgs /*=true*/) {
+  SmallVector<Value> retOperands;
+  retOperands.push_back(getInput());
+  retOperands.push_back(getWeight());
+  retOperands.push_back(getInitCondition());
+  if (getBias()) {
+    retOperands.push_back(getBias());
+  }
+  if (includeSyncRelatedArgs) {
+    auto syncRelatedArgs = getSyncRelatedArgs();
+    std::copy(syncRelatedArgs.begin(), syncRelatedArgs.end(),
+              std::back_inserter(retOperands));
+  }
+  return retOperands;
 }

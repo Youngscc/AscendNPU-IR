@@ -149,10 +149,32 @@ void decomposeVectorOpToScalarOpImpl(RewriterBase &rewriter, HIVMOP op) {
         hivmStructureOp.getHIVMInputOperands(false /*includeExtraBuffer*/),
         std::back_inserter(scalarInputs), getScalarValueFunc);
 
+    if constexpr (std::is_same<hivm::VDivOp, HIVMOP>::value) {
+      // === Safe handling: replace division by zero with 1 ===
+      // Logic modification: when the dividend is zero, replace the divisor
+      // with 1.
+      auto elemTySrc = scalarInputs[0].getType();
+      if (elemTySrc.isInteger(64)) {
+        auto DivLhs = scalarInputs[0];
+        auto DivRhs = scalarInputs[1];
+        auto loc = op.getLoc();
+
+        arith::ConstantOp constZero = rewriter.create<arith::ConstantOp>(
+            loc, rewriter.getIntegerAttr(elemTySrc, 0));
+        arith::ConstantOp constOne = rewriter.create<arith::ConstantOp>(
+            loc, rewriter.getIntegerAttr(elemTySrc, 1));
+        auto condition = rewriter.create<arith::CmpIOp>(
+            loc, arith::CmpIPredicate::eq, DivLhs, constZero);
+        auto newDivRhs = rewriter.create<arith::SelectOp>(
+            loc, condition, constOne, DivRhs);
+
+        scalarInputs[1] = newDivRhs;
+      }
+    }
+
     llvm::SmallVector<Value> dstIndexes(indexes);
     llvm::SmallVector<Value> resTensors =
         createScalarComputeOp(rewriter, op, scalarInputs);
-
     if constexpr (std::is_same<hivm::VCmpOp, HIVMOP>::value) {
       resTensors[0] = rewriter.create<arith::ExtUIOp>(
           op.getLoc(), rewriter.getIntegerType(8), resTensors[0]);
@@ -617,7 +639,7 @@ Value calculateResFloatArgMinArgMax(RewriterBase &rewriter, hivm::VReduceOp op,
   return res;
 }
 
-template <typename SCALAROP>
+template <typename INTEGEROP, typename FLOATINGOP>
 std::pair<Value, Value> getIndexTensorForArgmaxArgmin(
     Type elemType, RewriterBase &rewriter, hivm::VReduceOp op,
     llvm::SmallVector<Value, 4> scalarInputs,
@@ -630,14 +652,14 @@ std::pair<Value, Value> getIndexTensorForArgmaxArgmin(
                                                  scalarIndx, intPred,
                                                  scalarInputs[1], index);
 
-    resTensor = getScalarResult<hivm::VMinOp, SCALAROP>(rewriter, op.getLoc(),
-                                                        scalarInputs);
+    resTensor = getScalarResult<hivm::VMinOp, INTEGEROP>(rewriter, op.getLoc(),
+                                                         scalarInputs);
   } else {
     resIndex =
         calculateIndexFloatArgMinArgMax(rewriter, op, scalarInputs, scalarIndx,
                                         floatPred, scalarInputs[1], index);
-    resTensor = calculateResFloatArgMinArgMax(rewriter, op, scalarInputs,
-                                              floatPred, scalarInputs[1]);
+    resTensor = getScalarResult<hivm::VMinOp, FLOATINGOP>(rewriter, op.getLoc(),
+                                                          scalarInputs);
   }
   return {resIndex, resTensor};
 }
@@ -674,25 +696,25 @@ createScalarReduceComputeOp(RewriterBase &rewriter, hivm::VReduceOp op,
     break;
   case hivm::ReduceOperation::min_with_index_left:
     std::tie(resIndex, resTensor) =
-        getIndexTensorForArgmaxArgmin<arith::MinSIOp>(
+        getIndexTensorForArgmaxArgmin<arith::MinSIOp, arith::MinimumFOp>(
             elemType, rewriter, op, scalarInputs, scalarIndx, index,
             arith::CmpIPredicate::sgt, arith::CmpFPredicate::OGT);
     break;
   case hivm::ReduceOperation::min_with_index_right:
     std::tie(resIndex, resTensor) =
-        getIndexTensorForArgmaxArgmin<arith::MinSIOp>(
+        getIndexTensorForArgmaxArgmin<arith::MinSIOp, arith::MinimumFOp>(
             elemType, rewriter, op, scalarInputs, scalarIndx, index,
             arith::CmpIPredicate::sge, arith::CmpFPredicate::OGE);
     break;
   case hivm::ReduceOperation::max_with_index_left:
     std::tie(resIndex, resTensor) =
-        getIndexTensorForArgmaxArgmin<arith::MaxSIOp>(
+        getIndexTensorForArgmaxArgmin<arith::MaxSIOp, arith::MaximumFOp>(
             elemType, rewriter, op, scalarInputs, scalarIndx, index,
             arith::CmpIPredicate::slt, arith::CmpFPredicate::OLT);
     break;
   case hivm::ReduceOperation::max_with_index_right:
     std::tie(resIndex, resTensor) =
-        getIndexTensorForArgmaxArgmin<arith::MaxSIOp>(
+        getIndexTensorForArgmaxArgmin<arith::MaxSIOp, arith::MaximumFOp>(
             elemType, rewriter, op, scalarInputs, scalarIndx, index,
             arith::CmpIPredicate::sle, arith::CmpFPredicate::OLE);
     break;

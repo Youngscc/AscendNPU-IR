@@ -15,6 +15,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "bishengir/Dialect/HACC/Utils/Utils.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Dialect/HIVM/IR/HIVMImpl.h"
 #include "bishengir/Dialect/HIVM/Transforms/AlignBuffer/Util.h"
@@ -38,8 +39,7 @@ using namespace mlir::hivm;
 #include "bishengir/Dialect/HIVM/IR/HIVMVectorOps.cpp.inc"
 
 namespace {
-template <typename HIVMOP>
-LogicalResult verifyCumOp(HIVMOP op) {
+template <typename HIVMOP> LogicalResult verifyCumOp(HIVMOP op) {
   ArrayRef<int64_t> cumDims = op.getCumDims();
   ShapedType srcType = cast<ShapedType>(op.getSrc().getType());
   if (cumDims.empty()) {
@@ -136,6 +136,14 @@ void VBrcOp::build(OpBuilder &odsBuilder, OperationState &odsState,
 LogicalResult VBrcOp::verify() {
   // tmpBuf can be null
   auto tmpBuf = getTempBuffer();
+  Type srcElemType = getElementTypeOrSelf(getSrc().getType());
+
+  auto moduleOp =
+      this->getOperation()->template getParentOfType<mlir::ModuleOp>();
+  if (!mlir::hacc::utils::isAscend910_95(moduleOp) &&
+      (srcElemType.isFloat8E4M3FN() || srcElemType.isFloat8E5M2()))
+    return emitOpError("Current hardware doesn't support fp8 type");
+
   if (tmpBuf && tmpBuf.getType().getShape().size() != 1) {
     return emitOpError() << "temp_buffer'rank should be one";
   }
@@ -199,11 +207,9 @@ std::string VCastOp::getCastName(bool withMode) {
   auto srcElemType = srcVcastType.getElementType();
   auto dstElemType = dstVcastType.getElementType();
   hivm::TypeFn casting = this->getCast();
-  castName.append(
-      util::getTypeName(this->getLoc(), srcElemType, casting));
+  castName.append(util::getTypeName(this->getLoc(), srcElemType, casting));
   castName.append("_to_");
-  castName.append(
-      util::getTypeName(this->getLoc(), dstElemType, casting));
+  castName.append(util::getTypeName(this->getLoc(), dstElemType, casting));
   if (withMode) {
     castName.append("_");
     castName.append(stringifyRoundMode((*this).getRoundMode()));
@@ -701,6 +707,13 @@ bool VTransposeOp::isLastTwoAxesTranspose() {
 LogicalResult VTransposeOp::verify() {
   ArrayRef<int64_t> permutation = this->getPermutation();
   size_t permSize = permutation.size();
+  Type srcElemType = getElementTypeOrSelf(getSrc().getType());
+
+  auto moduleOp =
+      this->getOperation()->template getParentOfType<mlir::ModuleOp>();
+  if (!mlir::hacc::utils::isAscend910_95(moduleOp) &&
+      (srcElemType.isFloat8E4M3FN() || srcElemType.isFloat8E5M2()))
+    return emitOpError("Current hardware doesn't support fp8 type");
   if (permutation.empty()) {
     return emitOpError() << "Permutation array should not be empty.";
   }
@@ -771,10 +784,12 @@ LogicalResult VTransposeOp::verify() {
         SmallVector<int64_t> transposeLoopDims;
         getTransposeLoopDims(transposeLoopDims);
 
-        auto firstAlign = alignList[1]->alignBytes[0] / static_cast<int>(elemTypeBytes);
+        auto firstAlign =
+            alignList[1]->alignBytes[0] / static_cast<int>(elemTypeBytes);
         auto firstDim = srcShape[transposeLoopDims[0]];
 
-        auto lastAlign = alignList[0]->alignBytes[0] / static_cast<int>(elemTypeBytes);
+        auto lastAlign =
+            alignList[0]->alignBytes[0] / static_cast<int>(elemTypeBytes);
         auto lastDim = srcShape[transposeLoopDims[1]];
 
         if ((firstDim % firstAlign == 0) && (lastDim % lastAlign == 0)) {

@@ -19,61 +19,67 @@
 #include "bishengir/Dialect/HIVM/IR/HIVMImpl.h"
 #include "bishengir/Dialect/Utils/Util.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "llvm/ADT/DenseSet.h"
 
 #include <numeric>
 
 using namespace mlir;
 using namespace mlir::hivm;
 
-namespace {
+namespace mlir {
+namespace hivm {
 
-static std::optional<TCoreType>
-inferCoreTypeBasedOnPipes(ArrayRef<hivm::PIPE> pipes) {
+bool checkPipeInferredCoreType(hivm::PIPE pipe, hivm::TCoreType coreType,
+                               bool strict) {
+  if (auto inferredCoreTypeOpt = inferCoreTypeBasedOnPipes({pipe})) {
+    auto inferredCoreType = inferredCoreTypeOpt.value();
+    if (inferredCoreType == coreType ||
+        (!strict && inferredCoreType == TCoreType::CUBE_OR_VECTOR)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::optional<TCoreType> inferCoreTypeBasedOnPipes(ArrayRef<hivm::PIPE> pipes) {
   if (pipes.empty()) {
     return std::nullopt;
   }
-
-  static std::set<hivm::PIPE> cubeOnyPipes = {
-      hivm::PIPE::PIPE_FIX, hivm::PIPE::PIPE_M, hivm::PIPE::PIPE_MTE1};
-  static std::set<hivm::PIPE> vecOnyPipes = {hivm::PIPE::PIPE_MTE3,
-                                             hivm::PIPE::PIPE_V};
-
+  const llvm::DenseSet<hivm::PIPE> cubeOnlyPipes = {
+      hivm::PIPE::PIPE_M, hivm::PIPE::PIPE_MTE1, hivm::PIPE::PIPE_FIX};
+  const llvm::DenseSet<hivm::PIPE> vecOnlyPipes = {hivm::PIPE::PIPE_V,
+                                                   hivm::PIPE::PIPE_MTE3};
   SmallVector<TCoreType> coreTypes(pipes.size(), TCoreType::CUBE_OR_VECTOR);
   std::transform(pipes.begin(), pipes.end(), coreTypes.begin(),
-                 [](hivm::PIPE pipe) -> TCoreType {
-                   TCoreType result = hivm::TCoreType::CUBE_OR_VECTOR;
-                   if (cubeOnyPipes.count(pipe) != 0) {
-                     result = TCoreType::CUBE;
-                   } else if (vecOnyPipes.count(pipe) != 0) {
-                     result = TCoreType::VECTOR;
+                 [&cubeOnlyPipes, &vecOnlyPipes](hivm::PIPE pipe) -> TCoreType {
+                   if (cubeOnlyPipes.contains(pipe)) {
+                     return TCoreType::CUBE;
                    }
-                   return result;
+                   if (vecOnlyPipes.contains(pipe)) {
+                     return TCoreType::VECTOR;
+                   }
+                   return TCoreType::CUBE_OR_VECTOR;
                  });
-
-  return std::accumulate(
-      coreTypes.begin(), coreTypes.end(),
-      std::optional<TCoreType>(TCoreType::CUBE_OR_VECTOR),
-      [](std::optional<hivm::TCoreType> acc,
-         hivm::TCoreType t2) -> std::optional<hivm::TCoreType> {
-        if (!acc) {
-          return std::nullopt;
-        }
-
-        hivm::TCoreType t1 = acc.value();
-
-        hivm::TCoreType result = hivm::TCoreType::CUBE_OR_VECTOR;
-        if (t1 == hivm::TCoreType::CUBE_OR_VECTOR) {
-          result = t2;
-        } else if (t2 == hivm::TCoreType::CUBE_OR_VECTOR) {
-          result = t1;
-        } else if (t1 == t2) {
-          result = t1;
-        } else {
-          return std::nullopt;
-        }
-
-        return result;
-      });
+  auto accCoreType = [](std::optional<TCoreType> acc,
+                        TCoreType t2) -> std::optional<TCoreType> {
+    if (!acc.has_value()) {
+      return std::nullopt;
+    }
+    TCoreType t1 = acc.value();
+    if (t1 == TCoreType::CUBE_OR_VECTOR) {
+      return t2;
+    }
+    if (t2 == TCoreType::CUBE_OR_VECTOR) {
+      return t1;
+    }
+    if (t1 == t2) {
+      return t1;
+    }
+    return std::nullopt;
+  };
+  return std::accumulate(coreTypes.begin(), coreTypes.end(),
+                         std::optional<TCoreType>(TCoreType::CUBE_OR_VECTOR),
+                         accCoreType);
 }
 
 template <typename GlobalMixMatmulTy>
@@ -105,18 +111,31 @@ inferCoreTypeForGlobalMixMatmulOps(GlobalMixMatmulTy *mixMatmulOp) {
   return coreType;
 }
 
-} // namespace
+} // namespace hivm
+} // namespace mlir
 
 //===----------------------------------------------------------------------===//
 // HIVM Ops
 //===----------------------------------------------------------------------===//
 
-std::optional<TCoreType> ConvertLayoutOp::inferCoreType() {
-  BaseMemRefType srcMemRefTy = getSource().getType();
-  hivm::AddressSpace addrSpace =
-      static_cast<hivm::AddressSpace>(srcMemRefTy.getMemorySpaceAsInt());
+std::optional<TCoreType> CustomOp::inferCoreType() {
+  if (auto coreTypeAttr = getOperation()->template getAttrOfType<TCoreTypeAttr>(
+          TCoreTypeAttr::name)) {
+    return coreTypeAttr.getTcoretype();
+  }
 
+  return {};
+}
+
+std::optional<TCoreType> ConvertLayoutOp::inferCoreType() {
   TCoreType result = TCoreType::CUBE_OR_VECTOR;
+
+  std::optional<hivm::AddressSpace> addrSpace =
+      getOptionalHIVMAddressSpace(getSource().getType());
+  if (!addrSpace) {
+    return result;
+  }
+
   if (addrSpace == hivm::AddressSpace::UB) {
     result = TCoreType::VECTOR;
   } else if (addrSpace == hivm::AddressSpace::L1 ||
@@ -137,11 +156,24 @@ std::optional<TCoreType> DebugOp::inferCoreType() {
     return maybeTCoreTypeAttr.value().getTcoretype();
   } else {
     mlir::Value arg = this->getArg();
-    // first try the definingOp (TODO: change to tracing)
+    // first try the definingOp
     Operation *definingOp = arg.getDefiningOp();
+    FailureOr<hivm::TCoreType> res;
     if (definingOp) {
-      auto res = getCoreType(definingOp);
-      if (succeeded(res)) {
+      res = getCoreType(definingOp);
+      if (succeeded(res) && (res.value() != hivm::TCoreType::CUBE_OR_VECTOR)) {
+        this->setTcoretypeAttr(
+            hivm::TCoreTypeAttr::get(this->getContext(), res.value()));
+        return res.value();
+      }
+    }
+    // then try to infer from arg users
+    for (Operation *user : arg.getUsers()) {
+      // avoid inferCoreType for DebugOp recuresively
+      if (isa<hivm::DebugOp>(user))
+        continue;
+      res = getCoreType(user);
+      if (succeeded(res) && (res.value() != hivm::TCoreType::CUBE_OR_VECTOR)) {
         this->setTcoretypeAttr(
             hivm::TCoreTypeAttr::get(this->getContext(), res.value()));
         return res.value();
@@ -191,7 +223,8 @@ std::optional<TCoreType> SyncBlockOp::inferCoreType() {
       mode == hivm::SyncBlockMode::ALL_CUBE) {
     result = TCoreType::CUBE;
   } else if (mode == hivm::SyncBlockMode::BARRIER_VECTOR ||
-             mode == hivm::SyncBlockMode::ALL_VECTOR) {
+             mode == hivm::SyncBlockMode::ALL_VECTOR ||
+             mode == hivm::SyncBlockMode::ALL_SUB_VECTOR) {
     result = TCoreType::VECTOR;
   }
 
@@ -221,32 +254,33 @@ std::optional<TCoreType> LoadOp::inferCoreType() {
 
   auto dstAllocVal =
       dstMemRefTy ? utils::tracebackMemRef(getDst()) : getResult(0);
-  DenseSet<Value> visited;
   auto userAllCube = utils::checkUsersAllWithCondition(
-      dstAllocVal, getOperation(), visited,
+      dstAllocVal, getOperation(),
       [](Operation *op) {
         auto coreType = hivm::detail::queryCoreTypeHelper(op);
         return coreType == TCoreType::CUBE;
       },
       [](Operation *op) {
+        if (isa<hivm::DebugOp>(op))
+          return true;
         auto coreType = hivm::detail::queryCoreTypeHelper(op);
         return !coreType;
       });
   if (userAllCube.has_value() && userAllCube.value()) {
     return TCoreType::CUBE;
   }
-  visited.clear();
   auto userAllVec = utils::checkUsersAllWithCondition(
-      dstAllocVal, getOperation(), visited,
+      dstAllocVal, getOperation(),
       [](Operation *op) {
         auto coreType = hivm::detail::queryCoreTypeHelper(op);
         return coreType == TCoreType::VECTOR;
       },
       [](Operation *op) {
+        if (isa<hivm::DebugOp>(op))
+          return true;
         auto coreType = hivm::detail::queryCoreTypeHelper(op);
         return !coreType;
       });
-  visited.clear();
   if (userAllVec.has_value() && userAllVec.value()) {
     return TCoreType::VECTOR;
   }
@@ -295,6 +329,10 @@ std::optional<TCoreType> CopyOp::inferCoreType() {
 //===----------------------------------------------------------------------===//
 // HIVM Macro Ops
 //===----------------------------------------------------------------------===//
+
+std::optional<TCoreType> AtomicRMWOp::inferCoreType() {
+  return TCoreType::VECTOR;
+}
 
 std::optional<TCoreType> MatmulOp::inferCoreType() { return TCoreType::CUBE; }
 

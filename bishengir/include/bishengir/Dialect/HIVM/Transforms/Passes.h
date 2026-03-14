@@ -57,8 +57,14 @@ std::unique_ptr<Pass> createInferFuncCoreTypePass();
 /// Create a pass to convert ops from other dialects to HIVM Ops.
 std::unique_ptr<Pass> createConvertToHIVMOpPass();
 
+/// Create a pass to enable HIVMC version-compatible IR print.
+std::unique_ptr<Pass> createEnableHIVMCCompatiblePrintPass();
+
 /// Create a pass to normalize hivm matmul op.
 std::unique_ptr<Pass> createNormalizeMatmulPass();
+
+/// Create a pass to normalize hivm bitwise select op.
+std::unique_ptr<Pass> createNormalizeBitwiseSelectPass();
 
 /// Create a pass to convert args of global kernel function to HIVM Ops.
 std::unique_ptr<Pass> createTritonGlobalKernelArgsToHIVMOpPass();
@@ -102,6 +108,10 @@ createInjectSyncPass(const InjectSyncOptions &options = {});
 std::unique_ptr<Pass>
 createGraphSyncSolverPass(const GraphSyncSolverOptions &options = {});
 
+/// Create a pass to cross-core graph-sync-solver.
+std::unique_ptr<Pass>
+createCrossCoreGSSPass(const CrossCoreGSSOptions &options = {});
+
 /// Create a pass to inject block sync
 std::unique_ptr<Pass>
 createInjectBlockSyncPass(const InjectBlockSyncOptions &options = {});
@@ -130,6 +140,9 @@ std::unique_ptr<Pass> createAllocExtraBufferPass();
 
 /// Create a pass to remove unnecessary buffer address return
 std::unique_ptr<Pass> createHIVMOptFuncOutputPass();
+
+/// Create a pass to infer task type
+std::unique_ptr<Pass> createInsertInferTaskTypeFuncPass();
 
 // Create a pass to split davinci aicore and aivector kernel
 std::unique_ptr<Pass> createSplitMixKernelPass();
@@ -221,7 +234,8 @@ std::unique_ptr<Pass> createHIVMInlineOTFLoadStorePass();
 std::unique_ptr<Pass> createTileAndBindSubBlockPass();
 
 /// Create a pass to bubble up extract slice for hivm ops.
-std::unique_ptr<Pass> createHIVMBubbleUpExtractSlicePass();
+std::unique_ptr<Pass> createHIVMBubbleUpExtractSlicePass(
+    const HIVMBubbleUpExtractSliceOptions &options = {});
 
 // Create a pass to insert init and finish for debug.
 std::unique_ptr<Pass> createInsertInitAndFinishForDebugPass();
@@ -250,6 +264,11 @@ createTileCubeVectorLoopPass(const TileCubeVectorLoopOptions &options = {});
 /// Create a pass to generate copy for reassociative reshape that might be
 /// non-contiguous.
 std::unique_ptr<Pass> createNonContiguousReshapeToCopyPass();
+
+std::unique_ptr<Pass> createSinkOpToConsumerInLoopPass();
+
+/// Create a pass to normalize conv1d operation.
+std::unique_ptr<Pass> createNormalizeConvOpsPass();
 
 //===----------------------------------------------------------------------===//
 // Registration

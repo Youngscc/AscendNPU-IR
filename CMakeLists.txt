@@ -13,6 +13,22 @@ if(CMAKE_GENERATOR MATCHES "Ninja")
   endif()
 endif()
 
+# TODO : release different version of ascendnpu ir and remove the macro
+option(LLVM_MAJOR_VERSION_21_COMPATIBLE "NPUIR build with LLVM 21 or later" OFF)
+if(LLVM_MAJOR_VERSION_21_COMPATIBLE)
+  message(STATUS "Building with LLVM 21 or later")
+  add_definitions(-D__LLVM_MAJOR_VERSION_21_COMPATIBLE__)
+endif()
+
+# Some compatibility changes for LLVM 21 are also needed on LLVM 22.
+# Therefore __LLVM_MAJOR_VERSION_21_COMPATIBLE__ would be enabled too.
+option(LLVM_MAJOR_VERSION_22_COMPATIBLE "NPUIR build with LLVM 22" OFF)
+if(LLVM_MAJOR_VERSION_22_COMPATIBLE)
+  message(STATUS "Building with LLVM 22 or later")
+  add_definitions(-D__LLVM_MAJOR_VERSION_21_COMPATIBLE__)
+  add_definitions(-D__LLVM_MAJOR_VERSION_22_COMPATIBLE__)
+endif()
+
 # -------------------------------------------------------------------------------
 # Handle Option
 # -------------------------------------------------------------------------------
@@ -29,6 +45,10 @@ if("torch-mlir" IN_LIST LLVM_EXTERNAL_PROJECTS)
 else()
   set(BISHENGIR_ENABLE_TORCH_CONVERSIONS 0)
 endif()
+
+# The BISHENGIR_BUILD_TEMPLATE option is used to build BiShengIR template.
+option(BISHENGIR_BUILD_TEMPLATE
+  "Build the BiShengIR template." OFF)
 
 # The BISHENGIR_BUILD_STANDALONE_IR_ONLY option is used to only build IR definitions.
 option(BISHENGIR_BUILD_STANDALONE_IR_ONLY
@@ -89,6 +109,7 @@ include(TableGen)
 include(AddMLIR)
 include(AddMLIRPython)
 include(AddBiShengIR)
+include(BiShengIRVersion)
 
 configure_file(
   ${BISHENGIR_MAIN_INCLUDE_DIR}/bishengir/Config/bishengir-config.h.cmake
@@ -151,18 +172,18 @@ set_target_properties(bishengir-publish-products PROPERTIES FOLDER "BiShengIR/To
 add_llvm_install_targets(install-bishengir-publish-products
                          COMPONENT bishengir-publish-products)
 
-# If BISHENGIR_VERSION_* is specified, use it, if not use LLVM_VERSION_*.
-if(NOT DEFINED BISHENGIR_VERSION_MAJOR)
-  set(BISHENGIR_VERSION_MAJOR ${LLVM_VERSION_MAJOR})
-endif()
-if(NOT DEFINED BISHENGIR_VERSION_MINOR)
-  set(BISHENGIR_VERSION_MINOR ${LLVM_VERSION_MINOR})
-endif()
-if(NOT DEFINED BISHENGIR_VERSION_PATCHLEVEL)
-  set(BISHENGIR_VERSION_PATCHLEVEL ${LLVM_VERSION_PATCH})
-endif()
-if(NOT DEFINED BISHENGIR_VERSION_SUFFIX)
-  set(BISHENGIR_VERSION_SUFFIX ${LLVM_VERSION_SUFFIX})
+# Check format for BISHENGIR_VERSION
+foreach(part MAJOR MINOR PATCHLEVEL)
+  if(NOT BISHENGIR_VERSION_${part} MATCHES "^[0-9]+$")
+    message(FATAL_ERROR 
+      "BISHENGIR_VERSION_${part} is invalid: '${BISHENGIR_VERSION_${part}}'. "
+      "This part must contain only digits.")
+  endif()
+endforeach()
+if(NOT "${BISHENGIR_VERSION_SUFFIX}" MATCHES "^[a-zA-Z0-9-]*$")
+  message(FATAL_ERROR 
+    "BISHENGIR_VERSION_SUFFIX is invalid: '${BISHENGIR_VERSION_SUFFIX}'. "
+    "Suffix must only contain alphanumeric characters or hyphens.")
 endif()
 set(BISHENGIR_VERSION "${BISHENGIR_VERSION_MAJOR}.${BISHENGIR_VERSION_MINOR}.${BISHENGIR_VERSION_PATCHLEVEL}${BISHENGIR_VERSION_SUFFIX}")
 string(TIMESTAMP BISHENGIR_BUILD_DATE "%Y-%m-%d")
@@ -179,6 +200,7 @@ if (BISHENGIR_BUILD_STANDALONE_IR_ONLY)
   add_subdirectory(bishengir/include/bishengir/Interfaces)
   set(STANDALONE_IR_BUILD_DIALECT
   Annotation
+  HACC
   HFusion
   HIVM
   MemRef

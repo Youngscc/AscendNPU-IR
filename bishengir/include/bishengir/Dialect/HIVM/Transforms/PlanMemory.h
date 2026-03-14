@@ -27,6 +27,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallSet.h"
 
 #include <list>
@@ -57,8 +58,11 @@ constexpr const int SPEC_LEVEL_0 = 0;
 /// continuous instructions caused by plan, offset = 1.
 constexpr const int SPEC_LEVEL_1 = 1;
 
-/// pipe conflict opt.
+/// do not reuse the buffer in same loop when pipe conflicts between vector and dma.
 constexpr const int SPEC_LEVEL_2 = 2;
+
+/// do not reuse buffer when pipe conflicts.
+constexpr const int SPEC_LEVEL_3 = 3;
 
 /// plan information of alloc buffer.
 struct BufferInfo {
@@ -143,8 +147,9 @@ struct StorageEntry {
   /// Allocs that inplace buffer this entry.
   SmallVector<Value> inplaceBuffers;
 
-  /// multiBuffer relation StorageEntry.
-  StorageEntry *relationPongEntry{nullptr};
+  /// All otherBuffer relation StorageEntry entries.
+  /// This vector stores all additional entries (multiBufferNum - 1 entries).
+  SmallVector<StorageEntry *> otherBufferRelationEntries;
 
   /// The number of multibuffer optimization.
   /// note: default 1 which means single buffer and does not do multibuffer
@@ -199,9 +204,9 @@ struct PlanRecord {
 using PlanRecHis = SmallVector<PlanRecord>;
 
 struct SpecInfo {
-  int maxLevel = SPEC_LEVEL_2;
+  int maxLevel = SPEC_LEVEL_3;
   int minLevel = SPEC_LEVEL_0;
-  int specLevel = SPEC_LEVEL_2;
+  int specLevel = SPEC_LEVEL_3;
   int childIdx = -1;
   int specStartIdx = 0;
   int rollbackIdx = -1;
@@ -354,9 +359,16 @@ private:
   /// Update temp buffer for ignoring inplace.
   void UpdateExtraBufferIgnoreInplace(const ValueRange &results);
 
-  /// Update alias buffer and its condition.
-  void UpdateBuffer2AliasVec(const SetVector<Value> &buffers,
-                             const SetVector<Value> &aliasBuffers,
+  /// Update the alias relationship between buffer and aliasBuffer according to
+  /// condition.
+  /// NOTE :
+  /// 1. aliasBuffersOfBuffer: the alias buffers of `buffer`, including `buffer`
+  /// itself
+  /// 2. aliasBuffersOfAliasBuffer: the alias buffers of `aliasBuffer`,
+  /// including `aliasBuffer` itself
+  void UpdateBuffer2AliasVec(Value buffer, Value aliasBuffer,
+                             const SetVector<Value> &aliasBuffersOfBuffer,
+                             const SetVector<Value> &aliasBuffersOfAliasBuffer,
                              bool hasCond);
 
   /// Update the relationship of buffer aliases.
@@ -396,10 +408,10 @@ private:
   void UpdateOpKillInfo(OpInfo *opInfo, Value operand, Liveness live);
 
   /// Whether afterBlock is after beforeBlock.
-  bool IsBlockAfter(Block *afterBlock,  Block *beforeBlock) const;
+  bool IsBlockAfter(Block *afterBlock, Block *beforeBlock) const;
 
   /// Whether the value is dead after a certain block.
-  bool IsDeadAfterBlock(Value value,  Block *block) const;
+  bool IsDeadAfterBlock(Value value, Block *block) const;
 
   /// Have all alias buffer been killed.
   bool AllDeadAfter(Operation *op, SetVector<Value> aliasVec,
@@ -437,8 +449,9 @@ using StorageEntryPair = std::pair<const StorageEntry *, const StorageEntry *>;
 class MemPlan {
 public:
   MemPlan(MemPlanMode planMode, bool enableGlobalReuse,
-          bool restrictInplaceAsISA)
+          bool enableMemoryDisplay, bool restrictInplaceAsISA)
       : planMode(planMode), enableGlobalReuse(enableGlobalReuse),
+        enableMemoryDisplay(enableMemoryDisplay),
         restrictInplaceAsISA(restrictInplaceAsISA) {}
 
   LogicalResult plan();
@@ -477,6 +490,27 @@ public:
 
   func::FuncOp func_;
 
+  /// enable memory display tools.
+  bool enableMemoryDisplay;
+
+  /// when plan memory failed, record error info
+  DenseMap<hivm::AddressSpace, std::string> errorInfo;
+
+  void SetMemscope2rootSuccessStorageEntry();
+
+  DenseMap<hivm::AddressSpace, StorageEntry *> GetMemscope2rootStorageEntry() {
+    return memscope2rootStorageEntry;
+  }
+
+  DenseMap<hivm::AddressSpace, StorageEntry *>
+      GetMemscope2rootFailStorageEntry() {
+    return memscope2rootFailStorageEntry;
+  }
+
+  DenseMap<hivm::AddressSpace, StorageEntry *>
+      GetMemscope2rootSuccessStorageEntry() {
+    return memscope2rootSuccessStorageEntry;
+  }
 private:
   /// different mode for mem plan.
   MemPlanMode planMode;
@@ -549,22 +583,39 @@ private:
   LogicalResult SpecAlloc(MemBoundList &outline, PlanRecHis &his,
                           StorageEntry *e, const SpecInfo &si, int localLevel);
 
-  /// spec_level == SPEC_LEVEL_2, mte2/3 do not reuse with vector.
+  /// Check whether current buffer conflicts with the history buffers.
+  bool VerifyConflictStageCommon(
+      PlanRecHis &his, const StorageEntry *e, MemBoundListConstIter &start,
+      const MemBoundList &outline,
+      std::function<bool(const StorageEntry *, const StorageEntry *)>
+          conflictChecker);
+
+  /// spec_level == SPEC_LEVEL_3, do not reuse buffer when pipe conflicts.
+  bool VerifyConflictStage3(PlanRecHis &his, const StorageEntry *e,
+                            int specLevel, MemBoundListConstIter &start,
+                            const MemBoundList &outline);
+
+  /// spec_level == SPEC_LEVEL_2, do not reuse the buffer in same loop when pipe
+  /// conflicts between vector and dma.
   bool VerifyConflictStage2(PlanRecHis &his, const StorageEntry *e,
                             int specLevel, MemBoundListConstIter &start,
                             const MemBoundList &outline);
 
-  /// spec_level == SPEC_LEVEL_1, pure single can reuse with db.
+  /// spec_level == SPEC_LEVEL_1, pure single can reuse with mb.
+  /// otherBufferOffsets will contain multiBufferNum - 1 elements.
   bool VerifyConflictStage1(MemBoundList &outline, PlanRecHis &his,
                             StorageEntry *e,
                             const OutlineSectionInfo &outlineInfo,
-                            uint64_t &pongOffset);
+                            SmallVectorImpl<uint64_t> &otherBufferOffsets);
 
   /// check if e1 and e2 has pipe conflict.
   bool PipeConflict(const StorageEntry *e1, const StorageEntry *e2,
                     DenseMap<StorageEntryPair, bool> &conflictMap);
 
-  /// spec_level == SPEC_LEVEL_2, MTE2/MTE3 is pipe conflict with all existing
+  /// check if e1 and e2 has same parent loop.
+  bool PipeConflictInSameLoop(const StorageEntry *e1, const StorageEntry *e2);
+
+  /// spec_level == SPEC_LEVEL_3, MTE2/MTE3 is pipe conflict with all existing
   /// allocation. check if current entry has OptDmaPipe-conflict with buffers
   /// already allocate at current position. if conflict exists, continue loop
   /// until first not-conflict iter is found. Then update start as the first
@@ -633,26 +684,29 @@ private:
   DenseMap<ValuePair, BufferLife>
   GetOverlapBufferLife(const BufferLifeVec &b1, const BufferLifeVec &b2) const;
 
-  /// Reorder and make the storage entries of ping and pong continuous.
-  void
-  ReorderContinuousPingPongEntry(SmallVector<StorageEntry *> &storageEntryVec);
+  /// Reorder and make the storage entries of firstbuffer and otherbuffer
+  /// continuous.
+  void ReorderContinuousFirstBufferOtherBufferEntry(
+      SmallVector<StorageEntry *> &storageEntryVec);
 
   /// Determine if the current buffer life of the Storage Entry conflicts with
   /// the memory that has already been allocated in history.
   bool IsBufferLifeVecConflict(PlanRecord &r, uint64_t offset,
                                const StorageEntry *e) const;
 
-  /// Assign pong storage entry's address.
-  void PlanRelationPongEntryAddress(uint64_t offset, StorageEntry *e);
+  /// Assign otherbuffer storage entry address(es). Assigns
+  /// otherBufferRelationEntries[i]->bitsOffset = otherBufferOffsets[i] for each i.
+  void PlanRelationOtherBufferEntryAddress(
+      llvm::ArrayRef<uint64_t> otherBufferOffsets, StorageEntry *e);
 
-  /// Processing Pong Storage Entry Information.
-  void SpecAllocRelationPongEntry(MemBoundList &outline, PlanRecHis &his,
-                                  StorageEntry *e, uint64_t offset);
+  /// Processing otherbuffer Storage Entry Information.
+  void SpecAllocRelationOtherBufferEntry(MemBoundList &outline, PlanRecHis &his,
+                                         StorageEntry *e, uint64_t offset);
 
-  /// Get relative pong storage entry when the current reuse bound storage entry
-  /// is of type db.
+  /// Get relative otherbuffer storage entry when the current reuse bound
+  /// storage entry is of type mb.
   StorageEntry *
-  GetMultiRelationPongEntry(const StorageEntry *reuseBoundStorageEntry);
+  GetMultiRelationOtherBufferEntry(const StorageEntry *reuseBoundStorageEntry);
 
   /// Get the innermost for loop of buffer definition.
   LoopLikeOpInterface GetBufferParentLoop(const SmallVector<Value> &buffers);
@@ -670,8 +724,8 @@ private:
   void ReportCurEntryDebugInfo(const StorageEntry *curEntry) const;
 
   /// Report tensor allocate info.
-  void
-  ReportAllocatedEntryDebugInfo(const StorageEntry *rootStorageEntry) const;
+  void ReportAllocatedEntryDebugInfo(const StorageEntry *rootStorageEntry,
+                                     bool isFail) const;
 
 private:
   /// The buffer corresponding to each operation.
@@ -723,9 +777,11 @@ private:
   /// Map from the storage entry pair to its pipeDma conflict info.
   DenseMap<StorageEntryPair, bool> pipeDmaConflictMap;
 
-  /// Ping storage entry corresponding to reused additional Pong entry.
-  DenseMap<StorageEntry *, std::unique_ptr<StorageEntry>>
-      pingEntry2RelationPongEntry;
+  /// First buffer storage entry corresponding to reused additional otherbuffer
+  /// entries. When a single-buffer entry is expanded to use
+  /// otherbuffers, this stores one StorageEntry per otherbuffers.
+  DenseMap<StorageEntry *, SmallVector<std::unique_ptr<StorageEntry>, 4>>
+      firstBufferEntry2RelationOtherBufferEntry;
 
   DenseMap<hivm::AddressSpace, SmallVector<const StorageEntry *>>
       memscope2allocatedEntry;
@@ -735,6 +791,12 @@ private:
 
   /// The scope of the buffer applied memory fail and the max bits it applied.
   std::map<hivm::AddressSpace, uint64_t> failApplyBufferInfo;
+
+  /// when plan memory fail, map from each scope to its root StorageEntry.
+  DenseMap<hivm::AddressSpace, StorageEntry *> memscope2rootFailStorageEntry;
+
+  /// when plan memory success, map from each scope to its root StorageEntry.
+  DenseMap<hivm::AddressSpace, StorageEntry *> memscope2rootSuccessStorageEntry;
 };
 
 } // namespace hivm

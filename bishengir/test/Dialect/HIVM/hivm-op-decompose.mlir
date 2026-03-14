@@ -511,46 +511,155 @@ func.func @test_vrec_decompose() {
 }
 
 // -----
+
 // Test SyncBlockAll
-func.func @test_sync_block_all() {
-  // CHECK: %[[CONST:.*]] = arith.constant 0 : i64
-  // CHECK: hivm.hir.sync_block_set[<CUBE>, <PIPE_FIX>, <PIPE_FIX>] flag = 1 ffts_base_addr = %[[CONST]] syn_instr_mode = <INTER_BLOCK_SYNCHRONIZATION>
-  // CHECK: hivm.hir.sync_block_wait[<CUBE>, <PIPE_FIX>, <PIPE_FIX>] flag = 1
-  // CHECK: hivm.hir.sync_block_set[<CUBE_OR_VECTOR>, <PIPE_FIX>, <PIPE_MTE3>] flag = 1 ffts_base_addr = %[[CONST]] syn_instr_mode = <INTRA_BLOCK_SYNCHRONIZATION>
-  // CHECK: hivm.hir.sync_block_wait[<CUBE_OR_VECTOR>, <PIPE_FIX>, <PIPE_MTE3>] flag = 1
-  // CHECK: hivm.hir.sync_block_set[<VECTOR>, <PIPE_MTE3>, <PIPE_MTE3>] flag = 1 ffts_base_addr = %[[CONST]] syn_instr_mode = <INTER_BLOCK_SYNCHRONIZATION>
-  // CHECK: hivm.hir.sync_block_wait[<VECTOR>, <PIPE_MTE3>, <PIPE_MTE3>] flag = 1
-  %ffts_base_addr = arith.constant 0 : i64
-  hivm.hir.sync_block[#hivm.sync_block_mode<ALL>, 1 : i16]
-              ffts_base_addr = %ffts_base_addr
-              tcube_pipe=#hivm.pipe<PIPE_FIX>
-              tvector_pipe=#hivm.pipe<PIPE_MTE3>
-  return
+module attributes {hivm.module_core_type = #hivm.module_core_type<MIX>} {
+  func.func @kernel_mix_aic() attributes {hivm.func_core_type = #hivm.func_core_type<AIC>} {
+    %ffts_base_addr = arith.constant 0 : i64
+  // CHECK: hivm.hir.pipe_barrier[<PIPE_FIX>]
+  // CHECK: hivm.hir.sync_block_wait[<CUBE>, <PIPE_MTE3>, <PIPE_FIX>] flag = 10
+  // CHECK: hivm.hir.sync_block_set[<CUBE>, <PIPE_FIX>, <PIPE_FIX>] flag = 13 ffts_base_addr = %c0_i64 sync_instr_mode = <INTER_BLOCK_SYNCHRONIZATION>
+  // CHECK: hivm.hir.sync_block_wait[<CUBE>, <PIPE_FIX>, <PIPE_FIX>] flag = 13
+  // CHECK: hivm.hir.sync_block_set[<CUBE>, <PIPE_FIX>, <PIPE_MTE3>] flag = 11 ffts_base_addr = %c0_i64 sync_instr_mode = <INTRA_BLOCK_SYNCHRONIZATION>
+    hivm.hir.sync_block[#hivm.sync_block_mode<ALL>, 1 : i16]
+                ffts_base_addr = %ffts_base_addr
+                tcube_pipe=#hivm.pipe<PIPE_FIX>
+                tvector_pipe=#hivm.pipe<PIPE_MTE3>
+    return
+  }
+  func.func @kernel_mix_aiv() attributes {hivm.func_core_type = #hivm.func_core_type<AIV>} {
+    %ffts_base_addr = arith.constant 0 : i64
+  // CHECK: hivm.hir.pipe_barrier[<PIPE_MTE3>]
+  // CHECK: hivm.hir.sync_block_set[<VECTOR>, <PIPE_MTE3>, <PIPE_FIX>] flag = 10 ffts_base_addr = %c0_i64 sync_instr_mode = <INTRA_BLOCK_SYNCHRONIZATION>
+  // CHECK: hivm.hir.sync_block_wait[<VECTOR>, <PIPE_FIX>, <PIPE_MTE3>] flag = 11
+    hivm.hir.sync_block[#hivm.sync_block_mode<ALL>, 1 : i16]
+                ffts_base_addr = %ffts_base_addr
+                tcube_pipe=#hivm.pipe<PIPE_FIX>
+                tvector_pipe=#hivm.pipe<PIPE_MTE3>
+    return
+  }
 }
 
 // -----
+// Test SyncBlockAllBarrierAll
+module attributes {hivm.module_core_type = #hivm.module_core_type<MIX>} {
+  func.func @kernel_mix_aic() attributes {hivm.func_core_type = #hivm.func_core_type<AIC>} {
+    %ffts_base_addr = arith.constant 0 : i64
+    // CHECK: hivm.hir.pipe_barrier[<PIPE_ALL>]
+    // CHECK: hivm.hir.sync_block_wait[<CUBE>, <PIPE_MTE3>, <PIPE_S>] flag = 10
+    // CHECK: hivm.hir.sync_block_set[<CUBE>, <PIPE_FIX>, <PIPE_S>] flag = 13 ffts_base_addr = %c0_i64 sync_instr_mode = <INTER_BLOCK_SYNCHRONIZATION>
+    // CHECK: hivm.hir.sync_block_wait[<CUBE>, <PIPE_FIX>, <PIPE_S>] flag = 13
+    // CHECK: hivm.hir.sync_block_set[<CUBE>, <PIPE_FIX>, <PIPE_S>] flag = 11 ffts_base_addr = %c0_i64 sync_instr_mode = <INTRA_BLOCK_SYNCHRONIZATION>
+    hivm.hir.sync_block[#hivm.sync_block_mode<ALL>, 1 : i16]
+                ffts_base_addr = %ffts_base_addr
+                tcube_pipe=#hivm.pipe<PIPE_ALL>
+                tvector_pipe=#hivm.pipe<PIPE_ALL>
+    return
+  }
+  func.func @kernel_mix_aiv() attributes {hivm.func_core_type = #hivm.func_core_type<AIV>} {
+    %ffts_base_addr = arith.constant 0 : i64
+    // CHECK: hivm.hir.pipe_barrier[<PIPE_ALL>]
+    // CHECK: hivm.hir.sync_block_set[<VECTOR>, <PIPE_MTE3>, <PIPE_S>] flag = 10 ffts_base_addr = %c0_i64 sync_instr_mode = <INTRA_BLOCK_SYNCHRONIZATION>
+    // CHECK: hivm.hir.sync_block_wait[<VECTOR>, <PIPE_FIX>, <PIPE_S>] flag = 11
+    hivm.hir.sync_block[#hivm.sync_block_mode<ALL>, 1 : i16]
+                ffts_base_addr = %ffts_base_addr
+                tcube_pipe=#hivm.pipe<PIPE_ALL>
+                tvector_pipe=#hivm.pipe<PIPE_ALL>
+    return
+  }
+}
+
+
+// -----
 // Test SyncBlockAllCube
-func.func @test_sync_block_all_cube() {
-  // CHECK: %[[CONST:.*]] = arith.constant 0 : i64
-  // CHECK: hivm.hir.sync_block_set[<CUBE>, <PIPE_FIX>, <PIPE_FIX>] flag = 1 ffts_base_addr = %[[CONST]] syn_instr_mode = <INTER_BLOCK_SYNCHRONIZATION>
-  // CHECK: hivm.hir.sync_block_wait[<CUBE>, <PIPE_FIX>, <PIPE_FIX>] flag = 1
-  %ffts_base_addr = arith.constant 0 : i64
-  hivm.hir.sync_block[#hivm.sync_block_mode<ALL_CUBE>, 1 : i16]
-            ffts_base_addr = %ffts_base_addr
-            tcube_pipe=#hivm.pipe<PIPE_FIX>
-  return
+module {
+  func.func @kernel_mix_aic() attributes {hivm.func_core_type = #hivm.func_core_type<AIC>} {
+    %ffts_base_addr = arith.constant 0 : i64
+    // CHECK: hivm.hir.pipe_barrier[<PIPE_FIX>]
+    // CHECK: hivm.hir.sync_block_set[<CUBE>, <PIPE_FIX>, <PIPE_FIX>] flag = 1 ffts_base_addr = %c0_i64 sync_instr_mode = <INTER_BLOCK_SYNCHRONIZATION>
+    // CHECK: hivm.hir.sync_block_wait[<CUBE>, <PIPE_FIX>, <PIPE_FIX>] flag = 1
+    hivm.hir.sync_block[#hivm.sync_block_mode<ALL_CUBE>, 1 : i16]
+                ffts_base_addr = %ffts_base_addr
+                tcube_pipe=#hivm.pipe<PIPE_FIX>
+                tvector_pipe=#hivm.pipe<PIPE_FIX>
+    return
+  }
+}
+
+// -----
+// Test SyncBlockAllCubeBarrierAll
+module {
+  func.func @kernel_mix_aic() attributes {hivm.func_core_type = #hivm.func_core_type<AIC>} {
+    %ffts_base_addr = arith.constant 0 : i64
+    // CHECK: hivm.hir.pipe_barrier[<PIPE_ALL>]
+    // CHECK: hivm.hir.sync_block_set[<CUBE>, <PIPE_FIX>, <PIPE_S>] flag = 1 ffts_base_addr = %c0_i64 sync_instr_mode = <INTER_BLOCK_SYNCHRONIZATION>
+    // CHECK: hivm.hir.sync_block_wait[<CUBE>, <PIPE_FIX>, <PIPE_S>] flag = 1
+    hivm.hir.sync_block[#hivm.sync_block_mode<ALL_CUBE>, 1 : i16]
+                ffts_base_addr = %ffts_base_addr
+                tcube_pipe=#hivm.pipe<PIPE_ALL>
+                tvector_pipe=#hivm.pipe<PIPE_ALL>
+    return
+  }
 }
 
 // -----
 // Test SyncBlockAllVector
-func.func @test_sync_block_all_vector() {
+module {
+  func.func @kernel_mix_aiv() attributes {hivm.func_core_type = #hivm.func_core_type<AIV>} {
+    %ffts_base_addr = arith.constant 0 : i64
+    hivm.hir.sync_block[#hivm.sync_block_mode<ALL_VECTOR>, 1 : i16]
+    // CHECK: hivm.hir.pipe_barrier[<PIPE_MTE3>]
+    // CHECK: hivm.hir.sync_block_set[<VECTOR>, <PIPE_MTE3>, <PIPE_MTE3>] flag = 1 ffts_base_addr = %c0_i64 sync_instr_mode = <INTER_BLOCK_SYNCHRONIZATION>
+    // CHECK: hivm.hir.sync_block_wait[<VECTOR>, <PIPE_MTE3>, <PIPE_MTE3>] flag = 1
+                ffts_base_addr = %ffts_base_addr
+                tcube_pipe=#hivm.pipe<PIPE_MTE3>
+                tvector_pipe=#hivm.pipe<PIPE_MTE3>
+    return
+  }
+}
+
+// -----
+// Test SyncBlockAllVectorBarrierAll
+module {
+  func.func @kernel_mix_aiv() attributes {hivm.func_core_type = #hivm.func_core_type<AIV>} {
+    %ffts_base_addr = arith.constant 0 : i64
+    // CHECK: hivm.hir.pipe_barrier[<PIPE_ALL>]
+    // CHECK: hivm.hir.sync_block_set[<VECTOR>, <PIPE_MTE3>, <PIPE_S>] flag = 1 ffts_base_addr = %c0_i64 sync_instr_mode = <INTER_BLOCK_SYNCHRONIZATION>
+    // CHECK: hivm.hir.sync_block_wait[<VECTOR>, <PIPE_MTE3>, <PIPE_S>] flag = 1
+    hivm.hir.sync_block[#hivm.sync_block_mode<ALL_VECTOR>, 1 : i16]
+                ffts_base_addr = %ffts_base_addr
+                tcube_pipe=#hivm.pipe<PIPE_ALL>
+                tvector_pipe=#hivm.pipe<PIPE_ALL>
+    return
+  }
+}
+
+// -----
+// Test SyncBlockAllSubVector
+// Note: ALL_SUB_VECTOR uses INTER_SUBBLOCK_SYNCHRONIZATION instead of INTER_BLOCK_SYNCHRONIZATION
+func.func @test_sync_block_all_sub_vector() {
   // CHECK: %[[CONST:.*]] = arith.constant 0 : i64
-  // CHECK: hivm.hir.sync_block_set[<VECTOR>, <PIPE_MTE3>, <PIPE_MTE3>] flag = 1 ffts_base_addr = %[[CONST]] syn_instr_mode = <INTER_BLOCK_SYNCHRONIZATION>
+  // CHECK: hivm.hir.pipe_barrier[<PIPE_MTE3>]
+  // CHECK: hivm.hir.sync_block_set[<VECTOR>, <PIPE_MTE3>, <PIPE_MTE3>] flag = 1 ffts_base_addr = %[[CONST]] sync_instr_mode = <INTER_SUBBLOCK_SYNCHRONIZATION>
   // CHECK: hivm.hir.sync_block_wait[<VECTOR>, <PIPE_MTE3>, <PIPE_MTE3>] flag = 1
   %ffts_base_addr = arith.constant 0 : i64
-  hivm.hir.sync_block[#hivm.sync_block_mode<ALL_VECTOR>, 1 : i16]
+  hivm.hir.sync_block[#hivm.sync_block_mode<ALL_SUB_VECTOR>, 1 : i16]
             ffts_base_addr = %ffts_base_addr
             tvector_pipe=#hivm.pipe<PIPE_MTE3>
+  return
+}
+
+// -----
+// Test SyncBlockAllSubVectorBarrierAll
+func.func @test_sync_block_all_sub_vector_barrier_all() {
+  // CHECK: %[[CONST:.*]] = arith.constant 0 : i64
+  // CHECK: hivm.hir.pipe_barrier[<PIPE_ALL>]
+  // CHECK: hivm.hir.sync_block_set[<VECTOR>, <PIPE_MTE3>, <PIPE_S>] flag = 1 ffts_base_addr = %[[CONST]] sync_instr_mode = <INTER_SUBBLOCK_SYNCHRONIZATION>
+  // CHECK: hivm.hir.sync_block_wait[<VECTOR>, <PIPE_MTE3>, <PIPE_S>] flag = 1
+  %ffts_base_addr = arith.constant 0 : i64
+  hivm.hir.sync_block[#hivm.sync_block_mode<ALL_SUB_VECTOR>, 1 : i16]
+            ffts_base_addr = %ffts_base_addr
+            tvector_pipe=#hivm.pipe<PIPE_ALL>
   return
 }
 
@@ -939,7 +1048,7 @@ func.func @test_scalar_fp32_to_bf16(%1 :memref<1024xbf16>) {
   // CHECK: %[[ALLOC0:.*]] = memref.alloc() : memref<1xf32>
   // CHECK: memref.store %[[CST_VAL]], %[[ALLOC0]][%[[CST_ZERO]]] : memref<1xf32>
   // CHECK: %[[ALLOC1:.*]] = memref.alloc() : memref<1xbf16>
-  // CHECK: hivm.hir.vcast ins(%[[ALLOC0]] : memref<1xf32>) outs(%[[ALLOC1]] : memref<1xbf16>) round_mode = <round>
+  // CHECK: hivm.hir.vcast ins(%[[ALLOC0]] : memref<1xf32>) outs(%[[ALLOC1]] : memref<1xbf16>)
   // CHECK: %[[RES:.*]] = memref.load %[[ALLOC1]][%[[CST_ZERO]]] : memref<1xbf16>
   // CHECK: hivm.hir.vbrc ins(%[[RES]] : bf16) outs(%[[SRC0]] : memref<1024xbf16>)
   %cst = arith.constant 0.21 : f32
@@ -1784,21 +1893,21 @@ func.func @atomic_cas(%arg0: memref<?xi8> {hacc.arg_type = #hacc.arg_type<sync_b
 }
 
 // -----
-// CHECK: %[[ALLOC:.*]] = memref.alloc() : memref<256xi16>
-// CHECK: %[[REINTERPRET_CAST:.*]] = memref.reinterpret_cast %arg1 to offset: [0], sizes: [256], strides: [1] : memref<?xi16> to memref<256xi16, strided<[1]>>
-// CHECK: %[[LOCK:.*]] = hivm.hir.create_sync_block_lock : memref<1xi64>
-// CHECK: hivm.hir.sync_block_lock lock_var(%[[LOCK]] : memref<1xi64>)
-// CHECK: %[[ALLOC_0:.*]] = memref.alloc() : memref<256xi16>
-// CHECK: hivm.hir.load ins(%[[REINTERPRET_CAST:.*]] : memref<256xi16, strided<[1]>>) outs(%[[ALLOC_0]] : memref<256xi16>) init_out_buffer = false
-// CHECK: hivm.hir.store ins(%[[ALLOC:.*]] : memref<256xi16>) outs(%[[REINTERPRET_CAST:.*]] : memref<256xi16, strided<[1]>>)
-// CHECK: hivm.hir.copy ins(%[[ALLOC_0:.*]] : memref<256xi16>) outs(%[[ALLOC:.*]] : memref<256xi16>)
-// CHECK: hivm.hir.sync_block_unlock lock_var(%[[LOCK]] : memref<1xi64>)
+// CHECK-LABEL: func.func @atomic_xchg(
+// CHECK: %[[VAL_2:.*]] = memref.alloc() : memref<256xi16>
+// CHECK: %[[VAL_3:.*]] = memref.reinterpret_cast %[[ARG1:.*]] to offset: [0], sizes: [256], strides: [1] : memref<?xi16> to memref<256xi16, strided<[1]>>
+// CHECK: %[[VAL_4:.*]] = hivm.hir.create_sync_block_lock : memref<1xi64>
+// CHECK: hivm.hir.sync_block_lock lock_var(%[[VAL_4]] : memref<1xi64>)
+// CHECK: %[[VAL_5:.*]] = memref.alloc() : memref<256xi16>
+// CHECK: hivm.hir.load ins(%[[VAL_3]] : memref<256xi16, strided<[1]>>) outs(%[[VAL_5]] : memref<256xi16>)
+// CHECK: hivm.hir.store ins(%[[VAL_2]] : memref<256xi16>) outs(%[[VAL_3]] : memref<256xi16, strided<[1]>>)
+// CHECK: hivm.hir.copy ins(%[[VAL_5]] : memref<256xi16>) outs(%[[VAL_2]] : memref<256xi16>)
+// CHECK: hivm.hir.sync_block_unlock lock_var(%[[VAL_4]] : memref<1xi64>)
 // CHECK: return
 func.func @atomic_xchg(%arg0: memref<?xi8> {hacc.arg_type = #hacc.arg_type<sync_block_lock>}, %arg1: memref<?xi16>) {
   %alloc = memref.alloc() : memref<256xi16>
-  %alloc_1 = memref.alloc() : memref<256xi16>
   %reinterpret_cast_1 = memref.reinterpret_cast %arg1 to offset: [0], sizes: [256], strides: [1] : memref<?xi16> to memref<256xi16, strided<[1]>>
-  hivm.hir.atomic_xchg ins(%alloc_1, %alloc : memref<256xi16>, memref<256xi16>) outs(%reinterpret_cast_1 : memref<256xi16, strided<[1]>>)
+  hivm.hir.atomic_xchg ins(%alloc : memref<256xi16>) outs(%reinterpret_cast_1 : memref<256xi16, strided<[1]>>)
   return
 }
 
@@ -1868,5 +1977,111 @@ func.func @test_decompose_atomic_min_ui8(%arg0: memref<?xi8> {hacc.arg_type = #h
   %alloc = memref.alloc() : memref<16xi8>
   hivm.hir.load ins(%arg1 : memref<16xi8>) outs(%alloc : memref<16xi8>)
   hivm.hir.store ins(%alloc : memref<16xi8>) outs(%arg2 : memref<16xi8>) atomic = <umin>
+  return
+}
+
+// -----
+// CHECK-LABEL: func.func @atomic_masked_xchg(
+// CHECK: %[[VAL_3:.*]] = memref.alloc() : memref<256xi16>
+// CHECK: %[[VAL_4:.*]] = memref.reinterpret_cast %[[ARG1:.*]] to offset: [0], sizes: [256], strides: [1] : memref<?xi16> to memref<256xi16, strided<[1]>>
+// CHECK: %[[VAL_5:.*]] = hivm.hir.create_sync_block_lock : memref<1xi64>
+// CHECK: hivm.hir.sync_block_lock lock_var(%[[VAL_5]] : memref<1xi64>)
+// CHECK: %[[VAL_6:.*]] = memref.alloc() : memref<256xi16>
+// CHECK: hivm.hir.load ins(%[[VAL_4]] : memref<256xi16, strided<[1]>>) outs(%[[VAL_6]] : memref<256xi16>) init_out_buffer = false may_implicit_transpose_with_last_axis = false
+// CHECK: %[[VAL_8:.*]] = memref.alloc() : memref<256xi16>
+// CHECK: hivm.hir.vsel ins(%[[ARG2:.*]], %[[VAL_3]], %[[VAL_6]] : memref<256xi1>, memref<256xi16>, memref<256xi16>) outs(%[[VAL_8]] : memref<256xi16>)
+// CHECK: hivm.hir.vsel ins(%[[ARG2]], %[[VAL_6]], %[[VAL_3]] : memref<256xi1>, memref<256xi16>, memref<256xi16>) outs(%[[VAL_3]] : memref<256xi16>)
+// CHECK: hivm.hir.store ins(%[[VAL_8]] : memref<256xi16>) outs(%[[VAL_4]] : memref<256xi16, strided<[1]>>)
+// CHECK: hivm.hir.sync_block_unlock lock_var(%[[VAL_5]] : memref<1xi64>)
+// CHECK: return
+func.func @atomic_masked_xchg(%arg0: memref<?xi8> {hacc.arg_type = #hacc.arg_type<sync_block_lock>}, %arg1: memref<?xi16>, %mask: memref<256xi1>) {
+  %alloc = memref.alloc() : memref<256xi16>
+  %reinterpret_cast_1 = memref.reinterpret_cast %arg1 to offset: [0], sizes: [256], strides: [1] : memref<?xi16> to memref<256xi16, strided<[1]>>
+  hivm.hir.atomic_xchg ins(%alloc : memref<256xi16>) outs(%reinterpret_cast_1 : memref<256xi16, strided<[1]>>) mask(%mask : memref<256xi1>)
+  return
+}
+
+// -----
+// CHECK-LABEL: func.func @test_set_atomic_ADD_f32
+// CHECK: hivm.hir.set_ctrl true at ctrl[6]
+// CHECK: hivm.hir.set_ctrl false at ctrl[7]
+// CHECK: hivm.hir.set_ctrl false at ctrl[8]
+// CHECK: hivm.hir.set_ctrl false at ctrl[9]
+// CHECK: hivm.hir.set_ctrl false at ctrl[10]
+func.func @test_set_atomic_ADD_f32() {
+  hivm.hir.set_atomic kind = <add>[type = f32]
+  return
+}
+
+// -----
+// CHECK-LABEL: func.func @test_set_atomic_NONE_f32
+// CHECK: hivm.hir.set_ctrl false at ctrl[6]
+// CHECK: hivm.hir.set_ctrl false at ctrl[7]
+// CHECK: hivm.hir.set_ctrl false at ctrl[8]
+func.func @test_set_atomic_NONE_f32() {
+  hivm.hir.set_atomic kind = <none>[type = f32]
+  return
+}
+
+// -----
+// CHECK: %[[ALLOC:.*]] = memref.alloc() : memref<16xi8>
+// CHECK: hivm.hir.load ins(%arg1 : memref<16xi8>) outs(%[[ALLOC]] : memref<16xi8>)
+// CHECK: %[[ALLOC2:.*]] = memref.alloc() : memref<16xi8>
+// CHECK: %[[VAL:.*]] = hivm.hir.create_sync_block_lock : memref<1xi64>
+// CHECK: hivm.hir.sync_block_lock lock_var(%[[VAL]] : memref<1xi64>)
+// CHECK: hivm.hir.load ins(%arg2 : memref<16xi8>) outs(%[[ALLOC2]] : memref<16xi8>)
+// CHECK: hivm.hir.store ins(%[[ALLOC]] : memref<16xi8>) outs(%arg2 : memref<16xi8>) {already_sync} atomic = <add>
+// CHECK: hivm.hir.sync_block_unlock lock_var(%[[VAL]] : memref<1xi64>)
+// CHECK: hivm.hir.store ins(%[[ALLOC2]] : memref<16xi8>) outs(%arg3 : memref<16xi8>)
+// CHECK: return
+func.func @test_atomic_add_with_retuned_value(%arg0: memref<?xi8> {hacc.arg_type = #hacc.arg_type<sync_block_lock>}, %arg1: memref<16xi8>, %arg2: memref<16xi8>, %arg3: memref<16xi8>) {
+  %alloc = memref.alloc() : memref<16xi8>
+  hivm.hir.load ins(%arg1 : memref<16xi8>) outs(%alloc : memref<16xi8>)
+  %alloc2 = memref.alloc() : memref<16xi8>
+  hivm.hir.load ins(%arg2 : memref<16xi8>) outs(%alloc2 : memref<16xi8>)
+  hivm.hir.store ins(%alloc : memref<16xi8>) outs(%arg2 : memref<16xi8>) atomic = <add>
+  hivm.hir.store ins(%alloc2 : memref<16xi8>) outs(%arg3 : memref<16xi8>)
+  return
+}
+
+// -----
+// CHECK: %[[ALLOC:.*]] = memref.alloc() : memref<16xi8>
+// CHECK: hivm.hir.load ins(%arg1 : memref<16xi8>) outs(%[[ALLOC]] : memref<16xi8>)
+// CHECK: %[[ALLOC2:.*]] = memref.alloc() : memref<16xi8>
+// CHECK: %[[VAL:.*]] = hivm.hir.create_sync_block_lock : memref<1xi64>
+// CHECK: hivm.hir.sync_block_lock lock_var(%[[VAL]] : memref<1xi64>)
+// CHECK: hivm.hir.load ins(%arg2 : memref<16xi8>) outs(%[[ALLOC2]] : memref<16xi8>)
+// CHECK: hivm.hir.store ins(%[[ALLOC]] : memref<16xi8>) outs(%arg2 : memref<16xi8>) {already_sync} atomic = <min>
+// CHECK: hivm.hir.sync_block_unlock lock_var(%[[VAL]] : memref<1xi64>)
+// CHECK: hivm.hir.store ins(%[[ALLOC2]] : memref<16xi8>) outs(%arg3 : memref<16xi8>)
+// CHECK: return
+func.func @test_atomic_min_with_retuned_value(%arg0: memref<?xi8> {hacc.arg_type = #hacc.arg_type<sync_block_lock>}, %arg1: memref<16xi8>, %arg2: memref<16xi8>, %arg3: memref<16xi8>) {
+  %alloc = memref.alloc() : memref<16xi8>
+  hivm.hir.load ins(%arg1 : memref<16xi8>) outs(%alloc : memref<16xi8>)
+  %alloc2 = memref.alloc() : memref<16xi8>
+  hivm.hir.load ins(%arg2 : memref<16xi8>) outs(%alloc2 : memref<16xi8>)
+  hivm.hir.store ins(%alloc : memref<16xi8>) outs(%arg2 : memref<16xi8>) atomic = <min>
+  hivm.hir.store ins(%alloc2 : memref<16xi8>) outs(%arg3 : memref<16xi8>)
+  return
+}
+
+// -----
+// CHECK: %[[ALLOC:.*]] = memref.alloc() : memref<16xi8>
+// CHECK: hivm.hir.load ins(%arg1 : memref<16xi8>) outs(%[[ALLOC]] : memref<16xi8>)
+// CHECK: %[[ALLOC2:.*]] = memref.alloc() : memref<16xi8>
+// CHECK: %[[VAL:.*]] = hivm.hir.create_sync_block_lock : memref<1xi64>
+// CHECK: hivm.hir.sync_block_lock lock_var(%[[VAL]] : memref<1xi64>)
+// CHECK: hivm.hir.load ins(%arg2 : memref<16xi8>) outs(%[[ALLOC2]] : memref<16xi8>)
+// CHECK: hivm.hir.store ins(%[[ALLOC]] : memref<16xi8>) outs(%arg2 : memref<16xi8>) {already_sync} atomic = <max>
+// CHECK: hivm.hir.sync_block_unlock lock_var(%[[VAL]] : memref<1xi64>)
+// CHECK: hivm.hir.store ins(%[[ALLOC2]] : memref<16xi8>) outs(%arg3 : memref<16xi8>)
+// CHECK: return
+func.func @test_atomic_max_with_retuned_value(%arg0: memref<?xi8> {hacc.arg_type = #hacc.arg_type<sync_block_lock>}, %arg1: memref<16xi8>, %arg2: memref<16xi8>, %arg3: memref<16xi8>) {
+  %alloc = memref.alloc() : memref<16xi8>
+  hivm.hir.load ins(%arg1 : memref<16xi8>) outs(%alloc : memref<16xi8>)
+  %alloc2 = memref.alloc() : memref<16xi8>
+  hivm.hir.load ins(%arg2 : memref<16xi8>) outs(%alloc2 : memref<16xi8>)
+  hivm.hir.store ins(%alloc : memref<16xi8>) outs(%arg2 : memref<16xi8>) atomic = <max>
+  hivm.hir.store ins(%alloc2 : memref<16xi8>) outs(%arg3 : memref<16xi8>)
   return
 }

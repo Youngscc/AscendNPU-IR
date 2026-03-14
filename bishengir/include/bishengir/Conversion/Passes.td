@@ -86,7 +86,27 @@ def ConvertHFusionToHIVM : Pass<"convert-hfusion-to-hivm"> {
                    "covnert to gm buffer based matmul"),
         clEnumValN(mlir::hfusion::MmMapMode::MacroInstr, "macro_instr",
                    "covnert to local buffer based matmul")
-    )}]>
+    )}]>,
+      Option<"isEnableUbufSaving", "is-enable-ubuf-saving", "bool", /*default*/"false",
+             "enable low ubuf usage mode ">
+  ];
+}
+
+
+//===----------------------------------------------------------------------===//
+// HIVMToStandard
+//===----------------------------------------------------------------------===//
+
+def ConvertHIVMToStandard : Pass<"convert-hivm-to-std", "ModuleOp"> {
+  let summary = "Convert the operations from the hivm dialect into the "
+                "Standard dialect";
+  let constructor = "mlir::createConvertHIVMToStandardPass()";
+  let dependentDialects =
+      ["func::FuncDialect", "memref::MemRefDialect", "scf::SCFDialect", "LLVM::LLVMDialect"];
+  let options = [
+        Option<"isOpsAligned", "is-ops-aligned", "bool", /*default*/"false",
+               "Regard All Ops already dims aligned except last axis of "
+               "brc and reduce">
   ];
 }
 

@@ -65,7 +65,7 @@ public:
   // BackPipeMPipeMTE1DBEvent event-ids. Other wise, different mmadl1 operations
   // could run at the same time using different event-ids and cause r/w
   // conflicts.
-  SyncOperation *PipeMTE1ToPipeMSync[2]{nullptr};
+  DenseMap<int, SyncOperation *> BwdPipeMPipeMTE1SyncPtr;
 
 private:
   /// Save the Global syncIR.
@@ -168,12 +168,12 @@ private:
   InstanceElement *getParentScope(InstanceElement *instanceElement);
 
   PlaceHolderInstanceElement *
-  checkUnlikelyScope(CompoundInstanceElement *nowCompound,
+  CheckUnlikelyScope(CompoundInstanceElement *nowCompound,
                      CompoundInstanceElement *frontCompound);
 
   /// Insert synchronization instructions for dependent elements when the front
   /// compound is inside an "unlikely" scope.
-  void insertUnlikelySyncOperation(PlaceHolderInstanceElement *placeHolder,
+  void InsertUnlikelySyncOperation(PlaceHolderInstanceElement *placeHolder,
                                    CompoundInstanceElement *nowCompound,
                                    CompoundInstanceElement *frontCompound,
                                    DepBaseMemInfoPairVec &depBaseMemInfosVec,
@@ -263,24 +263,21 @@ private:
   void insertUnitFlagEnabledSyncOperations(
       CompoundInstanceElement *nowCompound,
       CompoundInstanceElement *frontCompound,
-      const std::optional<unsigned> &forEndIndex, UNIT_FLAG frontUnitFlagMode,
-      UNIT_FLAG nowUnitFlagMode);
+      const std::optional<unsigned> &forEndIndex, UnitFlagInfo unitFlagInfo);
+
+  void updateUnitFlagInfo(CompoundInstanceElement *nowCompound,
+                          CompoundInstanceElement *frontCompound,
+                          UnitFlagInfo unitFlagInfo);
+
+  bool
+  checkUnitFlagAlreadySync(const CompoundInstanceElement *nowCompound,
+                           const CompoundInstanceElement *frontCompound) const;
 
   /// Check all patterns where unit-flag is supported.
-  std::optional<std::pair<UNIT_FLAG, UNIT_FLAG>>
+  std::optional<UnitFlagInfo>
   checkUnitFlagPatterns(CompoundInstanceElement *nowCompound,
                         CompoundInstanceElement *frontCompound,
                         const std::optional<unsigned> &forEndIndex);
-
-  // checkUnitFlag helper function. Check (mmadl1/fixpipe) pair.
-  std::optional<std::pair<UNIT_FLAG, UNIT_FLAG>>
-  checkMmadl1FixpipeUnitFlagPattern(CompoundInstanceElement *op1,
-                                    CompoundInstanceElement *op2) const;
-
-  std::optional<std::pair<UNIT_FLAG, UNIT_FLAG>>
-  checkMmadl1FixpipeSingleForLoopUnitFlagPattern(CompoundInstanceElement *op1,
-                                                 CompoundInstanceElement *op2,
-                                                 bool op1IsFrontCompound) const;
 
   bool checkMemoryConflictBetweenExclusive(
       CompoundInstanceElement *nowCompound,
@@ -292,6 +289,11 @@ private:
   bool
   checkUnderParallelLoop(const CompoundInstanceElement *nowCompound,
                          const CompoundInstanceElement *frontCompound) const;
+
+  bool
+  isBackwardSyncUnderForLoop(const CompoundInstanceElement *nowCompound,
+                             const CompoundInstanceElement *frontCompound,
+                             const std::optional<unsigned> &forEndIndex) const;
 };
 
 } // namespace hivm

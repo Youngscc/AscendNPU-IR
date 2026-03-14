@@ -34,12 +34,12 @@ def HFusion_Dialect : Dialect {
   }];
   let cppNamespace = "::mlir::hfusion";
   let dependentDialects = [
-#ifndef BISHENGIR_BUILD_STANDALONE_IR_ONLY
     "hacc::HACCDialect",
-#endif
     "linalg::LinalgDialect",
     "mathExt::MathExtDialect",
+#ifndef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
     "mesh::MeshDialect",
+#endif
     "symbol::SymbolDialect"
   ];
   let hasCanonicalizer = 1;

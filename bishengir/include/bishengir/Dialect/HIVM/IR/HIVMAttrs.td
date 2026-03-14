@@ -91,6 +91,10 @@ def HIVM_DataLayoutDotCND : I32EnumAttrCase<"DOTC_ND", 3, "dotC_ND">;
 def HIVM_DataLayoutnZ : I32EnumAttrCase<"nZ", 4, "nZ">;
 def HIVM_DataLayoutzN : I32EnumAttrCase<"zN", 5, "zN">;
 def HIVM_DataLayoutND : I32EnumAttrCase<"ND", 6, "ND">;
+def HIVM_DataLayoutFractal : I32EnumAttrCase<"Fractal", 7, "Fractal">;
+def HIVM_DataLayoutNCHW : I32EnumAttrCase<"NCHW", 8, "NCHW">;
+def HIVM_DataLayoutNC1HWC0 : I32EnumAttrCase<"NC1HWC0", 9, "NC1HWC0">;
+def HIVM_DataLayoutC1HWNC0 : I32EnumAttrCase<"C1HWNC0", 10, "C1HWNC0">;
 
 def HIVM_DataLayoutEnum : HIVM_I32Enum<
   "DataLayout", "HIVM data layout", [
@@ -99,14 +103,18 @@ def HIVM_DataLayoutEnum : HIVM_I32Enum<
     HIVM_DataLayoutDotCND,
     HIVM_DataLayoutnZ,
     HIVM_DataLayoutzN,
-    HIVM_DataLayoutND
+    HIVM_DataLayoutND,
+    HIVM_DataLayoutFractal,
+    HIVM_DataLayoutNCHW,
+    HIVM_DataLayoutNC1HWC0,
+    HIVM_DataLayoutC1HWNC0
   ]>;
 
 def HIVM_DataLayoutAttr : HIVM_Attr<"DataLayout", "data_layout"> {
   let parameters = (ins
     EnumParameter<HIVM_DataLayoutEnum>:$data_layout,
-    OptionalParameter<"std::optional<bool>">:$transpose,
-    OptionalParameter<"std::optional<DenseI64ArrayAttr>">:$fractalSizes
+    OptionalParameter<"BoolAttr">:$transpose,
+    OptionalParameter<"DenseI64ArrayAttr">:$fractalSizes
   );
   let description = [{
     HIVM data layout mapping attribute. Maps to DOTA_ND, DOTB_ND, DOTC_ND, zN, nZ and ND.
@@ -114,13 +122,56 @@ def HIVM_DataLayoutAttr : HIVM_Attr<"DataLayout", "data_layout"> {
                      Only valid and must be present for DOTA_ND and DOTB_ND layout.
   }];
   let builders = [
-    AttrBuilder<(ins "hivm::DataLayout":$data_layout)>,
-    AttrBuilder<(ins "hivm::DataLayout":$data_layout, "std::optional<bool>":$transpose)>
+    AttrBuilder<(ins "hivm::DataLayout":$data_layout), [{
+      return $_get($_ctxt, data_layout, BoolAttr(), DenseI64ArrayAttr());
+    }]>,
+    AttrBuilder<(ins "hivm::DataLayout":$data_layout, "std::optional<bool>":$transpose), [{
+      BoolAttr transposeAttr = transpose.has_value()
+          ? BoolAttr::get($_ctxt, *transpose)
+          : BoolAttr();
+      return $_get($_ctxt, data_layout, transposeAttr, DenseI64ArrayAttr());
+    }]>
   ];
-  let genVerifyDecl = 1;
-  let assemblyFormat = [{
-    `<` $data_layout (`,` `transpose` `=` $transpose^)? (`,` `fractalSizes` `=` $fractalSizes^)?`>`
+  let extraClassDeclaration = [{
+    /// Returns the fractal sizes as a SmallVector, or std::nullopt if not set.
+    std::optional<SmallVector<int64_t>> getFractalSizesArray() const {
+      if (auto attr = getFractalSizes())
+        return SmallVector<int64_t>(attr.asArrayRef());
+      return std::nullopt;
+    }
+
+    /// Returns the transpose value as std::optional<bool>.
+    std::optional<bool> getTransposeValue() const {
+      if (auto attr = getTranspose())
+        return attr.getValue();
+      return std::nullopt;
+    }
+
+    /// True if layout is one of the *_ND layouts.
+    bool isNDLayout() const {
+      switch (getDataLayout()) {
+        case hivm::DataLayout::DOTA_ND:
+        case hivm::DataLayout::DOTB_ND:
+        case hivm::DataLayout::DOTC_ND:
+        case hivm::DataLayout::ND:
+          return true;
+        default:
+          return false;
+      }
+    }
+
+    using FractalSize = std::pair<int32_t, int32_t>;
+
+    /// Extract exactly 2 fractal block sizes.
+    FailureOr<FractalSize> getFractalBlockSizes() const {
+      auto sizes = getFractalSizesArray();
+      if (!sizes || sizes->size() != 2)
+        return failure();
+      return FractalSize((*sizes)[0], (*sizes)[1]);
+    }
   }];
+  let genVerifyDecl = 1;
+  let assemblyFormat = "`<` $data_layout (`,` struct($transpose, $fractalSizes)^)? `>`";
 }
 
 //===----------------------------------------------------------------------===//
@@ -398,6 +449,50 @@ def HIVM_CmpModeAttr : HIVM_I32EnumAttr<"compare_mode", HIVM_CmpModeEnum> {
 }
 
 //===----------------------------------------------------------------------===//
+// Bitcode Path Attributes
+//===----------------------------------------------------------------------===//
+
+def HIVM_AIC_BITCODEAttr : HIVM_Attr<"AIC_BITCODE", "aic_bitcode"> {
+  let parameters = (ins AttrParameter<"StringAttr", "AIC bitcode path">:$path);
+  let assemblyFormat = "`<` $path `>`";
+  let description = [{
+    HIVM AIC bitcode path attribute (string).
+  }];
+}
+
+def HIVM_AIV_BITCODEAttr : HIVM_Attr<"AIV_BITCODE", "aiv_bitcode"> {
+  let parameters = (ins AttrParameter<"StringAttr", "AIV bitcode path">:$path);
+  let assemblyFormat = "`<` $path `>`";
+  let description = [{
+    HIVM AIV bitcode path attribute (string).
+  }];
+}
+
+def HIVM_MIX_AIC_BITCODEAttr : HIVM_Attr<"MIX_AIC_BITCODE", "mix_aic_bitcode"> {
+  let parameters = (ins AttrParameter<"StringAttr", "MIX AIC bitcode path">:$path);
+  let assemblyFormat = "`<` $path `>`";
+  let description = [{
+    HIVM MIX AIC bitcode path attribute (string).
+  }];
+}
+
+def HIVM_MIX_AIV_BITCODEAttr : HIVM_Attr<"MIX_AIV_BITCODE", "mix_aiv_bitcode"> {
+  let parameters = (ins AttrParameter<"StringAttr", "MIX AIV bitcode path">:$path);
+  let assemblyFormat = "`<` $path `>`";
+  let description = [{
+    HIVM MIX AIV bitcode path attribute (string).
+  }];
+}
+
+def HIVM_HOST_BITCODEAttr : HIVM_Attr<"HOST_BITCODE", "host_bitcode"> {
+  let parameters = (ins AttrParameter<"StringAttr", "HOST bitcode path">:$path);
+  let assemblyFormat = "`<` $path `>`";
+  let description = [{
+    HIVM HOST bitcode path attribute (string).
+  }];
+}
+
+//===----------------------------------------------------------------------===//
 // Event ID
 //===----------------------------------------------------------------------===//
 
@@ -438,19 +533,13 @@ def HIVM_UNIT_FLAG_DISABLED : I32EnumAttrCase<"DISABLED", 0>;
 def HIVM_UNIT_FLAG_RESERVED : I32EnumAttrCase<"RESERVED", 1>;
 def HIVM_UNIT_FLAG_ENABLED_WITHOUT_UPDATE : I32EnumAttrCase<"ENABLED_WITHOUT_UPDATE", 2>;
 def HIVM_UNIT_FLAG_ENABLED_WITH_UPDATE : I32EnumAttrCase<"ENABLED_WITH_UPDATE", 3>;
-def HIVM_UNIT_FLAG_ENABLED_ONLY_LAST_ITER : I32EnumAttrCase<"ENABLED_ONLY_LAST_ITER", 4>;
-def HIVM_UNIT_FLAG_ENABLED_ONLY_FIRST_ITER : I32EnumAttrCase<"ENABLED_ONLY_FIRST_ITER", 5>;
-def HIVM_UNIT_FLAG_ENABLED_ONLY_FIRST_AND_LAST_ITERS : I32EnumAttrCase<"ENABLED_ONLY_FIRST_AND_LAST_ITERS", 6>;
 
 def HIVM_UnitFlagEnum : HIVM_I32Enum<
   "UNIT_FLAG", "Unit Flag Mode for Synchronization", [
     HIVM_UNIT_FLAG_DISABLED,
     HIVM_UNIT_FLAG_RESERVED,
     HIVM_UNIT_FLAG_ENABLED_WITHOUT_UPDATE,
-    HIVM_UNIT_FLAG_ENABLED_WITH_UPDATE,
-    HIVM_UNIT_FLAG_ENABLED_ONLY_LAST_ITER,
-    HIVM_UNIT_FLAG_ENABLED_ONLY_FIRST_ITER,
-    HIVM_UNIT_FLAG_ENABLED_ONLY_FIRST_AND_LAST_ITERS
+    HIVM_UNIT_FLAG_ENABLED_WITH_UPDATE
   ]>;
 
 def HIVM_UnitFlagAttr : HIVM_Attr<"UnitFlag", "unit_flag"> {
@@ -461,23 +550,29 @@ def HIVM_UnitFlagAttr : HIVM_Attr<"UnitFlag", "unit_flag"> {
   }];
 }
 
+def UnitFlagArrayAttr : TypedArrayAttrBase<HIVM_UnitFlagAttr,
+                                           "unit-flag mode array attribute">;
+
 //===----------------------------------------------------------------------===//
 // Sync Block Mode
 //===----------------------------------------------------------------------===//
 
 def HIVM_ALL_CUBE : I32EnumAttrCase<"ALL_CUBE", 0>;
 def HIVM_ALL_VECTOR : I32EnumAttrCase<"ALL_VECTOR", 1>;
-def HIVM_BARRIER_CUBE : I32EnumAttrCase<"BARRIER_CUBE", 2>;
-def HIVM_BARRIER_VECTOR : I32EnumAttrCase<"BARRIER_VECTOR", 3>;
-def HIVM_ALL : I32EnumAttrCase<"ALL", 4>;
+def HIVM_ALL_SUB_VECTOR : I32EnumAttrCase<"ALL_SUB_VECTOR", 2>;
+def HIVM_BARRIER_CUBE : I32EnumAttrCase<"BARRIER_CUBE", 3>;
+def HIVM_BARRIER_VECTOR : I32EnumAttrCase<"BARRIER_VECTOR", 4>;
+def HIVM_ALL : I32EnumAttrCase<"ALL", 5>;
+
 
 def HIVM_SyncBlockModeEnum : HIVM_I32Enum<
   "SyncBlockMode", "HIVM SyncBlockMode", [
     HIVM_ALL_CUBE,
     HIVM_ALL_VECTOR,
+    HIVM_ALL_SUB_VECTOR,
     HIVM_BARRIER_CUBE,
     HIVM_BARRIER_VECTOR,
-    HIVM_ALL
+    HIVM_ALL,
   ]>;
 
 def HIVM_SyncBlockModeAttr : HIVM_Attr<"SyncBlockMode", "sync_block_mode"> {
@@ -750,7 +845,6 @@ def HIVM_FixpipePreReluModeAttr : HIVM_I32EnumAttr<
   let description = "HIVM fixpipe pre_relu mode";
 }
 
-#ifdef BISHENGIR_ENABLE_A5_UNPUBLISHED_FEATURES
 def HIVM_FIXPIPEDUALDST_NO_DUAL : I32EnumAttrCase<"NO_DUAL", 0>;
 def HIVM_FIXPIPEDUALDST_ROW_SPLIT : I32EnumAttrCase<"ROW_SPLIT", 1>;
 def HIVM_FIXPIPEDUALDST_COLUMN_SPLIT : I32EnumAttrCase<"COLUMN_SPLIT", 2>;
@@ -790,7 +884,6 @@ def HIVM_FixpipeDMAModeAttr : HIVM_I32EnumAttr<
   "dma_mode", HIVM_FixpipeDMAModeEnum> {
   let description = "HIVM Fixpipe DMA mode";
 }
-#endif // BISHENGIR_ENABLE_A5_UNPUBLISHED_FEATURES
 
 //===----------------------------------------------------------------------===//
 // Deinterleave Mode for VDeinterleaveOp
@@ -838,10 +931,12 @@ def HIVM_LocalMatmul_NoBias : I32EnumAttrCase<"NoBias", 0>;
 def HIVM_LocalMatmul_PerChannelAdd : I32EnumAttrCase<"PerChannelAdd", 1>;
 def HIVM_LocalMatmul_PerChannelAddWithSplitK : I32EnumAttrCase<"PerChannelAddWithSplitK", 2>;
 def HIVM_LocalMatmul_ElementwiseAdd : I32EnumAttrCase<"ElementwiseAdd", 3>;
+def HIVM_LocalMatmul_ElementwiseCrossLoopAdd : I32EnumAttrCase<"ElementwiseCrossLoopAdd", 4>;
 def HIVM_LocalMatmul_BiasModeEnum : HIVM_I32Enum<"MatmulBiasMode", "bias mode for local matmul op", [
   HIVM_LocalMatmul_NoBias,
   HIVM_LocalMatmul_PerChannelAdd,
   HIVM_LocalMatmul_PerChannelAddWithSplitK,
+  HIVM_LocalMatmul_ElementwiseCrossLoopAdd,
   HIVM_LocalMatmul_ElementwiseAdd
 ]>;
 
@@ -858,9 +953,30 @@ def HIVM_StorageAligned : HIVM_Attr<"StorageAligned", "storage_aligned"> {
   }];
 }
 
+def HIVM_EnableSavingUb : HIVM_Attr<"EnableSavingUb", "enable_saving_ub"> {
+  let description = [{
+    If a module is tagged with this attribute, it means the operations with less memory
+    usage will be used whenever possible. e.g : enablevcg vector reduce
+  }];
+}
+
 //===----------------------------------------------------------------------===//
 // Misc.
 //===----------------------------------------------------------------------===//
+
+def HIVM_VF_SIMD : I32EnumAttrCase<"SIMD", 0>;
+def HIVM_VF_SIMT : I32EnumAttrCase<"SIMT", 1>;
+def HIVM_VF_MIX : I32EnumAttrCase<"MIX", 2>;
+
+def HIVM_VFModeEnum
+    : HIVM_I32Enum<"VFMode",
+                   "HIVM VF Mode", [HIVM_VF_SIMD, HIVM_VF_SIMT, HIVM_VF_MIX]>;
+
+def HIVM_VFModeAttr : HIVM_I32EnumAttr<"vf_mode", HIVM_VFModeEnum> {
+  let description = [{
+    HIVM VF mode attribute.
+  }];
+}
 
 def HIVM_MultiBufferAttr : HIVM_Attr<"MultiBuffer", "multi_buffer"> {
   let description = [{
@@ -919,6 +1035,20 @@ def HIVM_UnlikelyConditionAttr
     : HIVM_Attr<"UnlikelyCondition", "unlikely_condition"> {
   let description = [{
     Specifies that marked condition is unlikely to evaluate to true.
+  }];
+}
+
+def HIVM_DisableAutoInjectBlockSyncAttr
+    : HIVM_Attr<"DisableAutoInjectBlockSync", "disable_auto_inject_block_sync"> {
+  let description = [{
+    Disable auto inject block sync, skip block sync injection.
+  }];
+}
+
+def HIVM_TileMixCubeNumAttr
+    : HIVM_Attr<"TileMixCubeNum", "tile_mix_cube_num"> {
+  let description = [{
+    Specifies the number of cube loops will be tiled in mix kernel
   }];
 }
 

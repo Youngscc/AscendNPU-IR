@@ -48,6 +48,15 @@ Operation *createCmpOp(PatternRewriter &rewriter, Location loc, Value lhs,
 
 Operation *createVandOp(PatternRewriter &rewriter, Location loc, Value lhs,
                         Value rhs);
+
+Operation *createVorOp(PatternRewriter &rewriter, Location loc, Value lhs,
+                       Value rhs);
+
+Operation *createVnotOp(PatternRewriter &rewriter, Location loc, Value value);
+
+/// simplify 'x vxor 0xFF...' to 'vnot(x)'
+LogicalResult simplifyVxorToVnot(PatternRewriter &rewriter,
+                                 hfusion::ElemwiseBinaryOp op);
 /// Tiling related utilities
 namespace tiling {
 
@@ -285,6 +294,11 @@ Value divWithRoundMode(OpBuilder &builder, Location loc, Type resType,
                        Value src0, Value src1, Value resTensor,
                        hfusion::RoundMode roundingMode,
                        std::optional<Operation **> divOp = std::nullopt);
+
+Value divWithRoundModeAndCastType(OpBuilder &builder, Location loc, Type resType,
+                                Value src0, Value src1, Value resTensor,
+                                hfusion::RoundMode roundingMode, hfusion::TypeFn castIntegerType,
+                                std::optional<Operation **> divOp = std::nullopt);
 
 namespace util {
 constexpr static unsigned int VL = 256;

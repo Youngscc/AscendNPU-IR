@@ -969,8 +969,8 @@ def VSelOp : HIVM_ElementwiseTernaryOp<"vsel",
 
 def VBrcOp : HIVM_VectorOp<"vbrc",
     [SameOperandsElementType,
-     OperElemTypeConstraints<
-         [0], [I8, UI8, I16, F16, UI16, I32, F32, UI32, BF16, I64, UI64, I1]>,
+     OperElemTypeConstraints<[0], [F8E4M3FN, F8E5M2, I8, UI8, I16,
+      F16, UI16, I32, F32, UI32, BF16, I64, UI64, I1]>,
      DeclareOpInterfaceMethods<ExtraBufferOpInterface>,
      DeclareOpInterfaceMethods<HIVMStructuredOpInterface,
                                ["getIteratorTypesArray", "getIndexingMaps"]>,
@@ -1130,7 +1130,8 @@ def VReduceOp : HIVM_VectorOp<"vreduce",
 //===----------------------------------------------------------------------===//
 
 def VTransposeOp : HIVM_VectorOp<"vtranspose",
-    [OperElemTypeConstraints<[0], [AnyI8, AnyI16, AnyI32, F16, BF16, F32, I64, UI64]>,
+    [OperElemTypeConstraints<[0], [F8E4M3FN, F8E5M2,
+      AnyI8, AnyI16, AnyI32, F16, BF16, F32, I64, UI64]>,
      DeclareOpInterfaceMethods<HIVMStructuredOpInterface,
        ["getIteratorTypesArray", "setIteratorTypesArray"]>,
      DeclareOpInterfaceMethods<BiShengIRAggregatedOpInterface,
@@ -1565,6 +1566,54 @@ def VGatherOp : HIVM_VectorOp<"vgather",
   ];
   let extraClassDeclaration = vectorOpBaseDecls # [{
     static StringRef getOpName() { return "gather"; }
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// HIVM GatherMask Op
+//===----------------------------------------------------------------------===//
+
+def VGatherMaskOp : HIVM_VectorOp<"vgathermask",
+    [HIVMOpSameOperandsAndResultRank,
+     OperElemTypeConstraints<[0], [I16, UI16, I32, UI32, F16, BF16, F32]>,
+     OperElemTypeConstraints<[1], [I1]>,
+     DeclareOpInterfaceMethods<HIVMStructuredOpInterface,
+       ["getIteratorTypesArray"]>,
+     UniformReassociationFlattenTrait,
+     DeclareOpInterfaceMethods<FlattenInterface,
+       ["getLimitedAxes"]>
+    ]> {
+  let summary = "Vector Gather Mask Op";
+  let description = [{
+    Gathers elements from the `src` tensor where the corresponding element in the `mask` tensor is True.
+    Writes the result to the pre-allocated `dst` tensor/memref (InPlace semantics), 
+    and returns the `dst` tensor as `result` for functional compatibility.
+    The `dst`/`result` tensor will have the same shape and element type as the `src` tensor.
+
+    Arguments:
+      * `src`: the tensor/memref from which to gather elements
+      * `mask`: the mask tensor/memref to filter elements (non-zero = select src element)
+      * `dst`: the pre-allocated tensor/memref to store the gathered elements (InPlace write)
+    Results:
+      * `result`: the same as `dst` (functional return for compatibility)
+      * `dst_size`: the actual number of elements gathered from src
+    
+    Usage:
+      result_data, result_size = vgathermask ins (%src : tensor<16xf32>) mask (%mask : tensor<16xi1>) outs (%dst_data, %dst_size : tensor<16xf32>, tensor<1xi64>)
+  }];
+  let arguments = (ins TensorOrMemref:$src,
+                       TensorOrMemref:$mask,
+                       Variadic<TensorOrMemref>:$dst  
+  );
+  let results = (outs Variadic<AnyRankedTensor>:$result);
+  let assemblyFormat = [{
+    attr-dict `ins` `(` $src `:` type($src) `)`
+    `mask` `(` $mask `:` type($mask) `)`
+    `outs` `(` $dst `:` type($dst) `)`
+    (`->` type($result)^)?  
+  }];
+  let extraClassDeclaration = vectorOpBaseDecls # [{
+    static StringRef getOpName() { return "vgathermask"; }
   }];
 }
 

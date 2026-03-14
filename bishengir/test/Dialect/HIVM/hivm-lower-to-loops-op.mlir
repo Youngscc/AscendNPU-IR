@@ -1513,8 +1513,7 @@ func.func @test_decompose_vdeinterleave_single_f16(%src: memref<32xf16>, %even_d
 // CHECK: arith.cmpf
 // CHECK: arith.index_cast
 // CHECK: arith.select
-// CHECK: arith.cmpf
-// CHECK: arith.select
+// CHECK: arith.minimumf
 // CHECK: memref.store
 // CHECK: memref.store
 func.func @test_decompose_argmin_float(%src: memref<2x5x7xf16, strided<[96, 16, 1], offset: ?>>, %idx: memref<1x5x7xi32>) {
@@ -2016,4 +2015,2175 @@ func.func @test_vshr_vv_inline_brc_dim0() {
    %allocOut = memref.alloc() : memref<64x8xi64>
    hivm.hir.vshr {broadcast = array<i64: 0>} ins(%allocIn0, %allocIn1 : memref<1x8xi64>, memref<64x8xi64>) outs(%allocOut : memref<64x8xi64>)
    return
+}
+
+// CHECK-LABEL: func.func @triton_floordiv_gen
+// CHECK: %[[VAL_3:.*]] = arith.constant 1 : i64
+// CHECK: %[[VAL_4:.*]] = arith.constant 0 : i64
+// CHECK: %[[VAL_5:.*]] = arith.constant 8192 : index
+// CHECK: %[[VAL_6:.*]] = arith.constant 0 : index
+// CHECK: %[[VAL_7:.*]] = arith.constant 1 : index
+// CHECK: scf.for %[[VAL_8:.*]] = %[[VAL_6]] to %[[VAL_5]] step %[[VAL_7]] {
+// CHECK:   %[[VAL_9:.*]] = memref.load %[[VAL_0:.*]]{{\[}}%[[VAL_8]]] : memref<8192xi64, #hivm.address_space<ub>>
+// CHECK:   %[[VAL_10:.*]] = memref.load %[[VAL_1:.*]]{{\[}}%[[VAL_8]]] : memref<8192xi64, #hivm.address_space<ub>>
+// CHECK:   %[[VAL_11:.*]] = arith.cmpi eq, %[[VAL_9]], %[[VAL_4]] : i64
+// CHECK:   %[[VAL_12:.*]] = arith.select %[[VAL_11]], %[[VAL_3]], %[[VAL_10]] : i64
+// CHECK:   %[[VAL_13:.*]] = arith.divsi %[[VAL_9]], %[[VAL_12]] : i64
+// CHECK:   memref.store %[[VAL_13]], %[[VAL_2:.*]]{{\[}}%[[VAL_8]]] : memref<8192xi64, #hivm.address_space<ub>>
+
+func.func @triton_floordiv_gen(%arg0: memref<8192xi64, #hivm.address_space<ub>>, %arg1:memref<8192xi64, #hivm.address_space<ub>>, %arg2:memref<8192xi64, #hivm.address_space<ub>>){
+  hivm.hir.vdiv ins(%arg0, %arg1 : memref<8192xi64, #hivm.address_space<ub>>, memref<8192xi64, #hivm.address_space<ub>>) outs(%arg2 : memref<8192xi64, #hivm.address_space<ub>>)
+  return
+}
+
+// -----
+func.func @test_reduce_prod_ar_b64() {
+  // CHECK-DAG: %[[VAL_0:.*]] = arith.constant 1 : i64
+  // CHECK-DAG: %[[VAL_1:.*]] = arith.constant 32 : index
+  // CHECK-DAG: %[[VAL_2:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[VAL_4:.*]] = arith.constant 24 : index
+  // CHECK: %[[VAL_5:.*]] = memref.alloc() : memref<24x32xi64>
+  // CHECK: %[[VAL_6:.*]] = memref.alloc() : memref<24x1xi64>
+  %src = memref.alloc() : memref<24x32xi64>
+  %dst = memref.alloc() : memref<24x1xi64>
+  // CHECK: scf.for %[[VAL_7:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: scf.for %[[VAL_8:.*]] = %[[VAL_3]] to %[[VAL_1]] step %[[VAL_2]] {
+  // CHECK: %[[VAL_9:.*]] = memref.load %[[VAL_5]][%[[VAL_7]], %[[VAL_8]]] : memref<24x32xi64>
+  // CHECK: %[[VAL_10:.*]] = arith.cmpi eq, %[[VAL_8]], %[[VAL_3]] : index
+  // CHECK: scf.if %[[VAL_10]] {
+  // CHECK: memref.store %[[VAL_0]], %[[VAL_6]][%[[VAL_7]], %[[VAL_3]]] : memref<24x1xi64>
+  // CHECK: }
+  // CHECK: %[[VAL_11:.*]] = memref.load %[[VAL_6]][%[[VAL_7]], %[[VAL_3]]] : memref<24x1xi64>
+  // CHECK: %[[VAL_12:.*]] = arith.muli %[[VAL_9]], %[[VAL_11]] : i64
+  // CHECK: memref.store %[[VAL_12]], %[[VAL_6]][%[[VAL_7]], %[[VAL_3]]] : memref<24x1xi64>
+  hivm.hir.vreduce <prod> ins(%src : memref<24x32xi64>) outs(%dst : memref<24x1xi64>) reduce_dims = [1]
+  return
+}
+
+// -----
+func.func @test_reduce_xori_ar_b64() {
+  // CHECK-DAG: %[[VAL_0:.*]] = arith.constant 0 : i64
+  // CHECK-DAG: %[[VAL_1:.*]] = arith.constant 32 : index
+  // CHECK-DAG: %[[VAL_2:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[VAL_4:.*]] = arith.constant 24 : index
+  // CHECK: %[[VAL_5:.*]] = memref.alloc() : memref<24x32xi64>
+  // CHECK: %[[VAL_6:.*]] = memref.alloc() : memref<24x1xi64>
+  %src = memref.alloc() : memref<24x32xi64>
+  %dst = memref.alloc() : memref<24x1xi64>
+  // CHECK: scf.for %[[VAL_7:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]]
+  // CHECK: scf.for %[[VAL_8:.*]] = %[[VAL_3]] to %[[VAL_1]] step %[[VAL_2]]
+  // CHECK: %[[VAL_9:.*]] = memref.load %[[VAL_5]][%[[VAL_7]], %[[VAL_8]]] : memref<24x32xi64>
+  // CHECK: %[[VAL_10:.*]] = arith.cmpi eq, %[[VAL_8]], %[[VAL_3]] : index
+  // CHECK: scf.if %[[VAL_10]]
+  // CHECK: memref.store %[[VAL_0]], %[[VAL_6]][%[[VAL_7]], %[[VAL_3]]] : memref<24x1xi64>
+  // CHECK: %[[VAL_11:.*]] = memref.load %[[VAL_6]][%[[VAL_7]], %[[VAL_3]]] : memref<24x1xi64>
+  // CHECK: %[[VAL_12:.*]] = arith.xori %[[VAL_9]], %[[VAL_11]] : i64
+  // CHECK: memref.store %[[VAL_12]], %[[VAL_6]][%[[VAL_7]], %[[VAL_3]]] : memref<24x1xi64>
+  hivm.hir.vreduce <xori> ins(%src : memref<24x32xi64>) outs(%dst : memref<24x1xi64>) reduce_dims = [1]
+  return
+}
+
+// -----
+func.func @test_reduce_prod_ra_b64() {
+  // CHECK-DAG: %[[VAL_0:.*]] = arith.constant 1 : i64
+  // CHECK-DAG: %[[VAL_1:.*]] = arith.constant 32 : index
+  // CHECK-DAG: %[[VAL_2:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[VAL_4:.*]] = arith.constant 24 : index
+  // CHECK: %[[VAL_5:.*]] = memref.alloc() : memref<24x32xi64>
+  // CHECK: %[[VAL_6:.*]] = memref.alloc() : memref<1x32xi64>
+  %src = memref.alloc() : memref<24x32xi64>
+  %dst = memref.alloc() : memref<1x32xi64>
+  // CHECK: scf.for %[[VAL_7:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: scf.for %[[VAL_8:.*]] = %[[VAL_3]] to %[[VAL_1]] step %[[VAL_2]] {
+  // CHECK: %[[VAL_9:.*]] = memref.load %[[VAL_5]][%[[VAL_7]], %[[VAL_8]]] : memref<24x32xi64>
+  // CHECK: %[[VAL_10:.*]] = arith.cmpi eq, %[[VAL_7]], %[[VAL_3]] : index
+  // CHECK: scf.if %[[VAL_10]] {
+  // CHECK: memref.store %[[VAL_0]], %[[VAL_6]][%[[VAL_3]], %[[VAL_8]]] : memref<1x32xi64>
+  // CHECK: }
+  // CHECK: %[[VAL_11:.*]] = memref.load %[[VAL_6]][%[[VAL_3]], %[[VAL_8]]] : memref<1x32xi64>
+  // CHECK: %[[VAL_12:.*]] = arith.muli %[[VAL_9]], %[[VAL_11]] : i64
+  // CHECK: memref.store %[[VAL_12]], %[[VAL_6]][%[[VAL_3]], %[[VAL_8]]] : memref<1x32xi64>
+  hivm.hir.vreduce <prod> ins(%src : memref<24x32xi64>) outs(%dst : memref<1x32xi64>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_xori_ra_b64() {
+  // CHECK-DAG: %[[VAL_0:.*]] = arith.constant 0 : i64
+  // CHECK-DAG: %[[VAL_1:.*]] = arith.constant 32 : index
+  // CHECK-DAG: %[[VAL_2:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[VAL_4:.*]] = arith.constant 24 : index
+  // CHECK: %[[VAL_5:.*]] = memref.alloc() : memref<24x32xi64>
+  // CHECK: %[[VAL_6:.*]] = memref.alloc() : memref<1x32xi64>
+  %src = memref.alloc() : memref<24x32xi64>
+  %dst = memref.alloc() : memref<1x32xi64>
+  // CHECK: scf.for %[[VAL_7:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: scf.for %[[VAL_8:.*]] = %[[VAL_3]] to %[[VAL_1]] step %[[VAL_2]] {
+  // CHECK: %[[VAL_9:.*]] = memref.load %[[VAL_5]][%[[VAL_7]], %[[VAL_8]]] : memref<24x32xi64>
+  // CHECK: %[[VAL_10:.*]] = arith.cmpi eq, %[[VAL_7]], %[[VAL_3]] : index
+  // CHECK: scf.if %[[VAL_10]] {
+  // CHECK: memref.store %[[VAL_0]], %[[VAL_6]][%[[VAL_3]], %[[VAL_8]]] : memref<1x32xi64>
+  // CHECK: }
+  // CHECK: %[[VAL_11:.*]] = memref.load %[[VAL_6]][%[[VAL_3]], %[[VAL_8]]] : memref<1x32xi64>
+  // CHECK: %[[VAL_12:.*]] = arith.xori %[[VAL_9]], %[[VAL_11]] : i64
+  // CHECK: memref.store %[[VAL_12]], %[[VAL_6]][%[[VAL_3]], %[[VAL_8]]] : memref<1x32xi64>
+  hivm.hir.vreduce <xori> ins(%src : memref<24x32xi64>) outs(%dst : memref<1x32xi64>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_prod_r_b64() {
+  // CHECK-DAG: %[[VAL_0:.*]] = arith.constant 1 : i64
+  // CHECK-DAG: %[[VAL_1:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[VAL_2:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[VAL_3:.*]] = arith.constant 32 : index
+  // CHECK: %[[VAL_4:.*]] = memref.alloc() : memref<32xi64>
+  // CHECK: %[[VAL_5:.*]] = memref.alloc() : memref<1xi64>
+  %src = memref.alloc() : memref<32xi64>
+  %dst = memref.alloc() : memref<1xi64>
+  // CHECK: scf.for %[[VAL_6:.*]] = %[[VAL_2]] to %[[VAL_3]] step %[[VAL_1]] {
+  // CHECK: %[[VAL_7:.*]] = memref.load %[[VAL_4]][%[[VAL_6]]] : memref<32xi64>
+  // CHECK: %[[VAL_8:.*]] = arith.cmpi eq, %[[VAL_6]], %[[VAL_2]] : index
+  // CHECK: scf.if %[[VAL_8]] {
+  // CHECK: memref.store %[[VAL_0]], %[[VAL_5]][%[[VAL_2]]] : memref<1xi64>
+  // CHECK: }
+  // CHECK: %[[VAL_9:.*]] = memref.load %[[VAL_5]][%[[VAL_2]]] : memref<1xi64>
+  // CHECK: %[[VAL_10:.*]] = arith.muli %[[VAL_7]], %[[VAL_9]] : i64
+  // CHECK: memref.store %[[VAL_10]], %[[VAL_5]][%[[VAL_2]]] : memref<1xi64>
+  hivm.hir.vreduce <prod> ins(%src : memref<32xi64>) outs(%dst : memref<1xi64>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_xori_r_b64() {
+  // CHECK-DAG: %[[VAL_0:.*]] = arith.constant 0 : i64
+  // CHECK-DAG: %[[VAL_1:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[VAL_2:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[VAL_3:.*]] = arith.constant 32 : index
+  // CHECK: %[[VAL_4:.*]] = memref.alloc() : memref<32xi64>
+  // CHECK: %[[VAL_5:.*]] = memref.alloc() : memref<1xi64>
+  %src = memref.alloc() : memref<32xi64>
+  %dst = memref.alloc() : memref<1xi64>
+  // CHECK: scf.for %[[VAL_6:.*]] = %[[VAL_2]] to %[[VAL_3]] step %[[VAL_1]] {
+  // CHECK: %[[VAL_7:.*]] = memref.load %[[VAL_4]][%[[VAL_6]]] : memref<32xi64>
+  // CHECK: %[[VAL_8:.*]] = arith.cmpi eq, %[[VAL_6]], %[[VAL_2]] : index
+  // CHECK: scf.if %[[VAL_8]] {
+  // CHECK: memref.store %[[VAL_0]], %[[VAL_5]][%[[VAL_2]]] : memref<1xi64>
+  // CHECK: }
+  // CHECK: %[[VAL_9:.*]] = memref.load %[[VAL_5]][%[[VAL_2]]] : memref<1xi64>
+  // CHECK: %[[VAL_10:.*]] = arith.xori %[[VAL_7]], %[[VAL_9]] : i64
+  // CHECK: memref.store %[[VAL_10]], %[[VAL_5]][%[[VAL_2]]] : memref<1xi64>
+  hivm.hir.vreduce <xori> ins(%src : memref<32xi64>) outs(%dst : memref<1xi64>) reduce_dims = [0]
+  return
+}
+
+// -----
+// CHECK-LABEL: func.func @test_decompose_argmin_float16(
+// CHECK-SAME: %[[VAL_0:.*]]: memref<2x5x7xf16, strided<[96, 16, 1], offset: ?>>,
+// CHECK-SAME: %[[VAL_1:.*]]: memref<1x5x7xi32>) {
+// CHECK-DAG: %[[VAL_2:.*]] = arith.constant 0 : i32
+// CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0x7C00 : f16
+// CHECK-DAG: %[[VAL_4:.*]] = arith.constant 7 : index
+// CHECK-DAG: %[[VAL_5:.*]] = arith.constant 5 : index
+// CHECK-DAG: %[[VAL_6:.*]] = arith.constant 1 : index
+// CHECK-DAG: %[[VAL_7:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[VAL_8:.*]] = arith.constant 2 : index
+// CHECK: %[[VAL_9:.*]] = memref.alloc() : memref<1x5x7xf16>
+// CHECK: scf.for %[[VAL_10:.*]] = %[[VAL_7]] to %[[VAL_8]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_11:.*]] = %[[VAL_7]] to %[[VAL_5]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_12:.*]] = %[[VAL_7]] to %[[VAL_4]] step %[[VAL_6]] {
+// CHECK: %[[VAL_13:.*]] = memref.load %[[VAL_0]][%[[VAL_10]], %[[VAL_11]], %[[VAL_12]]] : memref<2x5x7xf16, strided<[96, 16, 1], offset: ?>>
+// CHECK: %[[VAL_14:.*]] = arith.cmpi eq, %[[VAL_10]], %[[VAL_7]] : index
+// CHECK: scf.if %[[VAL_14]] {
+// CHECK: memref.store %[[VAL_3]], %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf16>
+// CHECK: memref.store %[[VAL_2]], %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+// CHECK: }
+// CHECK: %[[VAL_15:.*]] = memref.load %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf16>
+// CHECK: %[[VAL_16:.*]] = memref.load %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+// CHECK: %[[VAL_17:.*]] = arith.cmpf ogt, %[[VAL_15]], %[[VAL_13]] : f16
+// CHECK: %[[VAL_18:.*]] = arith.index_cast %[[VAL_10]] : index to i32
+// CHECK: %[[VAL_19:.*]] = arith.select %[[VAL_17]], %[[VAL_18]], %[[VAL_16]] : i32
+// CHECK: %[[VAL_20:.*]] = arith.minimumf %[[VAL_13]], %[[VAL_15]] : f16
+// CHECK: memref.store %[[VAL_20]], %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf16>
+// CHECK: memref.store %[[VAL_19]], %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+func.func @test_decompose_argmin_float16(%src: memref<2x5x7xf16, strided<[96, 16, 1], offset: ?>>, %idx: memref<1x5x7xi32>) {
+  %dst = memref.alloc() : memref<1x5x7xf16>
+  hivm.hir.vreduce <min_with_index_left> ins(%src : memref<2x5x7xf16, strided<[96, 16, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<1x5x7xf16>, memref<1x5x7xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+// CHECK-LABEL: func.func @test_decompose_argmin_float32(
+// CHECK-SAME: %[[VAL_0:.*]]: memref<2x5x7xf32, strided<[96, 16, 1], offset: ?>>,
+// CHECK-SAME: %[[VAL_1:.*]]: memref<1x5x7xi32>) {
+// CHECK-DAG: %[[VAL_2:.*]] = arith.constant 0 : i32
+// CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0x7F800000 : f32
+// CHECK-DAG: %[[VAL_4:.*]] = arith.constant 7 : index
+// CHECK-DAG: %[[VAL_5:.*]] = arith.constant 5 : index
+// CHECK-DAG: %[[VAL_6:.*]] = arith.constant 1 : index
+// CHECK-DAG: %[[VAL_7:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[VAL_8:.*]] = arith.constant 2 : index
+// CHECK: %[[VAL_9:.*]] = memref.alloc() : memref<1x5x7xf32>
+// CHECK: scf.for %[[VAL_10:.*]] = %[[VAL_7]] to %[[VAL_8]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_11:.*]] = %[[VAL_7]] to %[[VAL_5]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_12:.*]] = %[[VAL_7]] to %[[VAL_4]] step %[[VAL_6]] {
+// CHECK: %[[VAL_13:.*]] = memref.load %[[VAL_0]][%[[VAL_10]], %[[VAL_11]], %[[VAL_12]]] : memref<2x5x7xf32, strided<[96, 16, 1], offset: ?>>
+// CHECK: %[[VAL_14:.*]] = arith.cmpi eq, %[[VAL_10]], %[[VAL_7]] : index
+// CHECK: scf.if %[[VAL_14]] {
+// CHECK: memref.store %[[VAL_3]], %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf32>
+// CHECK: memref.store %[[VAL_2]], %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+// CHECK: }
+// CHECK: %[[VAL_15:.*]] = memref.load %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf32>
+// CHECK: %[[VAL_16:.*]] = memref.load %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+// CHECK: %[[VAL_17:.*]] = arith.cmpf ogt, %[[VAL_15]], %[[VAL_13]] : f32
+// CHECK: %[[VAL_18:.*]] = arith.index_cast %[[VAL_10]] : index to i32
+// CHECK: %[[VAL_19:.*]] = arith.select %[[VAL_17]], %[[VAL_18]], %[[VAL_16]] : i32
+// CHECK: %[[VAL_20:.*]] = arith.minimumf %[[VAL_13]], %[[VAL_15]] : f32
+// CHECK: memref.store %[[VAL_20]], %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf32>
+// CHECK: memref.store %[[VAL_19]], %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+func.func @test_decompose_argmin_float32(%src: memref<2x5x7xf32, strided<[96, 16, 1], offset: ?>>, %idx: memref<1x5x7xi32>) {
+  %dst = memref.alloc() : memref<1x5x7xf32>
+  hivm.hir.vreduce <min_with_index_left> ins(%src : memref<2x5x7xf32, strided<[96, 16, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<1x5x7xf32>, memref<1x5x7xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+// CHECK-LABEL: func.func @test_decompose_argmax_float16(
+// CHECK-SAME: %[[VAL_0:.*]]: memref<2x5x7xf16, strided<[96, 16, 1], offset: ?>>,
+// CHECK-SAME: %[[VAL_1:.*]]: memref<1x5x7xi32>) {
+// CHECK-DAG: %[[VAL_2:.*]] = arith.constant 0 : i32
+// CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0xFC00 : f16
+// CHECK-DAG: %[[VAL_4:.*]] = arith.constant 7 : index
+// CHECK-DAG: %[[VAL_5:.*]] = arith.constant 5 : index
+// CHECK-DAG: %[[VAL_6:.*]] = arith.constant 1 : index
+// CHECK-DAG: %[[VAL_7:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[VAL_8:.*]] = arith.constant 2 : index
+// CHECK: %[[VAL_9:.*]] = memref.alloc() : memref<1x5x7xf16>
+// CHECK: scf.for %[[VAL_10:.*]] = %[[VAL_7]] to %[[VAL_8]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_11:.*]] = %[[VAL_7]] to %[[VAL_5]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_12:.*]] = %[[VAL_7]] to %[[VAL_4]] step %[[VAL_6]] {
+// CHECK: %[[VAL_13:.*]] = memref.load %[[VAL_0]][%[[VAL_10]], %[[VAL_11]], %[[VAL_12]]] : memref<2x5x7xf16, strided<[96, 16, 1], offset: ?>>
+// CHECK: %[[VAL_14:.*]] = arith.cmpi eq, %[[VAL_10]], %[[VAL_7]] : index
+// CHECK: scf.if %[[VAL_14]] {
+// CHECK: memref.store %[[VAL_3]], %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf16>
+// CHECK: memref.store %[[VAL_2]], %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+// CHECK: }
+// CHECK: %[[VAL_15:.*]] = memref.load %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf16>
+// CHECK: %[[VAL_16:.*]] = memref.load %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+// CHECK: %[[VAL_17:.*]] = arith.cmpf olt, %[[VAL_15]], %[[VAL_13]] : f16
+// CHECK: %[[VAL_18:.*]] = arith.index_cast %[[VAL_10]] : index to i32
+// CHECK: %[[VAL_19:.*]] = arith.select %[[VAL_17]], %[[VAL_18]], %[[VAL_16]] : i32
+// CHECK: %[[VAL_20:.*]] = arith.maximumf %[[VAL_13]], %[[VAL_15]] : f16
+// CHECK: memref.store %[[VAL_20]], %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf16>
+// CHECK: memref.store %[[VAL_19]], %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+func.func @test_decompose_argmax_float16(%src: memref<2x5x7xf16, strided<[96, 16, 1], offset: ?>>, %idx: memref<1x5x7xi32>) {
+  %dst = memref.alloc() : memref<1x5x7xf16>
+  hivm.hir.vreduce <max_with_index_left> ins(%src : memref<2x5x7xf16, strided<[96, 16, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<1x5x7xf16>, memref<1x5x7xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+// CHECK-LABEL: func.func @test_decompose_argmax_float32(
+// CHECK-SAME: %[[VAL_0:.*]]: memref<2x5x7xf32, strided<[96, 16, 1], offset: ?>>,
+// CHECK-SAME: %[[VAL_1:.*]]: memref<1x5x7xi32>) {
+// CHECK-DAG: %[[VAL_2:.*]] = arith.constant 0 : i32
+// CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0xFF800000 : f32
+// CHECK-DAG: %[[VAL_4:.*]] = arith.constant 7 : index
+// CHECK-DAG: %[[VAL_5:.*]] = arith.constant 5 : index
+// CHECK-DAG: %[[VAL_6:.*]] = arith.constant 1 : index
+// CHECK-DAG: %[[VAL_7:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[VAL_8:.*]] = arith.constant 2 : index
+// CHECK: %[[VAL_9:.*]] = memref.alloc() : memref<1x5x7xf32>
+// CHECK: scf.for %[[VAL_10:.*]] = %[[VAL_7]] to %[[VAL_8]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_11:.*]] = %[[VAL_7]] to %[[VAL_5]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_12:.*]] = %[[VAL_7]] to %[[VAL_4]] step %[[VAL_6]] {
+// CHECK: %[[VAL_13:.*]] = memref.load %[[VAL_0]][%[[VAL_10]], %[[VAL_11]], %[[VAL_12]]] : memref<2x5x7xf32, strided<[96, 16, 1], offset: ?>>
+// CHECK: %[[VAL_14:.*]] = arith.cmpi eq, %[[VAL_10]], %[[VAL_7]] : index
+// CHECK: scf.if %[[VAL_14]] {
+// CHECK: memref.store %[[VAL_3]], %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf32>
+// CHECK: memref.store %[[VAL_2]], %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+// CHECK: }
+// CHECK: %[[VAL_15:.*]] = memref.load %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf32>
+// CHECK: %[[VAL_16:.*]] = memref.load %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+// CHECK: %[[VAL_17:.*]] = arith.cmpf olt, %[[VAL_15]], %[[VAL_13]] : f32
+// CHECK: %[[VAL_18:.*]] = arith.index_cast %[[VAL_10]] : index to i32
+// CHECK: %[[VAL_19:.*]] = arith.select %[[VAL_17]], %[[VAL_18]], %[[VAL_16]] : i32
+// CHECK: %[[VAL_20:.*]] = arith.maximumf %[[VAL_13]], %[[VAL_15]] : f32
+// CHECK: memref.store %[[VAL_20]], %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf32>
+// CHECK: memref.store %[[VAL_19]], %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+func.func @test_decompose_argmax_float32(%src: memref<2x5x7xf32, strided<[96, 16, 1], offset: ?>>, %idx: memref<1x5x7xi32>) {
+  %dst = memref.alloc() : memref<1x5x7xf32>
+  hivm.hir.vreduce <max_with_index_left> ins(%src : memref<2x5x7xf32, strided<[96, 16, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<1x5x7xf32>, memref<1x5x7xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_min_with_r_index_int64() {
+  // CHECK-DAG: %[[VAL_0:.*]] = arith.constant 0 : i32
+  // CHECK-DAG: %[[VAL_1:.*]] = arith.constant 9223372036854775807 : i64
+  // CHECK-DAG: %[[VAL_2:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[VAL_4:.*]] = arith.constant 2 : index
+  // CHECK: %[[VAL_5:.*]] = memref.alloc() : memref<2x2xi64>
+  // CHECK: %[[VAL_6:.*]] = memref.alloc() : memref<1x2xi64>
+  // CHECK: %[[VAL_7:.*]] = memref.alloc() : memref<1x2xi32>
+  %src = memref.alloc() : memref<2x2xi64>
+  %dst1 = memref.alloc() : memref<1x2xi64>
+  %dst2 = memref.alloc() : memref<1x2xi32>
+  // CHECK: scf.for %[[VAL_8:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: scf.for %[[VAL_9:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: %[[VAL_10:.*]] = memref.load %[[VAL_5]][%[[VAL_8]], %[[VAL_9]]] : memref<2x2xi64>
+  // CHECK: %[[VAL_11:.*]] = arith.cmpi eq, %[[VAL_8]], %[[VAL_3]] : index
+  // CHECK: scf.if %[[VAL_11]] {
+  // CHECK: memref.store %[[VAL_1]], %[[VAL_6]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi64>
+  // CHECK: memref.store %[[VAL_0]], %[[VAL_7]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  // CHECK: }
+  // CHECK: %[[VAL_12:.*]] = memref.load %[[VAL_6]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi64>
+  // CHECK: %[[VAL_13:.*]] = memref.load %[[VAL_7]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  // CHECK: %[[VAL_14:.*]] = arith.cmpi sge, %[[VAL_12]], %[[VAL_10]] : i64
+  // CHECK: %[[VAL_15:.*]] = arith.index_cast %[[VAL_8]] : index to i32
+  // CHECK: %[[VAL_16:.*]] = arith.select %[[VAL_14]], %[[VAL_15]], %[[VAL_13]] : i32
+  // CHECK: %[[VAL_17:.*]] = arith.minsi %[[VAL_10]], %[[VAL_12]] : i64
+  // CHECK: memref.store %[[VAL_17]], %[[VAL_6]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi64>
+  // CHECK: memref.store %[[VAL_16]], %[[VAL_7]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  hivm.hir.vreduce <min_with_index_right> ins(%src : memref<2x2xi64>) outs(%dst1, %dst2 : memref<1x2xi64>, memref<1x2xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_min_with_r_index_int32() {
+  // CHECK-DAG: %[[VAL_0:.*]] = arith.constant 0 : i32
+  // CHECK-DAG: %[[VAL_1:.*]] = arith.constant 2147483647 : i32
+  // CHECK-DAG: %[[VAL_2:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[VAL_4:.*]] = arith.constant 2 : index
+  // CHECK: %[[VAL_5:.*]] = memref.alloc() : memref<2x2xi32>
+  // CHECK: %[[VAL_6:.*]] = memref.alloc() : memref<1x2xi32>
+  // CHECK: %[[VAL_7:.*]] = memref.alloc() : memref<1x2xi32>
+  %src = memref.alloc() : memref<2x2xi32>
+  %dst1 = memref.alloc() : memref<1x2xi32>
+  %dst2 = memref.alloc() : memref<1x2xi32>
+  // CHECK: scf.for %[[VAL_8:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: scf.for %[[VAL_9:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: %[[VAL_10:.*]] = memref.load %[[VAL_5]][%[[VAL_8]], %[[VAL_9]]] : memref<2x2xi32>
+  // CHECK: %[[VAL_11:.*]] = arith.cmpi eq, %[[VAL_8]], %[[VAL_3]] : index
+  // CHECK: scf.if %[[VAL_11]] {
+  // CHECK: memref.store %[[VAL_1]], %[[VAL_6]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  // CHECK: memref.store %[[VAL_0]], %[[VAL_7]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  // CHECK: }
+  // CHECK: %[[VAL_12:.*]] = memref.load %[[VAL_6]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  // CHECK: %[[VAL_13:.*]] = memref.load %[[VAL_7]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  // CHECK: %[[VAL_14:.*]] = arith.cmpi sge, %[[VAL_12]], %[[VAL_10]] : i32
+  // CHECK: %[[VAL_15:.*]] = arith.index_cast %[[VAL_8]] : index to i32
+  // CHECK: %[[VAL_16:.*]] = arith.select %[[VAL_14]], %[[VAL_15]], %[[VAL_13]] : i32
+  // CHECK: %[[VAL_17:.*]] = arith.minsi %[[VAL_10]], %[[VAL_12]] : i32
+  // CHECK: memref.store %[[VAL_17]], %[[VAL_6]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  // CHECK: memref.store %[[VAL_16]], %[[VAL_7]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  hivm.hir.vreduce <min_with_index_right> ins(%src : memref<2x2xi32>) outs(%dst1, %dst2 : memref<1x2xi32>, memref<1x2xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_min_with_r_index_int16() {
+  // CHECK-DAG: %[[VAL_0:.*]] = arith.constant 0 : i32
+  // CHECK-DAG: %[[VAL_1:.*]] = arith.constant 32767 : i16
+  // CHECK-DAG: %[[VAL_2:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[VAL_4:.*]] = arith.constant 2 : index
+  // CHECK: %[[VAL_5:.*]] = memref.alloc() : memref<2x2xi16>
+  // CHECK: %[[VAL_6:.*]] = memref.alloc() : memref<1x2xi16>
+  // CHECK: %[[VAL_7:.*]] = memref.alloc() : memref<1x2xi32>
+  %src = memref.alloc() : memref<2x2xi16>
+  %dst1 = memref.alloc() : memref<1x2xi16>
+  %dst2 = memref.alloc() : memref<1x2xi32>
+  // CHECK: scf.for %[[VAL_8:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: scf.for %[[VAL_9:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: %[[VAL_10:.*]] = memref.load %[[VAL_5]][%[[VAL_8]], %[[VAL_9]]] : memref<2x2xi16>
+  // CHECK: %[[VAL_11:.*]] = arith.cmpi eq, %[[VAL_8]], %[[VAL_3]] : index
+  // CHECK: scf.if %[[VAL_11]] {
+  // CHECK: memref.store %[[VAL_1]], %[[VAL_6]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi16>
+  // CHECK: memref.store %[[VAL_0]], %[[VAL_7]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  // CHECK: }
+  // CHECK: %[[VAL_12:.*]] = memref.load %[[VAL_6]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi16>
+  // CHECK: %[[VAL_13:.*]] = memref.load %[[VAL_7]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  // CHECK: %[[VAL_14:.*]] = arith.cmpi sge, %[[VAL_12]], %[[VAL_10]] : i16
+  // CHECK: %[[VAL_15:.*]] = arith.index_cast %[[VAL_8]] : index to i32
+  // CHECK: %[[VAL_16:.*]] = arith.select %[[VAL_14]], %[[VAL_15]], %[[VAL_13]] : i32
+  // CHECK: %[[VAL_17:.*]] = arith.minsi %[[VAL_10]], %[[VAL_12]] : i16
+  // CHECK: memref.store %[[VAL_17]], %[[VAL_6]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi16>
+  // CHECK: memref.store %[[VAL_16]], %[[VAL_7]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  hivm.hir.vreduce <min_with_index_right> ins(%src : memref<2x2xi16>) outs(%dst1, %dst2 : memref<1x2xi16>, memref<1x2xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_min_with_r_index_float32() {
+  // CHECK-DAG: %[[VAL_0:.*]] = arith.constant 0 : i32
+  // CHECK-DAG: %[[VAL_1:.*]] = arith.constant 0x7F800000 : f32
+  // CHECK-DAG: %[[VAL_2:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[VAL_4:.*]] = arith.constant 32 : index
+  // CHECK: %[[VAL_5:.*]] = memref.alloc() : memref<32xf32>
+  // CHECK: %[[VAL_6:.*]] = memref.alloc() : memref<1xf32>
+  // CHECK: %[[VAL_7:.*]] = memref.alloc() : memref<1xi32>
+  %src = memref.alloc() : memref<32xf32>
+  %dst1 = memref.alloc() : memref<1xf32>
+  %dst2 = memref.alloc() : memref<1xi32>
+  // CHECK: scf.for %[[VAL_8:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: %[[VAL_9:.*]] = memref.load %[[VAL_5]][%[[VAL_8]]] : memref<32xf32>
+  // CHECK: %[[VAL_10:.*]] = arith.cmpi eq, %[[VAL_8]], %[[VAL_3]] : index
+  // CHECK: scf.if %[[VAL_10]] {
+  // CHECK: memref.store %[[VAL_1]], %[[VAL_6]][%[[VAL_3]]] : memref<1xf32>
+  // CHECK: memref.store %[[VAL_0]], %[[VAL_7]][%[[VAL_3]]] : memref<1xi32>
+  // CHECK: }
+  // CHECK: %[[VAL_11:.*]] = memref.load %[[VAL_6]][%[[VAL_3]]] : memref<1xf32>
+  // CHECK: %[[VAL_12:.*]] = memref.load %[[VAL_7]][%[[VAL_3]]] : memref<1xi32>
+  // CHECK: %[[VAL_13:.*]] = arith.cmpf oge, %[[VAL_11]], %[[VAL_9]] : f32
+  // CHECK: %[[VAL_14:.*]] = arith.index_cast %[[VAL_8]] : index to i32
+  // CHECK: %[[VAL_15:.*]] = arith.select %[[VAL_13]], %[[VAL_14]], %[[VAL_12]] : i32
+  // CHECK: %[[VAL_16:.*]] = arith.minimumf %[[VAL_9]], %[[VAL_11]] : f32
+  // CHECK: memref.store %[[VAL_16]], %[[VAL_6]][%[[VAL_3]]] : memref<1xf32>
+  // CHECK: memref.store %[[VAL_15]], %[[VAL_7]][%[[VAL_3]]] : memref<1xi32>
+  hivm.hir.vreduce <min_with_index_right> ins(%src : memref<32xf32>) outs(%dst1, %dst2 : memref<1xf32>, memref<1xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_min_with_r_index_float16() {
+  // CHECK-DAG: %[[VAL_0:.*]] = arith.constant 0 : i32
+  // CHECK-DAG: %[[VAL_1:.*]] = arith.constant 0x7C00 : f16
+  // CHECK-DAG: %[[VAL_2:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[VAL_4:.*]] = arith.constant 32 : index
+  // CHECK: %[[VAL_5:.*]] = memref.alloc() : memref<32xf16>
+  // CHECK: %[[VAL_6:.*]] = memref.alloc() : memref<1xf16>
+  // CHECK: %[[VAL_7:.*]] = memref.alloc() : memref<1xi32>
+  %src = memref.alloc() : memref<32xf16>
+  %dst1 = memref.alloc() : memref<1xf16>
+  %dst2 = memref.alloc() : memref<1xi32>
+  // CHECK: scf.for %[[VAL_8:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: %[[VAL_9:.*]] = memref.load %[[VAL_5]][%[[VAL_8]]] : memref<32xf16>
+  // CHECK: %[[VAL_10:.*]] = arith.cmpi eq, %[[VAL_8]], %[[VAL_3]] : index
+  // CHECK: scf.if %[[VAL_10]] {
+  // CHECK: memref.store %[[VAL_1]], %[[VAL_6]][%[[VAL_3]]] : memref<1xf16>
+  // CHECK: memref.store %[[VAL_0]], %[[VAL_7]][%[[VAL_3]]] : memref<1xi32>
+  // CHECK: }
+  // CHECK: %[[VAL_11:.*]] = memref.load %[[VAL_6]][%[[VAL_3]]] : memref<1xf16>
+  // CHECK: %[[VAL_12:.*]] = memref.load %[[VAL_7]][%[[VAL_3]]] : memref<1xi32>
+  // CHECK: %[[VAL_13:.*]] = arith.cmpf oge, %[[VAL_11]], %[[VAL_9]] : f16
+  // CHECK: %[[VAL_14:.*]] = arith.index_cast %[[VAL_8]] : index to i32
+  // CHECK: %[[VAL_15:.*]] = arith.select %[[VAL_13]], %[[VAL_14]], %[[VAL_12]] : i32
+  // CHECK: %[[VAL_16:.*]] = arith.minimumf %[[VAL_9]], %[[VAL_11]] : f16
+  // CHECK: memref.store %[[VAL_16]], %[[VAL_6]][%[[VAL_3]]] : memref<1xf16>
+  // CHECK: memref.store %[[VAL_15]], %[[VAL_7]][%[[VAL_3]]] : memref<1xi32>
+  hivm.hir.vreduce <min_with_index_right> ins(%src : memref<32xf16>) outs(%dst1, %dst2 : memref<1xf16>, memref<1xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+// CHECK-LABEL: func.func @test_decompose_r_argmin_float16(
+// CHECK-SAME: %[[VAL_0:.*]]: memref<2x5x7xf16, strided<[35, 7, 1], offset: ?>>,
+// CHECK-SAME: %[[VAL_1:.*]]: memref<2x5x1xi32>) {
+// CHECK-DAG: %[[VAL_2:.*]] = arith.constant 0 : i32
+// CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0x7C00 : f16
+// CHECK-DAG: %[[VAL_4:.*]] = arith.constant 7 : index
+// CHECK-DAG: %[[VAL_5:.*]] = arith.constant 5 : index
+// CHECK-DAG: %[[VAL_6:.*]] = arith.constant 1 : index
+// CHECK-DAG: %[[VAL_7:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[VAL_8:.*]] = arith.constant 2 : index
+// CHECK: %[[VAL_9:.*]] = memref.alloc() : memref<2x5x1xf16>
+// CHECK: scf.for %[[VAL_10:.*]] = %[[VAL_7]] to %[[VAL_8]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_11:.*]] = %[[VAL_7]] to %[[VAL_5]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_12:.*]] = %[[VAL_7]] to %[[VAL_4]] step %[[VAL_6]] {
+// CHECK: %[[VAL_13:.*]] = memref.load %[[VAL_0]][%[[VAL_10]], %[[VAL_11]], %[[VAL_12]]] : memref<2x5x7xf16, strided<[35, 7, 1], offset: ?>>
+// CHECK: %[[VAL_14:.*]] = arith.cmpi eq, %[[VAL_12]], %[[VAL_7]] : index
+// CHECK: scf.if %[[VAL_14]] {
+// CHECK: memref.store %[[VAL_3]], %[[VAL_9]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xf16>
+// CHECK: memref.store %[[VAL_2]], %[[VAL_1]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xi32>
+// CHECK: }
+// CHECK: %[[VAL_15:.*]] = memref.load %[[VAL_9]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xf16>
+// CHECK: %[[VAL_16:.*]] = memref.load %[[VAL_1]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xi32>
+// CHECK: %[[VAL_17:.*]] = arith.cmpf oge, %[[VAL_15]], %[[VAL_13]] : f16
+// CHECK: %[[VAL_18:.*]] = arith.index_cast %[[VAL_12]] : index to i32
+// CHECK: %[[VAL_19:.*]] = arith.select %[[VAL_17]], %[[VAL_18]], %[[VAL_16]] : i32
+// CHECK: %[[VAL_20:.*]] = arith.minimumf %[[VAL_13]], %[[VAL_15]] : f16
+// CHECK: memref.store %[[VAL_20]], %[[VAL_9]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xf16>
+// CHECK: memref.store %[[VAL_19]], %[[VAL_1]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xi32>
+func.func @test_decompose_r_argmin_float16(%src: memref<2x5x7xf16, strided<[35, 7, 1], offset: ?>>, %idx: memref<2x5x1xi32>) {
+  %dst = memref.alloc() : memref<2x5x1xf16>
+  hivm.hir.vreduce <min_with_index_right> ins(%src : memref<2x5x7xf16, strided<[35, 7, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<2x5x1xf16>, memref<2x5x1xi32>) reduce_dims = [2]
+  return
+}
+
+// -----
+// CHECK-LABEL: func.func @test_decompose_r_argmin_float32(
+// CHECK-SAME: %[[VAL_0:.*]]: memref<2x5x7xf32, strided<[35, 7, 1], offset: ?>>,
+// CHECK-SAME: %[[VAL_1:.*]]: memref<2x5x1xi32>) {
+// CHECK-DAG: %[[VAL_2:.*]] = arith.constant 0 : i32
+// CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0x7F800000 : f32
+// CHECK-DAG: %[[VAL_4:.*]] = arith.constant 7 : index
+// CHECK-DAG: %[[VAL_5:.*]] = arith.constant 5 : index
+// CHECK-DAG: %[[VAL_6:.*]] = arith.constant 1 : index
+// CHECK-DAG: %[[VAL_7:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[VAL_8:.*]] = arith.constant 2 : index
+// CHECK: %[[VAL_9:.*]] = memref.alloc() : memref<2x5x1xf32>
+// CHECK: scf.for %[[VAL_10:.*]] = %[[VAL_7]] to %[[VAL_8]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_11:.*]] = %[[VAL_7]] to %[[VAL_5]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_12:.*]] = %[[VAL_7]] to %[[VAL_4]] step %[[VAL_6]] {
+// CHECK: %[[VAL_13:.*]] = memref.load %[[VAL_0]][%[[VAL_10]], %[[VAL_11]], %[[VAL_12]]] : memref<2x5x7xf32, strided<[35, 7, 1], offset: ?>>
+// CHECK: %[[VAL_14:.*]] = arith.cmpi eq, %[[VAL_12]], %[[VAL_7]] : index
+// CHECK: scf.if %[[VAL_14]] {
+// CHECK: memref.store %[[VAL_3]], %[[VAL_9]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xf32>
+// CHECK: memref.store %[[VAL_2]], %[[VAL_1]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xi32>
+// CHECK: }
+// CHECK: %[[VAL_15:.*]] = memref.load %[[VAL_9]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xf32>
+// CHECK: %[[VAL_16:.*]] = memref.load %[[VAL_1]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xi32>
+// CHECK: %[[VAL_17:.*]] = arith.cmpf oge, %[[VAL_15]], %[[VAL_13]] : f32
+// CHECK: %[[VAL_18:.*]] = arith.index_cast %[[VAL_12]] : index to i32
+// CHECK: %[[VAL_19:.*]] = arith.select %[[VAL_17]], %[[VAL_18]], %[[VAL_16]] : i32
+// CHECK: %[[VAL_20:.*]] = arith.minimumf %[[VAL_13]], %[[VAL_15]] : f32
+// CHECK: memref.store %[[VAL_20]], %[[VAL_9]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xf32>
+// CHECK: memref.store %[[VAL_19]], %[[VAL_1]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xi32>
+func.func @test_decompose_r_argmin_float32(%src: memref<2x5x7xf32, strided<[35, 7, 1], offset: ?>>, %idx: memref<2x5x1xi32>) {
+  %dst = memref.alloc() : memref<2x5x1xf32>
+  hivm.hir.vreduce <min_with_index_right> ins(%src : memref<2x5x7xf32, strided<[35, 7, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<2x5x1xf32>, memref<2x5x1xi32>) reduce_dims = [2]
+  return
+}
+
+
+// -----
+// CHECK-LABEL: func.func @test_decomposer_r_argmin_float16_notflatten(
+// CHECK-SAME: %[[VAL_0:.*]]: memref<2x5x7xf16, strided<[96, 16, 1], offset: ?>>,
+// CHECK-SAME: %[[VAL_1:.*]]: memref<1x5x7xi32>) {
+// CHECK-DAG: %[[VAL_2:.*]] = arith.constant 0 : i32
+// CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0x7C00 : f16
+// CHECK-DAG: %[[VAL_4:.*]] = arith.constant 7 : index
+// CHECK-DAG: %[[VAL_5:.*]] = arith.constant 5 : index
+// CHECK-DAG: %[[VAL_6:.*]] = arith.constant 1 : index
+// CHECK-DAG: %[[VAL_7:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[VAL_8:.*]] = arith.constant 2 : index
+// CHECK: %[[VAL_9:.*]] = memref.alloc() : memref<1x5x7xf16>
+// CHECK: scf.for %[[VAL_10:.*]] = %[[VAL_7]] to %[[VAL_8]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_11:.*]] = %[[VAL_7]] to %[[VAL_5]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_12:.*]] = %[[VAL_7]] to %[[VAL_4]] step %[[VAL_6]] {
+// CHECK: %[[VAL_13:.*]] = memref.load %[[VAL_0]][%[[VAL_10]], %[[VAL_11]], %[[VAL_12]]] : memref<2x5x7xf16, strided<[96, 16, 1], offset: ?>>
+// CHECK: %[[VAL_14:.*]] = arith.cmpi eq, %[[VAL_10]], %[[VAL_7]] : index
+// CHECK: scf.if %[[VAL_14]] {
+// CHECK: memref.store %[[VAL_3]], %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf16>
+// CHECK: memref.store %[[VAL_2]], %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+// CHECK: }
+// CHECK: %[[VAL_15:.*]] = memref.load %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf16>
+// CHECK: %[[VAL_16:.*]] = memref.load %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+// CHECK: %[[VAL_17:.*]] = arith.cmpf oge, %[[VAL_15]], %[[VAL_13]] : f16
+// CHECK: %[[VAL_18:.*]] = arith.index_cast %[[VAL_10]] : index to i32
+// CHECK: %[[VAL_19:.*]] = arith.select %[[VAL_17]], %[[VAL_18]], %[[VAL_16]] : i32
+// CHECK: %[[VAL_20:.*]] = arith.minimumf %[[VAL_13]], %[[VAL_15]] : f16
+// CHECK: memref.store %[[VAL_20]], %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf16>
+// CHECK: memref.store %[[VAL_19]], %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+func.func @test_decomposer_r_argmin_float16_notflatten(%src: memref<2x5x7xf16, strided<[96, 16, 1], offset: ?>>, %idx: memref<1x5x7xi32>) {
+  %dst = memref.alloc() : memref<1x5x7xf16>
+  hivm.hir.vreduce <min_with_index_right> ins(%src : memref<2x5x7xf16, strided<[96, 16, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<1x5x7xf16>, memref<1x5x7xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+// CHECK-LABEL: func.func @test_decompose_r_argmin_float32_notflatten(
+// CHECK-SAME: %[[VAL_0:.*]]: memref<2x5x7xf32, strided<[96, 16, 1], offset: ?>>,
+// CHECK-SAME: %[[VAL_1:.*]]: memref<1x5x7xi32>) {
+// CHECK-DAG: %[[VAL_2:.*]] = arith.constant 0 : i32
+// CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0x7F800000 : f32
+// CHECK-DAG: %[[VAL_4:.*]] = arith.constant 7 : index
+// CHECK-DAG: %[[VAL_5:.*]] = arith.constant 5 : index
+// CHECK-DAG: %[[VAL_6:.*]] = arith.constant 1 : index
+// CHECK-DAG: %[[VAL_7:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[VAL_8:.*]] = arith.constant 2 : index
+// CHECK: %[[VAL_9:.*]] = memref.alloc() : memref<1x5x7xf32>
+// CHECK: scf.for %[[VAL_10:.*]] = %[[VAL_7]] to %[[VAL_8]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_11:.*]] = %[[VAL_7]] to %[[VAL_5]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_12:.*]] = %[[VAL_7]] to %[[VAL_4]] step %[[VAL_6]] {
+// CHECK: %[[VAL_13:.*]] = memref.load %[[VAL_0]][%[[VAL_10]], %[[VAL_11]], %[[VAL_12]]] : memref<2x5x7xf32, strided<[96, 16, 1], offset: ?>>
+// CHECK: %[[VAL_14:.*]] = arith.cmpi eq, %[[VAL_10]], %[[VAL_7]] : index
+// CHECK: scf.if %[[VAL_14]] {
+// CHECK: memref.store %[[VAL_3]], %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf32>
+// CHECK: memref.store %[[VAL_2]], %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+// CHECK: }
+// CHECK: %[[VAL_15:.*]] = memref.load %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf32>
+// CHECK: %[[VAL_16:.*]] = memref.load %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+// CHECK: %[[VAL_17:.*]] = arith.cmpf oge, %[[VAL_15]], %[[VAL_13]] : f32
+// CHECK: %[[VAL_18:.*]] = arith.index_cast %[[VAL_10]] : index to i32
+// CHECK: %[[VAL_19:.*]] = arith.select %[[VAL_17]], %[[VAL_18]], %[[VAL_16]] : i32
+// CHECK: %[[VAL_20:.*]] = arith.minimumf %[[VAL_13]], %[[VAL_15]] : f32
+// CHECK: memref.store %[[VAL_20]], %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf32>
+// CHECK: memref.store %[[VAL_19]], %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+func.func @test_decompose_r_argmin_float32_notflatten(%src: memref<2x5x7xf32, strided<[96, 16, 1], offset: ?>>, %idx: memref<1x5x7xi32>) {
+  %dst = memref.alloc() : memref<1x5x7xf32>
+  hivm.hir.vreduce <min_with_index_right> ins(%src : memref<2x5x7xf32, strided<[96, 16, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<1x5x7xf32>, memref<1x5x7xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_with_r_index_int64() {
+  // CHECK-DAG: %[[VAL_0:.*]] = arith.constant 0 : i32
+  // CHECK-DAG: %[[VAL_1:.*]] = arith.constant -9223372036854775808 : i64
+  // CHECK-DAG: %[[VAL_2:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[VAL_4:.*]] = arith.constant 2 : index
+  // CHECK: %[[VAL_5:.*]] = memref.alloc() : memref<2x2xi64>
+  // CHECK: %[[VAL_6:.*]] = memref.alloc() : memref<1x2xi64>
+  // CHECK: %[[VAL_7:.*]] = memref.alloc() : memref<1x2xi32>
+  %src = memref.alloc() : memref<2x2xi64>
+  %dst1 = memref.alloc() : memref<1x2xi64>
+  %dst2 = memref.alloc() : memref<1x2xi32>
+  // CHECK: scf.for %[[VAL_8:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: scf.for %[[VAL_9:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: %[[VAL_10:.*]] = memref.load %[[VAL_5]][%[[VAL_8]], %[[VAL_9]]] : memref<2x2xi64>
+  // CHECK: %[[VAL_11:.*]] = arith.cmpi eq, %[[VAL_8]], %[[VAL_3]] : index
+  // CHECK: scf.if %[[VAL_11]] {
+  // CHECK: memref.store %[[VAL_1]], %[[VAL_6]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi64>
+  // CHECK: memref.store %[[VAL_0]], %[[VAL_7]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  // CHECK: }
+  // CHECK: %[[VAL_12:.*]] = memref.load %[[VAL_6]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi64>
+  // CHECK: %[[VAL_13:.*]] = memref.load %[[VAL_7]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  // CHECK: %[[VAL_14:.*]] = arith.cmpi sle, %[[VAL_12]], %[[VAL_10]] : i64
+  // CHECK: %[[VAL_15:.*]] = arith.index_cast %[[VAL_8]] : index to i32
+  // CHECK: %[[VAL_16:.*]] = arith.select %[[VAL_14]], %[[VAL_15]], %[[VAL_13]] : i32
+  // CHECK: %[[VAL_17:.*]] = arith.maxsi %[[VAL_10]], %[[VAL_12]] : i64
+  // CHECK: memref.store %[[VAL_17]], %[[VAL_6]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi64>
+  // CHECK: memref.store %[[VAL_16]], %[[VAL_7]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<2x2xi64>) outs(%dst1, %dst2 : memref<1x2xi64>, memref<1x2xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_with_r_index_int32() {
+  // CHECK-DAG: %[[VAL_0:.*]] = arith.constant 0 : i32
+  // CHECK-DAG: %[[VAL_1:.*]] = arith.constant -2147483648 : i32
+  // CHECK-DAG: %[[VAL_2:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[VAL_4:.*]] = arith.constant 2 : index
+  // CHECK: %[[VAL_5:.*]] = memref.alloc() : memref<2x2xi32>
+  // CHECK: %[[VAL_6:.*]] = memref.alloc() : memref<1x2xi32>
+  // CHECK: %[[VAL_7:.*]] = memref.alloc() : memref<1x2xi32>
+  %src = memref.alloc() : memref<2x2xi32>
+  %dst1 = memref.alloc() : memref<1x2xi32>
+  %dst2 = memref.alloc() : memref<1x2xi32>
+  // CHECK: scf.for %[[VAL_8:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: scf.for %[[VAL_9:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: %[[VAL_10:.*]] = memref.load %[[VAL_5]][%[[VAL_8]], %[[VAL_9]]] : memref<2x2xi32>
+  // CHECK: %[[VAL_11:.*]] = arith.cmpi eq, %[[VAL_8]], %[[VAL_3]] : index
+  // CHECK: scf.if %[[VAL_11]] {
+  // CHECK: memref.store %[[VAL_1]], %[[VAL_6]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  // CHECK: memref.store %[[VAL_0]], %[[VAL_7]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  // CHECK: }
+  // CHECK: %[[VAL_12:.*]] = memref.load %[[VAL_6]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  // CHECK: %[[VAL_13:.*]] = memref.load %[[VAL_7]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  // CHECK: %[[VAL_14:.*]] = arith.cmpi sle, %[[VAL_12]], %[[VAL_10]] : i32
+  // CHECK: %[[VAL_15:.*]] = arith.index_cast %[[VAL_8]] : index to i32
+  // CHECK: %[[VAL_16:.*]] = arith.select %[[VAL_14]], %[[VAL_15]], %[[VAL_13]] : i32
+  // CHECK: %[[VAL_17:.*]] = arith.maxsi %[[VAL_10]], %[[VAL_12]] : i32
+  // CHECK: memref.store %[[VAL_17]], %[[VAL_6]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  // CHECK: memref.store %[[VAL_16]], %[[VAL_7]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<2x2xi32>) outs(%dst1, %dst2 : memref<1x2xi32>, memref<1x2xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_with_r_index_int16() {
+  // CHECK-DAG: %[[VAL_0:.*]] = arith.constant 0 : i32
+  // CHECK-DAG: %[[VAL_1:.*]] = arith.constant -32768 : i16
+  // CHECK-DAG: %[[VAL_2:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[VAL_4:.*]] = arith.constant 2 : index
+  // CHECK: %[[VAL_5:.*]] = memref.alloc() : memref<2x2xi16>
+  // CHECK: %[[VAL_6:.*]] = memref.alloc() : memref<1x2xi16>
+  // CHECK: %[[VAL_7:.*]] = memref.alloc() : memref<1x2xi32>
+  %src = memref.alloc() : memref<2x2xi16>
+  %dst1 = memref.alloc() : memref<1x2xi16>
+  %dst2 = memref.alloc() : memref<1x2xi32>
+  // CHECK: scf.for %[[VAL_8:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: scf.for %[[VAL_9:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: %[[VAL_10:.*]] = memref.load %[[VAL_5]][%[[VAL_8]], %[[VAL_9]]] : memref<2x2xi16>
+  // CHECK: %[[VAL_11:.*]] = arith.cmpi eq, %[[VAL_8]], %[[VAL_3]] : index
+  // CHECK: scf.if %[[VAL_11]] {
+  // CHECK: memref.store %[[VAL_1]], %[[VAL_6]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi16>
+  // CHECK: memref.store %[[VAL_0]], %[[VAL_7]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  // CHECK: }
+  // CHECK: %[[VAL_12:.*]] = memref.load %[[VAL_6]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi16>
+  // CHECK: %[[VAL_13:.*]] = memref.load %[[VAL_7]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  // CHECK: %[[VAL_14:.*]] = arith.cmpi sle, %[[VAL_12]], %[[VAL_10]] : i16
+  // CHECK: %[[VAL_15:.*]] = arith.index_cast %[[VAL_8]] : index to i32
+  // CHECK: %[[VAL_16:.*]] = arith.select %[[VAL_14]], %[[VAL_15]], %[[VAL_13]] : i32
+  // CHECK: %[[VAL_17:.*]] = arith.maxsi %[[VAL_10]], %[[VAL_12]] : i16
+  // CHECK: memref.store %[[VAL_17]], %[[VAL_6]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi16>
+  // CHECK: memref.store %[[VAL_16]], %[[VAL_7]][%[[VAL_3]], %[[VAL_9]]] : memref<1x2xi32>
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<2x2xi16>) outs(%dst1, %dst2 : memref<1x2xi16>, memref<1x2xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_with_r_index_float32() {
+  // CHECK-DAG: %[[VAL_0:.*]] = arith.constant 0 : i32
+  // CHECK-DAG: %[[VAL_1:.*]] = arith.constant 0xFF800000 : f32
+  // CHECK-DAG: %[[VAL_2:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[VAL_4:.*]] = arith.constant 32 : index
+  // CHECK: %[[VAL_5:.*]] = memref.alloc() : memref<32xf32>
+  // CHECK: %[[VAL_6:.*]] = memref.alloc() : memref<1xf32>
+  // CHECK: %[[VAL_7:.*]] = memref.alloc() : memref<1xi32>
+  %src = memref.alloc() : memref<32xf32>
+  %dst1 = memref.alloc() : memref<1xf32>
+  %dst2 = memref.alloc() : memref<1xi32>
+  // CHECK: scf.for %[[VAL_8:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: %[[VAL_9:.*]] = memref.load %[[VAL_5]][%[[VAL_8]]] : memref<32xf32>
+  // CHECK: %[[VAL_10:.*]] = arith.cmpi eq, %[[VAL_8]], %[[VAL_3]] : index
+  // CHECK: scf.if %[[VAL_10]] {
+  // CHECK: memref.store %[[VAL_1]], %[[VAL_6]][%[[VAL_3]]] : memref<1xf32>
+  // CHECK: memref.store %[[VAL_0]], %[[VAL_7]][%[[VAL_3]]] : memref<1xi32>
+  // CHECK: }
+  // CHECK: %[[VAL_11:.*]] = memref.load %[[VAL_6]][%[[VAL_3]]] : memref<1xf32>
+  // CHECK: %[[VAL_12:.*]] = memref.load %[[VAL_7]][%[[VAL_3]]] : memref<1xi32>
+  // CHECK: %[[VAL_13:.*]] = arith.cmpf ole, %[[VAL_11]], %[[VAL_9]] : f32
+  // CHECK: %[[VAL_14:.*]] = arith.index_cast %[[VAL_8]] : index to i32
+  // CHECK: %[[VAL_15:.*]] = arith.select %[[VAL_13]], %[[VAL_14]], %[[VAL_12]] : i32
+  // CHECK: %[[VAL_16:.*]] = arith.maximumf %[[VAL_9]], %[[VAL_11]] : f32
+  // CHECK: memref.store %[[VAL_16]], %[[VAL_6]][%[[VAL_3]]] : memref<1xf32>
+  // CHECK: memref.store %[[VAL_15]], %[[VAL_7]][%[[VAL_3]]] : memref<1xi32>
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<32xf32>) outs(%dst1, %dst2 : memref<1xf32>, memref<1xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_with_r_index_float16() {
+  // CHECK-DAG: %[[VAL_0:.*]] = arith.constant 0 : i32
+  // CHECK-DAG: %[[VAL_1:.*]] = arith.constant 0xFC00 : f16
+  // CHECK-DAG: %[[VAL_2:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[VAL_4:.*]] = arith.constant 32 : index
+  // CHECK: %[[VAL_5:.*]] = memref.alloc() : memref<32xf16>
+  // CHECK: %[[VAL_6:.*]] = memref.alloc() : memref<1xf16>
+  // CHECK: %[[VAL_7:.*]] = memref.alloc() : memref<1xi32>
+  %src = memref.alloc() : memref<32xf16>
+  %dst1 = memref.alloc() : memref<1xf16>
+  %dst2 = memref.alloc() : memref<1xi32>
+  // CHECK: scf.for %[[VAL_8:.*]] = %[[VAL_3]] to %[[VAL_4]] step %[[VAL_2]] {
+  // CHECK: %[[VAL_9:.*]] = memref.load %[[VAL_5]][%[[VAL_8]]] : memref<32xf16>
+  // CHECK: %[[VAL_10:.*]] = arith.cmpi eq, %[[VAL_8]], %[[VAL_3]] : index
+  // CHECK: scf.if %[[VAL_10]] {
+  // CHECK: memref.store %[[VAL_1]], %[[VAL_6]][%[[VAL_3]]] : memref<1xf16>
+  // CHECK: memref.store %[[VAL_0]], %[[VAL_7]][%[[VAL_3]]] : memref<1xi32>
+  // CHECK: }
+  // CHECK: %[[VAL_11:.*]] = memref.load %[[VAL_6]][%[[VAL_3]]] : memref<1xf16>
+  // CHECK: %[[VAL_12:.*]] = memref.load %[[VAL_7]][%[[VAL_3]]] : memref<1xi32>
+  // CHECK: %[[VAL_13:.*]] = arith.cmpf ole, %[[VAL_11]], %[[VAL_9]] : f16
+  // CHECK: %[[VAL_14:.*]] = arith.index_cast %[[VAL_8]] : index to i32
+  // CHECK: %[[VAL_15:.*]] = arith.select %[[VAL_13]], %[[VAL_14]], %[[VAL_12]] : i32
+  // CHECK: %[[VAL_16:.*]] = arith.maximumf %[[VAL_9]], %[[VAL_11]] : f16
+  // CHECK: memref.store %[[VAL_16]], %[[VAL_6]][%[[VAL_3]]] : memref<1xf16>
+  // CHECK: memref.store %[[VAL_15]], %[[VAL_7]][%[[VAL_3]]] : memref<1xi32>
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<32xf16>) outs(%dst1, %dst2 : memref<1xf16>, memref<1xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+// CHECK-LABEL: func.func @test_decompose_r_argmax_float16(
+// CHECK-SAME: %[[VAL_0:.*]]: memref<2x5x7xf16, strided<[35, 7, 1], offset: ?>>,
+// CHECK-SAME: %[[VAL_1:.*]]: memref<2x5x1xi32>) {
+// CHECK-DAG: %[[VAL_2:.*]] = arith.constant 0 : i32
+// CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0xFC00 : f16
+// CHECK-DAG: %[[VAL_4:.*]] = arith.constant 7 : index
+// CHECK-DAG: %[[VAL_5:.*]] = arith.constant 5 : index
+// CHECK-DAG: %[[VAL_6:.*]] = arith.constant 1 : index
+// CHECK-DAG: %[[VAL_7:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[VAL_8:.*]] = arith.constant 2 : index
+// CHECK: %[[VAL_9:.*]] = memref.alloc() : memref<2x5x1xf16>
+// CHECK: scf.for %[[VAL_10:.*]] = %[[VAL_7]] to %[[VAL_8]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_11:.*]] = %[[VAL_7]] to %[[VAL_5]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_12:.*]] = %[[VAL_7]] to %[[VAL_4]] step %[[VAL_6]] {
+// CHECK: %[[VAL_13:.*]] = memref.load %[[VAL_0]][%[[VAL_10]], %[[VAL_11]], %[[VAL_12]]] : memref<2x5x7xf16, strided<[35, 7, 1], offset: ?>>
+// CHECK: %[[VAL_14:.*]] = arith.cmpi eq, %[[VAL_12]], %[[VAL_7]] : index
+// CHECK: scf.if %[[VAL_14]] {
+// CHECK: memref.store %[[VAL_3]], %[[VAL_9]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xf16>
+// CHECK: memref.store %[[VAL_2]], %[[VAL_1]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xi32>
+// CHECK: }
+// CHECK: %[[VAL_15:.*]] = memref.load %[[VAL_9]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xf16>
+// CHECK: %[[VAL_16:.*]] = memref.load %[[VAL_1]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xi32>
+// CHECK: %[[VAL_17:.*]] = arith.cmpf ole, %[[VAL_15]], %[[VAL_13]] : f16
+// CHECK: %[[VAL_18:.*]] = arith.index_cast %[[VAL_12]] : index to i32
+// CHECK: %[[VAL_19:.*]] = arith.select %[[VAL_17]], %[[VAL_18]], %[[VAL_16]] : i32
+// CHECK: %[[VAL_20:.*]] = arith.maximumf %[[VAL_13]], %[[VAL_15]] : f16
+// CHECK: memref.store %[[VAL_20]], %[[VAL_9]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xf16>
+// CHECK: memref.store %[[VAL_19]], %[[VAL_1]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xi32>
+func.func @test_decompose_r_argmax_float16(%src: memref<2x5x7xf16, strided<[35, 7, 1], offset: ?>>, %idx: memref<2x5x1xi32>) {
+  %dst = memref.alloc() : memref<2x5x1xf16>
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<2x5x7xf16, strided<[35, 7, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<2x5x1xf16>, memref<2x5x1xi32>) reduce_dims = [2]
+  return
+}
+
+// -----
+// CHECK-LABEL: func.func @test_decompose_r_argmax_float32(
+// CHECK-SAME: %[[VAL_0:.*]]: memref<2x5x7xf32, strided<[35, 7, 1], offset: ?>>,
+// CHECK-SAME: %[[VAL_1:.*]]: memref<2x5x1xi32>) {
+// CHECK-DAG: %[[VAL_2:.*]] = arith.constant 0 : i32
+// CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0xFF800000 : f32
+// CHECK-DAG: %[[VAL_4:.*]] = arith.constant 7 : index
+// CHECK-DAG: %[[VAL_5:.*]] = arith.constant 5 : index
+// CHECK-DAG: %[[VAL_6:.*]] = arith.constant 1 : index
+// CHECK-DAG: %[[VAL_7:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[VAL_8:.*]] = arith.constant 2 : index
+// CHECK: %[[VAL_9:.*]] = memref.alloc() : memref<2x5x1xf32>
+// CHECK: scf.for %[[VAL_10:.*]] = %[[VAL_7]] to %[[VAL_8]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_11:.*]] = %[[VAL_7]] to %[[VAL_5]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_12:.*]] = %[[VAL_7]] to %[[VAL_4]] step %[[VAL_6]] {
+// CHECK: %[[VAL_13:.*]] = memref.load %[[VAL_0]][%[[VAL_10]], %[[VAL_11]], %[[VAL_12]]] : memref<2x5x7xf32, strided<[35, 7, 1], offset: ?>>
+// CHECK: %[[VAL_14:.*]] = arith.cmpi eq, %[[VAL_12]], %[[VAL_7]] : index
+// CHECK: scf.if %[[VAL_14]] {
+// CHECK: memref.store %[[VAL_3]], %[[VAL_9]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xf32>
+// CHECK: memref.store %[[VAL_2]], %[[VAL_1]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xi32>
+// CHECK: }
+// CHECK: %[[VAL_15:.*]] = memref.load %[[VAL_9]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xf32>
+// CHECK: %[[VAL_16:.*]] = memref.load %[[VAL_1]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xi32>
+// CHECK: %[[VAL_17:.*]] = arith.cmpf ole, %[[VAL_15]], %[[VAL_13]] : f32
+// CHECK: %[[VAL_18:.*]] = arith.index_cast %[[VAL_12]] : index to i32
+// CHECK: %[[VAL_19:.*]] = arith.select %[[VAL_17]], %[[VAL_18]], %[[VAL_16]] : i32
+// CHECK: %[[VAL_20:.*]] = arith.maximumf %[[VAL_13]], %[[VAL_15]] : f32
+// CHECK: memref.store %[[VAL_20]], %[[VAL_9]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xf32>
+// CHECK: memref.store %[[VAL_19]], %[[VAL_1]][%[[VAL_10]], %[[VAL_11]], %[[VAL_7]]] : memref<2x5x1xi32>
+func.func @test_decompose_r_argmax_float32(%src: memref<2x5x7xf32, strided<[35, 7, 1], offset: ?>>, %idx: memref<2x5x1xi32>) {
+  %dst = memref.alloc() : memref<2x5x1xf32>
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<2x5x7xf32, strided<[35, 7, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<2x5x1xf32>, memref<2x5x1xi32>) reduce_dims = [2]
+  return
+}
+
+// -----
+// CHECK-LABEL: func.func @test_decomposer_r_argmax_float16_notflatten(
+// CHECK-SAME: %[[VAL_0:.*]]: memref<2x5x7xf16, strided<[96, 16, 1], offset: ?>>,
+// CHECK-SAME: %[[VAL_1:.*]]: memref<1x5x7xi32>) {
+// CHECK-DAG: %[[VAL_2:.*]] = arith.constant 0 : i32
+// CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0xFC00 : f16
+// CHECK-DAG: %[[VAL_4:.*]] = arith.constant 7 : index
+// CHECK-DAG: %[[VAL_5:.*]] = arith.constant 5 : index
+// CHECK-DAG: %[[VAL_6:.*]] = arith.constant 1 : index
+// CHECK-DAG: %[[VAL_7:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[VAL_8:.*]] = arith.constant 2 : index
+// CHECK: %[[VAL_9:.*]] = memref.alloc() : memref<1x5x7xf16>
+// CHECK: scf.for %[[VAL_10:.*]] = %[[VAL_7]] to %[[VAL_8]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_11:.*]] = %[[VAL_7]] to %[[VAL_5]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_12:.*]] = %[[VAL_7]] to %[[VAL_4]] step %[[VAL_6]] {
+// CHECK: %[[VAL_13:.*]] = memref.load %[[VAL_0]][%[[VAL_10]], %[[VAL_11]], %[[VAL_12]]] : memref<2x5x7xf16, strided<[96, 16, 1], offset: ?>>
+// CHECK: %[[VAL_14:.*]] = arith.cmpi eq, %[[VAL_10]], %[[VAL_7]] : index
+// CHECK: scf.if %[[VAL_14]] {
+// CHECK: memref.store %[[VAL_3]], %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf16>
+// CHECK: memref.store %[[VAL_2]], %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+// CHECK: }
+// CHECK: %[[VAL_15:.*]] = memref.load %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf16>
+// CHECK: %[[VAL_16:.*]] = memref.load %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+// CHECK: %[[VAL_17:.*]] = arith.cmpf ole, %[[VAL_15]], %[[VAL_13]] : f16
+// CHECK: %[[VAL_18:.*]] = arith.index_cast %[[VAL_10]] : index to i32
+// CHECK: %[[VAL_19:.*]] = arith.select %[[VAL_17]], %[[VAL_18]], %[[VAL_16]] : i32
+// CHECK: %[[VAL_20:.*]] = arith.maximumf %[[VAL_13]], %[[VAL_15]] : f16
+// CHECK: memref.store %[[VAL_20]], %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf16>
+// CHECK: memref.store %[[VAL_19]], %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+func.func @test_decomposer_r_argmax_float16_notflatten(%src: memref<2x5x7xf16, strided<[96, 16, 1], offset: ?>>, %idx: memref<1x5x7xi32>) {
+  %dst = memref.alloc() : memref<1x5x7xf16>
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<2x5x7xf16, strided<[96, 16, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<1x5x7xf16>, memref<1x5x7xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+// CHECK-LABEL: func.func @test_decompose_r_argmax_float32_notflatten(
+// CHECK-SAME: %[[VAL_0:.*]]: memref<2x5x7xf32, strided<[96, 16, 1], offset: ?>>,
+// CHECK-SAME: %[[VAL_1:.*]]: memref<1x5x7xi32>) {
+// CHECK-DAG: %[[VAL_2:.*]] = arith.constant 0 : i32
+// CHECK-DAG: %[[VAL_3:.*]] = arith.constant 0xFF800000 : f32
+// CHECK-DAG: %[[VAL_4:.*]] = arith.constant 7 : index
+// CHECK-DAG: %[[VAL_5:.*]] = arith.constant 5 : index
+// CHECK-DAG: %[[VAL_6:.*]] = arith.constant 1 : index
+// CHECK-DAG: %[[VAL_7:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[VAL_8:.*]] = arith.constant 2 : index
+// CHECK: %[[VAL_9:.*]] = memref.alloc() : memref<1x5x7xf32>
+// CHECK: scf.for %[[VAL_10:.*]] = %[[VAL_7]] to %[[VAL_8]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_11:.*]] = %[[VAL_7]] to %[[VAL_5]] step %[[VAL_6]] {
+// CHECK: scf.for %[[VAL_12:.*]] = %[[VAL_7]] to %[[VAL_4]] step %[[VAL_6]] {
+// CHECK: %[[VAL_13:.*]] = memref.load %[[VAL_0]][%[[VAL_10]], %[[VAL_11]], %[[VAL_12]]] : memref<2x5x7xf32, strided<[96, 16, 1], offset: ?>>
+// CHECK: %[[VAL_14:.*]] = arith.cmpi eq, %[[VAL_10]], %[[VAL_7]] : index
+// CHECK: scf.if %[[VAL_14]] {
+// CHECK: memref.store %[[VAL_3]], %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf32>
+// CHECK: memref.store %[[VAL_2]], %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+// CHECK: }
+// CHECK: %[[VAL_15:.*]] = memref.load %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf32>
+// CHECK: %[[VAL_16:.*]] = memref.load %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+// CHECK: %[[VAL_17:.*]] = arith.cmpf ole, %[[VAL_15]], %[[VAL_13]] : f32
+// CHECK: %[[VAL_18:.*]] = arith.index_cast %[[VAL_10]] : index to i32
+// CHECK: %[[VAL_19:.*]] = arith.select %[[VAL_17]], %[[VAL_18]], %[[VAL_16]] : i32
+// CHECK: %[[VAL_20:.*]] = arith.maximumf %[[VAL_13]], %[[VAL_15]] : f32
+// CHECK: memref.store %[[VAL_20]], %[[VAL_9]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xf32>
+// CHECK: memref.store %[[VAL_19]], %[[VAL_1]][%[[VAL_7]], %[[VAL_11]], %[[VAL_12]]] : memref<1x5x7xi32>
+func.func @test_decompose_r_argmax_float32_notflatten(%src: memref<2x5x7xf32, strided<[96, 16, 1], offset: ?>>, %idx: memref<1x5x7xi32>) {
+  %dst = memref.alloc() : memref<1x5x7xf32>
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<2x5x7xf32, strided<[96, 16, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<1x5x7xf32>, memref<1x5x7xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_ar_i1() {
+  %src = memref.alloc() : memref<24x32xi1>
+  %dst = memref.alloc() : memref<24x1xi1>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<24x32xi1>) outs(%dst : memref<24x1xi1>) reduce_dims = [1]
+  return
+}
+
+// -----
+func.func @test_reduce_max_ar_i8() {
+  %src = memref.alloc() : memref<24x32xi8>
+  %dst = memref.alloc() : memref<24x1xi8>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<24x32xi8>) outs(%dst : memref<24x1xi8>) reduce_dims = [1]
+  return
+}
+
+// -----
+func.func @test_reduce_max_ar_ui8() {
+  %src = memref.alloc() : memref<24x32xui8>
+  %dst = memref.alloc() : memref<24x1xui8>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<24x32xui8>) outs(%dst : memref<24x1xui8>) reduce_dims = [1]
+  return
+}
+
+// -----
+func.func @test_reduce_max_ar_i16() {
+  %src = memref.alloc() : memref<24x32xi16>
+  %dst = memref.alloc() : memref<24x1xi16>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<24x32xi16>) outs(%dst : memref<24x1xi16>) reduce_dims = [1]
+  return
+}
+
+// -----
+func.func @test_reduce_max_ar_ui16() {
+  %src = memref.alloc() : memref<24x32xui16>
+  %dst = memref.alloc() : memref<24x1xui16>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<24x32xui16>) outs(%dst : memref<24x1xui16>) reduce_dims = [1]
+  return
+}
+
+// -----
+func.func @test_reduce_max_ar_i32() {
+  %src = memref.alloc() : memref<24x32xi32>
+  %dst = memref.alloc() : memref<24x1xi32>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<24x32xi32>) outs(%dst : memref<24x1xi32>) reduce_dims = [1]
+  return
+}
+
+// -----
+func.func @test_reduce_max_ar_ui32() {
+  %src = memref.alloc() : memref<24x32xui32>
+  %dst = memref.alloc() : memref<24x1xui32>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<24x32xui32>) outs(%dst : memref<24x1xui32>) reduce_dims = [1]
+  return
+}
+
+// -----
+func.func @test_reduce_max_ra_i1() {
+  %src = memref.alloc() : memref<24x32xi1>
+  %dst = memref.alloc() : memref<1x32xi1>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<24x32xi1>) outs(%dst : memref<1x32xi1>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_ra_i8() {
+  %src = memref.alloc() : memref<24x32xi8>
+  %dst = memref.alloc() : memref<1x32xi8>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<24x32xi8>) outs(%dst : memref<1x32xi8>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_ra_ui8() {
+  %src = memref.alloc() : memref<24x32xui8>
+  %dst = memref.alloc() : memref<1x32xui8>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<24x32xui8>) outs(%dst : memref<1x32xui8>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_ra_i16() {
+  %src = memref.alloc() : memref<24x32xi16>
+  %dst = memref.alloc() : memref<1x32xi16>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<24x32xi16>) outs(%dst : memref<1x32xi16>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_ra_ui16() {
+  %src = memref.alloc() : memref<24x32xui16>
+  %dst = memref.alloc() : memref<1x32xui16>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<24x32xui16>) outs(%dst : memref<1x32xui16>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_ra_i32() {
+  %src = memref.alloc() : memref<24x32xi32>
+  %dst = memref.alloc() : memref<1x32xi32>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<24x32xi32>) outs(%dst : memref<1x32xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_ra_ui32() {
+  %src = memref.alloc() : memref<24x32xui32>
+  %dst = memref.alloc() : memref<1x32xui32>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<24x32xui32>) outs(%dst : memref<1x32xui32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_ra_f16() {
+  %src = memref.alloc() : memref<24x32xf16>
+  %dst = memref.alloc() : memref<1x32xf16>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<24x32xf16>) outs(%dst : memref<1x32xf16>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_ra_f32() {
+  %src = memref.alloc() : memref<24x32xf32>
+  %dst = memref.alloc() : memref<1x32xf32>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<24x32xf32>) outs(%dst : memref<1x32xf32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_r_i1() {
+  %src = memref.alloc() : memref<32xi1>
+  %dst = memref.alloc() : memref<1xi1>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<32xi1>) outs(%dst : memref<1xi1>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_r_i8() {
+  %src = memref.alloc() : memref<32xi8>
+  %dst = memref.alloc() : memref<1xi8>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<32xi8>) outs(%dst : memref<1xi8>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_r_ui8() {
+  %src = memref.alloc() : memref<32xui8>
+  %dst = memref.alloc() : memref<1xui8>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<32xui8>) outs(%dst : memref<1xui8>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_r_i16() {
+  %src = memref.alloc() : memref<32xi16>
+  %dst = memref.alloc() : memref<1xi16>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<32xi16>) outs(%dst : memref<1xi16>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_r_ui16() {
+  %src = memref.alloc() : memref<32xui16>
+  %dst = memref.alloc() : memref<1xui16>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<32xui16>) outs(%dst : memref<1xui16>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_r_i32() {
+  %src = memref.alloc() : memref<32xi32>
+  %dst = memref.alloc() : memref<1xi32>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<32xi32>) outs(%dst : memref<1xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_r_ui32() {
+  %src = memref.alloc() : memref<32xui32>
+  %dst = memref.alloc() : memref<1xui32>
+  // CHECK: hivm.hir.vreduce <max>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max> ins(%src : memref<32xui32>) outs(%dst : memref<1xui32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_with_index_i1() {
+  %src = memref.alloc() : memref<2x2xi1>
+  %dst1 = memref.alloc() : memref<1x2xi1>
+  %dst2 = memref.alloc() : memref<1x2xi32>
+  // CHECK: hivm.hir.vreduce <max_with_index_left>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_left> ins(%src : memref<2x2xi1>) outs(%dst1, %dst2 : memref<1x2xi1>, memref<1x2xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_with_index_i8() {
+  %src = memref.alloc() : memref<2x2xi8>
+  %dst1 = memref.alloc() : memref<1x2xi8>
+  %dst2 = memref.alloc() : memref<1x2xi32>
+  // CHECK: hivm.hir.vreduce <max_with_index_left>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_left> ins(%src : memref<2x2xi8>) outs(%dst1, %dst2 : memref<1x2xi8>, memref<1x2xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_with_index_ui8() {
+  %src = memref.alloc() : memref<2x2xui8>
+  %dst1 = memref.alloc() : memref<1x2xui8>
+  %dst2 = memref.alloc() : memref<1x2xi32>
+  // CHECK: hivm.hir.vreduce <max_with_index_left>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_left> ins(%src : memref<2x2xui8>) outs(%dst1, %dst2 : memref<1x2xui8>, memref<1x2xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_with_index_f16() {
+  %src = memref.alloc() : memref<2x2xf16>
+  %dst1 = memref.alloc() : memref<1x2xf16>
+  %dst2 = memref.alloc() : memref<1x2xi32>
+  // CHECK: hivm.hir.vreduce <max_with_index_left>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_left> ins(%src : memref<2x2xf16>) outs(%dst1, %dst2 : memref<1x2xf16>, memref<1x2xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_with_index_f32() {
+  %src = memref.alloc() : memref<2x2xf32>
+  %dst1 = memref.alloc() : memref<1x2xf32>
+  %dst2 = memref.alloc() : memref<1x2xi32>
+  // CHECK: hivm.hir.vreduce <max_with_index_left>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_left> ins(%src : memref<2x2xf32>) outs(%dst1, %dst2 : memref<1x2xf32>, memref<1x2xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_decompose_argmax_i1(%src: memref<2x5x7xi1, strided<[96, 16, 1], offset: ?>>, %idx: memref<1x5x7xi32>) {
+  %dst = memref.alloc() : memref<1x5x7xi1>
+  // CHECK: hivm.hir.vreduce <max_with_index_left>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_left> ins(%src : memref<2x5x7xi1, strided<[96, 16, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<1x5x7xi1>, memref<1x5x7xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_decompose_argmax_i8(%src: memref<2x5x7xi8, strided<[96, 16, 1], offset: ?>>, %idx: memref<1x5x7xi32>) {
+  %dst = memref.alloc() : memref<1x5x7xi8>
+  // CHECK: hivm.hir.vreduce <max_with_index_left>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_left> ins(%src : memref<2x5x7xi8, strided<[96, 16, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<1x5x7xi8>, memref<1x5x7xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_decompose_argmax_ui8(%src: memref<2x5x7xui8, strided<[96, 16, 1], offset: ?>>, %idx: memref<1x5x7xi32>) {
+  %dst = memref.alloc() : memref<1x5x7xui8>
+  // CHECK: hivm.hir.vreduce <max_with_index_left>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_left> ins(%src : memref<2x5x7xui8, strided<[96, 16, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<1x5x7xui8>, memref<1x5x7xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_with_r_index_i1() {
+  %src = memref.alloc() : memref<2x2xi1>
+  %dst1 = memref.alloc() : memref<1x2xi1>
+  %dst2 = memref.alloc() : memref<1x2xi32>
+  // CHECK: hivm.hir.vreduce <max_with_index_right>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<2x2xi1>) outs(%dst1, %dst2 : memref<1x2xi1>, memref<1x2xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_with_r_index_i8() {
+  %src = memref.alloc() : memref<2x2xi8>
+  %dst1 = memref.alloc() : memref<1x2xi8>
+  %dst2 = memref.alloc() : memref<1x2xi32>
+  // CHECK: hivm.hir.vreduce <max_with_index_right>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<2x2xi8>) outs(%dst1, %dst2 : memref<1x2xi8>, memref<1x2xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_with_r_index_ui8() {
+  %src = memref.alloc() : memref<2x2xui8>
+  %dst1 = memref.alloc() : memref<1x2xui8>
+  %dst2 = memref.alloc() : memref<1x2xi32>
+  // CHECK: hivm.hir.vreduce <max_with_index_right>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<2x2xui8>) outs(%dst1, %dst2 : memref<1x2xui8>, memref<1x2xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_with_r_index_f16() {
+  %src = memref.alloc() : memref<2x2xf16>
+  %dst1 = memref.alloc() : memref<1x2xf16>
+  %dst2 = memref.alloc() : memref<1x2xi32>
+  // CHECK: hivm.hir.vreduce <max_with_index_right>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<2x2xf16>) outs(%dst1, %dst2 : memref<1x2xf16>, memref<1x2xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_with_r_index_f32() {
+  %src = memref.alloc() : memref<2x2xf32>
+  %dst1 = memref.alloc() : memref<1x2xf32>
+  %dst2 = memref.alloc() : memref<1x2xi32>
+  // CHECK: hivm.hir.vreduce <max_with_index_right>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<2x2xf32>) outs(%dst1, %dst2 : memref<1x2xf32>, memref<1x2xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_with_r_index_dim0_I1() {
+  %src = memref.alloc() : memref<32xi1>
+  %dst1 = memref.alloc() : memref<1xi1>
+  %dst2 = memref.alloc() : memref<1xi32>
+  // CHECK: hivm.hir.vreduce <max_with_index_right>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<32xi1>) outs(%dst1, %dst2 : memref<1xi1>, memref<1xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_with_r_index_dim0_I8() {
+  %src = memref.alloc() : memref<32xi8>
+  %dst1 = memref.alloc() : memref<1xi8>
+  %dst2 = memref.alloc() : memref<1xi32>
+  // CHECK: hivm.hir.vreduce <max_with_index_right>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<32xi8>) outs(%dst1, %dst2 : memref<1xi8>, memref<1xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_reduce_max_with_r_index_dim0_UI8() {
+  %src = memref.alloc() : memref<32xui8>
+  %dst1 = memref.alloc() : memref<1xui8>
+  %dst2 = memref.alloc() : memref<1xi32>
+  // CHECK: hivm.hir.vreduce <max_with_index_right>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<32xui8>) outs(%dst1, %dst2 : memref<1xui8>, memref<1xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_decompose_r_argmax_I1(%src: memref<2x5x7xi1, strided<[35, 7, 1], offset: ?>>, %idx: memref<2x5x1xi32>) {
+  %dst = memref.alloc() : memref<2x5x1xi1>
+  // CHECK: hivm.hir.vreduce <max_with_index_right>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<2x5x7xi1, strided<[35, 7, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<2x5x1xi1>, memref<2x5x1xi32>) reduce_dims = [2]
+  return
+}
+
+// -----
+func.func @test_decompose_r_argmax_I8(%src: memref<2x5x7xi8, strided<[35, 7, 1], offset: ?>>, %idx: memref<2x5x1xi32>) {
+  %dst = memref.alloc() : memref<2x5x1xi8>
+  // CHECK: hivm.hir.vreduce <max_with_index_right>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<2x5x7xi8, strided<[35, 7, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<2x5x1xi8>, memref<2x5x1xi32>) reduce_dims = [2]
+  return
+}
+
+// -----
+func.func @test_decompose_r_argmax_UI8(%src: memref<2x5x7xui8, strided<[35, 7, 1], offset: ?>>, %idx: memref<2x5x1xi32>) {
+  %dst = memref.alloc() : memref<2x5x1xui8>
+  // CHECK: hivm.hir.vreduce <max_with_index_right>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<2x5x7xui8, strided<[35, 7, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<2x5x1xui8>, memref<2x5x1xi32>) reduce_dims = [2]
+  return
+}
+
+// -----
+func.func @test_decomposer_r_argmax_I1_notflatten(%src: memref<2x5x7xi1, strided<[96, 16, 1], offset: ?>>, %idx: memref<1x5x7xi32>) {
+  %dst = memref.alloc() : memref<1x5x7xi1>
+  // CHECK: hivm.hir.vreduce <max_with_index_right>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<2x5x7xi1, strided<[96, 16, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<1x5x7xi1>, memref<1x5x7xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_decomposer_r_argmax_I8_notflatten(%src: memref<2x5x7xi8, strided<[96, 16, 1], offset: ?>>, %idx: memref<1x5x7xi32>) {
+  %dst = memref.alloc() : memref<1x5x7xi8>
+  // CHECK: hivm.hir.vreduce <max_with_index_right>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<2x5x7xi8, strided<[96, 16, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<1x5x7xi8>, memref<1x5x7xi32>) reduce_dims = [0]
+  return
+}
+
+// -----
+func.func @test_decomposer_r_argmax_UI8_notflatten(%src: memref<2x5x7xui8, strided<[96, 16, 1], offset: ?>>, %idx: memref<1x5x7xi32>) {
+  %dst = memref.alloc() : memref<1x5x7xui8>
+  // CHECK: hivm.hir.vreduce <max_with_index_right>
+  // CHECK-NOT: for
+  hivm.hir.vreduce <max_with_index_right> ins(%src : memref<2x5x7xui8, strided<[96, 16, 1], offset: ?>>)
+                                    outs(%dst, %idx : memref<1x5x7xui8>, memref<1x5x7xi32>) reduce_dims = [0]
+  return
+}
+
+// CHECK-LABEL:   func.func @test_vabs_1d() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 256 : index
+// CHECK:           %[[VAL_3:.*]] = memref.alloc() : memref<1xi64>
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<256xi64>
+// CHECK:           scf.for %[[VAL_5:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             %[[VAL_6:.*]] = memref.load %[[VAL_3:.*]]{{\[}}%[[VAL_1:.*]]] : memref<1xi64>
+// CHECK:             %[[VAL_7:.*]] = math.absi %[[VAL_6:.*]] : i64
+// CHECK:             memref.store %[[VAL_7:.*]], %[[VAL_4:.*]]{{\[}}%[[VAL_5:.*]]] : memref<256xi64>
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vabs_1d() {
+  %src = memref.alloc() : memref<1xi64>
+  %dst = memref.alloc() : memref<256xi64>
+  hivm.hir.vabs ins(%src : memref<1xi64>)
+               outs(%dst : memref<256xi64>) broadcast = [0]
+
+  return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vabs_2d() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 256 : index
+// CHECK:           %[[VAL_3:.*]] = memref.alloc() : memref<256x1xi64>
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<256x256xi64>
+// CHECK:           scf.for %[[VAL_5:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             scf.for %[[VAL_6:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:               %[[VAL_7:.*]] = memref.load %[[VAL_3:.*]]{{\[}}%[[VAL_5:.*]], %[[VAL_1:.*]]] : memref<256x1xi64>
+// CHECK:               %[[VAL_8:.*]] = math.absi %[[VAL_7:.*]] : i64
+// CHECK:               memref.store %[[VAL_8:.*]], %[[VAL_4:.*]]{{\[}}%[[VAL_5:.*]], %[[VAL_6:.*]]] : memref<256x256xi64>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vabs_2d() {
+  %src = memref.alloc() : memref<256x1xi64>
+  %dst = memref.alloc() : memref<256x256xi64>
+  hivm.hir.vabs ins(%src : memref<256x1xi64>)
+               outs(%dst : memref<256x256xi64>) broadcast = [1]
+
+  return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vshr_1d_i64() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 8 : index
+// CHECK:           %[[VAL_3:.*]] = memref.alloc() : memref<8xi64>
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<8xi64>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<1xi64>
+// CHECK:           scf.for %[[VAL_6:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             %[[VAL_7:.*]] = memref.load %[[VAL_3:.*]]{{\[}}%[[VAL_6:.*]]] : memref<8xi64>
+// CHECK:             %[[VAL_8:.*]] = memref.load %[[VAL_5:.*]]{{\[}}%[[VAL_1:.*]]] : memref<1xi64>
+// CHECK:             %[[VAL_9:.*]] = arith.shrsi %[[VAL_7:.*]], %[[VAL_8:.*]] : i64
+// CHECK:             memref.store %[[VAL_9:.*]], %[[VAL_4:.*]]{{\[}}%[[VAL_6:.*]]] : memref<8xi64>
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vshr_1d_i64() {
+   %allocIn0 = memref.alloc() : memref<8xi64>
+   %allocOut = memref.alloc() : memref<8xi64>
+   %cst = memref.alloc() : memref<1xi64>
+   hivm.hir.vshr ins(%allocIn0, %cst : memref<8xi64>, memref<1xi64>) outs(%allocOut : memref<8xi64>) broadcast = [0]
+   return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vshr_2d_i64() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 8 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_3:.*]] = arith.constant 64 : index
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<64x8xi64>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<64x8xi64>
+// CHECK:           %[[VAL_6:.*]] = memref.alloc() : memref<64x1xi64>
+// CHECK:           scf.for %[[VAL_7:.*]] = %[[VAL_2:.*]] to %[[VAL_3:.*]] step %[[VAL_1:.*]] {
+// CHECK:             scf.for %[[VAL_8:.*]] = %[[VAL_2:.*]] to %[[VAL_0:.*]] step %[[VAL_1:.*]] {
+// CHECK:               %[[VAL_9:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_8:.*]]] : memref<64x8xi64>
+// CHECK:               %[[VAL_10:.*]] = memref.load %[[VAL_6:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_2:.*]]] : memref<64x1xi64>
+// CHECK:               %[[VAL_11:.*]] = arith.shrsi %[[VAL_9:.*]], %[[VAL_10:.*]] : i64
+// CHECK:               memref.store %[[VAL_11:.*]], %[[VAL_5:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_8:.*]]] : memref<64x8xi64>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vshr_2d_i64() {
+   %allocIn0 = memref.alloc() : memref<64x8xi64>
+   %allocOut = memref.alloc() : memref<64x8xi64>
+   %cst = memref.alloc() : memref<64x1xi64>
+   hivm.hir.vshr ins(%allocIn0, %cst : memref<64x8xi64>, memref<64x1xi64>) outs(%allocOut : memref<64x8xi64>) broadcast = [1]
+   return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vshr_1d_i32() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 8 : index
+// CHECK:           %[[VAL_3:.*]] = memref.alloc() : memref<8xi32>
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<8xi32>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<1xi32>
+// CHECK:           scf.for %[[VAL_6:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             %[[VAL_7:.*]] = memref.load %[[VAL_3:.*]]{{\[}}%[[VAL_6:.*]]] : memref<8xi32>
+// CHECK:             %[[VAL_8:.*]] = memref.load %[[VAL_5:.*]]{{\[}}%[[VAL_1:.*]]] : memref<1xi32>
+// CHECK:             %[[VAL_9:.*]] = arith.shrsi %[[VAL_7:.*]], %[[VAL_8:.*]] : i32
+// CHECK:             memref.store %[[VAL_9:.*]], %[[VAL_4:.*]]{{\[}}%[[VAL_6:.*]]] : memref<8xi32>
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vshr_1d_i32() {
+   %allocIn0 = memref.alloc() : memref<8xi32>
+   %allocOut = memref.alloc() : memref<8xi32>
+   %cst = memref.alloc() : memref<1xi32>
+   hivm.hir.vshr ins(%allocIn0, %cst : memref<8xi32>, memref<1xi32>) outs(%allocOut : memref<8xi32>) broadcast = [0]
+   return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vshr_1d_i16() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 8 : index
+// CHECK:           %[[VAL_3:.*]] = memref.alloc() : memref<8xi16>
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<8xi16>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<1xi16>
+// CHECK:           scf.for %[[VAL_6:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             %[[VAL_7:.*]] = memref.load %[[VAL_3:.*]]{{\[}}%[[VAL_6:.*]]] : memref<8xi16>
+// CHECK:             %[[VAL_8:.*]] = memref.load %[[VAL_5:.*]]{{\[}}%[[VAL_1:.*]]] : memref<1xi16>
+// CHECK:             %[[VAL_9:.*]] = arith.shrsi %[[VAL_7:.*]], %[[VAL_8:.*]] : i16
+// CHECK:             memref.store %[[VAL_9:.*]], %[[VAL_4:.*]]{{\[}}%[[VAL_6:.*]]] : memref<8xi16>
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vshr_1d_i16() {
+   %allocIn0 = memref.alloc() : memref<8xi16>
+   %allocOut = memref.alloc() : memref<8xi16>
+   %cst = memref.alloc() : memref<1xi16>
+   hivm.hir.vshr ins(%allocIn0, %cst : memref<8xi16>, memref<1xi16>) outs(%allocOut : memref<8xi16>) broadcast = [0]
+   return
+}
+
+
+// -----
+// CHECK-LABEL:   func.func @test_vshr_2d_i32() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 8 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_3:.*]] = arith.constant 64 : index
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<64x8xi32>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<64x8xi32>
+// CHECK:           %[[VAL_6:.*]] = memref.alloc() : memref<64x1xi32>
+// CHECK:           scf.for %[[VAL_7:.*]] = %[[VAL_2:.*]] to %[[VAL_3:.*]] step %[[VAL_1:.*]] {
+// CHECK:             scf.for %[[VAL_8:.*]] = %[[VAL_2:.*]] to %[[VAL_0:.*]] step %[[VAL_1:.*]] {
+// CHECK:               %[[VAL_9:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_8:.*]]] : memref<64x8xi32>
+// CHECK:               %[[VAL_10:.*]] = memref.load %[[VAL_6:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_2:.*]]] : memref<64x1xi32>
+// CHECK:               %[[VAL_11:.*]] = arith.shrsi %[[VAL_9:.*]], %[[VAL_10:.*]] : i32
+// CHECK:               memref.store %[[VAL_11:.*]], %[[VAL_5:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_8:.*]]] : memref<64x8xi32>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vshr_2d_i32() {
+   %allocIn0 = memref.alloc() : memref<64x8xi32>
+   %allocOut = memref.alloc() : memref<64x8xi32>
+   %cst = memref.alloc() : memref<64x1xi32>
+   hivm.hir.vshr ins(%allocIn0, %cst : memref<64x8xi32>, memref<64x1xi32>) outs(%allocOut : memref<64x8xi32>) broadcast = [1]
+   return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vshr_2d_i16() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 8 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_3:.*]] = arith.constant 64 : index
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<64x8xi16>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<64x8xi16>
+// CHECK:           %[[VAL_6:.*]] = memref.alloc() : memref<64x1xi16>
+// CHECK:           scf.for %[[VAL_7:.*]] = %[[VAL_2:.*]] to %[[VAL_3:.*]] step %[[VAL_1:.*]] {
+// CHECK:             scf.for %[[VAL_8:.*]] = %[[VAL_2:.*]] to %[[VAL_0:.*]] step %[[VAL_1:.*]] {
+// CHECK:               %[[VAL_9:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_8:.*]]] : memref<64x8xi16>
+// CHECK:               %[[VAL_10:.*]] = memref.load %[[VAL_6:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_2:.*]]] : memref<64x1xi16>
+// CHECK:               %[[VAL_11:.*]] = arith.shrsi %[[VAL_9:.*]], %[[VAL_10:.*]] : i16
+// CHECK:               memref.store %[[VAL_11:.*]], %[[VAL_5:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_8:.*]]] : memref<64x8xi16>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vshr_2d_i16() {
+   %allocIn0 = memref.alloc() : memref<64x8xi16>
+   %allocOut = memref.alloc() : memref<64x8xi16>
+   %cst = memref.alloc() : memref<64x1xi16>
+   hivm.hir.vshr ins(%allocIn0, %cst : memref<64x8xi16>, memref<64x1xi16>) outs(%allocOut : memref<64x8xi16>) broadcast = [1]
+   return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vshl_1d_i32() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 8 : index
+// CHECK:           %[[VAL_3:.*]] = memref.alloc() : memref<8xi32>
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<8xi32>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<1xi32>
+// CHECK:           scf.for %[[VAL_6:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             %[[VAL_7:.*]] = memref.load %[[VAL_3:.*]]{{\[}}%[[VAL_6:.*]]] : memref<8xi32>
+// CHECK:             %[[VAL_8:.*]] = memref.load %[[VAL_5:.*]]{{\[}}%[[VAL_1:.*]]] : memref<1xi32>
+// CHECK:             %[[VAL_9:.*]] = arith.shli %[[VAL_7:.*]], %[[VAL_8:.*]] : i32
+// CHECK:             memref.store %[[VAL_9:.*]], %[[VAL_4:.*]]{{\[}}%[[VAL_6:.*]]] : memref<8xi32>
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vshl_1d_i32() {
+   %allocIn0 = memref.alloc() : memref<8xi32>
+   %allocOut = memref.alloc() : memref<8xi32>
+   %cst = memref.alloc() : memref<1xi32>
+   hivm.hir.vshl ins(%allocIn0, %cst : memref<8xi32>, memref<1xi32>) outs(%allocOut : memref<8xi32>) broadcast = [0]
+   return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vshl_1d_i16() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 8 : index
+// CHECK:           %[[VAL_3:.*]] = memref.alloc() : memref<8xi16>
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<8xi16>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<1xi16>
+// CHECK:           scf.for %[[VAL_6:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             %[[VAL_7:.*]] = memref.load %[[VAL_3:.*]]{{\[}}%[[VAL_6:.*]]] : memref<8xi16>
+// CHECK:             %[[VAL_8:.*]] = memref.load %[[VAL_5:.*]]{{\[}}%[[VAL_1:.*]]] : memref<1xi16>
+// CHECK:             %[[VAL_9:.*]] = arith.shli %[[VAL_7:.*]], %[[VAL_8:.*]] : i16
+// CHECK:             memref.store %[[VAL_9:.*]], %[[VAL_4:.*]]{{\[}}%[[VAL_6:.*]]] : memref<8xi16>
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vshl_1d_i16() {
+   %allocIn0 = memref.alloc() : memref<8xi16>
+   %allocOut = memref.alloc() : memref<8xi16>
+   %cst = memref.alloc() : memref<1xi16>
+   hivm.hir.vshl ins(%allocIn0, %cst : memref<8xi16>, memref<1xi16>) outs(%allocOut : memref<8xi16>) broadcast = [0]
+   return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vshl_2d_i32() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 8 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_3:.*]] = arith.constant 64 : index
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<64x8xi32>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<64x8xi32>
+// CHECK:           %[[VAL_6:.*]] = memref.alloc() : memref<64x1xi32>
+// CHECK:           scf.for %[[VAL_7:.*]] = %[[VAL_2:.*]] to %[[VAL_3:.*]] step %[[VAL_1:.*]] {
+// CHECK:             scf.for %[[VAL_8:.*]] = %[[VAL_2:.*]] to %[[VAL_0:.*]] step %[[VAL_1:.*]] {
+// CHECK:               %[[VAL_9:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_8:.*]]] : memref<64x8xi32>
+// CHECK:               %[[VAL_10:.*]] = memref.load %[[VAL_6:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_2:.*]]] : memref<64x1xi32>
+// CHECK:               %[[VAL_11:.*]] = arith.shli %[[VAL_9:.*]], %[[VAL_10:.*]] : i32
+// CHECK:               memref.store %[[VAL_11:.*]], %[[VAL_5:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_8:.*]]] : memref<64x8xi32>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vshl_2d_i32() {
+   %allocIn0 = memref.alloc() : memref<64x8xi32>
+   %allocOut = memref.alloc() : memref<64x8xi32>
+   %cst = memref.alloc() : memref<64x1xi32>
+   hivm.hir.vshl ins(%allocIn0, %cst : memref<64x8xi32>, memref<64x1xi32>) outs(%allocOut : memref<64x8xi32>) broadcast = [1]
+   return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vshl_2d_i16() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 8 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_3:.*]] = arith.constant 64 : index
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<64x8xi16>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<64x8xi16>
+// CHECK:           %[[VAL_6:.*]] = memref.alloc() : memref<64x1xi16>
+// CHECK:           scf.for %[[VAL_7:.*]] = %[[VAL_2:.*]] to %[[VAL_3:.*]] step %[[VAL_1:.*]] {
+// CHECK:             scf.for %[[VAL_8:.*]] = %[[VAL_2:.*]] to %[[VAL_0:.*]] step %[[VAL_1:.*]] {
+// CHECK:               %[[VAL_9:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_8:.*]]] : memref<64x8xi16>
+// CHECK:               %[[VAL_10:.*]] = memref.load %[[VAL_6:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_2:.*]]] : memref<64x1xi16>
+// CHECK:               %[[VAL_11:.*]] = arith.shli %[[VAL_9:.*]], %[[VAL_10:.*]] : i16
+// CHECK:               memref.store %[[VAL_11:.*]], %[[VAL_5:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_8:.*]]] : memref<64x8xi16>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vshl_2d_i16() {
+   %allocIn0 = memref.alloc() : memref<64x8xi16>
+   %allocOut = memref.alloc() : memref<64x8xi16>
+   %cst = memref.alloc() : memref<64x1xi16>
+   hivm.hir.vshl ins(%allocIn0, %cst : memref<64x8xi16>, memref<64x1xi16>) outs(%allocOut : memref<64x8xi16>) broadcast = [1]
+   return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vshl_1d_i64() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 8 : index
+// CHECK:           %[[VAL_3:.*]] = memref.alloc() : memref<8xi64>
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<8xi64>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<1xi64>
+// CHECK:           scf.for %[[VAL_6:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             %[[VAL_7:.*]] = memref.load %[[VAL_3:.*]]{{\[}}%[[VAL_6:.*]]] : memref<8xi64>
+// CHECK:             %[[VAL_8:.*]] = memref.load %[[VAL_5:.*]]{{\[}}%[[VAL_1:.*]]] : memref<1xi64>
+// CHECK:             %[[VAL_9:.*]] = arith.shli %[[VAL_7:.*]], %[[VAL_8:.*]] : i64
+// CHECK:             memref.store %[[VAL_9:.*]], %[[VAL_4:.*]]{{\[}}%[[VAL_6:.*]]] : memref<8xi64>
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vshl_1d_i64() {
+   %allocIn0 = memref.alloc() : memref<8xi64>
+   %allocOut = memref.alloc() : memref<8xi64>
+   %cst = memref.alloc() : memref<1xi64>
+   hivm.hir.vshl ins(%allocIn0, %cst : memref<8xi64>, memref<1xi64>) outs(%allocOut : memref<8xi64>) broadcast = [0]
+   return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vshl_2d_i64() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 8 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_3:.*]] = arith.constant 64 : index
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<64x8xi64>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<64x8xi64>
+// CHECK:           %[[VAL_6:.*]] = memref.alloc() : memref<64x1xi64>
+// CHECK:           scf.for %[[VAL_7:.*]] = %[[VAL_2:.*]] to %[[VAL_3:.*]] step %[[VAL_1:.*]] {
+// CHECK:             scf.for %[[VAL_8:.*]] = %[[VAL_2:.*]] to %[[VAL_0:.*]] step %[[VAL_1:.*]] {
+// CHECK:               %[[VAL_9:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_8:.*]]] : memref<64x8xi64>
+// CHECK:               %[[VAL_10:.*]] = memref.load %[[VAL_6:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_2:.*]]] : memref<64x1xi64>
+// CHECK:               %[[VAL_11:.*]] = arith.shli %[[VAL_9:.*]], %[[VAL_10:.*]] : i64
+// CHECK:               memref.store %[[VAL_11:.*]], %[[VAL_5:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_8:.*]]] : memref<64x8xi64>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vshl_2d_i64() {
+   %allocIn0 = memref.alloc() : memref<64x8xi64>
+   %allocOut = memref.alloc() : memref<64x8xi64>
+   %cst = memref.alloc() : memref<64x1xi64>
+   hivm.hir.vshl ins(%allocIn0, %cst : memref<64x8xi64>, memref<64x1xi64>) outs(%allocOut : memref<64x8xi64>) broadcast = [1]
+   return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vdiv_1d_i64() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 24 : index
+// CHECK:           %[[VAL_3:.*]] = memref.alloc() : memref<24xi64>
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<1xi64>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<24xi64>
+// CHECK:           scf.for %[[VAL_6:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             %[[VAL_7:.*]] = memref.load %[[VAL_3:.*]]{{\[}}%[[VAL_6:.*]]] : memref<24xi64>
+// CHECK:             %[[VAL_8:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_1:.*]]] : memref<1xi64>
+// CHECK:             %[[VAL_9:.*]] = arith.divsi %[[VAL_7:.*]], %[[VAL_8:.*]] : i64
+// CHECK:             memref.store %[[VAL_9:.*]], %[[VAL_5:.*]]{{\[}}%[[VAL_6:.*]]] : memref<24xi64>
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vdiv_1d_i64() {
+  %lhs = memref.alloc() : memref<24xi64>
+  %rhs = memref.alloc() : memref<1xi64>
+  %dst = memref.alloc() : memref<24xi64>
+  hivm.hir.vdiv ins(%lhs, %rhs : memref<24xi64>, memref<1xi64>)
+               outs(%dst : memref<24xi64>) broadcast = [0]
+
+  return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vdiv_2d_i64() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 24 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_3:.*]] = arith.constant 64 : index
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<64x24xi64>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<64x1xi64>
+// CHECK:           %[[VAL_6:.*]] = memref.alloc() : memref<64x24xi64>
+// CHECK:           scf.for %[[VAL_7:.*]] = %[[VAL_2:.*]] to %[[VAL_3:.*]] step %[[VAL_1:.*]] {
+// CHECK:             scf.for %[[VAL_8:.*]] = %[[VAL_2:.*]] to %[[VAL_0:.*]] step %[[VAL_1:.*]] {
+// CHECK:               %[[VAL_9:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_8:.*]]] : memref<64x24xi64>
+// CHECK:               %[[VAL_10:.*]] = memref.load %[[VAL_5:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_2:.*]]] : memref<64x1xi64>
+// CHECK:               %[[VAL_11:.*]] = arith.divsi %[[VAL_9:.*]], %[[VAL_10:.*]] : i64
+// CHECK:               memref.store %[[VAL_11:.*]], %[[VAL_6:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_8:.*]]] : memref<64x24xi64>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vdiv_2d_i64() {
+  %lhs = memref.alloc() : memref<64x24xi64>
+  %rhs = memref.alloc() : memref<64x1xi64>
+  %dst = memref.alloc() : memref<64x24xi64>
+  hivm.hir.vdiv ins(%lhs, %rhs : memref<64x24xi64>, memref<64x1xi64>)
+               outs(%dst : memref<64x24xi64>) broadcast = [1]
+
+  return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vsub_1d_i64() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 32 : index
+// CHECK:           %[[VAL_3:.*]] = memref.alloc() : memref<32xi64>
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<1xi64>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<32xi64>
+// CHECK:           scf.for %[[VAL_6:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             %[[VAL_7:.*]] = memref.load %[[VAL_3:.*]]{{\[}}%[[VAL_6:.*]]] : memref<32xi64>
+// CHECK:             %[[VAL_8:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_1:.*]]] : memref<1xi64>
+// CHECK:             %[[VAL_9:.*]] = arith.subi %[[VAL_7:.*]], %[[VAL_8:.*]] : i64
+// CHECK:             memref.store %[[VAL_9:.*]], %[[VAL_5:.*]]{{\[}}%[[VAL_6:.*]]] : memref<32xi64>
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vsub_1d_i64() {
+  %lhs = memref.alloc() : memref<32xi64>
+  %rhs = memref.alloc() : memref<1xi64>
+  %dst = memref.alloc() : memref<32xi64>
+  hivm.hir.vsub ins(%lhs, %rhs : memref<32xi64>, memref<1xi64>)
+               outs(%dst : memref<32xi64>) broadcast = [0]
+
+  return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vsub_2d_i64() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 32 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_3:.*]] = arith.constant 64 : index
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<64x32xi64>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<64x1xi64>
+// CHECK:           %[[VAL_6:.*]] = memref.alloc() : memref<64x32xi64>
+// CHECK:           scf.for %[[VAL_7:.*]] = %[[VAL_2:.*]] to %[[VAL_3:.*]] step %[[VAL_1:.*]] {
+// CHECK:             scf.for %[[VAL_8:.*]] = %[[VAL_2:.*]] to %[[VAL_0:.*]] step %[[VAL_1:.*]] {
+// CHECK:               %[[VAL_9:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_8:.*]]] : memref<64x32xi64>
+// CHECK:               %[[VAL_10:.*]] = memref.load %[[VAL_5:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_2:.*]]] : memref<64x1xi64>
+// CHECK:               %[[VAL_11:.*]] = arith.subi %[[VAL_9:.*]], %[[VAL_10:.*]] : i64
+// CHECK:               memref.store %[[VAL_11:.*]], %[[VAL_6:.*]]{{\[}}%[[VAL_7:.*]], %[[VAL_8:.*]]] : memref<64x32xi64>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vsub_2d_i64() {
+  %lhs = memref.alloc() : memref<64x32xi64>
+  %rhs = memref.alloc() : memref<64x1xi64>
+  %dst = memref.alloc() : memref<64x32xi64>
+  hivm.hir.vsub ins(%lhs, %rhs : memref<64x32xi64>, memref<64x1xi64>)
+               outs(%dst : memref<64x32xi64>) broadcast = [1]
+
+  return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vmin_1d_i64() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 8 : index
+// CHECK-DAG:           %[[VAL_3:.*]] = arith.constant 8 : i64
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<1xi64, #hivm.address_space<ub>>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<8xi64, #hivm.address_space<ub>>
+// CHECK:           scf.for %[[VAL_6:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             %[[VAL_7:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_1:.*]]] : memref<1xi64, #hivm.address_space<ub>>
+// CHECK:             %[[VAL_8:.*]] = arith.minsi %[[VAL_7:.*]], %[[VAL_3:.*]] : i64
+// CHECK:             memref.store %[[VAL_8:.*]], %[[VAL_5:.*]]{{\[}}%[[VAL_6:.*]]] : memref<8xi64, #hivm.address_space<ub>>
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vmin_1d_i64() {
+  %src0 = memref.alloc() : memref<8xi64, #hivm.address_space<ub>>
+  %src0_last_inline_brc = memref.alloc() : memref<1xi64, #hivm.address_space<ub>>
+  %c8 = arith.constant 8 : i64
+  %dst = memref.alloc() : memref<8xi64, #hivm.address_space<ub>>
+  hivm.hir.vmin ins(%src0_last_inline_brc, %c8 : memref<1xi64, #hivm.address_space<ub>>, i64)
+                outs(%dst : memref<8xi64, #hivm.address_space<ub>>) broadcast = [0]
+  return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vmin_2d_i64() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 8 : index
+// CHECK-DAG:           %[[VAL_3:.*]] = arith.constant 8 : i64
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<8x1xi64, #hivm.address_space<ub>>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<8x8xi64, #hivm.address_space<ub>>
+// CHECK:           scf.for %[[VAL_6:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             scf.for %[[VAL_7:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:               %[[VAL_8:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_6:.*]], %[[VAL_1:.*]]] : memref<8x1xi64, #hivm.address_space<ub>>
+// CHECK:               %[[VAL_9:.*]] = arith.minsi %[[VAL_8:.*]], %[[VAL_3:.*]] : i64
+// CHECK:               memref.store %[[VAL_9:.*]], %[[VAL_5:.*]]{{\[}}%[[VAL_6:.*]], %[[VAL_7:.*]]] : memref<8x8xi64, #hivm.address_space<ub>>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vmin_2d_i64() {
+  %src0 = memref.alloc() : memref<8x8xi64, #hivm.address_space<ub>>
+  %src0_last_inline_brc = memref.alloc() : memref<8x1xi64, #hivm.address_space<ub>>
+  %c8 = arith.constant 8 : i64
+  %dst = memref.alloc() : memref<8x8xi64, #hivm.address_space<ub>>
+  hivm.hir.vmin ins(%src0_last_inline_brc, %c8 : memref<8x1xi64, #hivm.address_space<ub>>, i64)
+                outs(%dst : memref<8x8xi64, #hivm.address_space<ub>>) broadcast = [1]
+  return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vmax_1d_i64() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 64 : index
+// CHECK:           %[[VAL_3:.*]] = memref.alloc() : memref<64xi64>
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<1xi64>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<64xi64>
+// CHECK:           scf.for %[[VAL_6:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             %[[VAL_7:.*]] = memref.load %[[VAL_3:.*]]{{\[}}%[[VAL_6:.*]]] : memref<64xi64>
+// CHECK:             %[[VAL_8:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_1:.*]]] : memref<1xi64>
+// CHECK:             %[[VAL_9:.*]] = arith.maxsi %[[VAL_7:.*]], %[[VAL_8:.*]] : i64
+// CHECK:             memref.store %[[VAL_9:.*]], %[[VAL_5:.*]]{{\[}}%[[VAL_6:.*]]] : memref<64xi64>
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vmax_1d_i64() {
+  %lhs = memref.alloc() : memref<64xi64>
+  %rhs = memref.alloc() : memref<1xi64>
+  %dst = memref.alloc() : memref<64xi64>
+  hivm.hir.vmax ins(%lhs, %rhs : memref<64xi64>, memref<1xi64>)
+               outs(%dst : memref<64xi64>) broadcast = [0]
+
+  return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vmax_2d_i64() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 64 : index
+// CHECK:           %[[VAL_3:.*]] = memref.alloc() : memref<64x64xi64>
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<64x1xi64>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<64x64xi64>
+// CHECK:           scf.for %[[VAL_6:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             scf.for %[[VAL_7:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:               %[[VAL_8:.*]] = memref.load %[[VAL_3:.*]]{{\[}}%[[VAL_6:.*]], %[[VAL_7:.*]]] : memref<64x64xi64>
+// CHECK:               %[[VAL_9:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_6:.*]], %[[VAL_1:.*]]] : memref<64x1xi64>
+// CHECK:               %[[VAL_10:.*]] = arith.maxsi %[[VAL_8:.*]], %[[VAL_9:.*]] : i64
+// CHECK:               memref.store %[[VAL_10:.*]], %[[VAL_5:.*]]{{\[}}%[[VAL_6:.*]], %[[VAL_7:.*]]] : memref<64x64xi64>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vmax_2d_i64() {
+  %lhs = memref.alloc() : memref<64x64xi64>
+  %rhs = memref.alloc() : memref<64x1xi64>
+  %dst = memref.alloc() : memref<64x64xi64>
+  hivm.hir.vmax ins(%lhs, %rhs : memref<64x64xi64>, memref<64x1xi64>)
+               outs(%dst : memref<64x64xi64>) broadcast = [1]
+
+  return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vmul_1d_i64() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 64 : index
+// CHECK:           %[[VAL_3:.*]] = memref.alloc() : memref<64xi64>
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<1xi64>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<64xi64>
+// CHECK:           scf.for %[[VAL_6:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             %[[VAL_7:.*]] = memref.load %[[VAL_3:.*]]{{\[}}%[[VAL_6:.*]]] : memref<64xi64>
+// CHECK:             %[[VAL_8:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_1:.*]]] : memref<1xi64>
+// CHECK:             %[[VAL_9:.*]] = arith.muli %[[VAL_7:.*]], %[[VAL_8:.*]] : i64
+// CHECK:             memref.store %[[VAL_9:.*]], %[[VAL_5:.*]]{{\[}}%[[VAL_6:.*]]] : memref<64xi64>
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vmul_1d_i64() {
+  %src = memref.alloc() : memref<64xi64>     
+  %scalar_mem = memref.alloc() : memref<1xi64> 
+  %dst = memref.alloc() : memref<64xi64>
+  hivm.hir.vmul ins(%src, %scalar_mem : memref<64xi64>, memref<1xi64>)
+               outs(%dst : memref<64xi64>) broadcast = [0]
+
+  return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vmul_2d_i64() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 64 : index
+// CHECK:           %[[VAL_3:.*]] = memref.alloc() : memref<64x64xi64>
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<64x1xi64>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<64x64xi64>
+// CHECK:           scf.for %[[VAL_6:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             scf.for %[[VAL_7:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:               %[[VAL_8:.*]] = memref.load %[[VAL_3:.*]]{{\[}}%[[VAL_6:.*]], %[[VAL_7:.*]]] : memref<64x64xi64>
+// CHECK:               %[[VAL_9:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_6:.*]], %[[VAL_1:.*]]] : memref<64x1xi64>
+// CHECK:               %[[VAL_10:.*]] = arith.muli %[[VAL_8:.*]], %[[VAL_9:.*]] : i64
+// CHECK:               memref.store %[[VAL_10:.*]], %[[VAL_5:.*]]{{\[}}%[[VAL_6:.*]], %[[VAL_7:.*]]] : memref<64x64xi64>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vmul_2d_i64() {
+  %src = memref.alloc() : memref<64x64xi64>     
+  %scalar_mem = memref.alloc() : memref<64x1xi64> 
+  %dst = memref.alloc() : memref<64x64xi64>
+  hivm.hir.vmul ins(%src, %scalar_mem : memref<64x64xi64>, memref<64x1xi64>)
+               outs(%dst : memref<64x64xi64>) broadcast = [1]
+
+  return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vadd_1d_i64() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 8 : index
+// CHECK:           %[[VAL_3:.*]] = memref.alloc() : memref<8xi64, #hivm.address_space<ub>>
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<1xi64, #hivm.address_space<ub>>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<8xi64, #hivm.address_space<ub>>
+// CHECK:           %[[VAL_6:.*]] = memref.alloc() : memref<1xi64, #hivm.address_space<ub>>
+// CHECK:           %[[VAL_7:.*]] = memref.alloc() : memref<8xi64, #hivm.address_space<ub>>
+// CHECK:           scf.for %[[VAL_8:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             %[[VAL_9:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_1:.*]]] : memref<1xi64, #hivm.address_space<ub>>
+// CHECK:             %[[VAL_10:.*]] = memref.load %[[VAL_5:.*]]{{\[}}%[[VAL_8:.*]]] : memref<8xi64, #hivm.address_space<ub>>
+// CHECK:             %[[VAL_11:.*]] = arith.addi %[[VAL_9:.*]], %[[VAL_10:.*]] : i64
+// CHECK:             memref.store %[[VAL_11:.*]], %[[VAL_7:.*]]{{\[}}%[[VAL_8:.*]]] : memref<8xi64, #hivm.address_space<ub>>
+// CHECK:           }
+// CHECK:           scf.for %[[VAL_12:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             %[[VAL_13:.*]] = memref.load %[[VAL_3:.*]]{{\[}}%[[VAL_12:.*]]] : memref<8xi64, #hivm.address_space<ub>>
+// CHECK:             %[[VAL_14:.*]] = memref.load %[[VAL_6:.*]]{{\[}}%[[VAL_1:.*]]] : memref<1xi64, #hivm.address_space<ub>>
+// CHECK:             %[[VAL_15:.*]] = arith.addi %[[VAL_13:.*]], %[[VAL_14:.*]] : i64
+// CHECK:             memref.store %[[VAL_15:.*]], %[[VAL_7:.*]]{{\[}}%[[VAL_12:.*]]] : memref<8xi64, #hivm.address_space<ub>>
+// CHECK:           }
+// CHECK:           scf.for %[[VAL_16:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             %[[VAL_17:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_1:.*]]] : memref<1xi64, #hivm.address_space<ub>>
+// CHECK:             %[[VAL_18:.*]] = memref.load %[[VAL_6:.*]]{{\[}}%[[VAL_1:.*]]] : memref<1xi64, #hivm.address_space<ub>>
+// CHECK:             %[[VAL_19:.*]] = arith.addi %[[VAL_17:.*]], %[[VAL_18:.*]] : i64
+// CHECK:             memref.store %[[VAL_19:.*]], %[[VAL_7:.*]]{{\[}}%[[VAL_16:.*]]] : memref<8xi64, #hivm.address_space<ub>>
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vadd_1d_i64() {
+  %src0 = memref.alloc() : memref<8xi64, #hivm.address_space<ub>>
+  %src0_inline_brc = memref.alloc() : memref<1xi64, #hivm.address_space<ub>>
+  %src1 = memref.alloc() : memref<8xi64, #hivm.address_space<ub>>
+  %src1_inline_brc = memref.alloc() : memref<1xi64, #hivm.address_space<ub>>
+  %dst = memref.alloc() : memref<8xi64, #hivm.address_space<ub>>
+
+  hivm.hir.vadd ins(%src0_inline_brc, %src1 : memref<1xi64, #hivm.address_space<ub>>, memref<8xi64, #hivm.address_space<ub>>)
+                outs(%dst : memref<8xi64, #hivm.address_space<ub>>) broadcast = [0]
+
+  hivm.hir.vadd ins(%src0, %src1_inline_brc : memref<8xi64, #hivm.address_space<ub>>, memref<1xi64, #hivm.address_space<ub>>)
+                outs(%dst : memref<8xi64, #hivm.address_space<ub>>) broadcast = [0]
+
+  hivm.hir.vadd ins(%src0_inline_brc, %src1_inline_brc : memref<1xi64, #hivm.address_space<ub>>, memref<1xi64, #hivm.address_space<ub>>)
+                outs(%dst : memref<8xi64, #hivm.address_space<ub>>) broadcast = [0]
+  return
+}
+
+// -----
+// CHECK-LABEL:   func.func @test_vadd_2d_i64() {
+// CHECK-DAG:           %[[VAL_0:.*]] = arith.constant 1 : index
+// CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 0 : index
+// CHECK-DAG:           %[[VAL_2:.*]] = arith.constant 8 : index
+// CHECK:           %[[VAL_3:.*]] = memref.alloc() : memref<8x8xi64, #hivm.address_space<ub>>
+// CHECK:           %[[VAL_4:.*]] = memref.alloc() : memref<8x1xi64, #hivm.address_space<ub>>
+// CHECK:           %[[VAL_5:.*]] = memref.alloc() : memref<1x1xi64, #hivm.address_space<ub>>
+// CHECK:           %[[VAL_6:.*]] = memref.alloc() : memref<8x8xi64, #hivm.address_space<ub>>
+// CHECK:           %[[VAL_7:.*]] = memref.alloc() : memref<8x1xi64, #hivm.address_space<ub>>
+// CHECK:           %[[VAL_8:.*]] = memref.alloc() : memref<1x1xi64, #hivm.address_space<ub>>
+// CHECK:           %[[VAL_9:.*]] = memref.alloc() : memref<8x8xi64, #hivm.address_space<ub>>
+// CHECK:           scf.for %[[VAL_10:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             scf.for %[[VAL_11:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:               %[[VAL_12:.*]] = memref.load %[[VAL_3:.*]]{{\[}}%[[VAL_10:.*]], %[[VAL_11:.*]]] : memref<8x8xi64, #hivm.address_space<ub>>
+// CHECK:               %[[VAL_13:.*]] = memref.load %[[VAL_7:.*]]{{\[}}%[[VAL_10:.*]], %[[VAL_1:.*]]] : memref<8x1xi64, #hivm.address_space<ub>>
+// CHECK:               %[[VAL_14:.*]] = arith.addi %[[VAL_12:.*]], %[[VAL_13:.*]] : i64
+// CHECK:               memref.store %[[VAL_14:.*]], %[[VAL_9:.*]]{{\[}}%[[VAL_10:.*]], %[[VAL_11:.*]]] : memref<8x8xi64, #hivm.address_space<ub>>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           scf.for %[[VAL_15:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             scf.for %[[VAL_16:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:               %[[VAL_17:.*]] = memref.load %[[VAL_3:.*]]{{\[}}%[[VAL_15:.*]], %[[VAL_16:.*]]] : memref<8x8xi64, #hivm.address_space<ub>>
+// CHECK:               %[[VAL_18:.*]] = memref.load %[[VAL_8:.*]]{{\[}}%[[VAL_1:.*]], %[[VAL_1:.*]]] : memref<1x1xi64, #hivm.address_space<ub>>
+// CHECK:               %[[VAL_19:.*]] = arith.addi %[[VAL_17:.*]], %[[VAL_18:.*]] : i64
+// CHECK:               memref.store %[[VAL_19:.*]], %[[VAL_9:.*]]{{\[}}%[[VAL_15:.*]], %[[VAL_16:.*]]] : memref<8x8xi64, #hivm.address_space<ub>>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           scf.for %[[VAL_20:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             scf.for %[[VAL_21:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:               %[[VAL_22:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_20:.*]], %[[VAL_1:.*]]] : memref<8x1xi64, #hivm.address_space<ub>>
+// CHECK:               %[[VAL_23:.*]] = memref.load %[[VAL_6:.*]]{{\[}}%[[VAL_20:.*]], %[[VAL_21:.*]]] : memref<8x8xi64, #hivm.address_space<ub>>
+// CHECK:               %[[VAL_24:.*]] = arith.addi %[[VAL_22:.*]], %[[VAL_23:.*]] : i64
+// CHECK:               memref.store %[[VAL_24:.*]], %[[VAL_9:.*]]{{\[}}%[[VAL_20:.*]], %[[VAL_21:.*]]] : memref<8x8xi64, #hivm.address_space<ub>>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           scf.for %[[VAL_25:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             scf.for %[[VAL_26:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:               %[[VAL_27:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_25:.*]], %[[VAL_1:.*]]] : memref<8x1xi64, #hivm.address_space<ub>>
+// CHECK:               %[[VAL_28:.*]] = memref.load %[[VAL_7:.*]]{{\[}}%[[VAL_25:.*]], %[[VAL_1:.*]]] : memref<8x1xi64, #hivm.address_space<ub>>
+// CHECK:               %[[VAL_29:.*]] = arith.addi %[[VAL_27:.*]], %[[VAL_28:.*]] : i64
+// CHECK:               memref.store %[[VAL_29:.*]], %[[VAL_9:.*]]{{\[}}%[[VAL_25:.*]], %[[VAL_26:.*]]] : memref<8x8xi64, #hivm.address_space<ub>>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           scf.for %[[VAL_30:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             scf.for %[[VAL_31:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:               %[[VAL_32:.*]] = memref.load %[[VAL_4:.*]]{{\[}}%[[VAL_30:.*]], %[[VAL_1:.*]]] : memref<8x1xi64, #hivm.address_space<ub>>
+// CHECK:               %[[VAL_33:.*]] = memref.load %[[VAL_8:.*]]{{\[}}%[[VAL_1:.*]], %[[VAL_1:.*]]] : memref<1x1xi64, #hivm.address_space<ub>>
+// CHECK:               %[[VAL_34:.*]] = arith.addi %[[VAL_32:.*]], %[[VAL_33:.*]] : i64
+// CHECK:               memref.store %[[VAL_34:.*]], %[[VAL_9:.*]]{{\[}}%[[VAL_30:.*]], %[[VAL_31:.*]]] : memref<8x8xi64, #hivm.address_space<ub>>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           scf.for %[[VAL_35:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             scf.for %[[VAL_36:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:               %[[VAL_37:.*]] = memref.load %[[VAL_5:.*]]{{\[}}%[[VAL_1:.*]], %[[VAL_1:.*]]] : memref<1x1xi64, #hivm.address_space<ub>>
+// CHECK:               %[[VAL_38:.*]] = memref.load %[[VAL_6:.*]]{{\[}}%[[VAL_35:.*]], %[[VAL_36:.*]]] : memref<8x8xi64, #hivm.address_space<ub>>
+// CHECK:               %[[VAL_39:.*]] = arith.addi %[[VAL_37:.*]], %[[VAL_38:.*]] : i64
+// CHECK:               memref.store %[[VAL_39:.*]], %[[VAL_9:.*]]{{\[}}%[[VAL_35:.*]], %[[VAL_36:.*]]] : memref<8x8xi64, #hivm.address_space<ub>>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           scf.for %[[VAL_40:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             scf.for %[[VAL_41:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:               %[[VAL_42:.*]] = memref.load %[[VAL_5:.*]]{{\[}}%[[VAL_1:.*]], %[[VAL_1:.*]]] : memref<1x1xi64, #hivm.address_space<ub>>
+// CHECK:               %[[VAL_43:.*]] = memref.load %[[VAL_7:.*]]{{\[}}%[[VAL_40:.*]], %[[VAL_1:.*]]] : memref<8x1xi64, #hivm.address_space<ub>>
+// CHECK:               %[[VAL_44:.*]] = arith.addi %[[VAL_42:.*]], %[[VAL_43:.*]] : i64
+// CHECK:               memref.store %[[VAL_44:.*]], %[[VAL_9:.*]]{{\[}}%[[VAL_40:.*]], %[[VAL_41:.*]]] : memref<8x8xi64, #hivm.address_space<ub>>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           scf.for %[[VAL_45:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:             scf.for %[[VAL_46:.*]] = %[[VAL_1:.*]] to %[[VAL_2:.*]] step %[[VAL_0:.*]] {
+// CHECK:               %[[VAL_47:.*]] = memref.load %[[VAL_5:.*]]{{\[}}%[[VAL_1:.*]], %[[VAL_1:.*]]] : memref<1x1xi64, #hivm.address_space<ub>>
+// CHECK:               %[[VAL_48:.*]] = memref.load %[[VAL_8:.*]]{{\[}}%[[VAL_1:.*]], %[[VAL_1:.*]]] : memref<1x1xi64, #hivm.address_space<ub>>
+// CHECK:               %[[VAL_49:.*]] = arith.addi %[[VAL_47:.*]], %[[VAL_48:.*]] : i64
+// CHECK:               memref.store %[[VAL_49:.*]], %[[VAL_9:.*]]{{\[}}%[[VAL_45:.*]], %[[VAL_46:.*]]] : memref<8x8xi64, #hivm.address_space<ub>>
+// CHECK:             }
+// CHECK:           }
+// CHECK:           return
+// CHECK:         }
+func.func @test_vadd_2d_i64() {
+  %src0 = memref.alloc() : memref<8x8xi64, #hivm.address_space<ub>>
+  %src0_last_inline_brc = memref.alloc() : memref<8x1xi64, #hivm.address_space<ub>>
+  %src0_last_first_inline_brc = memref.alloc() : memref<1x1xi64, #hivm.address_space<ub>>
+  %src1 = memref.alloc() : memref<8x8xi64, #hivm.address_space<ub>>
+  %src1_last_inline_brc = memref.alloc() : memref<8x1xi64, #hivm.address_space<ub>>
+  %src1_last_first_inline_brc = memref.alloc() : memref<1x1xi64, #hivm.address_space<ub>>
+  %dst = memref.alloc() : memref<8x8xi64, #hivm.address_space<ub>>
+
+  hivm.hir.vadd ins(%src0, %src1_last_inline_brc : memref<8x8xi64, #hivm.address_space<ub>>, memref<8x1xi64, #hivm.address_space<ub>>)
+                outs(%dst : memref<8x8xi64, #hivm.address_space<ub>>) broadcast = [1]
+
+  hivm.hir.vadd ins(%src0, %src1_last_first_inline_brc : memref<8x8xi64, #hivm.address_space<ub>>, memref<1x1xi64, #hivm.address_space<ub>>)
+                outs(%dst : memref<8x8xi64, #hivm.address_space<ub>>) broadcast = [0, 1]
+
+  hivm.hir.vadd ins(%src0_last_inline_brc, %src1 : memref<8x1xi64, #hivm.address_space<ub>>, memref<8x8xi64, #hivm.address_space<ub>>)
+                outs(%dst : memref<8x8xi64, #hivm.address_space<ub>>) broadcast = [1]
+
+  hivm.hir.vadd ins(%src0_last_inline_brc, %src1_last_inline_brc : memref<8x1xi64, #hivm.address_space<ub>>, memref<8x1xi64, #hivm.address_space<ub>>)
+                outs(%dst : memref<8x8xi64, #hivm.address_space<ub>>) broadcast = [1]
+
+  hivm.hir.vadd ins(%src0_last_inline_brc, %src1_last_first_inline_brc : memref<8x1xi64, #hivm.address_space<ub>>, memref<1x1xi64, #hivm.address_space<ub>>)
+                outs(%dst : memref<8x8xi64, #hivm.address_space<ub>>) broadcast = [0, 1]
+
+  hivm.hir.vadd ins(%src0_last_first_inline_brc, %src1 : memref<1x1xi64, #hivm.address_space<ub>>, memref<8x8xi64, #hivm.address_space<ub>>)
+                outs(%dst : memref<8x8xi64, #hivm.address_space<ub>>) broadcast = [0, 1]
+
+  hivm.hir.vadd ins(%src0_last_first_inline_brc, %src1_last_inline_brc : memref<1x1xi64, #hivm.address_space<ub>>, memref<8x1xi64, #hivm.address_space<ub>>)
+                outs(%dst : memref<8x8xi64, #hivm.address_space<ub>>) broadcast = [0, 1]
+
+  hivm.hir.vadd ins(%src0_last_first_inline_brc, %src1_last_first_inline_brc : memref<1x1xi64, #hivm.address_space<ub>>, memref<1x1xi64, #hivm.address_space<ub>>)
+                outs(%dst : memref<8x8xi64, #hivm.address_space<ub>>) broadcast = [0, 1]
+  return
 }

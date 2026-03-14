@@ -17,7 +17,7 @@
 
 #include "bishengir/Dialect/HIVM/IR/HIVMImpl.h"
 #include "bishengir/Dialect/HIVM/Transforms/BubbleUpExtractSlice/CSEPattern.h"
-#include "bishengir/Dialect/HIVM/Transforms/BubbleUpExtractSlice/MoveUpAffineMap.h"
+#include "bishengir/Dialect/HIVM/Transforms/BubbleUpExtractSlice/HoistAffine.h"
 #include "bishengir/Dialect/HIVM/Transforms/BubbleUpExtractSlice/Pattern.h"
 #include "bishengir/Dialect/HIVM/Transforms/Passes.h"
 #include "bishengir/Dialect/HIVM/Transforms/TileAndBindSubBlock/Helper.h"
@@ -60,7 +60,7 @@ public:
 
   LogicalResult
   verifyMarkedExtractSlicesAreBubbledUp(func::FuncOp funcOp) const {
-    auto walkResult = funcOp->walk([](Operation *op) {
+    auto walkResult = funcOp->walk([this](Operation *op) {
       if (!isa<tensor::ExtractSliceOp>(op)) {
         return WalkResult::advance();
       }
@@ -83,7 +83,11 @@ public:
           }
         }
         if (!isa<tensor::EmptyOp>(extractSrc.getDefiningOp())) {
-          return WalkResult::interrupt();
+          if (strictMode) {
+            return WalkResult::interrupt();
+          } else {
+            extractSliceOp->emitWarning("Extract slice is not fully bubbled up");
+          }
         }
       }
       return WalkResult::advance();
@@ -100,7 +104,7 @@ public:
     config.maxIterations = 50;
     // Apply bubble up patterns
     RewritePatternSet patterns(funcOp.getContext());
-    populateMoveUpAffineMapPattern(patterns);
+    populateHoistAffinePattern(patterns);
     populateBubbleUpExtractSliceOpPatterns(patterns);
     populateCSEPattern(patterns);
     tensor::populateFoldTensorEmptyPatterns(patterns, true);
@@ -120,7 +124,7 @@ public:
     // Apply bubble up once more, because canonicalize might bring more
     // opportunity.
     RewritePatternSet patterns2(funcOp.getContext());
-    populateMoveUpAffineMapPattern(patterns2);
+    populateHoistAffinePattern(patterns2);
     populateBubbleUpExtractSliceOpPatterns(patterns2);
     populateCSEPattern(patterns2);
     tensor::populateFoldTensorEmptyPatterns(patterns2, true);
@@ -148,14 +152,18 @@ private:
     strategies.push_back(std::make_shared<LoopArgsBubbleUpStrategy>());
     strategies.push_back(std::make_shared<ExtractSliceBubbleUpStrategy>());
     strategies.push_back(std::make_shared<InsertSliceBubbleUpStrategy>());
-
-    // Add pattern with strategies
+    strategies.push_back(std::make_shared<BitcastBubbleUpStrategy>());
+    strategies.push_back(std::make_shared<BufferizationBubbleUpStrategy>());
+    strategies.push_back(std::make_shared<VTransposeBubbleUpStrategy>());
+    strategies.push_back(std::make_shared<IfBubbleUpStrategy>());
+    
     patterns.add<BubbleUpPattern>(context, std::move(strategies));
   }
 };
 
 } // namespace
 
-std::unique_ptr<Pass> mlir::hivm::createHIVMBubbleUpExtractSlicePass() {
-  return std::make_unique<HIVMBubbleUpExtractSlicePass>();
+std::unique_ptr<Pass> mlir::hivm::createHIVMBubbleUpExtractSlicePass(
+    const HIVMBubbleUpExtractSliceOptions &options) {
+  return std::make_unique<HIVMBubbleUpExtractSlicePass>(options);
 }

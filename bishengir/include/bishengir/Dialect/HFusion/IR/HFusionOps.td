@@ -35,6 +35,14 @@ include "bishengir/Dialect/HFusion/IR/HFusionAttrs.td"
 class HFusion_Op<string mnemonic, list<Trait> traits = []> :
     Op<HFusion_Dialect, mnemonic, traits>;
 
+// Shaped type whose element type is from the given `allowedTypes` list,
+// and which additionally satisfies an optional list of predicates.
+class ShapedTypeOf<list<Type> allowedTypes, list<Pred> preds = [],
+                     string summary = "ranked tensor">
+  : ShapedContainerType<
+      allowedTypes, And<!listconcat([IsShapedTypePred], preds)>,
+      summary, "::mlir::ShapedType">;
+
 //===----------------------------------------------------------------------===//
 // HFusion Types
 //===----------------------------------------------------------------------===//
@@ -348,7 +356,7 @@ def AtomicCasOp : HFusion_Op<"atomic_cas",
   }];
   let arguments = (ins Variadic<AnyTypeOf<[TensorOrMemref]>>:$input,
                        TensorOrMemref:$dst);
-  let results = (outs Variadic<AnyTypeOf<[TensorOrMemref]>>:$output);
+  let results = (outs Optional<TensorOrMemref>:$output);
   let assemblyFormat = [{ attr-dict `ins` `(` $input `:` type($input) `)`
                        `outs` `(` $dst `:` type($dst) `)`
                        (`->` type($output)^)?
@@ -378,18 +386,64 @@ def AtomicXchgOp : HFusion_Op<"atomic_xchg",
       Arguments:
         * `src`: new value
         * `dst`: memory location in GM
+        * `mask` : mask the element
 
       Examples:
       ```mlir
-      hfusion.atomic_xchg ins(%src : memref<?xf32>) outs(%dst : memref<?xf32>)
-      %result = hfusion.atomic_xchg ins(%src : tensor<?xf32>) outs(%dst : tensor<?xf32>) -> tensor<?xf32>
+      hfusion.atomic_xchg ins(%src : memref<?xf32>) outs(%dst : memref<?xf32>) mask(%m : memref<?xi1>)
+      %result = hfusion.atomic_xchg ins(%src : tensor<?xf32>) outs(%dst : tensor<?xf32>) mask(%m : memref<?xi1>) -> tensor<?xf32>
       ```
   }];
-  let arguments = (ins Variadic<AnyTypeOf<[TensorOrMemref]>>:$input,
-                       TensorOrMemref:$dst);
-  let results = (outs Variadic<AnyTypeOf<[TensorOrMemref]>>:$output);
+  let arguments = (ins TensorOrMemref:$input,
+                       TensorOrMemref:$dst, Optional<TensorOrMemref>:$mask);
+  let results = (outs Optional<TensorOrMemref>:$output);
+  let builders = [
+    OpBuilder<(ins "TypeRange":$res, "Value":$src, "Value":$dst)>,
+  ];
   let assemblyFormat = [{ attr-dict `ins` `(` $input `:` type($input) `)`
                        `outs` `(` $dst `:` type($dst) `)`
+                       (`mask` `(` $mask^ `:` type($mask) `)`)?
+                       (`->` type($output)^)?
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// AtomicRMWOp
+//===----------------------------------------------------------------------===//
+
+def AtomicRMWOp : HFusion_Op<"atomic_rmw",
+    [SameOperandsAndResultRank, AllTypesMatch<["output"]>, DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = [{
+    Atomic RMW Op
+  }];
+  let description = [{
+      Atomic RMW is an atomic operation that consists of three steps:
+      1. Read the current value of the specified memory address
+      2. Perform action depending on atomic_kind attr
+      3. Return the old value read previously
+      The whole process is atomic, that is, it will not be interrupted by other threads during the operation.
+
+      Constraints:
+        1. The input memref and output memref must have the same rank
+          and the same element type.
+
+      Arguments:
+        * `src`: new value
+        * `dst`: memory location in GM
+
+      Examples:
+      ```mlir
+      hfusion.atomic_rmw ins(%src : memref<?xf32>) outs(%dst : memref<?xf32>) atomic_kind = <add>
+      %result = hfusion.atomic_rmw ins(%src : tensor<?xf32>) outs(%dst : tensor<?xf32>) atomic_kind = <or> -> tensor<?xf32>
+      ```
+  }];
+  let arguments = (ins TensorOrMemref:$input,
+                       TensorOrMemref:$dst,
+                       AtomicKindAttr:$atomic_kind);
+  let results = (outs Optional<TensorOrMemref>:$output);
+  let assemblyFormat = [{ attr-dict `ins` `(` $input `:` type($input) `)`
+                       `outs` `(` $dst `:` type($dst) `)`
+                       `atomic_kind` `=` $atomic_kind
                        (`->` type($output)^)?
   }];
 }
@@ -456,13 +510,13 @@ def HistogramOp : HFusion_Op<"histogram", [
   }];
 
   let arguments = (ins
-    AnyRankedTensor:$input,
+    RankedTensorOf<[I8, I16, I32, I64]>:$input,
     I64Attr:$num_bins,
     Optional<RankedTensorOf<[I1]>>:$mask
   );
 
   let results = (outs
-    RankedTensorOf<[I8, I16, I32, I64]>:$output
+    RankedTensorOf<[I32, I64]>:$output
   );
 
   let hasVerifier = 1;
@@ -471,5 +525,53 @@ def HistogramOp : HFusion_Op<"histogram", [
     "type($input) (`,` type($mask)^)? `->` type($output)";
 }
 
+//===----------------------------------------------------------------------===//
+// MatMulMxOp
+//===----------------------------------------------------------------------===//
+def MatMulMxOp : HFusion_Op<"matmul_mx", [Pure, DestinationStyleOpInterface]> {
+  let summary = "Performs a block-scaled matrix multiplication";
+  let description = [{
+  Performs matrix multiplication in microscaling format where the inputs are implicitly scaled using provided scale factors, which are often used in quantized data types like FP8/FP4. The operation computes C = (A * scale_a) dot (B * scale_b) directly in hardware (Tensor Cores).
+  lhs and rhs use microscaling formats described here: https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
+  }];
+
+  let arguments = (ins
+    ShapedTypeOf<[F8E4M3FN, F8E5M2]>:$inputA,
+    ShapedTypeOf<[F8E4M3FN, F8E5M2]>:$inputB,
+    ShapedTypeOf<[UI8, I8]>:$scaleA,
+    ShapedTypeOf<[UI8, I8]>:$scaleB,
+    ShapedTypeOf<[AnyFloat]>:$acc
+  );
+
+  let results = (outs
+    ShapedTypeOf<[AnyFloat]>:$result
+  );
+
+  code hfusionMmadBaseDecls = [{
+    // Implement functions necessary for DestinationStyleOpInterface.
+    ::mlir::MutableOperandRange getDpsInitsMutable() {
+      return getAccMutable();
+    }
+  }];
+
+  let extraClassDeclaration = hfusionMmadBaseDecls;
+
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    attr-dict `ins` `(`
+    $inputA
+    `,` $inputB
+    `,` $scaleA
+    `,` $scaleB
+    `:`
+    type($inputA)
+    `,` type($inputB)
+    `,` type($scaleA)
+    `,` type($scaleB)
+    `)`
+    `outs` `(` $acc `:` type($acc) `)`
+    `->` type($result)
+  }];
+}
 
 #endif // BISHENGIR_DIALECT_HFUSION_IR_HFUSIONOPS_TD

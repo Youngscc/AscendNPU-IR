@@ -17,11 +17,15 @@
 #ifndef BISHENG_DIALECT_HIVM_TRANSFORMS_SYNC_COMMON_H
 #define BISHENG_DIALECT_HIVM_TRANSFORMS_SYNC_COMMON_H
 
-#include <utility>
-
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
-#include "bishengir/Dialect/HIVM/Transforms/Passes.h"
+#include "bishengir/Dialect/HIVM/Transforms/UnitFlagInfoBase.h"
+#include "bishengir/Dialect/MemRefExt/IR/MemRefExt.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/BuiltinTypeInterfaces.h"
+#include "llvm/ADT/STLExtras.h"
+#include <cstddef>
 #include <deque>
+#include <utility>
 
 #define MAX_MULTI_BUFFER_NUM 16
 
@@ -31,71 +35,94 @@ namespace hivm {
 /// different mode for sync analysis.
 enum SyncAnalysisMode { NORMALSYNC = 0, BLOCKSYNC };
 
+class CompoundInstanceElement;
+
+class UnitFlagInfo : public UnitFlagInfoBase {
+public:
+  CompoundInstanceElement *linkedElementAsSet{nullptr};
+  CompoundInstanceElement *linkedElementAsWait{nullptr};
+
+public:
+  UnitFlagInfo() = default;
+  ~UnitFlagInfo() override = default;
+
+  explicit UnitFlagInfo(const UnitFlagInfoBase &other) : UnitFlagInfoBase(other) {}
+
+  void reset() {
+    UnitFlagInfoBase::reset();
+    linkedElementAsSet = nullptr;
+    linkedElementAsWait = nullptr;
+  }
+
+  void merge(const UnitFlagInfo &other, CompoundInstanceElement *element1,
+             CompoundInstanceElement *element2, bool asSet = true,
+             bool asWait = true) {
+    UnitFlagInfoBase::merge(other, asSet, asWait);
+    if (asSet && element2 != nullptr) {
+      this->linkedElementAsSet = element2;
+    }
+    if (asWait && element1 != nullptr) {
+      this->linkedElementAsWait = element1;
+    }
+  }
+};
+
 /// Meminfo of the target buffer
 struct BaseMemInfo {
-  BaseMemInfo(
-      Value baseBuffer, Value rootBuffer, hivm::AddressSpace scope,
-      SmallVector<uint64_t> baseAddresses, uint64_t allocateSize,
-      std::optional<bishengir::memref_ext::AllocWorkspaceOp> allocWorkspaceOp)
-      : baseBuffer(baseBuffer), rootBuffer(rootBuffer), scope(scope),
-        baseAddresses(std::move(baseAddresses)), allocateSize(allocateSize),
-        allocWorkspaceOp(std::move(allocWorkspaceOp)) {}
-  /// baseBuffer means the buffer used for the corresponding operation.
+
+  BaseMemInfo(Value baseBuffer, Value rootBuffer,
+              hivm::AddressSpace addressSpace,
+              SmallVector<int64_t> baseAddresses, int64_t allocateSize,
+              bool hasVariableAddress = false,
+              std::optional<bishengir::memref_ext::AllocWorkspaceOp>
+                  allocWorkspaceOp = std::nullopt)
+      : baseBuffer(baseBuffer), rootBuffer(rootBuffer),
+        addressSpace(addressSpace), baseAddresses(std::move(baseAddresses)),
+        allocateSize(allocateSize), hasVariableAddress(hasVariableAddress),
+        allocWorkspaceOp(allocWorkspaceOp) {}
+
+  /// buffer used for the corresponding operation.
   Value baseBuffer;
-  /// rootBuffer means the result operand of defining alloc op or function
-  /// argument.
+
+  /// result operand of defining alloc op or function argument.
   Value rootBuffer;
-  hivm::AddressSpace scope;
-  SmallVector<uint64_t> baseAddresses;
-  uint64_t allocateSize;
+
+  /// memory space of the buffer
+  hivm::AddressSpace addressSpace{hivm::AddressSpace::Zero};
+
+  /// base addresses of the buffer (offsets)
+  SmallVector<int64_t> baseAddresses;
+
+  /// size of the buffer in bits
+  int64_t allocateSize{ShapedType::kDynamic};
+
+  /// whether the base addresses contain variable address
+  bool hasVariableAddress{false};
+
   /// when specified alloc_workspace op, it is workspace gm argument, otherwise,
   /// it is normal input or output gm argument.
   std::optional<bishengir::memref_ext::AllocWorkspaceOp> allocWorkspaceOp;
 
-  bool areVectorEqual(SmallVector<uint64_t> vec1,
-                      SmallVector<uint64_t> vec2) const {
-    if (vec1.size() != vec2.size()) {
-      return false;
-    }
-    for (size_t i = 0; i < vec1.size(); ++i) {
-      if (vec1[i] != vec2[i]) {
-        return false;
-      }
-    }
-    return true;
-  }
-
   bool operator==(const BaseMemInfo &other) const {
-    if (!areVectorEqual(baseAddresses, other.baseAddresses)) {
-      return false;
-    }
-    if (rootBuffer != other.rootBuffer) {
-      return false;
-    }
-    if (scope != other.scope) {
-      return false;
-    }
-    if (allocateSize != other.allocateSize) {
-      return false;
-    }
-    if (baseBuffer != other.baseBuffer) {
-      return false;
-    }
-    return true;
+    return std::tie(baseBuffer, rootBuffer, addressSpace, baseAddresses,
+                    allocateSize, hasVariableAddress, allocWorkspaceOp) ==
+           std::tie(other.baseBuffer, other.rootBuffer, other.addressSpace,
+                    other.baseAddresses, other.allocateSize,
+                    other.hasVariableAddress, other.allocWorkspaceOp);
   }
 
   std::unique_ptr<BaseMemInfo> clone() const {
-    auto newMemInfo = std::make_unique<BaseMemInfo>(
-        baseBuffer, rootBuffer, scope, baseAddresses, allocateSize,
-        allocWorkspaceOp);
-    return newMemInfo;
+    auto clonedMemInfo = std::make_unique<BaseMemInfo>(
+        baseBuffer, rootBuffer, addressSpace, baseAddresses, allocateSize,
+        hasVariableAddress, allocWorkspaceOp);
+    return clonedMemInfo;
   }
 
-  std::unique_ptr<BaseMemInfo> clone(Value cloneBaseBuffer) const {
-    auto newMemInfo = std::make_unique<BaseMemInfo>(
-        cloneBaseBuffer, rootBuffer, scope, baseAddresses, allocateSize,
-        allocWorkspaceOp);
-    return newMemInfo;
+  std::unique_ptr<BaseMemInfo> clone(Value newBaseBuffer) const {
+    // Clone the current BaseMemInfo and update the baseBuffer
+    auto clonedMemInfo = this->clone();
+    clonedMemInfo->baseBuffer = newBaseBuffer;
+    return clonedMemInfo;
   }
 };
 
@@ -123,6 +150,8 @@ public:
 
   // Indicates whether to insert the synchronization when codegen sync.
   bool uselessSync{false};
+
+  bool replacedWithUnitFlag{false};
 
   // Need to allocate the size of eventId.
   int eventIdNum{1};
@@ -344,17 +373,19 @@ public:
   // The CoreType for compound node.
   TCoreType compoundCoreType{TCoreType::CUBE_OR_VECTOR};
 
-  SyncOperation *PipeMTE1ToPipeMSync{nullptr};
+  // Backward pipeM->pipeMTE1 sync pair.
+  SyncOperation *BwdPipeMPipeMTE1SyncPtr{nullptr};
 
   // One operation can be synchronized with 2 other operations, one before it
   // and one after it ex: fixpipe-mmadl1-fixpipe. Usually using set/wait flags
   // we would have this: (fixpipe/set) (wait/mmadl1/set) (wait/fixpipe)
   // unitFlagModeAsSet is used to handle when an operation is synchronized with
   // an operation after it, and the opposite is true for unitFlagModeAsWait.
-  UNIT_FLAG unitFlagModeAsSet{UNIT_FLAG::DISABLED};
-  UNIT_FLAG unitFlagModeAsWait{UNIT_FLAG::DISABLED};
-  CompoundInstanceElement *linkedUnitFlagCompAsSet{nullptr};
-  CompoundInstanceElement *linkedUnitFlagCompAsWait{nullptr};
+  UnitFlagInfo unitFlagInfo;
+
+  // For macro operations that will get decomposed into multiple sync-ir
+  // elements, this id can be used to differentiate between the cloned elements.
+  int macroOpInstanceId{-1};
 
 public:
   CompoundInstanceElement(unsigned index,
@@ -367,12 +398,6 @@ public:
   ~CompoundInstanceElement() override = default;
 
   static bool classof(const InstanceElement *e);
-
-  // Check if unit-flag synchronization is enabled for current operation and
-  // return ENABLED if so.
-  UNIT_FLAG getUnitFlagMode() const;
-  std::optional<mlir::Value> getUnitFlagCond(Location loc,
-                                             IRRewriter &rewriter) const;
 };
 
 // Save all operation information on IR in order, with three main types of
@@ -386,6 +411,12 @@ using SyncOperations = SmallVector<SmallVector<std::unique_ptr<SyncOperation>>>;
 // the map from the buffer to its mem info
 using Buffer2MemInfoMap =
     llvm::DenseMap<Value, llvm::SmallVector<std::unique_ptr<BaseMemInfo>>>;
+
+bool isBackwardSync(const CompoundInstanceElement *nowCompound,
+                    const CompoundInstanceElement *frontCompound);
+
+// Check all loop-like parents of `op` to be of class SCF::ForOps.
+bool checkAllParentLoopsAreForLoops(Operation *op);
 
 // check and assert that index is within the bounds of syncIR
 void checkSyncIRIndex(const SyncIRs &syncIR, int index);

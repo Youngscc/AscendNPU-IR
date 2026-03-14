@@ -35,16 +35,24 @@ struct SyncPipeBuild {
 /// Sync and Template Interaction.
 struct SyncTemplateInter {
   SyncTemplateInter() = default;
-  SyncTemplateInter(Value MmadL1WaitL1AEvent, Value MmadL1WaitL1BEvent,
-                    Value L1AWaitMmadL1Event, Value L1B2WaitMmadL1Event,
-                    Value KLoopDBCond, Value BackPipeMPipeMTE1DBEvent0,
-                    Value BackPipeMPipeMTE1DBEvent1)
+
+  explicit SyncTemplateInter(Value MmadL1WaitL1AEvent, Value MmadL1WaitL1BEvent,
+                             Value L1AWaitMmadL1Event,
+                             Value L1B2WaitMmadL1Event, Value KLoopDBCond,
+                             Value BackPipeMPipeMTE1DBEvent0,
+                             Value BackPipeMPipeMTE1DBEvent1)
       : MmadL1WaitL1AEvent(MmadL1WaitL1AEvent),
         MmadL1WaitL1BEvent(MmadL1WaitL1BEvent),
         L1AWaitMmadL1Event(L1AWaitMmadL1Event),
         L1B2WaitMmadL1Event(L1B2WaitMmadL1Event), KLoopDBCond(KLoopDBCond),
         BackPipeMPipeMTE1DBEvent0(BackPipeMPipeMTE1DBEvent0),
         BackPipeMPipeMTE1DBEvent1(BackPipeMPipeMTE1DBEvent1) {}
+
+  explicit SyncTemplateInter(Value defaultValue)
+      : MmadL1WaitL1AEvent(defaultValue), MmadL1WaitL1BEvent(defaultValue),
+        L1AWaitMmadL1Event(defaultValue), L1B2WaitMmadL1Event(defaultValue),
+        KLoopDBCond(defaultValue), BackPipeMPipeMTE1DBEvent0(defaultValue),
+        BackPipeMPipeMTE1DBEvent1(defaultValue) {}
 
   Value MmadL1WaitL1AEvent;
   Value MmadL1WaitL1BEvent;
@@ -79,8 +87,9 @@ private:
 
   /// Update the synchronization required for compound element to be inserted.
   void UpdateCompoundOpInsertSync(CompoundInstanceElement *nowCompound);
-  
-  /// Update the synchronization required for place-holder element to be inserted.
+
+  /// Update the synchronization required for place-holder element to be
+  /// inserted.
   void updatePlaceHolderOpInsertSync(PlaceHolderInstanceElement *placeHolder);
 
   /// Update the synchronization required for for element to be inserted.
@@ -135,18 +144,18 @@ private:
 
   /// Determine whether to synchronize instructions to lower into the library.
   void UpdateSyncTemplateInterForBackPipeMPipeMTE1DB(
-      CompoundInstanceElement *nowCompound);
+      CompoundInstanceElement *nowCompound, hivm::MmadL1Op mmadL1Op);
 
   /// SyncTemplateInter for initialization and library interaction.
-  void InitDefaultSyncTemplateInterForMmadL1Op(IRRewriter &rewriter,
-                                               hivm::MmadL1Op mmadL1Op);
+  void InitDefaultSyncTemplateInterForMmadL1Op(hivm::MmadL1Op mmadL1Op);
 
   /// Update the SyncTemplateInter information for the interaction between
   /// MmadL1 and the library.
-  void UpdateMmadL1SyncTemplateInter();
+  void UpdateMmadL1SyncTemplateInter(IRRewriter &rewriter);
 
-  void handleEnableUnitFlag(IRRewriter &rewriter,
-                            CompoundInstanceElement *nowCompound) const;
+  void HandleUnitFlagEnabledOp(IRRewriter &rewriter,
+                               UnitFlagEnabledInterface unitFlagEnabledOp,
+                               UnitFlagInfo unitFlagInfo) const;
 
 private:
   /// Save the Global syncIR.
@@ -167,8 +176,9 @@ private:
       {4, hivm::EVENT::EVENT_ID4}, {5, hivm::EVENT::EVENT_ID5},
       {6, hivm::EVENT::EVENT_ID6}, {7, hivm::EVENT::EVENT_ID7}};
 
-  /// Record the loop and corresponding counter buffer.
-  DenseMap<LoopLikeOpInterface, Value> loop2BufferCounter;
+  /// Record the loop and corresponding counter buffer, with eventidNum as
+  /// part of the key to handle different buffer counts for the same loop
+  DenseMap<std::pair<LoopLikeOpInterface, unsigned>, Value> loop2BufferCounter;
 
   /// Collect sync index and corresponding event id expressions.
   DenseMap<unsigned, Value> SyncIndex2SelectBuffer;

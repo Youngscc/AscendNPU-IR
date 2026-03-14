@@ -17,6 +17,7 @@
 
 #include "bishengir/Dialect/HIVM/Utils/Utils.h"
 #include "bishengir/Dialect/Utils/Util.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 
 #define DEBUG_TYPE "hivm-extra-buffer"
 #define DBGS() (llvm::dbgs() << '[' << DEBUG_TYPE << "] ")
@@ -32,15 +33,19 @@ const static int halfBits = 16;
 
 namespace {
 int64_t getNumPerBlock(Type t) {
-  return INTR_BYTES_PER_BLOCK /
-         (getElementTypeOrSelf(t).getIntOrFloatBitWidth() /
-          utils::INTR_BITS_PER_BYTE);
+  unsigned bitWidth = getElementTypeOrSelf(t).getIntOrFloatBitWidth();
+
+  unsigned bytesPerElem = CEIL_DIV(bitWidth, utils::INTR_BITS_PER_BYTE);
+
+  return CEIL_DIV(INTR_BYTES_PER_BLOCK, bytesPerElem);
 }
 
 int64_t getNumPerRepeat(Type t) {
-  return INTR_BYTES_PER_REPEAT /
-         (getElementTypeOrSelf(t).getIntOrFloatBitWidth() /
-          utils::INTR_BITS_PER_BYTE);
+  unsigned bitWidth = getElementTypeOrSelf(t).getIntOrFloatBitWidth();
+
+  unsigned bytesPerElem = CEIL_DIV(bitWidth, utils::INTR_BITS_PER_BYTE);
+
+  return CEIL_DIV(INTR_BYTES_PER_REPEAT, bytesPerElem);
 }
 } // namespace
 static std::optional<int64_t>
@@ -220,10 +225,30 @@ std::optional<int64_t> getExtraBufferSizeForBroadcastOp(Operation *op,
   return result;
 }
 
+std::optional<int64_t> getVcgReduceExtraBufferSize(ShapedType srcType,
+                                                   int64_t srcAllocTotalSize,
+                                                   int64_t reductionDim) {
+  int64_t rDim = srcType.getShape()[reductionDim];
+  int64_t aDim = srcType.getShape()[0];
+  auto eleType = srcType.getElementType();
+  const int numPerBlock = getNumPerBlock(eleType);
+  const int numPerRepeat = getNumPerRepeat(eleType);
+  if (rDim <= numPerRepeat)
+    return std::nullopt;
+  if (reductionDim == 0) { // Reduce R
+    int64_t buffSize = ceilFactor(srcAllocTotalSize, numPerBlock) / numPerBlock;
+    return buffSize;
+  }
+  // Reduce AR, for now we assume it is a power of numPerBlock
+  //  if not then we need align each row post reduction
+  int64_t buffSize = ceilFactor(srcAllocTotalSize, numPerBlock) / numPerBlock;
+  return buffSize;
+}
+
 std::optional<int64_t>
 refineReduceExtraBufferSize(ShapedType srcType, int64_t srcAllocTotalSize,
-                            int64_t reductionDim,
-                            hivm::ReduceOperation arithOp) {
+                            int64_t reductionDim, hivm::ReduceOperation arithOp,
+                            bool saveUbUf) {
   auto eleType = srcType.getElementType();
   if (!srcType.hasStaticShape()) {
     if (eleType.isInteger() && (reductionDim == srcType.getRank() - 1)) {
@@ -238,9 +263,11 @@ refineReduceExtraBufferSize(ShapedType srcType, int64_t srcAllocTotalSize,
   const int numPerRepeat = getNumPerRepeat(eleType);
 
   int64_t rDim = srcType.getShape()[reductionDim];
-  int64_t aDim = srcType.getShape()[0];
+  int64_t aDim;
   if (reductionDim == 0) {
     aDim = 1;
+  } else {
+    aDim = srcType.getShape()[reductionDim - 1];
   }
   int64_t extraBufferSize = 0;
   if (eleType.isInteger() || arithOp == hivm::ReduceOperation::prod ||
@@ -262,6 +289,13 @@ refineReduceExtraBufferSize(ShapedType srcType, int64_t srcAllocTotalSize,
     return extraBufferSize;
   }
   if ((eleType.isF32() || eleType.isF16())) {
+    if ((arithOp == hivm::ReduceOperation::max ||
+         arithOp == hivm::ReduceOperation::min ||
+         arithOp == hivm::ReduceOperation::sum) &&
+        saveUbUf) {
+      return getVcgReduceExtraBufferSize(srcType, srcAllocTotalSize,
+                                         reductionDim);
+    }
     if ((arithOp == hivm::ReduceOperation::max ||
          arithOp == hivm::ReduceOperation::min) &&
         reductionDim == 0 && srcType.getRank() == 1) {
@@ -290,7 +324,7 @@ refineReduceExtraBufferSize(ShapedType srcType, int64_t srcAllocTotalSize,
 
 std::optional<int64_t>
 getExtraBufferSizeForReduceOpSingleDim(Operation *op, BufferSizeUnit unit,
-                                       int64_t reductionDim) {
+                                       int64_t reductionDim, bool saveUbUf) {
   ShapedType srcType = cast<ShapedType>(op->getOpOperand(0).get().getType());
   auto vReduceOp = dyn_cast<hivm::VReduceOp>(op);
   hivm::ReduceOperation arithOp = vReduceOp.getArith().getReduceOp();
@@ -320,18 +354,24 @@ getExtraBufferSizeForReduceOpSingleDim(Operation *op, BufferSizeUnit unit,
       return numElemPerBlock;
     }
     if (srcType.hasStaticShape()) {
-      // RA, static shape
-      // use r * sizeof(Index) aligned to ub_block_unit + 1 extra ub_block_unit
-      int64_t reductionDimLength = srcType.getShape()[reductionDim];
-      // TODO: library only supports 32 bit index; add verifier for
-      // ReduceWithIndexOp to check this
-      ShapedType indexType =
-          cast<ShapedType>(vReduceOp.getDpsInits()[1].getType());
-      int64_t indexBitWidth = indexType.getElementTypeBitWidth();
-      int64_t totalBitLength =
-          ceilFactor(reductionDimLength * indexBitWidth, vectorBlockSizeBit) +
-          vectorBlockSizeBit;
-      return totalBitLength / elementBitWidth;
+      int64_t aDimension = 1; // This is A dimension in RA term
+      for (auto dim : srcType.getShape()) {
+        if (dim == reductionDim) {
+          continue;
+        }
+        aDimension *= dim;
+      }
+      constexpr int64_t bitsPerByte = 8;
+      // FIXME indices hardcodes as int32
+      const int64_t eltByteSize = CEIL_DIV(elementBitWidth, bitsPerByte);
+      constexpr int64_t idxByteSize = sizeof(int32_t);
+      int64_t numElemPerRepeat = getNumPerRepeat(eleType);
+      int64_t elementsSize =
+          ceilDiv(aDimension * idxByteSize, numElemPerRepeat) * numElemPerRepeat /
+          eltByteSize;
+      int64_t maskSize =
+          ceilDiv(aDimension, bitsPerByte * numElemPerBlock) * numElemPerBlock;
+      return elementsSize + maskSize + numElemPerBlock;
     }
     // RA, dynamic shape
     // use 1.5 * alloc_size aligned to ub_block_unit
@@ -353,7 +393,7 @@ getExtraBufferSizeForReduceOpSingleDim(Operation *op, BufferSizeUnit unit,
     // reduce_or/reduce_and last axis
     // reduce(R/AR).
     return refineReduceExtraBufferSize(srcType, srcAllocTotalSize.value(),
-                                       reductionDim, arithOp);
+                                       reductionDim, arithOp, saveUbUf);
   }
   if (arithOp == hivm::ReduceOperation::xori) {
     if (reductionDim != srcType.getRank() - 1) {
@@ -367,13 +407,18 @@ getExtraBufferSizeForReduceOpSingleDim(Operation *op, BufferSizeUnit unit,
     }
     // reduce_xor last axis reduce(R/AR)
     return refineReduceExtraBufferSize(srcType, srcAllocTotalSize.value(),
-                                       reductionDim, arithOp);
+                                       reductionDim, arithOp, saveUbUf);
   }
   llvm_unreachable("unsupported reduce case");
 }
 
 std::optional<int64_t> getExtraBufferSizeForReduceOp(Operation *op,
                                                      BufferSizeUnit unit) {
+  bool saveUbUf = false;
+  if (op->getParentOfType<func::FuncOp>()->hasAttr(
+          hivm::EnableSavingUbAttr::name)) {
+    saveUbUf = true;
+  }
   assert(op && isa<hivm::VReduceOp>(op) && "Operation should be a reduce op!");
   auto dpsOp = dyn_cast<DestinationStyleOpInterface>(op);
   assert(dpsOp);
@@ -390,8 +435,8 @@ std::optional<int64_t> getExtraBufferSizeForReduceOp(Operation *op,
   std::optional<int64_t> bufSize = 0;
   bool needTempBuffer = false;
   for (auto reductionDim : reductionDims) {
-    std::optional<int64_t> tmpBufSize =
-        getExtraBufferSizeForReduceOpSingleDim(op, unit, reductionDim);
+    std::optional<int64_t> tmpBufSize = getExtraBufferSizeForReduceOpSingleDim(
+        op, unit, reductionDim, saveUbUf);
     if (tmpBufSize) {
       bufSize = std::max(bufSize, tmpBufSize);
       needTempBuffer = true;

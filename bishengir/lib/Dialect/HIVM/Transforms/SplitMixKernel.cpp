@@ -24,6 +24,7 @@
 #include "bishengir/Dialect/Utils/Util.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Tensor/Transforms/Transforms.h"
 #include "mlir/Interfaces/LoopLikeInterface.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/Support/Casting.h"
@@ -66,7 +67,8 @@ void annotateOpOperand(OpBuilder builder, Operation *op,
       return;
     auto opCoreType = getCoreType(definingOp);
     assert(succeeded(opCoreType));
-    if (opCoreType.value() == coreType) {
+    if (opCoreType.value() == coreType ||
+        isa<LoopLikeOpInterface, scf::IfOp>(definingOp)) {
       builder.setInsertionPointAfter(definingOp);
       builder.create<annotation::MarkOp>(definingOp->getLoc(), val);
     } else if (opCoreType.value() == TCoreType::CUBE_OR_VECTOR) {
@@ -180,6 +182,19 @@ struct PostCubeReplacement : public OpRewritePattern<tensor::ExtractOp> {
   }
 };
 
+struct FoldEmptyInsertSlice : public OpRewritePattern<tensor::InsertSliceOp> {
+  using OpRewritePattern<tensor::InsertSliceOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(tensor::InsertSliceOp op,
+                                PatternRewriter &rewriter) const override {
+    if (op.getSource().getDefiningOp<tensor::EmptyOp>()) {
+      rewriter.replaceOp(op, op.getDest());
+      return success();
+    }
+    return failure();
+  }
+};
+
 template <typename OpType>
 void removeOpWithAttrFromFunc(std::string attr, func::FuncOp func) {
   func.walk<WalkOrder::PostOrder>([&](Operation *op) {
@@ -194,6 +209,8 @@ void removeOpWithAttrFromFunc(std::string attr, func::FuncOp func) {
 void postProcessCubeFunc(func::FuncOp func) {
   RewritePatternSet patterns(func.getOperation()->getContext());
   patterns.insert<PostCubeReplacement>(patterns.getContext());
+  patterns.insert<FoldEmptyInsertSlice>(patterns.getContext());
+  tensor::populateFoldTensorEmptyPatterns(patterns);
   if (failed(applyPatternsGreedily(func.getOperation(), std::move(patterns)))) {
     llvm::report_fatal_error("postProcessCubeFunc failed");
   }

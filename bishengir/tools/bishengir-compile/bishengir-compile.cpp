@@ -48,10 +48,8 @@ void registerAndParseCLIOptions(int argc, char **argv) {
   mlir::registerAsmPrinterCLOptions();
   bishengir::BiShengIRCompileMainConfig::registerCLOptions();
   bishengir::registerPassManagerCLOptions();
-#if BISHENGIR_ENABLE_PM_CL_OPTIONS
   // Enable full pass management abilities.
   mlir::registerPassManagerCLOptions();
-#endif
 
   // Register version printer
   llvm::cl::SetVersionPrinter(printVersion);
@@ -81,6 +79,8 @@ int main(int argc, char **argv) {
   // Create config from command line options.
   bishengir::BiShengIRCompileMainConfig config =
       bishengir::BiShengIRCompileMainConfig::createFromCLOptions();
+  config.setExecutablePath(bishengir::getExecutablePath(
+      argv[0], reinterpret_cast<void *>(main)));
   // Check the validity of intput/output options
   if (failed(checkInOutOptionsValidity(config))) {
     return EXIT_FAILURE;

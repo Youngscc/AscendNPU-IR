@@ -167,7 +167,7 @@ LoopLikeOpInterface getParentLoop(Value val);
 /// In the position of ptrCastOp, affineApply and indexCastOp would be
 /// created.
 ///
-/// \return IndexCastOp of affineApply
+/// \return Index value of affineApply
 Value createNestedIndexModular(OpBuilder &builder, Operation *op,
                                int modular = 2);
 
@@ -239,8 +239,6 @@ std::vector<scf::ForOp> createNestedLoops(
 FailureOr<SmallVector<Operation *>> traceForPotentialMatrixC(Value v,
                                                              Block *storeBlock);
 
-bool isMarkedAsHIVMElementwiseOp(Operation *op);
-
 bool isMixModule(ModuleOp mod);
 
 bool isAICModule(ModuleOp mod);
@@ -259,12 +257,23 @@ void removeModuleCoreTypeAttr(ModuleOp mod);
 /// Constraints: Skip bufferization::ToMemrefOp
 void getOpUsers(Operation *op, SmallVector<Operation *, 8> &userOps);
 
+/// Get dynamic values of the tensor.
+SmallVector<Value> getTensorDynamicValues(OpBuilder &builder, Location loc,
+                                          Value src);
+
 // Create local workspace of current block
 Value createAllocLocalWorkSpace(OpBuilder &builder, Location loc,
-                                SmallVector<int64_t> shape, Type elementType);
+                                SmallVector<int64_t> targetShape,
+                                SmallVector<Value> dynamicSizes,
+                                Type elementType);
 
-Value getLocalWorkSpaceTensor(PatternRewriter &rewriter, Location loc,
-                              ArrayRef<int64_t> targetShapes, Type elementType);
+// Create local workspace and to_tensor ops. When staticAllocShape is provided,
+// add annotation::MarkOp to mark the static buffer size in byte (for dynamic
+// tensor case). When std::nullopt, skip the mark (for static tensor case).
+Value getLocalWorkSpaceTensor(
+    PatternRewriter &rewriter, Location loc, ArrayRef<int64_t> targetShape,
+    ArrayRef<Value> dynamicShape, Type elementType,
+    std::optional<ArrayRef<int64_t>> staticAllocShape = std::nullopt);
 
 // Create local lock var
 hivm::CreateSyncBlockLockOp createSyncBlockLockVar(OpBuilder &builder,
@@ -274,7 +283,7 @@ hivm::CreateSyncBlockLockOp createSyncBlockLockVar(OpBuilder &builder,
 std::vector<std::pair<Value, Value>> getOperationAliasInfo(Operation *op);
 
 /// Get buffer static size.
-std::optional<uint32_t> GetBufferSize(Value buffer);
+std::optional<int64_t> GetBufferBitSize(Value buffer);
 
 // get is operation aligned according to the broadcast/reduce dim and rank
 AlignKind isBrcOpAligned(VBrcOp vbrcOp, int dim, int rank);
@@ -327,7 +336,32 @@ enum class BitWidth : uint32_t {
   B32 = 32,
   B64 = 64,
 };
-  
+
+/// Task type encoded as a two‑digit decimal number:
+/// - Tens digit: which kernel(s) are used
+///   - 1 → pure vector kernel
+///   - 2 → pure cube kernel
+///   - 3 → mix cube and vector kernels (default 1:1 mix)
+/// - Units digit: presence of the kernel in the mix
+///
+/// Example: 31 → mixed cube + vector, ratio 1:1.
+enum TaskType : int8_t {
+  /// 1x – pure vector kernel (ratio 1:0)
+  VectorOnly = 10,
+
+  /// 2x – pure cube kernel (ratio 0:1)
+  CubeOnly = 20,
+
+  /// 3x – mixed cube & vector kernel, ratio 1:1
+  CubeVectorMix_1_1 = 31,
+
+  /// 3x – mixed cube & vector kernel, default 1:2 ratio
+  CubeVectorMix_1_2 = 32,
+
+  /// Unknown module type (kept as 0 to preserve original behaviour)
+  Unknown = 0
+};
+
 constexpr static unsigned int VL = 256;
 constexpr static unsigned int BL = VL / 8;
 const static int vectorBlockSizeBit = 256;
@@ -344,6 +378,9 @@ constexpr static unsigned int VNCHWCONV_INTR_BYTES_PER_REPEAT = 512;
 bool isGuaranteedCollapsibleStrictly(
     MemRefType srcType, ArrayRef<ReassociationIndices> reassociation);
 
+bool isGuaranteedCollapsibleUnStrictly(
+    MemRefType srcType, ArrayRef<ReassociationIndices> reassociation);
+
 /// Return the MemRefTypes
 SmallVector<MemRefType> getMemRefTypes(TypeRange types);
 
@@ -351,6 +388,7 @@ SmallVector<MemRefType> getMemRefTypes(TypeRange types);
 bool isAllSameRank(const SmallVectorImpl<MemRefType> &memrefTypes);
 
 inline int64_t ceilFactor(int64_t x, int64_t y) { return (x + y - 1) / y * y; }
+inline int64_t ceilDiv(int64_t x, int64_t y) { return (x + y - 1) / y; }
 
 bool isLastDimContiguous(Value operand);
 

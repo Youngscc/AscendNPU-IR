@@ -17,8 +17,10 @@
 
 #include "bishengir/Dialect/HIVM/Transforms/InjectSync/SyncCodegen.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
+#include "bishengir/Dialect/HIVM/IR/HIVMInterfaces.h"
 #include "bishengir/Dialect/HIVM/Transforms/InjectSync/SyncCodegen.h"
 #include "bishengir/Dialect/HIVM/Transforms/InjectSync/SyncCommon.h"
+#include "bishengir/Dialect/HIVM/Utils/Utils.h"
 #include "bishengir/Dialect/SCF/Utils/Utils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Attributes.h"
@@ -54,11 +56,11 @@ void SyncCodegen::Build() {
   });
 
   if (syncAnalysisMode == SyncAnalysisMode::NORMALSYNC) {
-    UpdateMmadL1SyncTemplateInter();
+    UpdateMmadL1SyncTemplateInter(rewriter);
   }
 }
 
-void SyncCodegen::UpdateMmadL1SyncTemplateInter() {
+void SyncCodegen::UpdateMmadL1SyncTemplateInter(IRRewriter &rewriter) {
   func_->walk<WalkOrder::PreOrder>([&](hivm::MmadL1Op mmadL1Op) {
     auto iter = mmadL12SyncTemplateInter.find(mmadL1Op);
     checkCondition(iter != mmadL12SyncTemplateInter.end(),
@@ -80,9 +82,17 @@ void SyncCodegen::UpdateOpInsertSync(IRRewriter &rewriter) {
   for (auto &nowElement : syncIR) {
     if (auto *compoundElement =
             dyn_cast<CompoundInstanceElement>(nowElement.get())) {
-      handleEnableUnitFlag(rewriter, compoundElement);
       UpdateCompoundOpInsertSync(compoundElement);
-      UpdateSyncTemplateInterForBackPipeMPipeMTE1DB(compoundElement);
+      if (auto unitFlagEnabledOp =
+              dyn_cast<UnitFlagEnabledInterface>(compoundElement->elementOp)) {
+        HandleUnitFlagEnabledOp(rewriter, unitFlagEnabledOp,
+                                compoundElement->unitFlagInfo);
+      }
+      if (auto mmadL1Op = dyn_cast<MmadL1Op>(compoundElement->elementOp)) {
+        InitDefaultSyncTemplateInterForMmadL1Op(mmadL1Op);
+        UpdateSyncTemplateInterForBackPipeMPipeMTE1DB(compoundElement,
+                                                      mmadL1Op);
+      }
     } else if (auto *placeHolder =
                    dyn_cast<PlaceHolderInstanceElement>(nowElement.get())) {
       updatePlaceHolderOpInsertSync(placeHolder);
@@ -96,35 +106,26 @@ void SyncCodegen::UpdateOpInsertSync(IRRewriter &rewriter) {
   }
 }
 
-void SyncCodegen::handleEnableUnitFlag(
-    IRRewriter &rewriter, CompoundInstanceElement *nowCompound) const {
-  auto unitFlagMode = nowCompound->getUnitFlagMode();
-  auto unitFlagCond =
-      nowCompound->getUnitFlagCond(nowCompound->elementOp->getLoc(), rewriter);
-  if (unitFlagMode == UNIT_FLAG::DISABLED) {
-    return;
-  }
-  if (auto fixpipeOp = dyn_cast<hivm::FixpipeOp>(nowCompound->elementOp)) {
-    rewriter.setInsertionPoint(fixpipeOp);
-    fixpipeOp.setUnitFlagModeAttr(
-        UnitFlagAttr::get(nowCompound->elementOp->getContext(), unitFlagMode));
-    if (unitFlagCond.has_value() && unitFlagCond.value()) {
-      fixpipeOp.getUnitFlagCondMutable().assign(unitFlagCond.value());
+void SyncCodegen::HandleUnitFlagEnabledOp(
+    IRRewriter &rewriter, UnitFlagEnabledInterface unitFlagEnabledOp,
+    UnitFlagInfo unitFlagInfo) const {
+  if (auto unitFlagArgsOpt =
+          unitFlagInfo.getUnitFlagArgs(unitFlagEnabledOp, rewriter)) {
+    auto [unitFlagModes, unitFlagConds] = unitFlagArgsOpt.value();
+    assert(unitFlagModes.size() <= 1 ||
+           unitFlagModes.size() == unitFlagConds.size());
+    if (!unitFlagModes.empty()) {
+      unitFlagEnabledOp.setUnitFlagModes(unitFlagModes);
+      unitFlagEnabledOp.setUnitFlagConditions(unitFlagConds);
     }
-  } else if (auto mmadl1Op = dyn_cast<hivm::MmadL1Op>(nowCompound->elementOp)) {
-    rewriter.setInsertionPoint(mmadl1Op);
-    mmadl1Op.setUnitFlagModeAttr(
-        UnitFlagAttr::get(nowCompound->elementOp->getContext(), unitFlagMode));
-    if (unitFlagCond.has_value() && unitFlagCond.value()) {
-      mmadl1Op.getUnitFlagCondMutable().assign(unitFlagCond.value());
-    }
-  } else {
-    llvm_unreachable("Unsupport op to have unit-flag enabled.");
   }
 }
 
 void SyncCodegen::updatePlaceHolderOpInsertSync(
     PlaceHolderInstanceElement *placeHolder) {
+  if (placeHolder->pipeBefore.empty() && placeHolder->pipeAfter.empty()) {
+    return;
+  }
   Operation *terminatorOp = nullptr;
   auto *parentScope = syncIR[placeHolder->parentScopeId].get();
   if (auto *branchOp = dyn_cast<BranchInstanceElement>(parentScope)) {
@@ -175,53 +176,50 @@ void SyncCodegen::UpdateCompoundOpInsertSync(
 }
 
 void SyncCodegen::UpdateSyncTemplateInterForBackPipeMPipeMTE1DB(
-    CompoundInstanceElement *nowCompound) {
-  auto mmadL1Op =
-      llvm::dyn_cast_if_present<hivm::MmadL1Op>(nowCompound->elementOp);
-  if (!mmadL1Op) {
+    CompoundInstanceElement *nowCompound, hivm::MmadL1Op mmadL1Op) {
+  if (!nowCompound->BwdPipeMPipeMTE1SyncPtr ||
+      nowCompound->BwdPipeMPipeMTE1SyncPtr->uselessSync) {
+    // There is no reverse or EventId conflict, and the library implementation
+    // needs to inserted needed synchronization.
     return;
   }
-  MLIRContext *ctx = func_->getContext();
-  IRRewriter rewriter(ctx);
+  checkCondition(nowCompound->BwdPipeMPipeMTE1SyncPtr->eventIds.size() == 1,
+                 "expected BwdPipeMPipeMTE1SyncPtr eventIds to be of size 1");
+  IRRewriter rewriter(func_->getContext());
   rewriter.setInsertionPointToStart(&func_.getBody().front());
-  auto iter = mmadL12SyncTemplateInter.find(mmadL1Op);
-  if (iter == mmadL12SyncTemplateInter.end()) {
-    InitDefaultSyncTemplateInterForMmadL1Op(rewriter, mmadL1Op);
-  }
-  if (!nowCompound->PipeMTE1ToPipeMSync ||
-      nowCompound->PipeMTE1ToPipeMSync->uselessSync) {
-    // There is no reverse or Eventid conflict, and the library itself
-    // needs to be inserted for synchronization.
-    return;
-  }
-  checkCondition(nowCompound->PipeMTE1ToPipeMSync->eventIds.size() == 1,
-                 "expected PipeMTE1ToPipeMSync eventIds to be of size 1");
   auto backPipeMPipeMTE1DBEvent = rewriter.create<arith::ConstantIntOp>(
       nowCompound->elementOp->getLoc(),
-      nowCompound->PipeMTE1ToPipeMSync->eventIds[0], rewriter.getI64Type());
+      nowCompound->BwdPipeMPipeMTE1SyncPtr->eventIds[0], rewriter.getI64Type());
   // mmadL1 Sync IR two updates, namely BackPipeMPipeMTE1DBEvent0 and
   // BackPipeMPipeMTE1DBEvent1.
-  if (nowCompound->defVec.empty()) {
-    mmadL12SyncTemplateInter[mmadL1Op].BackPipeMPipeMTE1DBEvent1 =
+  if (nowCompound->macroOpInstanceId == 0) {
+    mmadL12SyncTemplateInter[mmadL1Op].BackPipeMPipeMTE1DBEvent0 =
         backPipeMPipeMTE1DBEvent;
   } else {
-    mmadL12SyncTemplateInter[mmadL1Op].BackPipeMPipeMTE1DBEvent0 =
+    mmadL12SyncTemplateInter[mmadL1Op].BackPipeMPipeMTE1DBEvent1 =
         backPipeMPipeMTE1DBEvent;
   }
 }
 
 void SyncCodegen::InitDefaultSyncTemplateInterForMmadL1Op(
-    IRRewriter &rewriter, hivm::MmadL1Op mmadL1Op) {
+    hivm::MmadL1Op mmadL1Op) {
+  if (mmadL12SyncTemplateInter.contains(mmadL1Op)) {
+    return;
+  }
+  IRRewriter rewriter(func_->getContext());
+  rewriter.setInsertionPointToStart(&func_.getBody().front());
   auto defaultValue = rewriter.create<arith::ConstantIntOp>(
       mmadL1Op.getOperation()->getLoc(), -1, rewriter.getI64Type());
-  SyncTemplateInter syncTemplateInter(defaultValue, defaultValue, defaultValue,
-                                      defaultValue, defaultValue, defaultValue,
-                                      defaultValue);
-  Value KLoopDBCond = createNestedIndexForOp(rewriter, mmadL1Op.getOperation());
-  if (KLoopDBCond) {
-    syncTemplateInter.KLoopDBCond = KLoopDBCond;
-  }
+  SyncTemplateInter syncTemplateInter(defaultValue);
   mmadL12SyncTemplateInter[mmadL1Op] = syncTemplateInter;
+  if (checkAllParentLoopsAreForLoops(mmadL1Op)) {
+    if (auto KLoopDBCondIndex =
+            createNestedIndexForOp(rewriter, mmadL1Op.getOperation())) {
+      Value KLoopDBCondIdx = rewriter.create<arith::IndexCastOp>(
+          KLoopDBCondIndex.getLoc(), rewriter.getI64Type(), KLoopDBCondIndex);
+      mmadL12SyncTemplateInter[mmadL1Op].KLoopDBCond = KLoopDBCondIdx;
+    }
+  }
 }
 
 void SyncCodegen::UpdateLoopOpInsertSync(LoopInstanceElement *nowElement) {
@@ -344,7 +342,7 @@ void SyncCodegen::CreateSetWaitBlockOpForMultiBuffer(IRRewriter &rewriter,
   Location loc = op->getLoc();
   LoopLikeOpInterface forOp = op->getParentOfType<LoopLikeOpInterface>();
   if (!scf::utils::isNormalized(forOp)) {
-    // TODO: call normalize loop pass before plan memory, currently CVPipeling
+    // TODO: call normalize loop pass before plan memory, currently CVPipelining
     // ensure the loop is normalized
     op->emitOpError("parent loop is not normalized");
     return;
@@ -530,8 +528,8 @@ void SyncCodegen::CreateSetWaitOpForMultiBuffer(IRRewriter &rewriter,
                                                 Operation *op,
                                                 SyncOperation *sync,
                                                 bool beforeInsert) {
-  if (sync->eventIds.size() > 2) {
-    llvm_unreachable("Sync supports up to 2 buffers! ");
+  if (sync->eventIds.size() == 1) {
+    llvm_unreachable("Sync supports up to multi buffers! ");
   }
   Value bufferSelected = GetBufferSelected(rewriter, op, sync);
   if (NeedLowerSyncToTemplate(rewriter, op, sync, bufferSelected)) {
@@ -573,23 +571,49 @@ Value SyncCodegen::GetBufferSelected(IRRewriter &rewriter, Operation *op,
     LoopLikeOpInterface parentLoop =
         defineOp->getParentOfType<LoopLikeOpInterface>();
     Value counter;
-    auto iter = loop2BufferCounter.find(parentLoop);
+    unsigned eventIdCount = sync->eventIds.size();
+    // Use map structure: loop2BufferCounter[loop, eventIdCount]
+    std::pair<LoopLikeOpInterface, unsigned> counterKey = std::make_pair(parentLoop, eventIdCount);
+    auto iter = loop2BufferCounter.find(counterKey);
     if (iter != loop2BufferCounter.end()) {
-      counter = iter->second;
+        counter = iter->second;
     } else {
-      // Construct a ternary expression for select.
-      counter = createNestedIndexModular(rewriter, defineOp);
-      loop2BufferCounter[parentLoop] = counter;
+        // Construct a modular expression for select using the eventIdCount as modular
+        Value modularIndex = createNestedIndexModular(rewriter, defineOp, eventIdCount);
+        counter = rewriter.create<arith::IndexCastOp>(modularIndex.getLoc(), rewriter.getI64Type(), modularIndex);
+        loop2BufferCounter[counterKey] = counter;
     }
     // Insert selector after the defined value.
     rewriter.setInsertionPointAfter(counter.getDefiningOp());
     Location locDefineOp = counter.getDefiningOp()->getLoc();
-    Value firstID = rewriter.create<arith::ConstantIntOp>(
-        locDefineOp, sync->eventIds[0], rewriter.getI64Type());
-    Value secondID = rewriter.create<arith::ConstantIntOp>(
-        locDefineOp, sync->eventIds[1], rewriter.getI64Type());
-    bufferSelected = rewriter.create<arith::SelectOp>(
-        locDefineOp, rewriter.getI64Type(), counter, firstID, secondID);
+
+    // Support multi-buffer selection for arbitrary buffer counts (>=2)
+    if (eventIdCount >= 2) {
+      // For multi buffers selection, create array of event IDs and use the counter variable directly
+      // Create constants for each event ID
+      SmallVector<Value> eventValues;
+      for (int eventId : sync->eventIds) {
+        eventValues.push_back(rewriter.create<arith::ConstantIntOp>(
+            locDefineOp, static_cast<int64_t>(eventId), rewriter.getI64Type()));
+      }
+
+      // Build selections using the reused counter variable
+      // selected = eventValues[0];
+      // for i in 1..3:
+      //   if (counter == i) selected = eventValues[i] else keep previous
+      Value selectedValue = eventValues[0];
+      for (unsigned i = 1; i < eventValues.size(); ++i) {
+        Value iVal = rewriter.create<arith::ConstantIntOp>(
+            locDefineOp, static_cast<int64_t>(i), rewriter.getI64Type());
+        Value cond = rewriter.create<arith::CmpIOp>(
+            locDefineOp, arith::CmpIPredicate::eq, counter, iVal);
+        selectedValue = rewriter.create<arith::SelectOp>(
+            locDefineOp, eventValues[0].getType(), cond, eventValues[i], selectedValue);
+      }
+      bufferSelected = selectedValue;
+    } else {
+      llvm_unreachable("Should not reach here!!");
+    }
     SyncIndex2SelectBuffer[sync->GetSyncIndex()] = bufferSelected;
   }
   return bufferSelected;

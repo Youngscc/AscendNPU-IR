@@ -336,28 +336,32 @@ struct AtomicLinalgGenericToHFusionStorePattern
       op.emitOpError("unsupported atomic operation: ");
       llvm_unreachable("Not implemented");
     }
+    bool hasReturn = op.getOutputs().size() > 1;
+    TypeRange returnTypes;
+    if (hasReturn) {
+      returnTypes = TypeRange(op.getOutputs()[1].getType());
+    }
+
+    Operation *newOperation;
     if (atomicKind == AtomicKindAttr::get(context, AtomicKind::CAS)) {
-      rewriter.create<hfusion::AtomicCasOp>(
-          op.getLoc(), TypeRange(),
+      newOperation = rewriter.create<hfusion::AtomicCasOp>(
+          op.getLoc(), returnTypes,
           ValueRange{op.getInputs()[1], op.getInputs()[2]}, op.getInputs()[0]);
-      rewriter.eraseOp(op);
-      return success();
+    } else if (atomicKind == AtomicKindAttr::get(context, AtomicKind::XCHG)) {
+      newOperation = rewriter.create<hfusion::AtomicXchgOp>(
+          op.getLoc(), returnTypes, op.getInputs()[1], op.getInputs()[0]);
+    } else {
+      // hivm.copy only accept tensor/tensor or memref/memref as input/output
+      // and the atomicRMW Op might be masked
+      // need to turn the input tensor into the same type the dst memref has
+      newOperation = rewriter.create<hfusion::AtomicRMWOp>(
+          op.getLoc(), returnTypes, op.getInputs()[1], op.getInputs()[0],
+          atomicKind);
     }
-    if (atomicKind == AtomicKindAttr::get(context, AtomicKind::XCHG)) {
-      rewriter.create<hfusion::AtomicXchgOp>(op.getLoc(), TypeRange(),
-                                             ValueRange{op.getInputs()[1]},
-                                             op.getInputs()[0]);
-      rewriter.eraseOp(op);
-      return success();
-    }
-    // hivm.copy only accept tensor/tensor or memref/memref as input/output
-    // and the atomicRMW Op might be masked
-    // need to turn the input tensor into the same type the dst memref has
-    auto hfusionStoreOp = rewriter.create<hfusion::StoreOp>(
-        op.getLoc(), ValueRange(op.getInputs()[1]),
-        ValueRange(op.getInputs()[0]));
-    hfusionStoreOp.setAtomicKindAttr(atomicKind);
     rewriter.eraseOp(op);
+    if (hasReturn) {
+      rewriter.replaceOp(op.getOutputs()[1].getDefiningOp(), newOperation);
+    }
     return success();
   }
 };
@@ -375,7 +379,8 @@ struct AtomicLinalgGenericToHFusionStorePattern
 //    ins(%arg0, %arg1 : tensor<256x64xf32>, tensor<256x64xi32>)
 //    outs(%0, %1 : tensor<256xf32>, tensor<256xi32>)
 //    dimensions = [1] -> tensor<256xf32>, tensor<256xi32>
-struct LinalgToHFusionReduceWithIndex : public OpRewritePattern<linalg::ReduceOp> {
+struct LinalgToHFusionReduceWithIndex
+    : public OpRewritePattern<linalg::ReduceOp> {
   using OpRewritePattern<linalg::ReduceOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(linalg::ReduceOp op,
@@ -386,11 +391,18 @@ struct LinalgToHFusionReduceWithIndex : public OpRewritePattern<linalg::ReduceOp
       return failure();
     }
 
+    bool isUnsigned = checkUnsignedIntInput(op);
     hfusion::ReduceWithIndexKind reduceKind;
     if (linalgReduceAttr == "max_with_index") {
-      reduceKind = hfusion::ReduceWithIndexKind::MAX;
+      if (isUnsigned)
+        reduceKind = hfusion::ReduceWithIndexKind::MAXUI;
+      else
+        reduceKind = hfusion::ReduceWithIndexKind::MAX;
     } else if (linalgReduceAttr == "min_with_index") {
-      reduceKind = hfusion::ReduceWithIndexKind::MIN;
+      if (isUnsigned)
+        reduceKind = hfusion::ReduceWithIndexKind::MINUI;
+      else
+        reduceKind = hfusion::ReduceWithIndexKind::MIN;
     } else {
       return failure();
     }
@@ -410,24 +422,41 @@ struct LinalgToHFusionReduceWithIndex : public OpRewritePattern<linalg::ReduceOp
       return failure();
     }
 
-    ValueRange inits = op.getInits();
-    ValueRange inputs = op.getInputs();
+    SmallVector<Value> inputs;
+    auto inits = llvm::to_vector(op.getInits());
     auto reduceKindAttr =
         ReduceWithIndexKindAttr::get(rewriter.getContext(), reduceKind);
     auto tieBreakLeftAttr = BoolAttr::get(rewriter.getContext(), tieBreakLeft);
-    std::optional<Operation *> isIndexInputUnused = utils::getAnnotateOpWithAttr(inputs[1], "UseIndexInput");
+    std::optional<Operation *> isIndexInputUnused =
+        utils::getAnnotateOpWithAttr(op.getInputs()[1], "UseIndexInput");
     if (isIndexInputUnused.has_value()) {
-      rewriter.replaceOpWithNewOp<hfusion::ReduceWithIndexOp>(
-        op, TypeRange{inits[0].getType(), inits[1].getType()},
-        /*input*/ op.getInputs(), /*outputValue&Index*/ inits, reduceKindAttr,
-        tieBreakLeftAttr, op.getDimensionsAttr());
+      inputs = llvm::to_vector(op.getInputs());
     } else {
-      rewriter.replaceOpWithNewOp<hfusion::ReduceWithIndexOp>(
-          op, TypeRange{inits[0].getType(), inits[1].getType()},
-          /*input*/ ValueRange{op.getInputs()[0]}, /*outputValue&Index*/ inits, reduceKindAttr,
-          tieBreakLeftAttr, op.getDimensionsAttr());
+      inputs.push_back(op.getInputs()[0]);
     }
+
+    auto newOp = rewriter.create<hfusion::ReduceWithIndexOp>(
+        op.getLoc(), TypeRange{inits[0].getType(), inits[1].getType()},
+        /*input*/ inputs, /*outputValue&Index*/ inits,
+        reduceKindAttr, tieBreakLeftAttr, op.getDimensionsAttr());
+    rewriter.replaceOp(op, newOp);
     return success();
+  }
+
+private:
+  bool checkUnsignedIntInput(linalg::ReduceOp op) const {
+    Block *block = &op.getRegion().front();
+    auto inputArg = block->getArgument(0);
+    for (auto *user : inputArg.getUsers()) {
+      if (auto cmpIOp = dyn_cast<arith::CmpIOp>(user)) {
+        if (cmpIOp.getPredicate() == arith::CmpIPredicate::ult ||
+            cmpIOp.getPredicate() == arith::CmpIPredicate::ugt ||
+            cmpIOp.getPredicate() == arith::CmpIPredicate::ule ||
+            cmpIOp.getPredicate() == arith::CmpIPredicate::uge)
+          return true;
+      }
+    }
+    return false;
   }
 };
 

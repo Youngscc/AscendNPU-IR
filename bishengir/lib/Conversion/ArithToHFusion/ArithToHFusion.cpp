@@ -229,21 +229,22 @@ struct ElementwiseOpToHFusionCast : public OpRewritePattern<CastOp> {
       auto inType = getElementTypeOrSelf(concreteOp.getIn().getType());
       auto outType = getElementTypeOrSelf(concreteOp.getOut().getType());
 
+      const bool isI8ToI64 = inType.isInteger(8) && outType.isInteger(64);
       const bool isI8ToI32 = inType.isInteger(8) && outType.isInteger(32);
       const bool isI8ToI16 = inType.isInteger(8) && outType.isInteger(16);
 
       // Now we support unsigned casts only from uint8
       // All casts from uint8 are performed using intermediate float cast
-      // So now we just need to now that source is signed/unsigned
+      // So now we just need to know that source is signed/unsigned
       // In future, we need to support both cast_from_sign, cast_to_sign
       // parameters
-      if (isI8ToI16 || isI8ToI32) {
+      if (isI8ToI16 || isI8ToI32 || isI8ToI64) {
         return hfusion::TypeFn::cast_unsigned;
       }
       return hfusion::TypeFn::cast_signed;
     }
 
-    if (isa<arith::UIToFPOp>(op))
+    if (isa<arith::UIToFPOp, arith::FPToUIOp>(op.getOperation()))
       return hfusion::TypeFn::cast_unsigned;
     return hfusion::TypeFn::cast_signed;
   }
@@ -325,8 +326,6 @@ struct ElementwiseOpToHFusionCompare : public OpRewritePattern<CompareOp> {
       return CompareFn::vge;
     case arith::CmpIPredicate::uge:
       return CompareFn::vuge;
-    default:
-      llvm_unreachable("unsupported arith cmp predicate to hfusion");
     }
   }
 
@@ -445,6 +444,7 @@ void mlir::hfusion::populateArithToHFusionConversionPatterns(
       ElementwiseOpToHFusionBinary<arith::MaxNumFOp,
                                    hfusion::BinaryFn::maxnumf>,
       ElementwiseOpToHFusionBinary<arith::MaximumFOp, hfusion::BinaryFn::maxf>,
+      ElementwiseOpToHFusionBinary<arith::RemFOp, hfusion::BinaryFn::mod>,
       ElementwiseOpToHFusionBinary<arith::RemSIOp, hfusion::BinaryFn::mod>,
       ElementwiseOpToHFusionBinary<arith::RemUIOp, hfusion::BinaryFn::modui>,
       ElementwiseOpToHFusionBinary<arith::ShLIOp, hfusion::BinaryFn::shli>,

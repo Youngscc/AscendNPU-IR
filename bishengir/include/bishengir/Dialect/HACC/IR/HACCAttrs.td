@@ -23,6 +23,7 @@
 #define BISHENGIR_DIALECT_HACC_IR_HACCATTRS_TD
 
 include "bishengir/Dialect/HACC/IR/HACCBase.td"
+include "bishengir/Dialect/HACC/IR/HACCInterfaces.td"
 
 include "mlir/IR/AttrTypeBase.td"
 include "mlir/IR/EnumAttr.td"
@@ -129,6 +130,7 @@ def HACC_kInferWorkspaceShapeFunction : I32EnumAttrCase<"kInferWorkspaceShapeFun
 def HACC_kInferSyncBlockLockNumFunction : I32EnumAttrCase<"kInferSyncBlockLockNumFunction", 5, "infer_sync_block_lock_num_function">;
 def HACC_kInferSyncBlockLockInitFunction : I32EnumAttrCase<"kInferSyncBlockLockInitFunction", 6, "infer_sync_block_lock_init_function">;
 def HACC_kGetTilingStructSizeFunction : I32EnumAttrCase<"kGetTilingStructSizeFunction", 7, "get_tiling_struct_size_function">;
+def HACC_kInferTaskTypeFunction : I32EnumAttrCase<"kInferTaskTypeFunction", 8, "infer_task_type_function">;
 def HACC_HostFuncTypeEnum : HACC_I32Enum<"HostFuncType", "HACC Host function type", [
   HACC_kEntry,
   HACC_kTilingFunction,
@@ -137,6 +139,7 @@ def HACC_HostFuncTypeEnum : HACC_I32Enum<"HostFuncType", "HACC Host function typ
   HACC_kInferSyncBlockLockNumFunction,
   HACC_kInferSyncBlockLockInitFunction,
   HACC_kGetTilingStructSizeFunction,
+  HACC_kInferTaskTypeFunction,
 ]> {}
 
 def HACC_HostFuncTypeAttr : HACC_Attr<"HostFuncType", "host_func_type"> {
@@ -226,6 +229,14 @@ def HACC_GetTilingStructSizeFunctionAttr
   }];
 }
 
+def HACC_InferTaskTypeFunctionAttr
+    : HACC_FuncRefAttr<"InferTaskTypeFunction",
+                       "infer_task_type_function"> {
+  let description = [{
+    HACC infer core type and mix ratio.
+  }];
+}
+
 //===----------------------------------------------------------------------===//
 // Device Target and Specification
 //===----------------------------------------------------------------------===//
@@ -260,14 +271,9 @@ def HACC_DeviceSpecEnum :
   }];
 }
 
-def HACCTargetDeviceSpecTrait
-    : NativeAttrTrait<"HACCTargetDeviceSpecInterface::Trait"> {
-  let cppNamespace = "::mlir::hacc";
-}
-
 def HACC_TargetDeviceSpecAttr :
     HACC_Attr<"TargetDeviceSpec", "target_device_spec",
-              [TargetDeviceSpecTrait, HACCTargetDeviceSpecTrait]> {
+              [TargetDeviceSpecInterface, HACCTargetDeviceSpecInterface]> {
   let summary = "An attribute to represent NPU target device specification.";
   let description = [{
     Each device specification describes a single device and its
@@ -285,6 +291,55 @@ def HACC_TargetDeviceSpecAttr :
   );
   let genVerifyDecl = 1;
   let assemblyFormat = "`<` $entries `>`";
+  let extraClassDeclaration = [{
+    /// In older MLIR versions, TargetDeviceSpecInterface does not inherit from
+    /// DLTIQueryInterface, and queryHelper() is not available.
+    /// By using a template member function, we leverage "Lazy Instantiation":
+    /// the function body is only parsed when query() is explicitly called.
+    /// This allows the same code to compile against both old and new MLIR
+    /// versions without requiring explicit preprocessor macros.
+    template <typename T = ::mlir::TargetDeviceSpecInterface>
+    ::mlir::FailureOr<::mlir::Attribute> query(::mlir::DataLayoutEntryKey key) const {
+      return ::llvm::cast<T>(*this).queryHelper(key);
+    }
+  }];
+}
+
+def HACC_HIVMCCompatiblePrintAttr
+    : HACC_Attr<"HIVMCCompatiblePrint", "hivmc_compatible_print"> {
+  let description = [{
+    If it is true, it will generate MLIR according to the HIVMC version.
+  }];
+}
+
+def HACCVersionTrait
+    : NativeAttrTrait<"HACCVersionInterface::Trait"> {
+  let cppNamespace = "::mlir::hacc";
+}
+
+def HACC_HIVMCVersionAttr :
+    HACC_Attr<"HIVMCVersion", "hivmc_version",
+              [HACCVersionTrait]> {
+  let summary = "An attribute to represent hivmc version information.";
+  let parameters = (ins
+    AttrParameter<"StringAttr", "version">:$version
+  );
+  let builders = [TypeBuilder<(ins "llvm::VersionTuple":$llvmVersion), [{
+      return Base::get($_ctxt,
+        ::mlir::StringAttr::get($_ctxt, llvmVersion.getAsString()));
+  }]>];
+  let assemblyFormat = "`<` $version `>`";
+  let extraClassDeclaration = [{
+  std::optional<llvm::VersionTuple> getParsedVersion() {
+    StringAttr version = this->getVersion();
+    if (!version)
+      return std::nullopt;
+    auto hivmcVersion = llvm::VersionTuple();
+    if (!hivmcVersion.tryParse(version))
+      return hivmcVersion;
+    return std::nullopt;
+  }
+}];
 }
 
 //===----------------------------------------------------------------------===//

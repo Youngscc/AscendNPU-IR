@@ -34,6 +34,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/Casting.h"
 
 #include <type_traits>
 
@@ -81,25 +82,31 @@ StridedLayoutAttr calcStridedLayout(MLIRContext *context,
   return StridedLayoutAttr::get(context, offset, outputStrides);
 }
 
-Operation *createNewExpandOpFromCollapseOp(tensor::CollapseShapeOp &collapseOp,
+Operation *createNewExpandOpFromCollapseOp(Operation *collapseOp,
                                            PatternRewriter &rewriter,
                                            Location loc, Value operand) {
   PatternRewriter::InsertionGuard guard(rewriter);
   rewriter.setInsertionPointAfterValue(operand);
-  auto reassociation = collapseOp.getReassociationIndices();
-  auto currentShape = utils::getShape(collapseOp.getSrc().getType());
-  if (isa<MemRefType>(operand.getType())) {
-    MemRefType resultType;
-    if (!isStrided(operand)) {
-      resultType = MemRefType::get(currentShape, getElementTypeOrSelf(operand));
-    } else {
-      resultType =
-          MemRefType::get(currentShape, getElementTypeOrSelf(operand),
-                          calcStridedLayout(rewriter.getContext(), currentShape,
-                                            getOffset(operand)));
-    }
-    return rewriter.create<memref::ExpandShapeOp>(loc, resultType, operand,
-                                                  reassociation);
+  // Extract common properties regardless of collapse op type
+  SmallVector<ReassociationIndices> reassociation;
+  SmallVector<int64_t> currentShape;
+  if (auto memrefCollapse = dyn_cast<memref::CollapseShapeOp>(collapseOp)) {
+    reassociation = memrefCollapse.getReassociationIndices();
+    currentShape = utils::getShape(memrefCollapse.getSrc().getType());
+  } else if (auto tensorCollapse = dyn_cast<tensor::CollapseShapeOp>(collapseOp)) {
+    reassociation = tensorCollapse.getReassociationIndices();
+    currentShape = utils::getShape(tensorCollapse.getSrc().getType());
+  } else {
+    llvm::report_fatal_error("Expected memref::CollapseShapeOp or tensor::CollapseShapeOp");
+  }
+  // Create expand op based on operand type
+  if (auto operandType = dyn_cast<MemRefType>(operand.getType())) {
+    auto resultType = memref::ExpandShapeOp::computeExpandedType(
+        operandType, currentShape, reassociation);
+    if (failed(resultType))
+      llvm::report_fatal_error("cannot create new expand from this collapse");
+    return rewriter.create<memref::ExpandShapeOp>(loc, resultType.value(),
+                                                  operand, reassociation);
   }
   auto resultType =
       RankedTensorType::get(currentShape, getElementTypeOrSelf(operand));
@@ -1232,6 +1239,10 @@ PropagateCollapseDown::matchAndRewrite(tensor::CollapseShapeOp collapseOp,
     if (isa<hfusion::ReduceWithIndexOp>(userOp)) {
       LLVM_DEBUG(llvm::dbgs()
                      << "Propagate collapse down - ReduceWithIndex\n";);
+      if (userOp->getNumResults() >= 2u &&
+          !userOp->getResults()[1].getUsers().empty()) {
+        return failure();
+      }
       return handleReduceLikeOp<hfusion::ReduceWithIndexOp>(
           collapseOp, rewriter, userOp, checkValueIsInit(userOp, result));
     }
@@ -1277,6 +1288,14 @@ PropagateCollapseDown::matchAndRewrite(tensor::CollapseShapeOp collapseOp,
                                    checkValueIsInit(userOp, result));
     }
     if (isa<hivm::VReduceOp>(userOp)) {
+      hivm::VReduceOp reduceOp = dyn_cast<hivm::VReduceOp>(userOp);
+      auto reduceOpArith = reduceOp.getArithAttr();
+      auto reduceOpAttr = reduceOpArith.getReduceOp();
+      if (hivm::VReduceOp::isArgminOrArgmax(reduceOpAttr) &&
+          userOp->getNumResults() >= 2 &&
+          !userOp->getResults()[1].getUsers().empty()) {
+        return failure();
+      }
       return handleHIVMReduceOp(collapseOp, rewriter, userOp,
                                 checkValueIsInit(userOp, result));
     }
@@ -1285,6 +1304,45 @@ PropagateCollapseDown::matchAndRewrite(tensor::CollapseShapeOp collapseOp,
     }
   }
   return failure();
+}
+
+LogicalResult PropagateCollapseDownToI1Cast::matchAndRewrite(
+    tensor::CollapseShapeOp collapseOp, PatternRewriter &rewriter) const {
+  Value result = collapseOp.getResult();
+
+  if (!result.hasOneUse())
+    return failure();
+
+  Operation *userOp = *result.getUsers().begin();
+  if (!userOp)
+    return failure();
+
+  if (collapseOp->getParentOp() != userOp->getParentOp())
+    return failure();
+
+  if (!mlir::isa<hfusion::CastOp>(userOp))
+    return failure();
+
+  auto srcTy = mlir::dyn_cast<RankedTensorType>(collapseOp.getSrc().getType());
+  auto resTy =
+      mlir::dyn_cast<RankedTensorType>(collapseOp.getResult().getType());
+  if (!srcTy || !resTy)
+    return failure();
+
+  if (!srcTy.getElementType().isInteger(1) ||
+      !resTy.getElementType().isInteger(1))
+    return failure();
+
+  auto *src = collapseOp.getSrc().getDefiningOp();
+  if (!src || isStopPropagatable(src))
+    return failure();
+
+  LDBG(*userOp);
+  LLVM_DEBUG(
+      llvm::dbgs()
+          << "Propagate collapse down, single use hfusion.cast on i1\n";);
+
+  return handleElementwiseOp(collapseOp, rewriter, userOp);
 }
 
 } // namespace tensor

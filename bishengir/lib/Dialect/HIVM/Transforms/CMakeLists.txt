@@ -26,7 +26,12 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   ConstantizeBufferSize.cpp
   ConvertNonContiguousReshapeToCopy.cpp
   ConvertToHIVMOp.cpp
+  ConvertLayout/ShapeConversion/ConvertLayoutToFractalsUtils.cpp
+  ConvertLayout/ShapeConversion/ConvertLayoutFromFractalsUtils.cpp
+  ConvertLayout/ShapeConversion/ConvertLayoutOffsetUtils.cpp
+  ConvertLayout/ConvertLayoutUtils.cpp
   CVPipelining.cpp
+  EnableHIVMCCompatiblePrint.cpp
   EnableMultiBuffer.cpp
   FlattenOps.cpp
   HIVMAggregatedDecomposeOp.cpp
@@ -46,6 +51,7 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   InlineLoadCopy.cpp
   InlineOTFBroadcast.cpp
   InsertInferSyncBlockLockNumAndInitFunc.cpp
+  InsertInferTaskTypeFunc.cpp
   InsertInferWorkSpaceSizeFunc.cpp
   InsertInitAndFinishForDebug.cpp
   InsertLoadStoreForMixCV.cpp
@@ -57,6 +63,9 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   MarkDisableLoad.cpp
   MarkMultiBuffer.cpp
   MarkRealCoreType.cpp
+  MemoryDisplay.cpp
+  NormalizeBitwiseSelect.cpp
+  NormalizeConvOps.cpp
   NormalizeLoopIterator.cpp
   NormalizeMatmul.cpp
   OptMemPlanForPipeline.cpp
@@ -64,12 +73,14 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   RecognizeDeinterleaveOp.cpp
   ReduceRankSubview.cpp
   SetBufferSize.cpp
+  SinkOpToConsumerInLoop.cpp
   SplitMixKernel.cpp
   SyncBlockHoisting.cpp
   TileAndBindSubBlock.cpp
   TileBatchMMIntoLoop.cpp
   TileCubeVectorLoop.cpp
   TritonGlobalKernelArgsToHIVMOp.cpp
+  UnitFlagInfoBase.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/bishengir/Dialect/HIVM/Transforms
@@ -95,6 +106,7 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   BiShengIRHIVMAnalysis
   BiShengIRHIVMDialect
   BiShengIRHIVMUtils
+  BiShengIRScopeDialect
   MLIRIR
   MLIRLinalgDialect
   MLIRLinalgUtils

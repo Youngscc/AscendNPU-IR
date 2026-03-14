@@ -26,9 +26,11 @@ readonly ENABLE_PROJECTS="mlir"
 readonly LONG_OPTS=(
   "add-cmake-options:"
   "apply-patches"
+  "bisheng-compiler:"
   "bishengir-publish:"
   "build:"
   "build-bishengir-doc"
+  "build-bishengir-template"
   "build-test"
   "build-type:"
   "build-torch-mlir"
@@ -36,7 +38,6 @@ readonly LONG_OPTS=(
   "cxx-compiler:"
   "disable-ccache"
   "enable-assertion"
-  "enable-ir-print"
   "fast-build"
   "help"
   "install-prefix:"
@@ -71,7 +72,6 @@ LLVM_SOURCE_DIR="$THIRD_PARTY_FOLDER/llvm-project"
 TORCH_MLIR_SOURCE_DIR="$THIRD_PARTY_FOLDER/torch-mlir"
 BISHENGIR_SOURCE_DIR="$GIT_ROOT"
 ENABLE_ASSERTION="OFF"
-ENABLE_IR_PRINT="OFF"
 PYTHON_BINDING="OFF"
 BUILD_TORCH_MLIR="OFF"
 CCACHE_BUILD="ON"
@@ -79,6 +79,8 @@ SAFETY_OPTIONS=""
 SAFETY_LD_OPTIONS=""
 BISHENGIR_PUBLISH="ON"
 LLVM_BUILD_TARGETS="host"
+BISHENGIR_BUILD_TEMPLATE="OFF"
+BISHENG_COMPILER=""
 
 # help infomation
 usage() {
@@ -88,8 +90,10 @@ usage() {
       ${SCRIPT_NAME}
                 [--add-cmake-options CMAKE_OPTIONS]
                 [--apply-patches]
+                [--bisheng-compiler BISHENG_COMPILER]
                 [--bishengir-publish]
                 [-o | --build PATH]
+                [-t | --build-bishengir-template]
                 [--build-bishengir-doc]
                 [--build-test]
                 [--build-type BUILD_TYPE]
@@ -103,7 +107,6 @@ usage() {
                 [--llvm-source-dir DIR]
                 [--python-binding]
                 [-r | --rebuild]
-                [-t | --build-bishengir-template]
                 [--safety-options]
                 [--safety-ld-options]
                 [--skip_rpath]
@@ -112,11 +115,13 @@ usage() {
     Options:
       --add-cmake-options CMAKE_OPTIONS    Add options to CMake. (Default: null)
       --apply-patches                      Apply patches to third-party submodules. (Default: disabled)
+      --bisheng-compiler BISHENG_COMPILER  Path to bisheng compiler. (Default: null)
       --bishengir-publish                  Whether to disable features is currently unpublished. (Default: ON)
       -o, --build BUILD_PATH               Path to directory which CMake will use as the root of build directory
                                            (Default: build)
       --build-bishengir-doc                Whether to build BiShengIR documentation. (Default: disabled)
-      --build-test                         Whether to build bishengir-test (Default: disabled)
+      -t, --build-bishengir-template       Whether to build BiShengIR template. (Default: disabled)
+      -build-test                          Whether to build bishengir-test (Default: disabled)
       --build-type BUILD_TYPE              Specifies the build type. (Default: Release)
       --build-torch-mlir                   Whether to build torch-mlir. (Default: disabled)
       --c-compiler C_COMPILER              The full path to the compiler for C (Default: clang)
@@ -154,6 +159,10 @@ while true; do
     readonly APPLY_PATCHES=""
     shift
     ;;
+  --bisheng-compiler)
+    BISHENG_COMPILER="$2"
+    shift 2
+    ;;
   --bishengir-publish)
     BISHENGIR_PUBLISH="$2"
     shift 2
@@ -161,6 +170,10 @@ while true; do
   -o | --build)
     BUILD_DIR="$(realpath "$2")"
     shift 2
+    ;;
+  -t | --build-bishengir-template)
+    BISHENGIR_BUILD_TEMPLATE="ON"
+    shift
     ;;
   --build-bishengir-doc)
     BUILD_BISHENGIR_DOC="ON"
@@ -192,10 +205,6 @@ while true; do
     ;;
   --enable-assertion)
     ENABLE_ASSERTION="ON"
-    shift
-    ;;
-  --enable-ir-print)
-    ENABLE_IR_PRINT="ON"
     shift
     ;;
   --fast-build)
@@ -275,6 +284,15 @@ fi
 cmake_generate() {
   local torch_mlir_option=""
   local enable_external_projects="bishengir"
+
+  if [ "${BISHENGIR_BUILD_TEMPLATE}" = "ON" ]; then
+    if [ ! -d "$BISHENG_COMPILER" ]; then
+        echo "Path to bisheng compiler "$BISHENG_COMPILER" does not exist"
+      else
+        export BISHENG_INSTALL_PATH="${BISHENG_COMPILER}"
+    fi
+  fi
+
   if [ "${BUILD_TORCH_MLIR}" = "ON" ]; then
     enable_external_projects="${enable_external_projects};torch-mlir"
     torch_mlir_option="-DPython3_FIND_VIRTUALENV=ONLY\
@@ -335,7 +353,6 @@ cmake_generate() {
     -DLLVM_TARGETS_TO_BUILD="${LLVM_BUILD_TARGETS}" \
     ${torch_mlir_option} \
     -DLLVM_ENABLE_ASSERTIONS="${ENABLE_ASSERTION}" \
-    -DBISHENGIR_ENABLE_PM_CL_OPTIONS="${ENABLE_IR_PRINT}" \
     -DMLIR_ENABLE_BINDINGS_PYTHON="${PYTHON_BINDING}" \
     -DLLVM_CCACHE_BUILD="${build_ccache_build}" \
     -DCMAKE_C_FLAGS="${C_FLAGS}" \
@@ -348,6 +365,8 @@ cmake_generate() {
     -DCMAKE_INSTALL_PREFIX="${INSTALL_PREFIX}" \
     -DBSPUB_DAVINCI_BISHENGIR=ON \
     -DBISHENGIR_PUBLISH="${BISHENGIR_PUBLISH}" \
+    -DBISHENG_COMPILER_PATH="${BISHENG_COMPILER}" \
+    -DBISHENGIR_BUILD_TEMPLATE="${BISHENGIR_BUILD_TEMPLATE}" \
     ${CMAKE_OPTIONS}
 }
 

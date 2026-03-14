@@ -145,6 +145,68 @@ Operation *hfusion::createVandOp(PatternRewriter &rewriter, Location loc,
       ValueRange{andEmptyOp});
 }
 
+Operation *hfusion::createVorOp(PatternRewriter &rewriter, Location loc,
+                                Value lhs, Value rhs) {
+  auto andEmptyOp = utils::createEmptyOp(rewriter, loc, rhs);
+  return hfusion::createBinaryOp<hfusion::ElemwiseBinaryOp, hfusion::BinaryFn,
+                                 hfusion::BinaryFnAttr>(
+      rewriter, loc, hfusion::BinaryFn::vor, ValueRange({lhs, rhs}),
+      ValueRange{andEmptyOp});
+}
+
+Operation *hfusion::createVnotOp(PatternRewriter &rewriter, Location loc,
+                                 Value value) {
+  auto andEmptyOp = utils::createEmptyOp(rewriter, loc, value);
+  return hfusion::createUnaryOp<hfusion::ElemwiseUnaryOp, hfusion::UnaryFn,
+                                hfusion::UnaryFnAttr>(
+      rewriter, loc, hfusion::UnaryFn::vnot, value, ValueRange{andEmptyOp});
+}
+
+bool isConstantAllOne(Value v) {
+  auto type = getElementTypeOrSelf(v);
+  if (isa<FloatType>(type)) {
+    return false;
+  }
+
+  APInt value;
+  if (matchPattern(v, m_ConstantInt(&value))) {
+    // match true for i1 type, match -1 for i8/i16/i32/i64 type
+    return value.isAllOnes() ? true : false;
+  }
+
+  auto defineOp = v.getDefiningOp();
+  if (!defineOp) {
+    return false;
+  }
+
+  auto resIndx = cast<OpResult>(v).getResultNumber();
+  if (auto fillOp = dyn_cast<linalg::FillOp>(defineOp)) {
+    return isConstantAllOne(fillOp.getOperand(resIndx));
+  }
+
+  if (auto castOp = dyn_cast<hfusion::CastOp>(defineOp)) {
+    return isConstantAllOne(castOp.getOperand(resIndx));
+  }
+
+  return false;
+}
+
+LogicalResult hfusion::simplifyVxorToVnot(PatternRewriter &rewriter,
+                                          hfusion::ElemwiseBinaryOp op) {
+  if (isConstantAllOne(op.getOperand(1))) {
+    // XOR with all ones values can be optimized as NOT operation
+    auto vnotOp = hfusion::createUnaryOp<hfusion::ElemwiseUnaryOp, hfusion::UnaryFn, hfusion::UnaryFnAttr> (
+      rewriter, op.getLoc(), hfusion::UnaryFn::vnot,
+      ValueRange(op.getOperand(0)), ValueRange(op.getOperand(0))
+    );
+
+    rewriter.replaceOp(op, vnotOp);
+    return success();
+  }
+
+  return failure();
+}
+
 void tiling::getCallerInfo(func::FuncOp callee, ModuleOp enclosingModule,
                            DenseMap<func::FuncOp, CallerInfo> &info) {
   std::optional<SymbolTable::UseRange> maybeUses =
@@ -1242,6 +1304,50 @@ Value hfusion::divWithRoundMode(OpBuilder &builder, Location loc, Type resType,
   if (!elemType.isF32()) {
     castF32X = hfusion::castTo(builder, src0, builder.getF32Type());
     castF32Y = hfusion::castTo(builder, src1, builder.getF32Type());
+  }
+
+  // step 2: div_f32 = x_f32 / y_f32
+  auto divInit = utils::createEmptyOpWithTargetElemType(builder, loc, resTensor,
+                                                        builder.getF32Type());
+
+  auto divF32 = hfusion::createBinaryOp<linalg::ElemwiseBinaryOp,
+                                        linalg::BinaryFn, linalg::BinaryFnAttr>(
+      builder, loc, linalg::BinaryFn::div, ValueRange{castF32X, castF32Y},
+      ValueRange(divInit));
+
+  if (divOp != std::nullopt) {
+    (*divOp.value()) = divF32;
+  }
+
+  // step3: res = cast<RoundingMode>(div) -> resType
+  if (resType.isInteger(8) || resType.isInteger(16)) {
+    // cast from f32 to i32 then to resType
+    Value resI32 = hfusion::castTo(builder, divF32->getResults()[0],
+                                   builder.getI32Type(), roundingMode);
+    Value res = hfusion::castTo(builder, resI32, resType,
+                                hfusion::RoundMode::TRUNCWITHOVERFLOW);
+    return res;
+  }
+
+  // cast directly to resType
+  Value res =
+      hfusion::castTo(builder, divF32->getResults()[0], resType, roundingMode);
+  return res;
+}
+
+Value hfusion::divWithRoundModeAndCastType(OpBuilder &builder, Location loc, Type resType,
+                                Value src0, Value src1, Value resTensor,
+                                hfusion::RoundMode roundingMode, hfusion::TypeFn castIntegerType,
+                                std::optional<Operation **> divOp) {
+  Type elemType = getElementTypeOrSelf(src0.getType());
+  Value castF32X = src0;
+  Value castF32Y = src1;
+
+  // step 1: x_f32 = cast(x) -> f32
+  //         y_f32 = cast(y) -> f32
+  if (!elemType.isF32()) {
+    castF32X = hfusion::castTo(builder, src0, builder.getF32Type(), castIntegerType);
+    castF32Y = hfusion::castTo(builder, src1, builder.getF32Type(), castIntegerType); 
   }
 
   // step 2: div_f32 = x_f32 / y_f32

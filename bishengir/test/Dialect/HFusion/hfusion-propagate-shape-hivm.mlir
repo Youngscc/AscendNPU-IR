@@ -107,3 +107,44 @@ func.func @reinterpret_dynamic_stride(%arg0: memref<?xf32>, %arg1: memref<?xf32>
   %3 = hivm.hir.mmadL1 ins(%expanded, %expanded_2, %arg6, %arg7, %arg7, %arg7 : tensor<1x4xf32>, tensor<4x1xf32>, i1, index, index, index) outs(%arg5 : tensor<1x1xf32>) -> tensor<1x1xf32>
   return %3 : tensor<1x1xf32>
 }
+
+// -----
+// CHECK-LABEL: func.func @rearrange_cache_with_mask
+// CHECK: %[[OUT_I1:.*]] = tensor.empty() : tensor<1x30xi1>
+// CHECK: %[[CMP:.*]] = hfusion.compare {compare_fn = #hfusion.compare_fn<veq>} ins(%[[ARG0:.*]], %[[ARG0]] : tensor<1x30xi1>, tensor<1x30xi1>) outs(%[[OUT_I1]] : tensor<1x30xi1>) -> tensor<1x30xi1>
+// CHECK-NOT: tensor.collapse_shape %[[CMP]]
+// CHECK: %[[OUT_F16:.*]] = tensor.empty() : tensor<30xf16>
+// CHECK: %[[EXP:.*]] = tensor.expand_shape %[[OUT_F16]] {{\[\[0, *1\]\]}} output_shape [1, 30] : tensor<30xf16> into tensor<1x30xf16>
+// CHECK: %[[CAST:.*]] = hfusion.cast {cast = #hfusion.type_fn<cast_signed>, enable_overflow = true, round_mode = #hfusion.round_mode<trunc>} ins(%[[CMP]] : tensor<1x30xi1>) outs(%[[EXP]] : tensor<1x30xf16>) -> tensor<1x30xf16>
+// CHECK: %[[COLL:.*]] = tensor.collapse_shape %[[CAST]] {{\[\[0, *1\]\]}} : tensor<1x30xf16> into tensor<30xf16>
+module {
+  func.func @rearrange_cache_with_mask(%arg0: tensor<1x30xi1>) -> tensor<30xf16> {
+    %0 = tensor.empty() : tensor<1x30xi1>
+    %1 = hfusion.compare {compare_fn = #hfusion.compare_fn<veq>}
+      ins(%arg0, %arg0 : tensor<1x30xi1>, tensor<1x30xi1>) outs(%0 : tensor<1x30xi1>) -> tensor<1x30xi1>
+
+    %collapsed_in = tensor.collapse_shape %1 [[0, 1]] : tensor<1x30xi1> into tensor<30xi1>
+    %2 = tensor.empty() : tensor<30xf16>
+    %3 = hfusion.cast {cast = #hfusion.type_fn<cast_signed>, enable_overflow = true, round_mode = #hfusion.round_mode<trunc>}
+      ins(%collapsed_in : tensor<30xi1>) outs(%2 : tensor<30xf16>) -> tensor<30xf16>
+    return %3 : tensor<30xf16>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: @test_trivial_subview
+// CHECK: %[[CAST:.*]] = memref.reinterpret_cast %[[ARG2:.*]] to offset: {{\[}}%[[ARG0:.*]]], sizes: [128, 1], strides: [8, 8] : memref<?xf32> to memref<128x1xf32, strided<[8, 8], offset: ?>>
+// CHECK: %[[SUBVIEW_1:.*]] = memref.subview %[[CAST]][0, 0] {{\[}}%[[ARG1:.*]], 1] [1, 1] : memref<128x1xf32, strided<[8, 8], offset: ?>> to memref<?x1xf32, strided<[8, 8], offset: ?>>
+// CHECK: %[[SUBVIEW_2:.*]] = memref.subview %[[ALLOC:.*]][0, 0] {{\[}}%[[ARG1]], 1] [1, 1] : memref<128x1xf32> to memref<?x1xf32, strided<[1, 1]>>
+// CHECK: hivm.hir.load ins(%[[SUBVIEW_1]] : memref<?x1xf32, strided<[8, 8], offset: ?>>) outs(%[[SUBVIEW_2]] : memref<?x1xf32, strided<[1, 1]>>)
+func.func @test_trivial_subview(%arg0: index, %arg1: index, %arg2: memref<?xf32> {tt.divisibility = 16 : i32}) -> tensor<128x1xf32> {
+  %reinterpret_cast = memref.reinterpret_cast %arg2 to offset: [%arg0], sizes: [128], strides: [8] : memref<?xf32> to memref<128xf32, strided<[8], offset: ?>>
+  %alloc = memref.alloc() : memref<128x1xf32>
+  %collapse_shape = memref.collapse_shape %alloc [[0, 1]] : memref<128x1xf32> into memref<128xf32>
+  %subview = memref.subview %reinterpret_cast[0] [%arg1] [1] : memref<128xf32, strided<[8], offset: ?>> to memref<?xf32, strided<[8], offset: ?>>
+  %subview_0 = memref.subview %collapse_shape[0] [%arg1] [1] : memref<128xf32> to memref<?xf32, strided<[1]>>
+  hivm.hir.load ins(%subview : memref<?xf32, strided<[8], offset: ?>>) outs(%subview_0 : memref<?xf32, strided<[1]>>) may_implicit_transpose_with_last_axis = false
+  %0 = bufferization.to_tensor %alloc restrict writable : memref<128x1xf32>
+  return %0 : tensor<128x1xf32>
+}

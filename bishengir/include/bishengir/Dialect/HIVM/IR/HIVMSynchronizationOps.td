@@ -87,13 +87,14 @@ def PipeBarrierOp : HIVM_SynchronizationOp<"pipe_barrier"> {
 def SyncBlockOp : HIVM_SynchronizationOp<"sync_block"> {
   let summary = "hivm sync block between different kernels.";
   let description = [{
-    There are three sync block modes:
+    There are sync block modes:
       - ALL_CUBE : All cube are synchronized to a same point.
                    `tcube_pipe` needs to be set to the pipe that
                    the cube core is waiting for.
       - ALL_VECTOR : All vector are synchronized to a same point.
                    `tvector_pipe` needs to be set to the pipe that the
                    vector core is waiting for.
+      - ALL_SUB_VECTOR : All sub-vector cores are synchronized to a same point.
       - BARRIER_CUBE : Used for cube-cube synchronization, it's going to
                    be lowered to a barrie.pipe_all and would only be
                    copied the aic kernel.
@@ -140,7 +141,7 @@ def SyncBlockSetOp : HIVM_SynchronizationOp<"sync_block_set", [AttrSizedOperandS
     attr-dict `[` $tcore_type `,` $tpipe `,` $pipe`]`
     `flag` `=` custom<FlagID>($static_flag_id, $dynamic_flag_id)
     (`ffts_base_addr` `=` $ffts_base_addr^)?
-    (`syn_instr_mode` `=` $tsync_instr_mode^)?
+    (`sync_instr_mode` `=` $tsync_instr_mode^)?
   }];
   let builders = [
     OpBuilder<(ins "TCoreTypeAttr":$tcore_type, "PipeAttr":$tpipe, "PipeAttr":$pipe,

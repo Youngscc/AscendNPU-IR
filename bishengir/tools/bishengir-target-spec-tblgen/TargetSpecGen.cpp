@@ -102,11 +102,22 @@ static const char *const stringifyEnumDeclStr = R"(
 ///  {int AiCoreCount = 24;},
 static SmallVector<RecordVal>
 getSpecSuperClassEntries(const Record *derivedClassRecord) {
+#if defined(__LLVM_MAJOR_VERSION_22_COMPATIBLE__)
+  // LLVM 22: return ArrayRef<std::pair<const Record *, SMRange>>
+  auto superClasses = derivedClassRecord->getDirectSuperClasses();
+  const Record *superClass = superClasses.front().first;
+#elif defined(__LLVM_MAJOR_VERSION_21_COMPATIBLE__)
+  // LLVM 21: input SmallVector<const Record *>
+  SmallVector<const Record *> superClasses;
+  derivedClassRecord->getDirectSuperClasses(superClasses);
+  const Record *superClass = superClasses.front();
+#else
+  // LLVM 19: input SmallVector<Record *>
   SmallVector<Record *> superClasses;
   derivedClassRecord->getDirectSuperClasses(superClasses);
-  auto *superClass = superClasses.front();
-  SmallVector<RecordVal> result = llvm::to_vector(superClass->getValues());
-  return result;
+  Record *superClass = superClasses.front();
+#endif
+  return llvm::to_vector(superClass->getValues());
 }
 
 /// Main entry to emit target spec decls.
@@ -229,8 +240,13 @@ Attribute TargetSpec::getSpecEntry(DeviceSpec specEntry, OpBuilder& builder) con
 }
 
 /// Emit a function to map string to \c DeviceTarget enum.
+#ifndef __LLVM_MAJOR_VERSION_21_COMPATIBLE__
 static void emitStrToSymFnForDeviceTarget(const std::vector<Record *> &records,
                                           raw_ostream &OS) {
+#else
+static void emitStrToSymFnForDeviceTarget(const std::vector<const Record *> &records,
+                                          raw_ostream &OS) {
+#endif
   const auto *enumName = "TargetDevice";
   OS << formatv("{0} symbolize{0}Enum(::llvm::StringRef str){{\n", enumName);
   OS << formatv("  return ::llvm::StringSwitch<{0}>(str)\n", enumName);
@@ -244,11 +260,20 @@ static void emitStrToSymFnForDeviceTarget(const std::vector<Record *> &records,
 }
 
 /// Emit a function to map \c DeviceTarget enum to string.
+#ifndef __LLVM_MAJOR_VERSION_21_COMPATIBLE__
 static void emitSymToStrFnForDeviceTarget(const std::vector<Record *> &records,
                                           raw_ostream &OS) {
+#else
+static void emitSymToStrFnForDeviceTarget(const std::vector<const Record *> &records,
+                                          raw_ostream &OS) {
+#endif
   const auto *enumName = "TargetDevice";
   OS << formatv("::llvm::StringRef stringify{0}Enum({0} val){{\n", enumName);
+#ifndef __LLVM_MAJOR_VERSION_21_COMPATIBLE__
   OS << formatv("  switch (val) {{\n", enumName);
+#else
+  OS << "  switch (val) {\n";
+#endif
   for (auto [idx, record] : llvm::enumerate(records)) {
     auto deviceName = record->getValueAsString("Name");
     OS << formatv("    case {0}::{1}: return \"{2}\";\n", enumName, deviceName,

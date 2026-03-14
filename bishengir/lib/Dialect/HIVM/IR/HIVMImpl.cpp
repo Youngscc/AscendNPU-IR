@@ -97,31 +97,42 @@ bool traceSingleChainUser(
     return traceSingleChainUser(insertSliceOp.getResult(), isMatchedOp);
   }
 
-  if (isa<scf::ForOp>(curOperation)) {
-    auto forOp = dyn_cast_if_present<scf::ForOp>(curOperation);
-    auto initArgs = forOp.getInitArgs();
+  if (isa<LoopLikeOpInterface>(curOperation)) {
+    auto loop = dyn_cast_if_present<LoopLikeOpInterface>(curOperation);
+    auto initArgs = loop.getInits();
     auto it = std::find(initArgs.begin(), initArgs.end(), v);
     int initIndx = it == initArgs.end() ? -1 : it - initArgs.begin();
     if (initIndx >= 0) {
-      bool hasTraceMmad = traceSingleChainUser(
-          forOp.getRegionIterArgs()[initIndx], isMatchedOp);
+      bool hasTraceMmad =
+          traceSingleChainUser(loop.getRegionIterArgs()[initIndx], isMatchedOp);
       if (getUsersNum(initArgs[initIndx]) == 1 && hasTraceMmad)
         return true;
       return false;
     }
   }
 
-  if (isa<scf::ForOp>(curOperation->getParentOp()) &&
+  if (isa<LoopLikeOpInterface>(curOperation->getParentOp()) &&
       isa<scf::YieldOp>(curOperation)) {
-    auto scfForOp =
-        dyn_cast_if_present<scf::ForOp>(curOperation->getParentOp());
+    auto loopLikeOp =
+        dyn_cast_if_present<LoopLikeOpInterface>(curOperation->getParentOp());
     SmallVector<Value> yieldValues =
-        llvm::to_vector(scfForOp.getYieldedValues());
+        llvm::to_vector(loopLikeOp.getYieldedValues());
     auto idx = findIdx(yieldValues, v);
     if (idx.has_value()) {
-      auto forResult = scfForOp.getLoopResults().value()[idx.value()];
+      auto forResult = loopLikeOp.getLoopResults().value()[idx.value()];
       return traceSingleChainUser(forResult, isMatchedOp);
     }
+  }
+
+  if (isa<scf::WhileOp>(curOperation->getParentOp()) &&
+      isa<scf::ConditionOp>(curOperation)) {
+    auto whileOp = cast<scf::WhileOp>(curOperation->getParentOp());
+    auto condOp = cast<scf::ConditionOp>(curOperation);
+    SmallVector<Value> argsValue = llvm::to_vector(condOp.getArgs());
+    auto idx = findIdx(argsValue, v);
+    if (idx.has_value())
+      return traceSingleChainUser(
+          whileOp.getAfter().front().getArgument(idx.value()), isMatchedOp);
   }
 
   if (isa<scf::IfOp>(curOperation->getParentOp()) &&
@@ -324,8 +335,12 @@ Type getAnnotationMarkByteAlignment(Value value) {
   // set new type with new stride
   auto memrefType = cast<MemRefType>(shapedType);
   bool isAlreadyAligned = true;
-
+// TODO : release different version of ascendnpu ir and remove the macro
+#ifndef __LLVM_MAJOR_VERSION_21_COMPATIBLE__
   auto [strides, offset] = getStridesAndOffset(memrefType);
+#else
+  auto [strides, offset] = memrefType.getStridesAndOffset();
+#endif
   llvm::SmallVector<int64_t> alignedStrides(rank, 1);
   for (int64_t i = 0; i < rank; i++) {
     if (strideAlignElems[i] == 1) {
@@ -454,9 +469,6 @@ std::string getTypeName(Location loc, Type type,
         return "uint" + std::to_string(iType.getWidth()) + "_t";
       else
         return "int" + std::to_string(iType.getWidth()) + "_t";
-    default:
-      emitError(loc, "unrecognized integer type: ") << type;
-      return unknown;
     }
   }
   if (auto fType = dyn_cast<FloatType>(type)) {
@@ -481,128 +493,6 @@ std::string getTypeName(Location loc, Type type,
   }
   emitError(loc, "unsupported type: ") << type;
   return unknown;
-}
-
-static LogicalResult getCastSrcUnAlignSizeInfo(
-    Value src, SmallVector<int64_t> castAlignDims, int64_t bytesFactor,
-    std::vector<std::unique_ptr<OperAlignInfo>> *operAlignInfoList) {
-  // get alignment bytes
-  ShapedType srcType = cast<ShapedType>(src.getType());
-  auto maybeHwAlignBytes = getHWAlignBytes(srcType);
-  if (!maybeHwAlignBytes.has_value()) {
-    return failure();
-  }
-
-  // collect unalign info of src if cast src dims are not aligned.
-  auto hwAlignBytes = maybeHwAlignBytes.value();
-  auto elemTypeBytes = getElementTypeOrSelf(srcType).getIntOrFloatBitWidth() /
-                       mlir::utils::INTR_BITS_PER_BYTE;
-#ifndef NDEBUG
-  const int b16InByte = 2;
-  const int b32InByte = 4;
-  assert((elemTypeBytes == b16InByte || elemTypeBytes == b32InByte) &&
-      "Src only supports b32/b16 in cast overflow.");
-#endif
-  auto shape = cast<ShapedType>(src.getType()).getShape();
-  int64_t numElemPerBlock = mlir::utils::INTR_BYTES_PER_BLOCK / elemTypeBytes;
-  int64_t numElemPerBlockForDst = numElemPerBlock * bytesFactor;
-  int64_t rank = srcType.getRank();
-  // For example (a, b)strides<n1, 1>*i32 cast to (a, b)strides<n2, 1>*i8:
-  // 1. (a, b)strides<n1, 1>*i32 view as (a, b*4)strides<n1*4, 1>*i8
-  // 2. i8 transpose: Used to separate the high and low bits of int32, make sure
-  //    the shape of tranpose is 32*32 aligned.
-  // 3. i8 copyubtoub: Take out the lower 8 bits.
-  // 4. i8 transpose: Transpose back to get the final cast result, make sure the
-  //    shape of tranpose is 32*32 aligned.
-  // 5. When n2 is aligned with multiple blocks, need to add another copyubtoub
-  //    to adjust it to the target stride.
-  if (rank == 1) {
-    // The 1D scene is quite special and needs to be converted into a
-    // corresponding 2D scene to implement.
-    if (!ShapedType::isDynamic(shape[0]) && shape[0] <= numElemPerBlockForDst) {
-      hwAlignBytes = static_cast<unsigned>(
-        CEIL_FACTOR(shape[0] * bytesFactor, numElemPerBlockForDst) *
-        numElemPerBlockForDst);
-    } else {
-      hwAlignBytes = static_cast<unsigned>(numElemPerBlockForDst *
-                                           numElemPerBlockForDst * bytesFactor);
-    }
-    if (ShapedType::isDynamic(shape[0]) ||
-        (shape[0] * elemTypeBytes) % hwAlignBytes != 0) {
-      auto srcAlignInfo = std::make_unique<OperAlignInfo>(src, 0, hwAlignBytes);
-      operAlignInfoList->push_back(std::move(srcAlignInfo));
-    }
-  } else {
-#ifndef NDEBUG
-    const int supportedCastAlignDimSize = 2;
-    assert(castAlignDims.size() == supportedCastAlignDimSize &&
-        "When cast rank >= 2, castAlignDims size must be equal to 2");
-#endif
-    // Align the second axis in castAlignDims.
-    if (ShapedType::isDynamic(shape[castAlignDims[1]]) ||
-        (shape[castAlignDims[1]] * elemTypeBytes) % hwAlignBytes != 0) {
-      auto srcAlignInfo =
-          std::make_unique<OperAlignInfo>(src, castAlignDims[1], hwAlignBytes);
-      operAlignInfoList->push_back(std::move(srcAlignInfo));
-    }
-    // Align the first axis in castAlignDims.
-    hwAlignBytes = static_cast<unsigned>(numElemPerBlockForDst * bytesFactor);
-    if (ShapedType::isDynamic(shape[castAlignDims[0]]) ||
-        (static_cast<uint64_t>(shape[castAlignDims[0]]) * elemTypeBytes) %
-        hwAlignBytes !=
-        0) {
-      auto srcAlignInfo =
-          std::make_unique<OperAlignInfo>(src, castAlignDims[0], hwAlignBytes);
-      operAlignInfoList->push_back(std::move(srcAlignInfo));
-    }
-  }
-  return success();
-}
-
-
-static LogicalResult getCastDstUnAlignSizeInfo(
-    Value dst, SmallVector<int64_t> castAlignDims,
-    std::vector<std::unique_ptr<OperAlignInfo>> *operAlignInfoList) {
-  // get alignment bytes
-  ShapedType dstType = cast<ShapedType>(dst.getType());
-  auto maybeHwAlignBytes = getHWAlignBytes(dstType);
-  if (!maybeHwAlignBytes.has_value()) {
-    return failure();
-  }
-
-  // collect unalign info of dst if cast dst dims are not aligned
-  auto hwAlignBytes = maybeHwAlignBytes.value();
-  auto elemTypeBytes = getElementTypeOrSelf(dstType).getIntOrFloatBitWidth() /
-                       mlir::utils::INTR_BITS_PER_BYTE;
-  assert(elemTypeBytes == 1 && "Dst only supports b8 in cast overflow.");
-  auto shape = cast<ShapedType>(dst.getType()).getShape();
-  uint64_t numElemPerBlock = mlir::utils::INTR_BYTES_PER_BLOCK / elemTypeBytes;
-  int64_t rank = dstType.getRank();
-  // For example (a, b)strides<n1, 1>*i32 cast to (a, b)strides<n2, 1>*i8:
-  // 1. (a, b)strides<n1, 1>*i32 view as (a, b*4)strides<n1*4, 1>*i8
-  // 2. i8 transpose: Used to separate the high and low bits of int32, make sure
-  //    the shape of tranpose is 32*32 aligned.
-  // 3. i8 copyubtoub: Take out the lower 8 bits.
-  // 4. i8 transpose: Transpose back to get the final cast result, make sure the
-  //    shape of tranpose is 32*32 aligned.
-  // 5. When n2 is aligned with multiple blocks, need to add another copyubtoub
-  //    to adjust it to the target stride.
-  if (rank == 1) {
-    // The 1D scene is quite special and needs to be converted into a
-    // corresponding 2D scene to implement.
-    hwAlignBytes = numElemPerBlock * numElemPerBlock;
-  }
-  for (auto checkDim : castAlignDims) {
-    if (ShapedType::isDynamic(shape[checkDim]) ||
-        (static_cast<uint64_t>(shape[checkDim]) * elemTypeBytes) %
-        hwAlignBytes !=
-        0) {
-      auto dstAlignInfo =
-          std::make_unique<OperAlignInfo>(dst, checkDim, hwAlignBytes);
-      operAlignInfoList->push_back(std::move(dstAlignInfo));
-    }
-  }
-  return success();
 }
 
 static void collectOpAlignInfo(
@@ -694,44 +584,6 @@ LogicalResult getUnAlignSizeInfo(
   auto dstTrans1AlignInfo = std::make_unique<OperAlignInfo>(
       op.getDst(), transposeLoopDims[1], hwAlignBytes);
   operAlignInfoList->push_back(std::move(dstTrans1AlignInfo));
-  return success();
-}
-
-LogicalResult getUnAlignSizeInfo(
-    VCastOp op,
-    std::vector<std::unique_ptr<OperAlignInfo>> *operAlignInfoList) {
-  auto srcType = cast<ShapedType>(op.getSrc()[0].getType());
-  auto dstType = cast<ShapedType>(op.getDst()[0].getType());
-  auto srcElemTypeBytes =
-      getElementTypeOrSelf(srcType).getIntOrFloatBitWidth() /
-      mlir::utils::INTR_BITS_PER_BYTE;
-  auto dstElemTypeBytes =
-      getElementTypeOrSelf(dstType).getIntOrFloatBitWidth() /
-      mlir::utils::INTR_BITS_PER_BYTE;
-  auto bytesFactor = srcElemTypeBytes / dstElemTypeBytes;
-
-  // Get the cast axis that needs to be aligned.
-  SmallVector<int64_t> castAlignDims;
-  int64_t rank = srcType.getRank();
-  if (rank == 1) {
-    castAlignDims.push_back(0);
-  } else if (rank >= 2) {
-    castAlignDims.push_back(rank - 2);
-    castAlignDims.push_back(rank - 1);
-  } else {
-    llvm_unreachable("cast op rank need lager than 0.");
-  }
-
-  // Get the unalign information of the axis corresponding to cast src.
-  if (failed(getCastSrcUnAlignSizeInfo(op.getSrc()[0], castAlignDims,
-                                       bytesFactor, operAlignInfoList))) {
-    return failure();
-  }
-  // Get the unalign information of the axis corresponding to cast dst.
-  if (failed(getCastDstUnAlignSizeInfo(op.getDst()[0], castAlignDims,
-                                       operAlignInfoList))) {
-    return failure();
-  }
   return success();
 }
 

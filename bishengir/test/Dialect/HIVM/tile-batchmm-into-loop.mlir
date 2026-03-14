@@ -61,7 +61,7 @@ module {
     // CHECK: %[[FIX_RES:.*]] = hivm.hir.fixpipe
     // CHECK-SAME: ins(%[[MATMUL_RES]]
     // CHECK-SAME: outs(%[[EXT_WS]]
-    // CHECK: %[[INSERT:.*]] = tensor.insert_slice %[[FIX_RES]] into %[[ITERATION]]
+    // CHECK: %[[INSERT:.*]] = tensor.insert_slice %[[FIX_RES]] into %[[ITERATION]][%[[INDUCTION_VAR]], 0, 0] [1, 16, 16] [1, 1, 1] {elide_after_bufferize}
     // CHECK: scf.yield %[[INSERT]]
     %3 = tensor.empty() : tensor<3x16x16xf32>
     %4 = hivm.hir.batchMmadL1 ins(%0, %1, %true, %c16, %c32, %c16 : tensor<3x16x32xf16>, tensor<3x32x16xf16>, i1, index, index, index) outs(%3 : tensor<3x16x16xf32>) -> tensor<3x16x16xf32>
@@ -73,4 +73,35 @@ module {
     hivm.hir.store ins(%8 : tensor<3x16x16xf32>) outs(%reinterpret_cast_4 : memref<3x16x16xf32, strided<[256, 16, 1]>>)
     return
   }
+}
+
+// -----
+// CHECK: func.func @test_tile_batchMmadL1(%[[DST:.*]]: memref<2x256x256xf16>)
+func.func @test_tile_batchMmadL1(%dst : memref<2x256x256xf16>) {
+  // CHECK-DAG: %[[MA:.*]] = tensor.empty() : tensor<2x256x128xf16>
+  // CHECK-DAG: %[[MB:.*]] = tensor.empty() : tensor<2x128x256xf16>
+  %ma = tensor.empty() : tensor<2x256x128xf16>
+  %mb = tensor.empty() : tensor<2x128x256xf16>
+  %mc = tensor.empty() : tensor<2x256x256xf32>
+  %true = arith.constant true
+  %M = arith.constant 256 : index
+  %K = arith.constant 128 : index
+  %N = arith.constant 256 : index
+  // CHECK: scf.for %[[ITERATOR:.*]] =
+  // CHECK:   %[[EXT_MA:.*]] = tensor.extract_slice %[[MA]][%[[ITERATOR]], 0, 0]
+  // CHECK:   %[[EXT_MB:.*]] = tensor.extract_slice %[[MB]][%[[ITERATOR]], 0, 0]
+  // CHECK:   %[[MC:.*]] = tensor.empty() : tensor<256x256xf32>
+
+
+  // CHECK:   %[[RES:.*]] = hivm.hir.mmadL1 {fixpipe_already_inserted = true} ins(%[[EXT_MA]], %[[EXT_MB]]
+  // CHECK-SAME:                            outs(%[[MC]]
+  // CHECK:   %[[SUBVIEW_DST:.*]] = memref.subview %[[DST]][%[[ITERATOR]], 0, 0]
+  // CHECK:   %[[COLLAPSE_DST:.*]] = memref.collapse_shape %[[SUBVIEW_DST]]
+  // CHECK:   hivm.hir.fixpipe
+  // CHECK-SAME: ins(%[[RES]]
+  // CHECK-SAME: outs(%[[COLLAPSE_DST]]
+  %result = hivm.hir.batchMmadL1 {fixpipe_already_inserted = true} ins(%ma, %mb, %true, %M, %K, %N: tensor<2x256x128xf16>, tensor<2x128x256xf16>, i1, index, index, index)
+                              outs(%mc: tensor<2x256x256xf32>) -> tensor<2x256x256xf32>
+  hivm.hir.fixpipe {enable_nz2nd} ins(%result : tensor<2x256x256xf32>) outs(%dst : memref<2x256x256xf16>)
+  return
 }

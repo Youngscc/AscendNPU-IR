@@ -31,6 +31,7 @@ public:
     Parallel,
     RankReduced,
     Reduce,
+    NotAligned,
   };
   explicit DimensionAnalyzer(Operation *op);
   LogicalResult initialize() override;
@@ -106,6 +107,7 @@ protected:
   void processVReduceOp(hivm::VReduceOp op);
   void processVTransposeOp(hivm::VTransposeOp op);
   void processVGatherOp(hivm::VGatherOp op);
+  void processVGatherMaskOp(hivm::VGatherMaskOp op);
   void processVConcatOp(hivm::VConcatOp op);
   void processVInterleaveOp(hivm::VInterleaveOp op);
   void processVDeinterleaveOp(hivm::VDeinterleaveOp op);
@@ -131,13 +133,15 @@ protected:
   void markDimensionKind();
 
   template <typename StoreOpTy>
-  int64_t computeTilingDimImpl(
-      DenseMap<int64_t, SmallVector<Dimension>> &parallelDimMap);
+  void computeTilingDimImpl(
+      DenseMap<int64_t, DenseMap<int64_t, SmallVector<Dimension>>> &parallelDimMaps,
+      DenseMap<int64_t, int> &numStoreOps);
 
 protected:
   DenseMap<Value, int64_t> tilingDim_;
   DenseMap<int64_t, TilingDimensionKind> tilingDimKindMap;
-  int selectedTilingParIdx = -1;
+  llvm::SmallDenseSet<int> selectedTilingParIdx;
+  std::unique_ptr<mlir::detail::SimpleUnionFind> solverGroup_;
 };
 
 } // namespace detail

@@ -259,6 +259,36 @@ func.func @test_extui_i1_i8(%arg0 : tensor<6x6xi1>) -> tensor<6x6xi8> {
 
 // -----
 
+// CHECK-LABEL: func.func @test_extui_i8_i64
+func.func @test_extui_i8_i64(%arg0 : tensor<6x6xi8>) -> tensor<6x6xi64> {
+  // CHECK:       %[[EMPTY:.*]] = tensor.empty()
+  // CHECK:       %[[RET:.*]] = hfusion.cast {cast = #hfusion.type_fn<cast_unsigned>, round_mode = #hfusion.round_mode<rint>}
+  %ret = arith.extui %arg0 : tensor<6x6xi8> to tensor<6x6xi64>
+  return %ret : tensor<6x6xi64>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_extui_i8_i32
+func.func @test_extui_i8_i32(%arg0 : tensor<6x6xi8>) -> tensor<6x6xi32> {
+  // CHECK:       %[[EMPTY:.*]] = tensor.empty()
+  // CHECK:       %[[RET:.*]] = hfusion.cast {cast = #hfusion.type_fn<cast_unsigned>, round_mode = #hfusion.round_mode<rint>}
+  %ret = arith.extui %arg0 : tensor<6x6xi8> to tensor<6x6xi32>
+  return %ret : tensor<6x6xi32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_extui_i8_i16
+func.func @test_extui_i8_i16(%arg0 : tensor<6x6xi8>) -> tensor<6x6xi16> {
+  // CHECK:       %[[EMPTY:.*]] = tensor.empty()
+  // CHECK:       %[[RET:.*]] = hfusion.cast {cast = #hfusion.type_fn<cast_unsigned>, round_mode = #hfusion.round_mode<rint>}
+  %ret = arith.extui %arg0 : tensor<6x6xi8> to tensor<6x6xi16>
+  return %ret : tensor<6x6xi16>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @test_fptosi_f32_i32
 func.func @test_fptosi_f32_i32(%arg0 : tensor<6x6xf32>) -> tensor<6x6xi32> {
   // CHECK:       %[[EMPTY:.*]] = tensor.empty()
@@ -411,4 +441,14 @@ func.func @test_arith_bitcast(%arg : tensor<32xf32>) -> tensor<32xi32> {
   // CHECK: %[[RET:.*]] = hfusion.bitcast ins(%[[arg0:.*]] : tensor<32xf32>) outs(%[[EMPTY]] : tensor<32xi32>) -> tensor<32xi32>
   %1 = arith.bitcast %arg : tensor<32xf32> to tensor<32xi32>
   return %1 : tensor<32xi32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_arith_remui
+func.func @test_arith_remui(%arg0 : tensor<1024xi8>, %arg1 : tensor<1024xi8>) -> tensor<1024xi8> {
+  // CHECK: %[[EMPTY:.*]] = tensor.empty()
+  // CHECK: %[[RET:.*]] = hfusion.elemwise_binary {fun = #hfusion.binary_fn<modui>}
+  %ret = arith.remui %arg0, %arg1 : tensor<1024xi8>
+  return %ret : tensor<1024xi8>
 }

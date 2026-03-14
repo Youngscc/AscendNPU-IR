@@ -66,8 +66,9 @@ def LoadOp : HIVM_DmaOp<"load", [
   // Will automatically use the default uniform reassociation impl
   UniformReassociationFlattenTrait,
   DeclareOpInterfaceMethods<FlattenInterface, ["getLimitedAxes"]>,
-  OperElemTypeConstraints<[0], [I8, UI8, I16, UI16, F16, BF16,
-                                I32, UI32, F32, UI64, I64]>,
+  // TODO: Use trait to avoid writing duplicate type constraints
+  OperElemTypeConstraints<[0], [F8E4M3FN, F8E5M2, I1, I8, UI8,
+    I16, UI16, F16, BF16, I32, UI32, F32, UI64, I64]>,
   DeclareOpInterfaceMethods<BiShengIRAggregatedOpInterface,
     ["decomposeOperation", "getDecomposePhase"]>,
   DeclareOpInterfaceMethods<HIVMStructuredOpInterface, ["getIndexingMaps"]>,
@@ -147,8 +148,8 @@ def StoreOp : HIVM_DmaOp<"store", [
   // Will automatically use the default uniform reassociation impl
   UniformReassociationFlattenTrait,
   DeclareOpInterfaceMethods<FlattenInterface, ["getLimitedAxes"]>,
-  OperElemTypeConstraints<[0], [I8, UI8, I16, UI16, F16, BF16,
-                                I32, UI32, F32, UI64, I64]>,
+  OperElemTypeConstraints<[0], [F8E4M3FN, F8E5M2, I1, I8, UI8,
+    I16, UI16, F16, BF16, I32, UI32, F32, UI64, I64]>,
   DeclareOpInterfaceMethods<HIVMStructuredOpInterface, ["getIndexingMaps"]>,
 ]> {
   let summary = "HIVM data store operation";
@@ -201,8 +202,8 @@ def CopyOp : HIVM_DmaOp<"copy", [
   // Will automatically use the default uniform reassociation impl
   UniformReassociationFlattenTrait,
   DeclareOpInterfaceMethods<FlattenInterface, ["getLimitedAxes"]>,
-  OperElemTypeConstraints<[0], [I1, I8, UI8, I16, UI16, F16, BF16,
-                                I32, UI32, F32, UI64, I64]>,
+  OperElemTypeConstraints<[0], [F8E4M3FN, F8E5M2, I1, I8, UI8,
+    I16, UI16, F16, BF16, I32, UI32, F32, UI64, I64]>,
   DeclareOpInterfaceMethods<HIVMStructuredOpInterface, ["getIndexingMaps"]>,
 ]> {
   let summary = "HIVM data copy operation";
@@ -273,7 +274,6 @@ def FixpipeOp : HIVM_DmaOp<"fixpipe", [
   DeclareOpInterfaceMethods<HIVMStructuredOpInterface, ["getIndexingMaps"]>
 ]> {
   let summary = "HIVM data copy operation from L0C to other memory hierarchies.";
-#ifndef BISHENGIR_ENABLE_A5_UNPUBLISHED_FEATURES
   let description = [{
     Fixpipe is pipeline that performing data movement from L0C to other memory hierarchies,
     with on-the-fly fixed function of pre-stage quantization,
@@ -285,88 +285,45 @@ def FixpipeOp : HIVM_DmaOp<"fixpipe", [
 
     Additionally, Fixpipe is also capable of layout transform.
   }];
-#else
-  let description = [{
-    Fixpipe is pipeline that performing data movement from L0C to OUT or L1,
-    with on-the-fly fixed function of pre-stage quantization,
-    pre-stage ReLU, element-wise add, post-stage ReLU, post-stage quantization.
-
-    Additionally, Fixpipe is also capable of layout transform.
-
-    ### Attributes
-
-    #### 'dma_mode'
-    HIVM data movement model from L0C to destination, There are three values: NZ2DN, NZ2ND, and NZ2NZ(normal).
-
-    #### `dual_dst_mode`
-    HIVM dual destination mode control. dual destination mode can be enabled only when nz2nd or normal data
-    movement mode is enabled, and data movement is being performed from L0C to UB. Only supported on Ascend910_95 series.
-  }];
-#endif // BISHENGIR_ENABLE_A5_UNPUBLISHED_FEATURES
   let arguments = (ins AnyShaped:$src,
                        AnyShaped:$dst,
-                       Arg<Optional<I1>, [{
-                        An optional condition to enable unit-flge mode,
+                       Arg<Variadic<I1>, [{
+                        An optional condition to enable unit-flag mode, 
                         useful if there is a dependency on a for loop to run at least once.
                        }]>:$unit_flag_cond,
-#ifdef BISHENGIR_ENABLE_A5_UNPUBLISHED_FEATURES
                        DefaultValuedAttr<HIVM_FixpipeDMAModeAttr,
                          "FixpipeDMAMode::NZ2NZ">:$dma_mode,
                        DefaultValuedOptionalAttr<HIVM_FixpipeDualDstModeAttr,
                          "FixpipeDualDstMode::NO_DUAL">:$dual_dst_mode,
-#else
-                       OptionalAttr<UnitAttr>:$enable_nz2nd,
-#endif // BISHENGIR_ENABLE_A5_UNPUBLISHED_FEATURES
                        DefaultValuedOptionalAttr<HIVM_FixpipePreQuantModeAttr,
                          "FixpipePreQuantMode::NO_QUANT">:$pre_quant,
                        DefaultValuedOptionalAttr<HIVM_FixpipePreReluModeAttr,
                          "FixpipePreReluMode::NO_RELU">:$pre_relu,
                        DefaultValuedOptionalAttr<BoolAttr, "false">:$channel_split,
-                       Arg<OptionalAttr<HIVM_UnitFlagAttr>, [{
-                        Enable unit-flag for synchronization, it is
-                        managed by inject-sync passes.
-                       }]>:$unit_flag_mode
+                       OptionalAttr<UnitFlagArrayAttr>:$unit_flag_mode
   );
   let results = (outs Optional<AnyRankedTensor>:$result_tensor);
   let builders = [
     OpBuilder<(ins "TypeRange":$result, "Value":$src, "Value":$dst,
-#ifdef BISHENGIR_ENABLE_A5_UNPUBLISHED_FEATURES
                     CArg<"FixpipeDMAModeAttr", "nullptr">:$dma_mode,
                     CArg<"FixpipeDualDstModeAttr", "nullptr">:$dual_dst_mode,
-#else
-                    CArg<"UnitAttr", "nullptr">:$enable_nz2nd,
-#endif
                     CArg<"FixpipePreQuantModeAttr", "nullptr">:$pre_quant,
                     CArg<"FixpipePreReluModeAttr", "nullptr">:$pre_relu, CArg<"BoolAttr", "nullptr">:$channel_split)
     >,
     OpBuilder<(ins "Type":$result, "Value":$src, "Value":$dst,
-#ifdef BISHENGIR_ENABLE_A5_UNPUBLISHED_FEATURES
                     CArg<"FixpipeDMAModeAttr", "nullptr">:$dma_mode,
                     CArg<"FixpipeDualDstModeAttr", "nullptr">:$dual_dst_mode,
-#else
-                    CArg<"UnitAttr", "nullptr">:$enable_nz2nd,
-#endif // BISHENGIR_ENABLE_A5_UNPUBLISHED_FEATURES
                     CArg<"FixpipePreQuantModeAttr", "nullptr">:$pre_quant,
                     CArg<"FixpipePreReluModeAttr", "nullptr">:$pre_relu, CArg<"BoolAttr", "nullptr">:$channel_split)
     >
   ];
-  let assemblyFormat = [{
-    attr-dict
-    `ins` `(` $src `:` type($src) `)`
-    `outs` `(` $dst `:` type($dst) `)`
-    (`unit_flag` `[` $unit_flag_mode^ (`,` $unit_flag_cond^)? `]`)?
-    (`->` type($result_tensor)^)?
-  }];
-#ifdef BISHENGIR_ENABLE_A5_UNPUBLISHED_FEATURES
+
+  let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1; // verify parameter according to hardware version
-#endif // BISHENGIR_ENABLE_A5_UNPUBLISHED_FEATURES
   let extraClassDeclaration = DmaOpBaseDecl # [{
     int getFixpipeState();
     int needFixpipePreFuse();
     bool hasStore();
-    // Needed for unit-flag-enabled interface.
-    ::std::optional<::mlir::hivm::UnitFlagAttr> getUnitFlagModeValue();
-    ::std::optional<::mlir::Value> getUnitFlagModeCondition();
   }];
 }
 
@@ -429,7 +386,8 @@ def NZ2NDOp : HIVM_DmaOp<"nz2nd",
 }
 
 def AtomicCasOp : HIVM_Op<"atomic_cas", [
-  OperElemTypeConstraints<[0], [I8, I16, I32, F16, F32, I64]>
+  OperElemTypeConstraints<[0], [I8, I16, I32, F16, F32, I64, BF16]>,
+  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
 ]> {
   let summary = "Atomic Compare-And-Swap (CAS) Op";
   let description = [{
@@ -454,7 +412,7 @@ def AtomicCasOp : HIVM_Op<"atomic_cas", [
     %result = hivm.hir.atomic_cas ins(%src0, %src1 : tensor<?xf32>, tensor<?xf32>) outs(%dst : tensor<?xf32>) -> tensor<?xf32>
     ```
   }];
-  let arguments = (ins Variadic<AnyType>:$src,
+  let arguments = (ins Variadic<TensorOrMemref>:$src,
                        TensorOrMemref:$dst
   );
   let results = (outs Optional<AnyRankedTensor>:$result_tensor);
@@ -467,7 +425,7 @@ def AtomicCasOp : HIVM_Op<"atomic_cas", [
 }
 
 def AtomicXchgOp : HIVM_Op<"atomic_xchg", [
-  OperElemTypeConstraints<[0], [I8, I16, I32, F16, F32, I64]>
+  OperElemTypeConstraints<[0], [I8, I16, I32, F16, F32, I64, BF16]>
 ]> {
   let summary = "Atomic Exchange Op";
   let description = [{
@@ -484,6 +442,7 @@ def AtomicXchgOp : HIVM_Op<"atomic_xchg", [
     Arguments:
       * `src`: new value
       * `dst`: memory location in GM
+      * `mask`: mask the element
 
     Examples:
     ```mlir
@@ -491,15 +450,64 @@ def AtomicXchgOp : HIVM_Op<"atomic_xchg", [
     %result = hivm.hir.atomic_cas ins(%src : tensor<?xf32>) outs(%dst : tensor<?xf32>) -> tensor<?xf32>
     ```
   }];
-  let arguments = (ins Variadic<AnyType>:$src,
-                       TensorOrMemref:$dst
+  let arguments = (ins AnyType:$src,
+                       TensorOrMemref:$dst,
+                       Optional<TensorOrMemref>:$mask
   );
   let results = (outs Optional<AnyRankedTensor>:$result_tensor);
   let assemblyFormat = [{
     attr-dict
     `ins` `(` $src `:` type($src) `)`
     `outs` `(` $dst `:` type($dst) `)`
+    (`mask` `(` $mask^ `:` type($mask) `)`)?
     (`->` type($result_tensor)^)?
+  }];
+}
+
+def AtomicRMWOp : HIVM_Op<"atomic_rmw", [
+  OperElemTypeConstraints<[0], [I1, I8, I16, I32, F16, F32, I64, BF16]>,
+  MemoryEffectsOpInterface,
+  HIVMStructuredOpInterface,
+  DeclareOpInterfaceMethods<HIVMInferCoreTypeInterface, ["inferCoreType"]>
+]> {
+  let summary = "Atomic RMW Op";
+  let description = [{
+    Atomic exchange is an atomic operation that consists of three steps:
+    1. Read the current value of the specified memory address
+    2. Perform action on value depending on atomic_kind attr
+    3. Return the old value read previously
+    The whole process is atomic, that is, it will not be interrupted by other threads during the operation.
+
+    Constraints:
+      1. The input memref and output memref must have the same rank
+         and the same element type.
+
+    Arguments:
+      * `src`: new value
+      * `dst`: memory location in GM
+
+    Examples:
+    ```mlir
+    hivm.hir.atomic_rmw ins(%src : memref<?xf32>) outs(%dst : memref<?xf32>) atomic_kind = <add>
+    %result = hivm.hir.atomic_rmw ins(%src : tensor<?xf32>) outs(%dst : tensor<?xf32>) atomic_kind = <or> -> tensor<?xf32>
+    ```
+  }];
+  let arguments = (ins AnyType:$src,
+                       TensorOrMemref:$dst,
+                       HIVM_AtomicKindAttr:$atomic_kind
+  );
+  let results = (outs Optional<AnyRankedTensor>:$result_tensor);
+  let assemblyFormat = [{
+    attr-dict
+    `ins` `(` $src `:` type($src) `)`
+    `outs` `(` $dst `:` type($dst) `)`
+    `atomic_kind` `=` $atomic_kind
+    (`->` type($result_tensor)^)?
+  }];
+  let extraClassDeclaration = [{
+    ::mlir::MutableOperandRange getDpsInitsMutable() {
+      return getDstMutable();
+    }
   }];
 }
 

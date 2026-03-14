@@ -61,6 +61,14 @@ def EnableTritonKernelCompile : FeatureControlOptions<
   let passGroup = ["HFUSION", "HIVM", "HFUSION_TO_HIVM"];
 }
 
+def EnableUbufSaving : FeatureControlOptions<
+  "Enable ub buffer saving mode.",
+  "bool",
+  "false"
+>{
+  let passGroup = ["HFUSION", "HIVM", "HFUSION_TO_HIVM"];
+}
+
 #ifdef BISHENGIR_ENABLE_TORCH_CONVERSIONS
 def EnableTorchCompile : FeatureControlOptions<
   "Enable Torch-MLIR compilation.",
@@ -126,19 +134,6 @@ def EnableBinRelocation : FeatureControlOptions<
   bit isSharedWithDownstreamToolchain = 1;
 }
 
-def ConvertHIRToLIR : FeatureControlOptions<
-  "Enable converting from BiShengHIR to BiShengLIR.",
-  "bool",
-  "false"
-> {
-  // This option is still registered in the command line becuase
-  // `bishengir-hivm-compile` relies on it.
-  // However, it's hidden.
-  let additionalOptFlags = [{
-    llvm::cl::Hidden
-  }];
-}
-
 #ifdef BISHENGIR_ENABLE_TORCH_CONVERSIONS
 def EnsureNoImplicitBroadcast : FeatureControlOptions<
   "Whether to ensure that there is no implicit broadcast "
@@ -186,6 +181,14 @@ def DisableAutoCVWorkSpaceManage : FeatureControlOptions<
   let passGroup = ["HFUSION", "HIVM"];
 }
 
+def EnableHIVMCrossCoreGSS : FeatureControlOptions<
+  "Use hivm cross-core graph-sync-solver instead of inject-block-sync.",
+  "bool",
+  "false"
+> {
+  let passGroup = ["HFUSION", "HIVM"];
+}
+
 def DisableHIVMAutoInjectSync : FeatureControlOptions<
   "Disable auto inject sync intra core.",
   "bool",
@@ -213,11 +216,18 @@ class DFXControlOptions<
 > : BiShengIRCompileOpt<desc, ty, defaultVal> {
   let compileOptionCategories = ["dfxCtrlCategory"];
   let passGroup = ["HFUSION", "HIVM"];
-  bit isSharedWithDownstreamToolchain = 1;
 }
 
 def EnableSanitizer : DFXControlOptions<
   "Enable ascend sanitizer.",
+  "bool",
+  "false"
+> {
+  bit isSharedWithDownstreamToolchain = 1;
+}
+
+def EnableMemoryDisplay : DFXControlOptions<
+  "Enable ascend memory display tools.",
   "bool",
   "false"
 >;
@@ -226,15 +236,28 @@ def EnableDebugInfo : DFXControlOptions<
   "Enable debug info.",
   "bool",
   "false"
->;
+> {
+  bit isSharedWithDownstreamToolchain = 1;
+}
 
 #ifndef BISHENGIR_PUBLISH
 def EnableCpuTraceIntrinsic : DFXControlOptions<
   "Enable to generate host-accepted IR by eliminating HIVM special traits.",
   "bool",
   "false"
->;
+> {
+  bit isSharedWithDownstreamToolchain = 1;
+}
 #endif
+
+def InjectIRFromFile : DFXControlOptions<
+  "Path to IR file for debug: load functions from this file and replace "
+  "matching functions in the current module (inject-ir pass).",
+  "std::string",
+  "\"\""
+> {
+  bit isSharedWithDownstreamToolchain = 1;
+}
 
 //===----------------------------------------------------------------------===//
 // General Optimization Control Options
@@ -362,7 +385,7 @@ llvm::cl::values(
 def LimitAutoMultiBufferBuffer : HIVMOptimizationControlOptions<
   "When enable-auto-multi-buffer = true, limit it to only cube, only vector or no limit.",
   "MultiBufferStrategy",
-  "MultiBufferStrategy::ONLY_CUBE"
+  "MultiBufferStrategy::NO_LIMIT"
 > {
   let additionalOptFlags = [{
 llvm::cl::values(
@@ -477,6 +500,8 @@ llvm::cl::values(
                 // Ascend910B series
                 REGISTER_TARGET(Ascend910B1), REGISTER_TARGET(Ascend910B2),
                 REGISTER_TARGET(Ascend910B3), REGISTER_TARGET(Ascend910B4),
+                clEnumValN(mlir::hacc::TargetDevice::Ascend910B4_1,
+                              "Ascend910B4-1", "Ascend910B4-1"),
                 REGISTER_TARGET(Ascend910B2C),
                 // Ascend910_93 series
                 REGISTER_TARGET(Ascend910_9362), REGISTER_TARGET(Ascend910_9372),
@@ -522,10 +547,19 @@ def HIVMCArgs : BiShengIRCompileListOpt<
   "std::string"
 >;
 
+def LinkAicoreBitcode : BiShengIRCompileListOpt<
+  "Aicore bitcode file(s) to link. Accepts one or more absolute paths, "
+  "comma-separated. Passed to hivmc as --link-aicore-bitcode.",
+  "std::string"
+> {
+  let compileOptionCategories = ["targetCategory"];
+  bit isSharedWithDownstreamToolchain = 1;
+}
+
 /// Note that we don't own `mlir-print-ir-after-all` and
 /// `mlir-print-ir-before-all` as they are upstream options.
 /// We add it here because we can capture their values and forward
-/// them to `bishengir-hivm-compile` tool.
+/// them to `hivmc` tool.
 def MlirPrintIrAfterAll : BiShengIRCompileOpt<
   "Print IR after each pass.",
   "bool",
@@ -543,6 +577,14 @@ def MlirPrintIrBeforeAll : BiShengIRCompileOpt<
 > {
   let emitOptionRegistration = 0;
   let externalStorage = 0;
+  bit isSharedWithDownstreamToolchain = 1;
+}
+
+def AppendBishengOptions : BiShengIRCompileOpt<
+  "Append options when calling bisheng.",
+  "std::string",
+  "\"\""
+> {
   bit isSharedWithDownstreamToolchain = 1;
 }
 

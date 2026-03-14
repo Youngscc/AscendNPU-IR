@@ -69,8 +69,14 @@ using namespace mlir::hfusion;
 // Support for named HFusion ops defined in ods-gen.
 //===----------------------------------------------------------------------===//
 
+#ifndef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
 using RegionBuilderFn = llvm::function_ref<void(ImplicitLocOpBuilder &, Block &,
                                                 ArrayRef<NamedAttribute>)>;
+#else
+using RegionBuilderFn = llvm::function_ref<void(ImplicitLocOpBuilder &, Block &,
+                                                ArrayRef<NamedAttribute>,
+                                                function_ref<InFlightDiagnostic()>)>;
+#endif
 
 /// Fills the region of a structured operation using the provided
 /// `regionBuilder`. The method is used by both named structured ops created by
@@ -104,7 +110,13 @@ static void fillStructuredOpRegion(OpBuilder &opBuilder, Region &region,
 
   opBuilder.setInsertionPointToStart(body);
   ImplicitLocOpBuilder b(opBuilder.getUnknownLoc(), opBuilder);
+#ifndef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
   regionBuilder(b, *body, attrs);
+#else
+  regionBuilder(b, *body, attrs, [&]() {
+    return mlir::emitError(opBuilder.getUnknownLoc());
+  });
+#endif
 
   // indexing_maps is an auto-generated method.
 
@@ -624,9 +636,12 @@ public:
   }
 
   // Build the type functions defined by OpDSL.
-  Value buildRoundMode(RoundMode round, Type toType, Value operand) {
+  Value buildRoundMode(TypeFn castSign, RoundMode round, Type toType,
+                       Value operand) {
     bool isUnsignedCast = false;
-    if (operand.getType().isInteger(1) && toType.getIntOrFloatBitWidth() > 1) {
+    if ((castSign == TypeFn::cast_unsigned) ||
+        (operand.getType().isInteger(1) &&
+         toType.getIntOrFloatBitWidth() > 1)) {
       // TODO: general support for unsigned cast
       isUnsignedCast = true;
     }
@@ -694,8 +709,7 @@ private:
   Block &block;
 };
 
-template <typename CumOpTy>
-LogicalResult verifyCumOp(CumOpTy op) {
+template <typename CumOpTy> LogicalResult verifyCumOp(CumOpTy op) {
   ArrayRef<int64_t> cumDims = op.getCumDims();
   if (cumDims.empty()) {
     return op.emitOpError() << "have empty cum dims array";
@@ -937,30 +951,27 @@ void codeGenWithoutIndexDispatch(OpBuilder &builder, Block &block,
           arith::CmpFPredicate::OLT);
     }
   } else if (isa<IntegerType>(elemType)) {
-    IntegerType::SignednessSemantics sgn =
-        cast<IntegerType>(elemType).getSignedness();
-    if (reduce_kind == ReduceWithIndexKind::MAX) {
-      if (sgn == IntegerType::SignednessSemantics::Signed ||
-          sgn == IntegerType::SignednessSemantics::Signless) {
-        codeGenWithoutIndex<arith::MaxSIOp, arith::CmpIOp,
-                            arith::CmpIPredicate>(
-            builder, inValue, outValue, outIndex, indexType, theDimension,
-            arith::CmpIPredicate::sgt);
-      } else {
-        llvm::report_fatal_error(
-            "Unsigned reduce_with_index is not currently supported by HFusion");
-      }
-    } else {
-      if (sgn == IntegerType::SignednessSemantics::Signed ||
-          sgn == IntegerType::SignednessSemantics::Signless) {
-        codeGenWithoutIndex<arith::MinSIOp, arith::CmpIOp,
-                            arith::CmpIPredicate>(
-            builder, inValue, outValue, outIndex, indexType, theDimension,
-            arith::CmpIPredicate::slt);
-      } else {
-        llvm::report_fatal_error(
-            "Unsigned reduce_with_index is not currently supported by HFusion");
-      }
+    switch (reduce_kind) {
+    case ReduceWithIndexKind::MAX:
+      codeGenWithoutIndex<arith::MaxSIOp, arith::CmpIOp, arith::CmpIPredicate>(
+          builder, inValue, outValue, outIndex, indexType, theDimension,
+          arith::CmpIPredicate::sgt);
+      break;
+    case ReduceWithIndexKind::MAXUI:
+      codeGenWithoutIndex<arith::MaxUIOp, arith::CmpIOp, arith::CmpIPredicate>(
+          builder, inValue, outValue, outIndex, indexType, theDimension,
+          arith::CmpIPredicate::ugt);
+      break;
+    case ReduceWithIndexKind::MIN:
+      codeGenWithoutIndex<arith::MinSIOp, arith::CmpIOp, arith::CmpIPredicate>(
+          builder, inValue, outValue, outIndex, indexType, theDimension,
+          arith::CmpIPredicate::slt);
+      break;
+    case ReduceWithIndexKind::MINUI:
+      codeGenWithoutIndex<arith::MinUIOp, arith::CmpIOp, arith::CmpIPredicate>(
+          builder, inValue, outValue, outIndex, indexType, theDimension,
+          arith::CmpIPredicate::ult);
+      break;
     }
   } else {
     llvm::report_fatal_error("unsupported element type for reduce_with_index");
@@ -1019,10 +1030,19 @@ void codeGenWithIndexDispatch(OpBuilder &builder, Block &block, Type elemType,
   }
 }
 
+#ifndef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
 std::function<void(ImplicitLocOpBuilder &, Block &, ArrayRef<NamedAttribute>)>
+#else
+std::function<void(ImplicitLocOpBuilder &, Block &, ArrayRef<NamedAttribute>, 
+                   function_ref<InFlightDiagnostic()>)>
+#endif
 ReduceWithIndexOp::getRegionBuilder() {
   return [](ImplicitLocOpBuilder &b, Block &block,
-            ArrayRef<NamedAttribute> attrs) {
+            ArrayRef<NamedAttribute> attrs
+#ifdef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
+            , function_ref<InFlightDiagnostic()> emitError
+#endif
+  ) {
     // check numArgs
     constexpr int kNumArgsWithoutIndex = 3;
     auto numArgs = block.getNumArguments();
@@ -1212,10 +1232,10 @@ void ReduceWithIndexOp::getCanonicalizationPatterns(RewritePatternSet &results,
 }
 
 LogicalResult ReduceWithIndexOp::verify() {
-  if (getDimensions().size() != 1)
-    return emitOpError(
-        "currently ReduceWithIndexOp only supports one reduction dimension");
-
+  if (getDimensions().size() <= 0 || getInputs().size() <= 0) {
+    return emitError(
+        "ReduceWithIndexOp requires positive number of dimensions and inputs");
+  }
   auto inputType = llvm::cast<ShapedType>(getInputs()[0].getType());
   auto initType = llvm::cast<ShapedType>(getInits()[0].getType());
 
@@ -1257,39 +1277,6 @@ LogicalResult ReduceWithIndexOp::verify() {
 } // namespace hfusion
 } // namespace mlir
 
-static LogicalResult appendMangledType(llvm::raw_string_ostream &ss, Type t) {
-  if (auto memref = llvm::dyn_cast<MemRefType>(t)) {
-    ss << "view";
-    for (auto size : memref.getShape())
-      if (size < 0)
-        ss << "sx";
-      else
-        ss << size << "x";
-    if (failed(appendMangledType(ss, memref.getElementType())))
-      return failure();
-    if (auto as = memref.getMemorySpace()) {
-      if (auto attr = llvm::dyn_cast<IntegerAttr>(as))
-        ss << "as" << attr.getInt();
-      else
-        return failure();
-    }
-    return success();
-  }
-  if (auto vec = llvm::dyn_cast<VectorType>(t)) {
-    ss << "vector";
-    llvm::interleave(
-        vec.getShape(), [&](int64_t i) { ss << i; }, [&]() { ss << "x"; });
-    if (failed(appendMangledType(ss, vec.getElementType())))
-      return failure();
-    return success();
-  }
-  if (t.isSignlessIntOrIndexOrFloat()) {
-    ss << t;
-    return success();
-  }
-  return failure();
-}
-
 /// Pattern to fold cast into emtpy.
 ///
 /// Before:
@@ -1318,8 +1305,7 @@ struct FoldCastEmpty : public OpRewritePattern<hfusion::CastOp> {
 
 struct ConstantFolding : public OpRewritePattern<hfusion::CastOp> {
   using OpRewritePattern<hfusion::CastOp>::OpRewritePattern;
-  template <typename T>
-  inline T roundToOdd(T x) const {
+  template <typename T> inline T roundToOdd(T x) const {
     T rounded = std::round(x);
     if (std::fabs(x - std::floor(x)) == 0.5) {
       if (static_cast<int>(rounded) % 2 != 0) {
@@ -1856,7 +1842,13 @@ ParseResult ArangeOp::parse(OpAsmParser &parser, OperationState &result) {
   ImplicitLocOpBuilder builder(unknownLoc, parser.getContext());
   builder.setInsertionPointToStart(&block);
   // Build the region
+#ifndef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
   getRegionBuilder()(builder, block, result.attributes.getAttrs());
+#else
+  getRegionBuilder()(builder, block, result.attributes.getAttrs(), [&]() {
+    return mlir::emitError(builder.getLoc());
+  });
+#endif
 
   return success();
 }
@@ -1881,10 +1873,19 @@ ArrayAttr ArangeOp::getIndexingMaps() {
   return builder.getAffineMapArrayAttr(maps);
 }
 
+#ifndef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
 std::function<void(ImplicitLocOpBuilder &, Block &, ArrayRef<NamedAttribute>)>
+#else
+std::function<void(ImplicitLocOpBuilder &, Block &, ArrayRef<NamedAttribute>,
+                   function_ref<InFlightDiagnostic()>)>
+#endif
 ArangeOp::getRegionBuilder() {
   return [](ImplicitLocOpBuilder &builder, Block &block,
-            ArrayRef<NamedAttribute> attrs) {
+            ArrayRef<NamedAttribute> attrs
+#ifdef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
+            , function_ref<InFlightDiagnostic()> emitError
+#endif
+  ) {
     OpBuilder::InsertionGuard guard(builder);
 
     auto segmentSizes = cast_or_null<DenseI32ArrayAttr>(
@@ -2068,10 +2069,19 @@ void GatherOp::build(OpBuilder &odsBuilder, OperationState &odsState, Value src,
 ///   %cmp = arith.cmpi eq, <indexVal>, %iter
 ///   %sel = arith.select %cmp, <srcVal>, <outVal>
 ///   linalg.yield %sel
+#ifndef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
 std::function<void(ImplicitLocOpBuilder &, Block &, ArrayRef<NamedAttribute>)>
+#else
+std::function<void(ImplicitLocOpBuilder &, Block &, ArrayRef<NamedAttribute>,
+                   function_ref<InFlightDiagnostic()>)>
+#endif
 GatherOp::getRegionBuilder() {
   return [](ImplicitLocOpBuilder &builder, Block &block,
-            ArrayRef<NamedAttribute> attrs) {
+            ArrayRef<NamedAttribute> attrs
+#ifdef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
+            , function_ref<InFlightDiagnostic()> emitError
+#endif
+  ) {
     assert(block.getNumArguments() == 3 &&
            "GatherOp expecting 3 block arguments");
     Value srcVal = block.getArgument(0);
@@ -2265,6 +2275,208 @@ FailureOr<SmallVector<Value>> GatherOp::decomposeOperation(OpBuilder &b) {
 }
 
 //===----------------------------------------------------------------------===//
+// GatherMaskOp
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GatherMaskOp::getDpsInitsMutable() {
+  return getInitMutable();
+}
+
+SmallVector<utils::IteratorType> GatherMaskOp::getIteratorTypesArray() {
+#if BISHENGIR_BUILD_STANDALONE_IR_ONLY
+  llvm_unreachable("Not implemented");
+#else
+  mlir::Value initData = getInit()[0];
+  mlir::Type initDataType = initData.getType();
+  mlir::ShapedType initShapeType = mlir::cast<mlir::ShapedType>(initDataType);
+  SmallVector<utils::IteratorType> result(initShapeType.getRank(),
+                                          utils::IteratorType::parallel);
+  return result;
+#endif // BISHENGIR_BUILD_STANDALONE_IR_ONLY
+}
+
+ArrayAttr GatherMaskOp::getIndexingMaps() {
+  MLIRContext *ctx = getContext();
+  mlir::Value initData = getInit()[0];
+  mlir::Type initDataType = initData.getType();
+  mlir::ShapedType initShapeType = mlir::cast<mlir::ShapedType>(initDataType);
+  int64_t numIters = initShapeType.getRank();
+
+  SmallVector<AffineExpr> dims(numIters);
+  auto dimsArrayRef = MutableArrayRef(dims);
+  bindDimsList(ctx, dimsArrayRef);
+
+  AffineMap identityMap = AffineMap::getMultiDimIdentityMap(numIters, ctx);
+  AffineMapAttr identityMapAttr = AffineMapAttr::get(identityMap);
+
+  AffineMap scalarMap = AffineMap::get(1, 0, getAffineConstantExpr(0, ctx), ctx); 
+  AffineMapAttr scalarMapAttr = AffineMapAttr::get(scalarMap);
+
+  return ArrayAttr::get(ctx, {identityMapAttr, identityMapAttr, identityMapAttr, scalarMapAttr});
+}
+
+void GatherMaskOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
+  getGenericEffectsImpl(effects, cast<linalg::LinalgOp>(getOperation()));
+}
+
+void GatherMaskOp::build(OpBuilder &odsBuilder, OperationState &odsState,
+                         Value src, Value mask, ValueRange init) {
+  SmallVector<Type, 2> resultTys;
+  for (Value initVal : init) {
+    resultTys.push_back(initVal.getType());
+  }
+  
+  buildStructuredOp(odsBuilder, odsState, resultTys, {src, mask}, init, {},
+                    getRegionBuilder());
+}
+
+#ifndef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
+std::function<void(ImplicitLocOpBuilder &, Block &, ArrayRef<NamedAttribute>)>
+#else
+std::function<void(ImplicitLocOpBuilder &, Block &, ArrayRef<NamedAttribute>,
+                   function_ref<InFlightDiagnostic()>)>
+#endif
+GatherMaskOp::getRegionBuilder() {
+  return [](ImplicitLocOpBuilder &builder, Block &block,
+            ArrayRef<NamedAttribute> /*attrs*/) {
+    Value srcVal = block.getArgument(0);
+    Value maskVal = block.getArgument(1);
+    ValueRange initArgs = block.getArguments().drop_front(2);
+
+    Type i1Type = builder.getI1Type();
+    if (maskVal.getType() != i1Type) {
+      maskVal = builder.create<arith::TruncIOp>(builder.getLoc(), i1Type, maskVal);
+    }
+
+    SmallVector<Value, 2> yieldVals;
+    for (size_t i = 0; i < initArgs.size(); ++i) {
+      Value initVal = initArgs[i];
+      if (i == 0) {
+        yieldVals.push_back(builder.create<arith::SelectOp>(maskVal, srcVal, initVal));
+      } else {
+        yieldVals.push_back(builder.create<arith::ConstantOp>(
+            builder.getLoc(),
+            builder.getI32IntegerAttr(0)
+        ));
+      }
+    }
+
+
+    builder.create<linalg::YieldOp>(builder.getLoc(), yieldVals);
+  };
+}
+
+void GatherMaskOp::print(OpAsmPrinter &p) {
+  p.printOptionalAttrDict(getOperation()->getAttrs(), /*elidedAttrs=*/{});
+  printCommonStructuredOpParts(p, {getSrc(), getMask()}, getInit());
+  if (getNumResults())
+    p.printArrowTypeList(getResultTypes());
+}
+
+ParseResult GatherMaskOp::parse(OpAsmParser &p, OperationState &result) {
+  if (p.parseOptionalAttrDict(result.attributes))
+    return failure();
+
+  SmallVector<Type, 2> inputTypes;
+  SmallVector<Type, 1> outputTypes;
+  if (parseCommonStructuredOpParts(p, result, inputTypes, outputTypes,
+                                   /*OperandSegmentSizes*/ false)) {
+    return failure();
+  }
+
+  if (p.parseOptionalArrowTypeList(result.types))
+    return failure();
+
+  OpBuilder opBuilder(p.getContext());
+  fillStructuredOpRegion(opBuilder, *(result.addRegion()), inputTypes,
+                         outputTypes, result.attributes.getAttrs(),
+                         getRegionBuilder());
+
+  return success();
+}
+
+LogicalResult GatherMaskOp::verify() {
+  bool isTensorSemantic = hasPureTensorSemantics();
+  bool isMemrefSemantic = hasPureBufferSemantics();
+  // Check: must be pure tensor or pure memref semantics, cannot mix
+  if (!isTensorSemantic && !isMemrefSemantic) {
+    return emitOpError("must have pure tensor or pure memref semantics (cannot mix tensor/memref operands)");
+  }
+
+  if (isTensorSemantic) {
+    if (getNumResults() != 2) {
+      return emitOpError("expecting exactly 2 result for tensor semantics, but got ") << getNumResults();
+    }
+    Value resultValue = getResult()[0];
+    Type resultType = resultValue.getType();
+    Type initType = getInit()[0].getType();
+    if (resultType != initType) {
+      return emitOpError("tensor semantics: result type (")
+             << resultType << ") must match init type (" << initType << ")";
+    }
+  }
+
+  // Memref semantics: no result allowed (memref is in-place write, no return value)
+  if (isMemrefSemantic) {
+    if (getNumResults() != 0) {
+      return emitOpError("expecting 0 results for memref semantics, but got ") << getNumResults();
+    }
+  }
+
+  Value mask = getMask();
+  Type maskElementType = getElementTypeOrSelf(mask);
+  // Check: mask must be I1 or I8 (compatible with any shape, only check element type)
+  if (!maskElementType.isInteger(1) && !maskElementType.isInteger(8)) {
+    return emitOpError("mask element type must be i1 or i8, but got ") << maskElementType;
+  }
+
+  auto getRank = [&](Value value) -> std::optional<int64_t> {
+    Type type = value.getType();
+    if (auto tensorTy = mlir::dyn_cast<RankedTensorType>(type)) {
+      return tensorTy.getRank();
+    }
+    if (auto memrefTy = mlir::dyn_cast<MemRefType>(type)) {
+      return memrefTy.getRank();
+    }
+    return -1;
+  };
+
+  std::optional<int64_t> srcRank = getRank(getSrc());
+  std::optional<int64_t> maskRank = getRank(getMask());
+  std::optional<int64_t> initRank = getRank(getInit()[0]);
+
+  // Check: ranks must match for ranked types; skip for unranked types (adapt to any shape)
+  if (srcRank != -1 && maskRank != -1 && initRank != -1) {
+    if (srcRank != maskRank || srcRank != initRank) {
+      return emitOpError("src rank (") << srcRank.value()
+             << "), mask rank (" << maskRank.value()
+             << "), init rank (" << initRank.value()
+             << ") must be the same (for ranked types)";
+    }
+  }
+
+  Type srcElementType = getElementTypeOrSelf(getSrc());
+  Type initElementType = getElementTypeOrSelf(getInit()[0]);
+  if (srcElementType != initElementType) {
+    return emitOpError("src element type (") << srcElementType
+           << ") must match init element type (" << initElementType << ")";
+  }
+  return success();
+}
+
+static Type getElementTypeOrSelf(Value value) {
+  Type type = value.getType();
+  if (auto tensorTy = mlir::dyn_cast<TensorType>(type)) {
+    return tensorTy.getElementType();
+  }
+  if (auto memrefTy = mlir::dyn_cast<MemRefType>(type)) {
+    return memrefTy.getElementType();
+  }
+  return type;
+}
+
+//===----------------------------------------------------------------------===//
 // CumsumOp
 //===----------------------------------------------------------------------===//
 
@@ -2275,6 +2487,26 @@ LogicalResult CumsumOp::verify() { return verifyCumOp(*this); }
 //===----------------------------------------------------------------------===//
 
 LogicalResult CumprodOp::verify() { return verifyCumOp(*this); }
+
+//===----------------------------------------------------------------------===//
+// AtomicRMWOp
+//===----------------------------------------------------------------------===//
+
+void AtomicRMWOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  if (llvm::isa<MemRefType>(this->getInput().getType()))
+    effects.emplace_back(MemoryEffects::Read::get(),
+                         &getOperation()->getOpOperand(0), /*stage=*/0,
+                         /*effectOnFullRegion=*/true,
+                         SideEffects::DefaultResource::get());
+  OpOperand &operand = this->getDstMutable();
+  if (!llvm::isa<MemRefType>(operand.get().getType()))
+    return;
+  effects.emplace_back(MemoryEffects::Write::get(), &operand, /*stage=*/0,
+                       /*effectOnFullRegion=*/true,
+                       SideEffects::DefaultResource::get());
+}
 
 //===----------------------------------------------------------------------===//
 // AtomicCasOp
@@ -2306,20 +2538,22 @@ void AtomicCasOp::getEffects(
 void AtomicXchgOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  for (auto [index, operand] : llvm::enumerate(this->getInput())) {
-    if (!llvm::isa<MemRefType>(operand.getType()))
-      continue;
+  if (llvm::isa<MemRefType>(this->getInput().getType()))
     effects.emplace_back(MemoryEffects::Read::get(),
-                         &getOperation()->getOpOperand(index), /*stage=*/0,
+                         &getOperation()->getOpOperand(0), /*stage=*/0,
                          /*effectOnFullRegion=*/true,
                          SideEffects::DefaultResource::get());
-  }
   OpOperand &operand = this->getDstMutable();
   if (!llvm::isa<MemRefType>(operand.get().getType()))
     return;
   effects.emplace_back(MemoryEffects::Write::get(), &operand, /*stage=*/0,
                        /*effectOnFullRegion=*/true,
                        SideEffects::DefaultResource::get());
+}
+
+void AtomicXchgOp::build(OpBuilder &odsBuilder, OperationState &odsState,
+                         TypeRange output, Value src, Value dst) {
+  build(odsBuilder, odsState, output, src, dst, /*mask=*/nullptr);
 }
 
 //===----------------------------------------------------------------------===//
@@ -2360,8 +2594,8 @@ LogicalResult SortOp::verify() {
 // HistogramOp
 //===----------------------------------------------------------------------===//
 LogicalResult HistogramOp::verify() {
-  auto inTy = mlir::dyn_cast<RankedTensorType>(getInput().getType());
-  auto outTy = mlir::dyn_cast<RankedTensorType>(getOutput().getType());
+  auto inTy = dyn_cast<RankedTensorType>(getInput().getType());
+  auto outTy = dyn_cast<RankedTensorType>(getOutput().getType());
   Value mask = getMask();
 
   // Input/output must be ranked tensors
@@ -2370,10 +2604,11 @@ LogicalResult HistogramOp::verify() {
 
   // Input element type must be i32 or i64
   Type inEltTy = inTy.getElementType();
-  if (!mlir::isa<IntegerType>(inEltTy) ||
-      (inEltTy.getIntOrFloatBitWidth() != 32 &&
-       inEltTy.getIntOrFloatBitWidth() != 64))
-    return emitOpError() << "input element type must be i32 or i64";
+  if (!isa<IntegerType>(inEltTy) || (inEltTy.getIntOrFloatBitWidth() != 8 &&
+                                     inEltTy.getIntOrFloatBitWidth() != 16 &&
+                                     inEltTy.getIntOrFloatBitWidth() != 32 &&
+                                     inEltTy.getIntOrFloatBitWidth() != 64))
+    return emitOpError() << "input element type must be i8, i16, i32, i64, u8";
 
   // Output must be 1D statically sized
   if (outTy.getRank() != 1)
@@ -2383,9 +2618,8 @@ LogicalResult HistogramOp::verify() {
 
   // Output element type must be i32 or i64
   Type outEltTy = outTy.getElementType();
-  if (!mlir::isa<IntegerType>(outEltTy) ||
-      (outEltTy.getIntOrFloatBitWidth() != 32 &&
-       outEltTy.getIntOrFloatBitWidth() != 64))
+  if (!isa<IntegerType>(outEltTy) || (outEltTy.getIntOrFloatBitWidth() != 32 &&
+                                      outEltTy.getIntOrFloatBitWidth() != 64))
     return emitOpError() << "output element type must be i32 or i64";
 
   // Output length must match num_bins
@@ -2396,7 +2630,7 @@ LogicalResult HistogramOp::verify() {
 
   // If mask is provided, it must match input shape
   if (mask) {
-    auto maskTy = mlir::dyn_cast<RankedTensorType>(mask.getType());
+    auto maskTy = dyn_cast<RankedTensorType>(mask.getType());
     if (!maskTy)
       return emitOpError() << "mask must be a ranked tensor";
     if (maskTy.getElementType() != IntegerType::get(getContext(), 1))
@@ -2413,12 +2647,12 @@ FailureOr<SmallVector<Value>> HistogramOp::decomposeOperation(OpBuilder &b) {
   b.setInsertionPoint(getOperation());
 
   Location loc = getLoc();
-
+  auto inputBins = static_cast<int64_t>(getNumBins());
   Value input = getInput();
   Value mask = getMask();
-  auto inTy = mlir::dyn_cast<RankedTensorType>(input.getType());
-  auto outTy = mlir::dyn_cast<RankedTensorType>(getOutput().getType());
 
+  auto inTy = cast<RankedTensorType>(input.getType());
+  auto outTy = cast<RankedTensorType>(getOutput().getType());
   Type outEltTy = outTy.getElementType();
   Type idxTy = b.getIndexType();
 
@@ -2429,23 +2663,30 @@ FailureOr<SmallVector<Value>> HistogramOp::decomposeOperation(OpBuilder &b) {
   auto cstOut = [&](int64_t v) -> Value {
     return b.create<arith::ConstantOp>(loc, b.getIntegerAttr(outEltTy, v));
   };
+  auto cstInZero = [&](Value src) -> Value {
+    auto ty = cast<IntegerType>(src.getType());
+#ifndef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
+    return b.create<arith::ConstantIntOp>(loc, 0, ty);
+#else
+    return b.create<arith::ConstantIntOp>(loc, ty, static_cast<int64_t>(0));
+#endif
+  };
 
   // Constants
   Value c0 = cstIdx(0);
   Value c1 = cstIdx(1);
+  Value bins = cstIdx(inputBins);
   Value oneOut = cstOut(1);
   Value zeroOut = cstOut(0);
 
   // Create zero-initialized histogram tensor
   Value histEmpty = b.create<tensor::EmptyOp>(loc, outTy.getShape(), outEltTy);
-  Value histInit = b.create<linalg::FillOp>(loc, zeroOut, histEmpty).getResult(0);
+  Value histInit =
+      b.create<linalg::FillOp>(loc, zeroOut, histEmpty).getResult(0);
 
   // Upper bound: number of elements in input
-  Value ub;
-  if (inTy.hasStaticShape())
-    ub = cstIdx(inTy.getDimSize(0));
-  else
-    ub = b.create<tensor::DimOp>(loc, input, 0);
+  Value ub = inTy.hasStaticShape() ? cstIdx(inTy.getDimSize(0))
+                                   : b.create<tensor::DimOp>(loc, input, 0);
 
   // Single loop over input elements
   auto forOp = b.create<scf::ForOp>(loc, c0, ub, c1, ValueRange{histInit});
@@ -2456,47 +2697,37 @@ FailureOr<SmallVector<Value>> HistogramOp::decomposeOperation(OpBuilder &b) {
     Value i = forOp.getInductionVar();
     Value hist = forOp.getRegionIterArg(0);
 
-    // Case 1: mask provided
+    Value elem = b.create<tensor::ExtractOp>(loc, input, ValueRange{i});
+    Value isNeg = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult, elem,
+                                          cstInZero(elem));
+    Value elemIdx = b.create<arith::IndexCastUIOp>(loc, idxTy, elem);
+    Value posIdx = b.create<arith::SelectOp>(loc, isNeg, c0, elemIdx);
+    Value outRange =
+        b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::uge, posIdx, bins);
+    Value safeIdx = b.create<arith::SelectOp>(loc, outRange, c0, posIdx);
+
+    Value maskCond;
     if (mask) {
-      Value cond = b.create<tensor::ExtractOp>(loc, mask, ValueRange{i});
-
-      // Create scf.if with one result (the histogram tensor)
-      auto ifOp = b.create<scf::IfOp>(loc, TypeRange{hist.getType()}, cond,
-                                      /*withElseRegion=*/true);
-
-      // Then region: perform update
-      {
-        OpBuilder thenBuilder = ifOp.getThenBodyBuilder();
-        Value elem = thenBuilder.create<tensor::ExtractOp>(loc, input, ValueRange{i});
-        Value elemIdx = thenBuilder.create<arith::IndexCastUIOp>(loc, idxTy, elem);
-
-        Value old = thenBuilder.create<tensor::ExtractOp>(loc, hist, ValueRange{elemIdx});
-        Value neu = thenBuilder.create<arith::AddIOp>(loc, old, oneOut);
-        Value upd = thenBuilder.create<tensor::InsertOp>(loc, neu, hist, ValueRange{elemIdx});
-
-        thenBuilder.create<scf::YieldOp>(loc, upd);
-      }
-
-      // Else region: yield histogram unchanged
-      {
-        OpBuilder elseBuilder = ifOp.getElseBodyBuilder();
-        elseBuilder.create<scf::YieldOp>(loc, hist);
-      }
-
-      b.create<scf::YieldOp>(loc, ifOp.getResult(0));
+      maskCond = b.create<tensor::ExtractOp>(loc, mask, ValueRange{i});
+    } else {
+      maskCond = b.create<arith::ConstantIntOp>(loc, 1, 1);
     }
 
-    // Case 2: no mask
-    else {
-      Value elem = b.create<tensor::ExtractOp>(loc, input, ValueRange{i});
-      Value elemIdx = b.create<arith::IndexCastUIOp>(loc, idxTy, elem);
+    Value skipCond = b.create<arith::OrIOp>(loc, isNeg, outRange);
+    Value writeMask = b.create<arith::AndIOp>(
+        loc, maskCond,
+        b.create<arith::XOrIOp>(loc, skipCond,
+                                b.create<arith::ConstantIntOp>(loc, 1, 1)));
 
-      Value old = b.create<tensor::ExtractOp>(loc, hist, ValueRange{elemIdx});
-      Value neu = b.create<arith::AddIOp>(loc, old, oneOut);
-      Value upd = b.create<tensor::InsertOp>(loc, neu, hist, ValueRange{elemIdx});
+    Value oldVal = b.create<tensor::ExtractOp>(loc, hist, ValueRange{safeIdx});
+    Value newVal = b.create<arith::AddIOp>(loc, oldVal, oneOut);
 
-      b.create<scf::YieldOp>(loc, upd);
-    }
+    Value updatedHist =
+        b.create<tensor::InsertOp>(loc, newVal, hist, ValueRange{safeIdx});
+    Value resultHist =
+        b.create<arith::SelectOp>(loc, writeMask, updatedHist, hist);
+
+    b.create<scf::YieldOp>(loc, resultHist);
   }
 
   Value finalHist = forOp.getResult(0);
@@ -2539,4 +2770,336 @@ Value hfusion::castTo(OpBuilder &builder, Value src, Type targetElemType,
                                                        targetElemType);
   return hfusion::castTo(builder, src, targetElemType, rounding, std::nullopt,
                          /*enableOverflow=*/true, castIntegerType);
+}
+
+Value hfusion::castTo(OpBuilder &builder, Value src, Type targetElemType,
+                      hfusion::RoundMode roundMode,
+                      hfusion::TypeFn castIntegerType) {
+  return hfusion::castTo(builder, src, targetElemType, roundMode, std::nullopt,
+                         /*enableOverflow=*/true, castIntegerType);
+}
+
+Value hfusion::castTo(OpBuilder &builder, Value src, Type targetElemType,
+                      bool enableOverflow, hfusion::TypeFn castIntegerType) {
+  Type srcElemType = getElementTypeOrSelf(src.getType());
+  hfusion::RoundMode rounding =
+      mlir::utils::selectRoundMode<hfusion::RoundMode>(srcElemType,
+                                                       targetElemType);
+  return hfusion::castTo(builder, src, targetElemType, rounding, std::nullopt,
+                         /*enableOverflow=*/enableOverflow, castIntegerType);
+}
+
+LogicalResult MatMulMxOp::verify() {
+  auto inputATy = mlir::cast<ShapedType>(getInputA().getType());
+  auto inputBTy = mlir::cast<ShapedType>(getInputB().getType());
+  auto scaleATy = mlir::cast<ShapedType>(getScaleA().getType());
+  auto scaleBTy = mlir::cast<ShapedType>(getScaleB().getType());
+  auto resultTy = mlir::cast<ShapedType>(getResult().getType());
+
+  // Input/Output must be ranked tensors
+  if (!inputATy || !inputBTy || !scaleATy || !scaleBTy)
+    return emitOpError() << "requires shaped types for input";
+
+  static constexpr int twoD = 2;
+  if (inputATy.getRank() != twoD || inputBTy.getRank() != twoD)
+    return emitOpError() << "requires both input to have rank 2";
+
+  static constexpr int dim0 = 0;
+  static constexpr int dim1 = 1;
+  if (inputATy.getDimSize(dim1) != inputBTy.getDimSize(dim0))
+    return emitOpError() << "requires inner dimension of matmul matrix to match";
+
+  if (resultTy.getDimSize(dim0) != inputATy.getDimSize(dim0) ||
+      resultTy.getDimSize(dim1) != inputBTy.getDimSize(dim1))
+    return emitOpError() << "requires output shape to match with input shapes";
+
+  // if acc is provided
+  if (getAcc()) {
+    auto accTy = mlir::cast<ShapedType>(getAcc().getType());
+    if (accTy.getRank() != resultTy.getRank())
+      return emitOpError() << "acc and output should have the same shape";
+
+    for (int dim = 0; dim < accTy.getRank(); dim++) {
+      if (accTy.getDimSize(dim) != resultTy.getDimSize(dim))
+        return emitOpError() << "acc and output should have the same shape";
+    }
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// Conv1DOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult Conv1DOp::verify() {
+  auto inputTy = mlir::dyn_cast<ShapedType>(getInput().getType());
+  auto weightTy = mlir::dyn_cast<ShapedType>(getWeight().getType());
+  auto initTy = mlir::dyn_cast<ShapedType>(getInit().getType());
+  auto resultTy = mlir::dyn_cast<ShapedType>(getResult().getType());
+
+  if (!inputTy || !weightTy || !initTy || !resultTy)
+    return emitOpError()
+           << "requires shaped types for input/weight/init/result";
+
+  // init and result must be consistent
+  if (initTy.getRank() != resultTy.getRank())
+    return emitOpError() << "init and result must have the same rank";
+
+  for (int i = 0; i < initTy.getRank(); ++i) {
+    if (!initTy.isDynamicDim(i) && !resultTy.isDynamicDim(i) &&
+        initTy.getDimSize(i) != resultTy.getDimSize(i))
+      return emitOpError() << "init and result must have the same shape";
+  }
+
+  // input and init must be 2D or 3D and have same rank
+  int64_t inputRank = inputTy.getRank();
+  int64_t initRank = initTy.getRank();
+  if (inputRank != initRank)
+    return emitOpError() << "requires input and init to have the same rank";
+
+  if (inputRank != 2 && inputRank != 3)
+    return emitOpError() << "requires input and init to be 2D or 3D tensors";
+
+  // weight must be [oC, iC/groups, wW]
+  if (weightTy.getRank() != 3)
+    return emitOpError()
+           << "requires weight to have rank 3: [oC, iC/groups, wW]";
+
+  // bias must be 1D if present, and match oC
+  if (getBias()) {
+    auto biasTy = mlir::dyn_cast<ShapedType>(getBias().getType());
+    if (!biasTy)
+      return emitOpError() << "requires shaped type for bias";
+
+    if (biasTy.getRank() != 1)
+      return emitOpError() << "requires bias to be 1D tensor";
+
+    if (!weightTy.isDynamicDim(0) && !biasTy.isDynamicDim(0) &&
+        biasTy.getDimSize(0) != weightTy.getDimSize(0))
+      return emitOpError() << "requires bias shape to be oC from weight";
+
+    // init: [oC, oW] or [N, oC, oW]
+    int64_t oCDimInInit = (initRank == 2) ? 0 : 1;
+    if (!initTy.isDynamicDim(oCDimInInit) && !biasTy.isDynamicDim(0) &&
+        biasTy.getDimSize(0) != initTy.getDimSize(oCDimInInit))
+      return emitOpError() << "requires bias shape to be oC from init";
+  }
+
+  // input.shape[C] == weight.shape[1] * groups
+  int64_t groups = getGroups();
+  int64_t inputCDim = (inputRank == 2) ? 0 : 1;
+
+  if (!inputTy.isDynamicDim(inputCDim) && !weightTy.isDynamicDim(1)) {
+    int64_t expectedIC = weightTy.getDimSize(1) * groups;
+    if (inputTy.getDimSize(inputCDim) != expectedIC)
+      return emitOpError()
+             << "requires input channels == weight.shape[1] * groups";
+  }
+
+  // batch check: if 3D, input.shape[0] == init.shape[0]
+  if (inputRank == 3) {
+    if (!inputTy.isDynamicDim(0) && !initTy.isDynamicDim(0) &&
+        inputTy.getDimSize(0) != initTy.getDimSize(0))
+      return emitOpError() << "requires batch size of input and init to match";
+  }
+
+  int64_t stride = getStride();
+  int64_t dilation = getDilation();
+
+  // Currently only support stride == 1 and dilation == 1
+  if (stride != 1 || dilation != 1)
+    return emitOpError()
+           << "currently does not support stride != 1 or dilation != 1";
+
+  // Check output width oW
+  // oW = floor((iW + 2 * padding - dilation * (wW - 1) - 1) / stride + 1)
+  int64_t padding = getPadding();
+  int64_t inputWDim = (inputRank == 2) ? 1 : 2;
+  int64_t outputWDim = (initRank == 2) ? 1 : 2;
+
+  if (!inputTy.isDynamicDim(inputWDim) && !weightTy.isDynamicDim(2) &&
+      !initTy.isDynamicDim(outputWDim)) {
+    int64_t iW = inputTy.getDimSize(inputWDim);
+    int64_t wW = weightTy.getDimSize(2);
+    int64_t oWExpected =
+        (iW + 2 * padding - dilation * (wW - 1) - 1) / stride + 1;
+
+    if (initTy.getDimSize(outputWDim) != oWExpected)
+      return emitOpError()
+             << "requires output width oW to be computed as: "
+             << "(iW + 2 * padding - dilation * (wW - 1) - 1) / stride + 1";
+  }
+
+  return success();
+}
+
+void Conv1DOp::build(OpBuilder &odsBuilder, OperationState &odsState,
+                     ValueRange inputs, Value output, int32_t stride,
+                     int32_t padding, int32_t dilation, int32_t groups) {
+  odsState.addAttribute("stride", odsBuilder.getI32IntegerAttr(stride));
+  odsState.addAttribute("padding", odsBuilder.getI32IntegerAttr(padding));
+  odsState.addAttribute("dilation", odsBuilder.getI32IntegerAttr(dilation));
+  odsState.addAttribute("groups", odsBuilder.getI32IntegerAttr(groups));
+  auto outType = output.getType();
+  odsState.addOperands(inputs);
+  odsState.addOperands(output);
+  odsState.addTypes(outType);
+  Region &region = *odsState.addRegion();
+  fillStructuredOpRegion(odsBuilder, region, TypeRange(inputs),
+                         TypeRange(output), odsState.attributes.getAttrs(),
+                         getRegionBuilder());
+}
+
+MutableOperandRange Conv1DOp::getDpsInitsMutable() { return getInitMutable(); }
+
+SmallVector<utils::IteratorType> Conv1DOp::getIteratorTypesArray() {
+  bool hasBatch = false;
+  if (auto inputType = mlir::dyn_cast<ShapedType>(getInput().getType())) {
+    if (inputType.hasRank() && inputType.getRank() == 3) {
+      hasBatch = true;
+    }
+  }
+
+  if (hasBatch) {
+    // [N, ic, iw] [oc, ic/groups, ww] -> [N, oc, ow]
+    return SmallVector<utils::IteratorType>{
+        utils::IteratorType::parallel,  utils::IteratorType::reduction,
+        utils::IteratorType::reduction, utils::IteratorType::parallel,
+        utils::IteratorType::reduction, utils::IteratorType::reduction,
+        utils::IteratorType::parallel};
+  } else {
+    // [ic, iw] [oc, ic/groups, ww] -> [oc, ow]
+    return SmallVector<utils::IteratorType>{
+        utils::IteratorType::reduction, utils::IteratorType::reduction,
+        utils::IteratorType::parallel,  utils::IteratorType::reduction,
+        utils::IteratorType::reduction, utils::IteratorType::parallel};
+  }
+}
+
+void Conv1DOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  getGenericEffectsImpl(effects, cast<linalg::LinalgOp>(getOperation()));
+}
+
+ArrayAttr Conv1DOp::getIndexingMaps() {
+  MLIRContext *ctx = getContext();
+  AffineMap scalarMap = AffineMap::get(getNumParallelLoops(), 0, ctx);
+  SmallVector<AffineMap> indexingMaps(getNumOperands(), scalarMap);
+  bool hasBatch = false;
+  if (auto inputType = mlir::dyn_cast<ShapedType>(getInput().getType())) {
+    if (inputType.hasRank() && inputType.getRank() == 3) {
+      hasBatch = true;
+    }
+  }
+  if (hasBatch) {
+    // [N, ic, iw] [oc, ic/groups, ww] -> [N, oc, ow]
+    AffineMap iMap =
+        parseAffineMap("(d0, d1, d2, d3, d4, d5, d6) -> (d0, d1, d2)", ctx);
+    indexingMaps[getInputMutable().getOperandNumber()] = iMap;
+
+    AffineMap wMap =
+        parseAffineMap("(d0, d1, d2, d3, d4, d5, d6) -> (d3, d4, d5)", ctx);
+    indexingMaps[getWeightMutable().getOperandNumber()] = wMap;
+
+    auto bias = getBiasMutable();
+    if (!bias.empty()) {
+      AffineMap bMap =
+          parseAffineMap("(d0, d1, d2, d3, d4, d5, d6) -> (d3)", ctx);
+      indexingMaps[bias.begin()->getOperandNumber()] = bMap;
+    }
+    AffineMap oMap =
+        parseAffineMap("(d0, d1, d2, d3, d4, d5, d6) -> (d0, d3, d6)", ctx);
+    indexingMaps[getInitMutable().getOperandNumber()] = oMap;
+    return Builder(ctx).getAffineMapArrayAttr(indexingMaps);
+  } else {
+    // [ic, iw] [oc, ic/groups, ww] -> [oc, ow]
+    AffineMap iMap =
+        parseAffineMap("(d0, d1, d2, d3, d4, d5) -> (d0, d1)", ctx);
+    indexingMaps[getInputMutable().getOperandNumber()] = iMap;
+
+    AffineMap wMap =
+        parseAffineMap("(d0, d1, d2, d3, d4, d5) -> (d2, d3, d4)", ctx);
+    indexingMaps[getWeightMutable().getOperandNumber()] = wMap;
+
+    auto bias = getBiasMutable();
+    if (!bias.empty()) {
+      AffineMap bMap = parseAffineMap("(d0, d1, d2, d3, d4, d5) -> (d2)", ctx);
+      indexingMaps[bias.begin()->getOperandNumber()] = bMap;
+    }
+    AffineMap oMap =
+        parseAffineMap("(d0, d1, d2, d3, d4, d5) -> (d2, d5)", ctx);
+    indexingMaps[getInitMutable().getOperandNumber()] = oMap;
+    return Builder(ctx).getAffineMapArrayAttr(indexingMaps);
+  }
+}
+
+void Conv1DOp::print(OpAsmPrinter &p) {
+  // attr-dict
+  p.printOptionalAttrDict((*this)->getAttrs(), ArrayRef<StringRef>{});
+  if (getODSOperands(2).empty())
+    printCommonStructuredOpParts(p, {getInput(), getWeight()}, getInit());
+  else
+    printCommonStructuredOpParts(p, {getInput(), getWeight(), getBias()},
+                                 getInit());
+  p.printArrowTypeList(TypeRange{getResult().getType()});
+}
+
+ParseResult Conv1DOp::parse(OpAsmParser &p, OperationState &result) {
+  // Parse attr-dict
+  if (p.parseOptionalAttrDict(result.attributes))
+    return failure();
+
+  SmallVector<Type> inputTypes;
+  SmallVector<Type, 1> outputTypes;
+  if (parseCommonStructuredOpParts(p, result, inputTypes, outputTypes,
+                                   /*OperandSegmentSizes*/ false))
+    return failure();
+
+  // Parse optional result type
+  if (p.parseOptionalArrowTypeList(result.types))
+    return failure();
+
+  // Build implicit region
+  OpBuilder opBuilder(p.getContext());
+  fillStructuredOpRegion(opBuilder, *(result.addRegion()), inputTypes,
+                         outputTypes, result.attributes.getAttrs(),
+                         getRegionBuilder());
+
+  return success();
+}
+
+#ifndef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
+std::function<void(ImplicitLocOpBuilder &, Block &, ArrayRef<NamedAttribute>)>
+#else
+std::function<void(ImplicitLocOpBuilder &, Block &, ArrayRef<NamedAttribute>,
+                   function_ref<InFlightDiagnostic()>)>
+#endif
+Conv1DOp::getRegionBuilder() {
+  return [](ImplicitLocOpBuilder &builder, Block &block,
+            ArrayRef<NamedAttribute> attrs
+#ifdef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
+            , function_ref<InFlightDiagnostic()> emitError
+#endif
+ 	   ) {
+    RegionBuilderHelper helper(builder.getContext(), block);
+    SmallVector<Value> yields;
+
+    if (block.getNumArguments() == 4) {
+      Value arg0 = block.getArgument(0);
+      Type targetType = block.getArgument(3).getType();
+      yields.push_back(
+          helper.buildTypeFn(TypeFn::cast_signed, targetType, arg0));
+    } else {
+      assert(block.getNumArguments() == 3 &&
+             "Conv1DOp regionBuilder expects 3 (>=0) args");
+      Value arg0 = block.getArgument(0);
+      Type targetType = block.getArgument(2).getType();
+      yields.push_back(
+          helper.buildTypeFn(TypeFn::cast_signed, targetType, arg0));
+    }
+
+    helper.yieldOutputs(yields);
+  };
 }
