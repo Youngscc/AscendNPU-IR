@@ -604,6 +604,13 @@ bool isAlignedInUB(Type type) {
   return type.getIntOrFloatBitWidth() % kUBAlignSizeInBits == 0;
 }
 
+bool isUnstructuredMemAccLoop(Operation *op) {
+  auto forOp = dyn_cast<scf::ForOp>(op);
+  if (!forOp)
+    return false;
+  return forOp->hasAttr("ExtractedLoadOrStore");
+}
+
 hivm::AxisKind getAxisKind(int dim, int rank) {
   if (dim == rank - 1)
     return hivm::AxisKind::LAST;

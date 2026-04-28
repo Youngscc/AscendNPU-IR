@@ -195,7 +195,10 @@ std::unique_ptr<Pass> createTileBatchMMIntoLoopPass();
 std::unique_ptr<Pass> createLiftZeroRankPass();
 
 // Create a pass to insert load/store op for mix cv function.
-std::unique_ptr<Pass> createInsertLoadStoreForMixCVPass();
+std::unique_ptr<Pass> createInsertLoadStoreForMixCVPass(
+    const InsertLoadStoreForMixCVOptions &options = {});
+
+std::unique_ptr<Pass> createInsertLoadStoreForScalarPass();
 
 // Create a pass to insert infer-workspace callback func for host
 std::unique_ptr<Pass> createInsertInferWorkSpaceSizeFuncPass();

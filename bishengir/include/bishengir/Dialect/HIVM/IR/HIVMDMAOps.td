@@ -97,7 +97,8 @@ def LoadOp : HIVM_DmaOp<"load", [
                        Optional<AnyType>:$right_padding_num,
                        DefaultValuedOptionalAttr<BoolAttr, "false">:$init_out_buffer,
                        Optional<AnyType>:$init_condition,
-                       DefaultValuedOptionalAttr<BoolAttr, "false">:$may_implicit_transpose_with_last_axis
+                       DefaultValuedOptionalAttr<BoolAttr, "false">:$may_implicit_transpose_with_last_axis,
+                       DefaultValuedOptionalAttr<HIVM_TCoreTypeAttr, "::mlir::hivm::TCoreType::CUBE_OR_VECTOR">:$tcoretype
   );
   let results = (outs Optional<AnyRankedTensor>:$result_tensor);
   let builders = [
@@ -135,6 +136,7 @@ def LoadOp : HIVM_DmaOp<"load", [
     (`right_padding_num` `=` $right_padding_num^ `:` type($right_padding_num))?
     (`init_condition` `=` $init_condition^ `:` type($init_condition))?
     (`may_implicit_transpose_with_last_axis` `=` $may_implicit_transpose_with_last_axis^ )?
+    (`core_type` `=` $tcoretype^ )?
     (`->` type($result_tensor)^)?
   }];
   let hasFolder = 1;
