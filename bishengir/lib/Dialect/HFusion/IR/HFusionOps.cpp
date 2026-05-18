@@ -413,6 +413,8 @@ public:
       return buildUnaryRec(builder, arg);
     case UnaryFn::vnot:
       return buildUnaryVNot(builder, arg);
+    case UnaryFn::lgamma:
+      return builder.create<mathExt::LgammaOp>(arg.getLoc(), arg);
     }
     llvm::report_fatal_error("unsupported unary function");
   }

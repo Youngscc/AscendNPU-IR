@@ -597,6 +597,241 @@ static bool isZero(Value v) {
   }
   return (cstOp.value() == 0);
 }
+// ============================================================================
+// lgamma(x) = ln|Γ(x)| implementation
+// ============================================================================
+//   lgamma(z + 1) = (log(2) + log(pi)) / 2
+//                   + (z + 1/2) * log(t(z))
+//                   - t(z) + log(a(z))
+//   where t(z) = z + g + 1/2
+//         a(z) = c0 + sum(k=1..n, c[k] / (z + k))
+//
+// For x < 0.5, use Euler's reflection formula:
+//   lgamma(x) = log(pi) - lgamma(1-x) - log(|sin(pi*x)|)
+// ============================================================================
+struct NormalizeLgammaOp : public OpRewritePattern<hfusion::ElemwiseUnaryOp> {
+public:
+  using OpRewritePattern<hfusion::ElemwiseUnaryOp>::OpRewritePattern;
+
+  // Bundle of values computed during input preparation, shared across stages
+  struct InputContext {
+    Value x;             // possibly upcast to f32
+    Value empty;
+    Value half;
+    Value one;
+    Value needToReflect;
+    Value z;
+    Value absX;
+  };
+
+  LogicalResult matchAndRewrite(hfusion::ElemwiseUnaryOp op,
+                              PatternRewriter &rewriter) const override {
+    if (!op.hasPureTensorSemantics())
+      return failure();
+    if (op.getFun() != hfusion::UnaryFn::lgamma)
+      return failure();
+
+    Value rawX = op.getInputs()[0];
+    auto inType = getElementTypeOrSelf(rawX.getType());
+    assert((inType.isF16() || inType.isF32()) &&
+          "only support input Type is f16 or f32");
+
+    Location loc = op->getLoc();
+
+    // [1] FP16->FP32, compute shared values and z
+    InputContext ctx = prepareInput(rewriter, loc, rawX, inType);
+
+    // [2] Lanczos approximation: lgamma(z+1)
+    Value lgamma = computeLanczosLgamma(rewriter, loc, ctx.z, ctx.half, ctx.empty);
+
+    // [3] Reflection formula for x < 0.5
+    Value lgammaReflection = computeReflection(rewriter, loc, ctx.absX, lgamma,
+                                              ctx.half, ctx.one, ctx.empty);
+
+    // [4] inf handling + needToReflect select + FP32->FP16
+    Value result = applySpecialValues(rewriter, loc, ctx, lgamma,
+                                      lgammaReflection, inType);
+
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+
+protected:
+  // [1] FP16->FP32 upcast if needed; compute empty, half, one,
+  //     needToReflect, z, absX for use in subsequent stages.
+  InputContext prepareInput(PatternRewriter &rewriter, Location loc,
+                            Value x, Type inType) const {
+    if (inType.isF16())
+      x = hfusion::castTo(rewriter, x, rewriter.getF32Type(),
+                          hfusion::RoundMode::ROUND);
+
+    auto empty = utils::createEmptyOp(rewriter, loc, x);
+    Value half = f32Const(rewriter, loc, 0.5);
+    Value one  = f32Const(rewriter, loc, 1.0);
+
+    // If the input is less than 0.5 use Euler's reflection formula.
+    //   z = -x      if x < 0.5
+    //   z = x - 1   otherwise
+    Value needToReflect =
+        hfusion::createCmpOp(rewriter, loc, x, half, hfusion::CompareFn::vlt)
+            ->getResult(0);
+    Value negX    = createUnaryOp(rewriter, loc, linalg::UnaryFn::negf, x, empty);
+    Value xSubOne = createBinOp(rewriter, loc, linalg::BinaryFn::sub, x, one, empty);
+    Value z       = createSelect(rewriter, loc, needToReflect, negX, xSubOne);
+    Value absX    = createUnaryOp(rewriter, loc, linalg::UnaryFn::abs, x, empty);
+
+    return {x, empty, half, one, needToReflect, z, absX};
+  }
+
+  // [2] Compute lgamma(z+1) using the Lanczos approximation:
+  //   a(z)   = c0 + sum(k=1..n, c[k] / (z + k))
+  //   log(t) = log(g + 1/2) + log1p(z / (g + 1/2))
+  //   r      = (z + 1/2 - t / log(t)) * log(t)
+  //   result = log(sqrt(2*pi)) + r + log(a(z))
+  Value computeLanczosLgamma(PatternRewriter &rewriter, Location loc,
+                              Value z, Value half, Value empty) const {
+    // Materialize a(z) = c0 + sum(k=1..n, c[k] / (z + k))
+    Value a = f32Const(rewriter, loc, lgamma_const::LANCZOS_C0);
+    for (size_t i = 0; i < std::size(lgamma_const::LANCZOS_COEFFS); ++i) {
+      Value coeff         = f32Const(rewriter, loc, lgamma_const::LANCZOS_COEFFS[i]);
+      Value oneBasedIndex = f32Const(rewriter, loc, static_cast<double>(i + 1));
+      Value zPlusK        = createBinOp(rewriter, loc, linalg::BinaryFn::add, z, oneBasedIndex, empty);
+      Value quotient      = createBinOp(rewriter, loc, linalg::BinaryFn::div, coeff, zPlusK, empty);
+      a = createBinOp(rewriter, loc, linalg::BinaryFn::add, a, quotient, empty);
+    }
+
+    // Materialize log(t) = log(g + 1/2) + log1p(z / (g + 1/2))
+    constexpr double gPlusHalf    = lgamma_const::LANCZOS_G + 0.5;
+    Value lanczosPlusHalf         = f32Const(rewriter, loc, gPlusHalf);
+    Value t                       = createBinOp(rewriter, loc, linalg::BinaryFn::add, lanczosPlusHalf, z, empty);
+    Value logTerm                 = f32Const(rewriter, loc, std::log(gPlusHalf));
+    Value zDivLanczosPlusHalf     = createBinOp(rewriter, loc, linalg::BinaryFn::div, z, lanczosPlusHalf, empty);
+    Value log1pTerm =
+        hfusion::createUnaryOp<hfusion::ElemwiseUnaryOp, hfusion::UnaryFn, hfusion::UnaryFnAttr>(
+            rewriter, loc, hfusion::UnaryFn::log1p,
+            ValueRange{zDivLanczosPlusHalf}, empty)
+            ->getResult(0);
+    Value logT = createBinOp(rewriter, loc, linalg::BinaryFn::add, logTerm, log1pTerm, empty);
+
+    // Materialize r = (z + 1/2 - t / log(t)) * log(t)
+    Value zPlusHalf = createBinOp(rewriter, loc, linalg::BinaryFn::add, z, half, empty);
+    Value tDivLogT  = createBinOp(rewriter, loc, linalg::BinaryFn::div, t, logT, empty);
+    Value rInner    = createBinOp(rewriter, loc, linalg::BinaryFn::sub, zPlusHalf, tDivLogT, empty);
+    Value r         = createBinOp(rewriter, loc, linalg::BinaryFn::mul, rInner, logT, empty);
+
+    // lgamma(z+1) = log(sqrt(2*pi)) + r + log(a(z))
+    Value logA       = createUnaryOp(rewriter, loc, linalg::UnaryFn::log, a, empty);
+    Value logSqrt2Pi = f32Const(rewriter, loc, 0.5 * std::log(2.0 * M_PI));
+    Value lgamma     = createBinOp(rewriter, loc, linalg::BinaryFn::add, logSqrt2Pi, r, empty);
+    lgamma           = createBinOp(rewriter, loc, linalg::BinaryFn::add, lgamma, logA, empty);
+    return lgamma;
+  }
+
+  // [3] Compute lgamma(x) via Euler's reflection formula for x < 0.5:
+  //   lgamma(x) = log(pi) - log(|sin(pi * x)|) - lgamma(1 - x)
+  // Uses abs(frac(x)) with [0, 0.5] symmetry to avoid precision loss near poles.
+  Value computeReflection(PatternRewriter &rewriter, Location loc,
+                          Value absX, Value lgamma,
+                          Value half, Value one, Value empty) const {
+    // abs(frac(x)) = abs(x) - floor(abs(x))
+    Value floorAbsX = createUnaryOp(rewriter, loc, linalg::UnaryFn::floor, absX, empty);
+    Value absFrac   = createBinOp(rewriter, loc, linalg::BinaryFn::sub, absX, floorAbsX, empty);
+
+    // Symmetry: absFrac > 0.5 -> use (1 - absFrac) for better precision near integers
+    Value reduceAbsFrac =
+        hfusion::createCmpOp(rewriter, loc, absFrac, half, hfusion::CompareFn::vgt)
+            ->getResult(0);
+    Value oneMinusAbsFrac = createBinOp(rewriter, loc, linalg::BinaryFn::sub, one, absFrac, empty);
+    absFrac = createSelect(rewriter, loc, reduceAbsFrac, oneMinusAbsFrac, absFrac);
+
+    // reflectionDenom = log(|sin(pi * absFrac)|)
+    Value pi           = f32Const(rewriter, loc, M_PI);
+    Value piAbsFrac    = createBinOp(rewriter, loc, linalg::BinaryFn::mul, pi, absFrac, empty);
+    Value sinPiAbsFrac =
+        hfusion::createUnaryOp<hfusion::ElemwiseUnaryOp, hfusion::UnaryFn, hfusion::UnaryFnAttr>(
+            rewriter, loc, hfusion::UnaryFn::sin,
+            ValueRange{piAbsFrac}, empty)
+            ->getResult(0);
+    Value reflectionDenom = createUnaryOp(rewriter, loc, linalg::UnaryFn::log, sinPiAbsFrac, empty);
+
+    // lgammaReflection = log(pi) - reflectionDenom - lgamma
+    Value logPi            = f32Const(rewriter, loc, std::log(M_PI));
+    Value lgammaReflection = createBinOp(rewriter, loc, linalg::BinaryFn::sub, logPi, reflectionDenom, empty);
+    lgammaReflection       = createBinOp(rewriter, loc, linalg::BinaryFn::sub, lgammaReflection, lgamma, empty);
+
+    // Avoid -inf - inf = nan: if reflectionDenom is +/-inf, return -reflectionDenom instead
+    Value posInf = f32Const(rewriter, loc, std::numeric_limits<float>::infinity());
+    Value absReflectionDenom =
+        createUnaryOp(rewriter, loc, linalg::UnaryFn::abs, reflectionDenom, empty);
+    Value finiteReflectionDenom =
+        hfusion::createCmpOp(rewriter, loc, absReflectionDenom, posInf,
+                            hfusion::CompareFn::vlt)
+            ->getResult(0);
+    Value negReflectionDenom = createUnaryOp(rewriter, loc, linalg::UnaryFn::negf, reflectionDenom, empty);
+    lgammaReflection = createSelect(rewriter, loc, finiteReflectionDenom, lgammaReflection, negReflectionDenom);
+
+    return lgammaReflection;
+  }
+
+  // [4] Select main/reflected result, clamp +/-inf input to +inf output,
+  //     then cast back to FP16 if the original input was FP16.
+  Value applySpecialValues(PatternRewriter &rewriter, Location loc,
+                          const InputContext &ctx,
+                          Value lgamma, Value lgammaReflection,
+                          Type inType) const {
+    // Select whether or not to rely on the reflection
+    Value result = createSelect(rewriter, loc, ctx.needToReflect, lgammaReflection, lgamma);
+
+    // Materialize +/-inf behavior: lgamma(+/-inf) = +inf
+    Value posInf = f32Const(rewriter, loc, std::numeric_limits<float>::infinity());
+    Value xIsInf =
+        hfusion::createCmpOp(rewriter, loc, ctx.absX, posInf,
+                            hfusion::CompareFn::vge)
+            ->getResult(0);
+    Value posInfTensor =
+        rewriter.create<linalg::FillOp>(loc, posInf, ctx.empty).getResult(0);
+    result = createSelect(rewriter, loc, xIsInf, posInfTensor, result);
+
+    // FP32 -> FP16 if needed
+    if (inType.isF16())
+      result = hfusion::castTo(rewriter, result, rewriter.getF16Type(),
+                              hfusion::RoundMode::ROUND);
+    return result;
+  }
+
+  Value f32Const(PatternRewriter &rewriter, Location loc, double v) const {
+    auto f32 = rewriter.getF32Type();
+    return rewriter.create<arith::ConstantOp>(loc, f32,
+                                              rewriter.getFloatAttr(f32, v));
+  }
+
+  Value createSelect(PatternRewriter &rewriter, Location loc, Value cond,
+                    Value trueVal, Value falseVal) const {
+    auto selEmpty = utils::createEmptyOp(rewriter, loc, trueVal);
+    return rewriter
+        .create<hfusion::SelectOp>(loc, TypeRange{selEmpty.getType()},
+                                  ValueRange{cond, trueVal, falseVal},
+                                  ValueRange{selEmpty})
+        .getResult(0);
+  }
+
+  Value createBinOp(PatternRewriter &rewriter, Location loc,
+                    linalg::BinaryFn fn, Value inp1, Value inp2,
+                    Value out) const {
+    return hfusion::createBinaryOp<linalg::ElemwiseBinaryOp, linalg::BinaryFn,
+                                  linalg::BinaryFnAttr>(
+              rewriter, loc, fn, ValueRange({inp1, inp2}), out)
+        ->getResult(0);
+  }
+
+  Value createUnaryOp(PatternRewriter &rewriter, Location loc,
+                      linalg::UnaryFn fn, Value inp, Value out) const {
+    return hfusion::createUnaryOp<linalg::ElemwiseUnaryOp, linalg::UnaryFn,
+                                  linalg::UnaryFnAttr>(
+              rewriter, loc, fn, ValueRange{inp}, ValueRange{out})
+        ->getResult(0);
+  }
+};
 
 class NormalizeInvTrigBase : public OpRewritePattern<hfusion::ElemwiseUnaryOp> {
 public:
@@ -7946,6 +8181,7 @@ void populateNormalizeHFusionPatterns(RewritePatternSet &patterns) {
   patterns.add<NormalizeAsinOp>(patterns.getContext());
   patterns.add<NormalizeAcosOp>(patterns.getContext());
   patterns.add<NormalizeAcoshOp>(patterns.getContext());
+  patterns.add<NormalizeLgammaOp>(patterns.getContext());
   patterns.add<NormalizeAtanOp>(patterns.getContext());
   patterns.add<NormalizeAtan2Op>(patterns.getContext());
   patterns.add<NormalizeAtanhOp>(patterns.getContext());
