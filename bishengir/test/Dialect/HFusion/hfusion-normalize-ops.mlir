@@ -3499,3 +3499,151 @@ func.func @test_hfusion_cyl_bessel_i0_ops(%arg0 : tensor<5x1xf16>) -> tensor<5x1
   %ret = hfusion.cyl_bessel_i0 %arg0 : tensor<5x1xf16> -> tensor<5x1xf16>
   return %ret : tensor<5x1xf16>
 }
+
+// -----
+// Test lgamma normalization for f32 input
+// lgamma(x) = ln|Γ(x)| using Lanczos approximation
+
+// CHECK-LABEL: func.func @test_hfusion_lgamma_f32(
+// CHECK-SAME: %[[ARG:.*]]: tensor<8xf32>) -> tensor<8xf32> {
+
+// Original lgamma op should be eliminated
+// CHECK-NOT: #hfusion.unary_fn<lgamma>
+
+// Constants
+// CHECK-DAG: arith.constant 5.000000e-01 : f32
+// CHECK-DAG: arith.constant 1.000000e+00 : f32
+// CHECK-DAG: arith.constant -1.000000e+00 : f32
+// CHECK-DAG: arith.constant 7.500000e+00 : f32
+
+// Tensor init
+// CHECK: tensor.empty
+
+// needToReflect = x < 0.5
+// CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vlt>}
+
+// negX implemented as mul(x, -1)
+// CHECK: linalg.elemwise_binary {fun = #linalg.binary_fn<mul>}
+
+// x - 1
+// CHECK: linalg.elemwise_binary {fun = #linalg.binary_fn<sub>}
+
+// z = select(...)
+// CHECK: hfusion.select
+
+// abs(x)
+// CHECK: linalg.elemwise_unary {fun = #linalg.unary_fn<abs>}
+
+// Lanczos series
+// CHECK: linalg.elemwise_binary {fun = #linalg.binary_fn<div>}
+// CHECK: linalg.elemwise_binary {fun = #linalg.binary_fn<add>}
+
+// log1p expanded into add + log
+// CHECK: linalg.elemwise_binary {fun = #linalg.binary_fn<add>}
+// CHECK: linalg.elemwise_unary {fun = #linalg.unary_fn<log>}
+
+// log(a(z))
+// CHECK: linalg.elemwise_unary {fun = #linalg.unary_fn<log>}
+
+// floor(abs(x)) implemented as cast(round_mode=floor)
+// CHECK: hfusion.cast
+// CHECK-SAME: round_mode = #hfusion.round_mode<floor>
+
+// absFrac > 0.5
+// CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vgt>}
+
+// polynomial-based sin approximation exists
+// CHECK: linalg.elemwise_binary {fun = #linalg.binary_fn<mul>}
+// CHECK: linalg.elemwise_binary {fun = #linalg.binary_fn<sub>}
+
+// finiteReflectionDenom = abs(reflectionDenom) < inf
+// CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vlt>}
+
+// reflection finite select
+// CHECK: hfusion.select
+
+// Final reflection/main select
+// CHECK: hfusion.select
+
+// inf input handling
+// CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vge>}
+// CHECK: hfusion.select
+
+// CHECK: return %{{.*}} : tensor<8xf32>
+
+func.func @test_hfusion_lgamma_f32(%arg0 : tensor<8xf32>) -> tensor<8xf32> {
+  %0 = tensor.empty() : tensor<8xf32>
+  %ret = hfusion.elemwise_unary {fun = #hfusion.unary_fn<lgamma>}
+      ins(%arg0 : tensor<8xf32>)
+      outs(%0 : tensor<8xf32>)
+      -> tensor<8xf32>
+  return %ret : tensor<8xf32>
+}
+
+// -----
+// Test lgamma normalization for f16 input (with F16->F32->F16 conversion)
+
+// CHECK-LABEL: func.func @test_hfusion_lgamma_f16(
+// CHECK-SAME: %[[ARG:.*]]: tensor<8xf16>) -> tensor<8xf16> {
+
+// F16 -> F32 cast
+// CHECK: tensor.empty() : tensor<8xf32>
+// CHECK: hfusion.cast {cast = #hfusion.type_fn<cast_signed>
+// CHECK-SAME: round_mode = #hfusion.round_mode<round>}
+
+// Reflection predicate
+// CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vlt>}
+
+// negf lowered to mul(-1)
+// CHECK: linalg.elemwise_binary {fun = #linalg.binary_fn<mul>}
+
+// select
+// CHECK: hfusion.select
+
+// Lanczos
+// CHECK: linalg.elemwise_binary {fun = #linalg.binary_fn<div>}
+// CHECK: linalg.elemwise_binary {fun = #linalg.binary_fn<add>}
+
+// log1p lowered to add + log
+// CHECK: linalg.elemwise_binary {fun = #linalg.binary_fn<add>}
+// CHECK: linalg.elemwise_unary {fun = #linalg.unary_fn<log>}
+
+// log(a)
+// CHECK: linalg.elemwise_unary {fun = #linalg.unary_fn<log>}
+
+// floor lowered to cast(round_mode=floor)
+// CHECK: hfusion.cast
+// CHECK-SAME: round_mode = #hfusion.round_mode<floor>
+
+// absFrac > 0.5
+// CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vgt>}
+
+// polynomial sin approximation
+// CHECK: linalg.elemwise_binary {fun = #linalg.binary_fn<mul>}
+// CHECK: linalg.elemwise_binary {fun = #linalg.binary_fn<sub>}
+
+// finite reflection check
+// CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vlt>}
+
+// reflection select
+// CHECK: hfusion.select
+
+// inf handling
+// CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vge>}
+// CHECK: hfusion.select
+
+// F32 -> F16 cast
+// CHECK: tensor.empty() : tensor<8xf16>
+// CHECK: hfusion.cast {cast = #hfusion.type_fn<cast_signed>
+// CHECK-SAME: round_mode = #hfusion.round_mode<round>}
+
+// CHECK: return %{{.*}} : tensor<8xf16>
+
+func.func @test_hfusion_lgamma_f16(%arg0 : tensor<8xf16>) -> tensor<8xf16> {
+  %0 = tensor.empty() : tensor<8xf16>
+  %ret = hfusion.elemwise_unary {fun = #hfusion.unary_fn<lgamma>}
+      ins(%arg0 : tensor<8xf16>)
+      outs(%0 : tensor<8xf16>)
+      -> tensor<8xf16>
+  return %ret : tensor<8xf16>
+}

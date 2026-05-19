@@ -193,6 +193,7 @@ void mlir::hfusion::populateMathToHFusionConversionPatterns(
       ElementwiseOpToHFusionUnary<math::Exp2Op, hfusion::UnaryFn::exp2>,
       ElementwiseOpToHFusionUnary<math::ExpM1Op, hfusion::UnaryFn::expm1>,
       ElementwiseOpToHFusionUnary<mathExt::IlogbOp, hfusion::UnaryFn::ilogb>,
+      ElementwiseOpToHFusionUnary<mathExt::LgammaOp, hfusion::UnaryFn::lgamma>,
       MathFmaToComposeBinaryOp>(patterns.getContext());
 }
 
