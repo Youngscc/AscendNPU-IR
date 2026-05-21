@@ -5194,6 +5194,24 @@ public:
   }
 };
 
+// Copy operation is simulated by i16 (2 bytes each). 
+// Hardware requires 32-byte alignment, which translates to 16 consecutive i16 elements.
+static bool needToTransform(Value src, int64_t stride0) {
+    auto type = mlir::cast<RankedTensorType>(src.getType());
+    auto inType = getElementTypeOrSelf(src.getType());
+    int64_t srcBitWidth = inType.getIntOrFloatBitWidth();
+
+    if (type.getRank() > 1) {
+      return true;
+    } 
+    int64_t num = type.getDimSize(0);
+    // 32 bytes -> 256 bits
+    int alignment = 256 / srcBitWidth;
+
+    // Require: misalignment with 32 bytes (i.e., num not multiple of 16) or stride[0] not equal to 1
+    return ((num % alignment) != 0) || (stride0 != 1);
+}
+
 // Rewrite pattern to normalize tensor.insert_slice operations with bool (i1) element type
 // Converts bool source/dest to f16 type to enable NPU hardware acceleration
 template <>
@@ -5207,7 +5225,7 @@ template <>
       SmallVector<Value> tensors = {op.getSource(), op.getDest()};
       // Check if both tensors have i1 (boolean) element type
       // If not, skip this pattern
-      if (!hasI1ElemType(tensors))
+      if (!hasI1ElemType(tensors) || !needToTransform(op.getSource(), op.getStaticStrides()[0]))
         return failure();
   
       SmallVector<Value> newTensors =
@@ -5236,7 +5254,7 @@ template <>
       SmallVector<Value> tensors = {op.getSource(), op.getDest()};
       // Check if both tensors have i8 (int8) element type
       // If not, skip this pattern
-      if (!hasI8ElemType(tensors))
+      if (!hasI8ElemType(tensors) || !needToTransform(op.getSource(), op.getStaticStrides()[0]))
         return failure();
   
       SmallVector<Value> newTensors =
