@@ -370,7 +370,7 @@ reduce_ra(memref_t<__ubuf__ T, 2> *src0,
 
     // The address of source and dest with the offset is not 32-byte aligned.
     // After an additional same offset is added, the addresses can be 32-byte aligned.
-    if (is_same_offset_aligned) {
+    if (is_same_offset_aligned && (OP != ReduceOpTy::REDUCE_SUM) && (OP != ReduceOpTy::REDUCE_PROD)) {
       // source and dest. The unaligned part is calculated using the scalar,
       // and the aligned part is calculated using the vector.
       int64_t element_nums_offset_to_aligned = reduction_element_nums_to_move_offset_aligned<T>(src0->offset);

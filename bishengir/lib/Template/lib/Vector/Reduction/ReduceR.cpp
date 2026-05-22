@@ -328,11 +328,7 @@ reduce_r_core_on_scalar_impl(memref_t<__ubuf__ T, 1> *src0,
         src_ptr, src0->strides[0], scalar_element_num, tmp_buf_ptr);
   }
 
-  if (need_merge) {
-    *dst_value_ptr = reduction_scalar_operation<OP, T>(*dst_value_ptr, result);
-  } else {
-    *dst_value_ptr = result;
-  }
+  *dst_value_ptr = need_merge ? reduction_scalar_operation<OP, T>(*dst_value_ptr, result) : result;
 }
 
 // Implementation for PROD (all types) or SUM with non-float types using dichotomy reduction
@@ -358,11 +354,7 @@ reduce_r_core_on_scalar_impl(memref_t<__ubuf__ T, 1> *src0,
     result = scalar_reduce_two_phase<OP, T>(src_ptr, src0->strides[0], scalar_element_num, tmp_buf_ptr);
   }
 
-  if (need_merge) {
-    *dst_value_ptr = reduction_scalar_operation<OP, T>(*dst_value_ptr, result);
-  } else {
-    *dst_value_ptr = result;
-  }
+  *dst_value_ptr = need_merge ? reduction_scalar_operation<OP, T>(*dst_value_ptr, result) : result;
 }
 
 // Implementation for other ops using naive sequential reduction
@@ -376,11 +368,7 @@ reduce_r_core_on_scalar_impl(memref_t<__ubuf__ T, 1> *src0,
   __ubuf__ T *src_ptr = src0->aligned + src0->offset;
   __ubuf__ T *dst_value_ptr = dst->aligned + dst->offset;
 
-  if (need_merge) {
-    *dst_value_ptr = reduction_scalar_operation<OP, T>(*dst_value_ptr, *src_ptr);
-  } else {
-    *dst_value_ptr = *src_ptr;
-  }
+  *dst_value_ptr = need_merge ? reduction_scalar_operation<OP, T>(*dst_value_ptr, *src_ptr) : *src_ptr;
 
   if (scalar_element_num > 1) {
     for (int64_t i = 1; i < scalar_element_num; i++) {
@@ -443,8 +431,12 @@ reduce_r(memref_t<__ubuf__ T, 1> *src0, memref_t<__ubuf__ T, 1> *dst,
   }
 
   if (scalar_element_num != 0) {
+    if (OP == ReduceOpTy::REDUCE_SUM || OP == ReduceOpTy::REDUCE_PROD) {
+      reduce_r_core_on_scalar<OP, T>(src0, dst, src0->sizes[0], false, tmp_buf);
+      return;
+    }
     check_inputs_of_reduce_r(src0, dst, tmp_buf, initvalue);
-    bool need_merge = !(vector_element_num == 0);
+    bool need_merge = (vector_element_num != 0);
     reduce_r_core_on_scalar<OP, T>(src0, dst, scalar_element_num, need_merge, tmp_buf);
   }
 }

@@ -82,11 +82,7 @@ reduce_ar_scalar_core(memref_t<__ubuf__ T, 2> *src,
           row_ptr, src_stride1, size1, tmp_buf_ptr);
     }
 
-    if (need_merge) {
-      *dst_ptr = reduction_scalar_operation<OP, T>(*dst_ptr, result);
-    } else {
-      *dst_ptr = result;
-    }
+    *dst_ptr = need_merge ? reduction_scalar_operation<OP, T>(*dst_ptr, result) : result;
   }
 }
 
@@ -121,11 +117,7 @@ reduce_ar_scalar_core(memref_t<__ubuf__ T, 2> *src,
       result = scalar_reduce_two_phase<OP, T>(row_ptr, src_stride1, size1, tmp_buf_ptr);
     }
 
-    if (need_merge) {
-      *dst_ptr = reduction_scalar_operation<OP, T>(*dst_ptr, result);
-    } else {
-      *dst_ptr = result;
-    }
+    *dst_ptr = need_merge ? reduction_scalar_operation<OP, T>(*dst_ptr, result) : result;
   }
 }
 
