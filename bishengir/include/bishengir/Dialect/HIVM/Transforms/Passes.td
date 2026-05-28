@@ -576,7 +576,24 @@ def InsertLoadStoreForMixCV
     : Pass<"hivm-insert-load-store-for-mix-cv", "func::FuncOp"> {
   let summary = "insert load store op for mix cv";
   let constructor = "mlir::hivm::createInsertLoadStoreForMixCVPass()";
-  let dependentDialects = ["hivm::HIVMDialect", "bishengir::memref_ext::MemRefExtDialect", "annotation::AnnotationDialect"];
+  let dependentDialects = ["hivm::HIVMDialect",
+                           "bishengir::memref_ext::MemRefExtDialect",
+                           "bufferization::BufferizationDialect",
+                           "annotation::AnnotationDialect"];
+  let options = [Option<
+    "enableLegacy", "enable-legacy", "bool",
+    /*default=*/"false",
+    "Run legacy logic for insert load store op for mix cv">];
+}
+
+def InsertLoadStoreForScalar
+    : Pass<"hivm-insert-load-store-for-scalar", "func::FuncOp"> {
+  let summary = "Insert explicit load/store boundaries for scalar values crossing vector and cube cores";
+  let constructor = "mlir::hivm::createInsertLoadStoreForScalarPass()";
+  let dependentDialects = ["hivm::HIVMDialect",
+                           "bishengir::memref_ext::MemRefExtDialect",
+                           "bufferization::BufferizationDialect",
+                           "annotation::AnnotationDialect"];
 }
 
 def InsertInferWorkSpaceSizeFunc : Pass<"hivm-insert-infer-workspace-size-func",

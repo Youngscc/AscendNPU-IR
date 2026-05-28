@@ -213,6 +213,14 @@ def DisableHIVMTensorCompile : FeatureControlOptions<
   let passGroup = ["HFUSION", "HIVM"];
 }
 
+def EnableLegacyInsertLoadStoreForMixCV : FeatureControlOptions<
+  "Use legacy InsertLoadStoreForMixCV.",
+  "bool",
+  "false"
+> {
+  let passGroup = ["HIVM"];
+}
+
 //===----------------------------------------------------------------------===//
 // DFX Control Options
 //===----------------------------------------------------------------------===//

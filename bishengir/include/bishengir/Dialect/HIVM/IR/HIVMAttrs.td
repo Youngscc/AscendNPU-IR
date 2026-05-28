@@ -331,6 +331,9 @@ def HIVM_TCoreTypeAttr : HIVM_Attr<"TCoreType", "tcore_type"> {
   let description = [{
     HIVM op core type attribute.
   }];
+  let constBuilderCall =
+      "::mlir::hivm::TCoreTypeAttr::get($_builder.getContext(), "
+      "::mlir::hivm::TCoreType::CUBE_OR_VECTOR)";
 }
 
 def HIVM_TCoreTypeMarkerAttr : HIVM_Attr<"TCoreTypeMarker", "tcore_type_marker"> {
