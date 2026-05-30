@@ -1056,7 +1056,15 @@ areValuesAlignedAfterTiling(ValueRange valueRange,
       }
     }
     bitUsed = bitUsed * static_cast<int>(resultType.getElementTypeBitWidth());
-    if (bitUsed % alignSize != 0)
+
+    // Determine alignment size based on element type because template supports
+    // i1 type which does not require 32-byte alignment.
+    int64_t actualAlignSize = alignSize;
+    if (resultType.getElementType().isInteger(1)) {
+      actualAlignSize = 8; // 8 bits
+    }
+
+    if (bitUsed % actualAlignSize != 0)
       return false;
   }
   return true;
