@@ -38,6 +38,7 @@
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/LogicalResult.h"
 #include "llvm/Support/raw_ostream.h"
+#include <array>
 #include <cassert>
 #include <cstdint>
 #include <iterator>
@@ -62,6 +63,47 @@ FailureOr<size_t> getRankFromShapedTypeValue(Value val) {
     return failure();
   }
   return valType.getRank();
+}
+
+//===----------------------------------------------------------------------===//
+// Utils for Conv Ops
+//===----------------------------------------------------------------------===//
+
+FailureOr<std::array<int64_t, 2>>
+getConv2DIntPairAttr(Attribute attr, StringRef attrName,
+                     function_ref<InFlightDiagnostic()> emitError) {
+  auto emitInvalidAttr = [&]() {
+    emitError() << "`" << attrName
+                << "` must be an integer scalar or a 2-element integer array";
+    return failure();
+  };
+
+  if (auto intAttr = dyn_cast<IntegerAttr>(attr)) {
+    int64_t value = intAttr.getInt();
+    return std::array<int64_t, 2>{value, value};
+  }
+
+  if (auto denseAttr = dyn_cast<DenseI64ArrayAttr>(attr)) {
+    if (denseAttr.size() != 2)
+      return emitInvalidAttr();
+    return std::array<int64_t, 2>{denseAttr[0], denseAttr[1]};
+  }
+
+  if (auto arrayAttr = dyn_cast<ArrayAttr>(attr)) {
+    if (arrayAttr.size() != 2)
+      return emitInvalidAttr();
+
+    std::array<int64_t, 2> values;
+    for (auto [idx, element] : llvm::enumerate(arrayAttr)) {
+      auto intAttr = dyn_cast<IntegerAttr>(element);
+      if (!intAttr)
+        return emitInvalidAttr();
+      values[idx] = intAttr.getInt();
+    }
+    return values;
+  }
+
+  return emitInvalidAttr();
 }
 
 //===----------------------------------------------------------------------===//
@@ -865,6 +907,12 @@ Conv1DL1Op::getLibraryCallOperands(PatternRewriter &rewriter) {
 // Conv2DL1Op
 //===----------------------------------------------------------------------===//
 
+LogicalResult Conv2DL1Op::verify() {
+  FailureOr<std::array<int64_t, 2>> padding = getConv2DIntPairAttr(
+      getPaddingAttr(), "padding", [&]() { return emitOpError(); });
+  return failed(padding) ? failure() : success();
+}
+
 bool Conv2DL1Op::isInitConstant(std::optional<bool> cst) {
   return isInitConstantForLocalMmadOp<Conv2DL1Op>(this, cst);
 }
@@ -962,11 +1010,14 @@ Conv2DL1Op::getLibraryCallOperands(PatternRewriter &rewriter) {
 
   libParams.push_back(makeI64(getGroups()));
 
-  int64_t pad = getPadding();
-  libParams.push_back(makeI64(pad));   // padT
-  libParams.push_back(makeI64(pad));   // padB
-  libParams.push_back(makeI64(pad)); // padL
-  libParams.push_back(makeI64(pad)); // padR
+  FailureOr<std::array<int64_t, 2>> padding =
+      getConv2DIntPairAttr(getPaddingAttr(), "padding",
+                           [&]() { return emitOpError(); });
+  assert(!failed(padding) && "Conv2DL1Op padding must be verified");
+  libParams.push_back(makeI64((*padding)[0])); // padT
+  libParams.push_back(makeI64((*padding)[0])); // padB
+  libParams.push_back(makeI64((*padding)[1])); // padL
+  libParams.push_back(makeI64((*padding)[1])); // padR
 
   libParams.push_back(makeI64(1)); // strideH
   libParams.push_back(makeI64(1)); // strideW
