@@ -1084,7 +1084,7 @@ struct HFusionToHIVMConv2DOp : public OpRewritePattern<hfusion::Conv2DOp> {
     auto weight = op.getWeight();
     auto bias = op.getBias();
     auto group = op.getGroups();
-    auto padding = op.getPadding();
+    auto padding = op.getPaddingAttr();
     Value initCondition =
         rewriter.create<arith::ConstantIntOp>(op->getLoc(), 1, int1Type);
     rewriter.replaceOpWithNewOp<hivm::Conv2DL1Op>(op, resType, input, weight,

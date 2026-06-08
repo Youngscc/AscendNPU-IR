@@ -53,6 +53,7 @@
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -64,6 +65,51 @@
 
 using namespace mlir;
 using namespace mlir::hfusion;
+
+namespace {
+
+//===----------------------------------------------------------------------===//
+// Utils for Conv Ops
+//===----------------------------------------------------------------------===//
+
+FailureOr<std::array<int64_t, 2>>
+getConv2DIntPairAttr(Attribute attr, StringRef attrName,
+                     function_ref<InFlightDiagnostic()> emitError) {
+  auto emitInvalidAttr = [&]() {
+    emitError() << "`" << attrName
+                << "` must be an integer scalar or a 2-element integer array";
+    return failure();
+  };
+
+  if (auto intAttr = dyn_cast<IntegerAttr>(attr)) {
+    int64_t value = intAttr.getInt();
+    return std::array<int64_t, 2>{value, value};
+  }
+
+  if (auto denseAttr = dyn_cast<DenseI64ArrayAttr>(attr)) {
+    if (denseAttr.size() != 2)
+      return emitInvalidAttr();
+    return std::array<int64_t, 2>{denseAttr[0], denseAttr[1]};
+  }
+
+  if (auto arrayAttr = dyn_cast<ArrayAttr>(attr)) {
+    if (arrayAttr.size() != 2)
+      return emitInvalidAttr();
+
+    std::array<int64_t, 2> values;
+    for (auto [idx, element] : llvm::enumerate(arrayAttr)) {
+      auto intAttr = dyn_cast<IntegerAttr>(element);
+      if (!intAttr)
+        return emitInvalidAttr();
+      values[idx] = intAttr.getInt();
+    }
+    return values;
+  }
+
+  return emitInvalidAttr();
+}
+
+} // namespace
 
 //===----------------------------------------------------------------------===//
 // Support for named HFusion ops defined in ods-gen.
@@ -3260,17 +3306,23 @@ LogicalResult Conv2DOp::verify() {
       return emitOpError() << "requires batch size of input and init to match";
   }
 
-  int64_t stride = getStride();
-  int64_t dilation = getDilation();
+  FailureOr<std::array<int64_t, 2>> stride = getConv2DIntPairAttr(
+      getStrideAttr(), "stride", [&]() { return emitOpError(); });
+  FailureOr<std::array<int64_t, 2>> dilation = getConv2DIntPairAttr(
+      getDilationAttr(), "dilation", [&]() { return emitOpError(); });
+  FailureOr<std::array<int64_t, 2>> padding = getConv2DIntPairAttr(
+      getPaddingAttr(), "padding", [&]() { return emitOpError(); });
+  if (failed(stride) || failed(dilation) || failed(padding))
+    return failure();
 
   // Currently only support stride == 1 and dilation == 1
-  if (stride != 1 || dilation != 1)
+  if ((*stride)[0] != 1 || (*stride)[1] != 1 || (*dilation)[0] != 1 ||
+      (*dilation)[1] != 1)
     return emitOpError()
            << "currently does not support stride != 1 or dilation != 1";
 
   // Check output height oH
-  // oH = floor((iH + 2 * padding - dilation * (wH - 1) - 1) / stride + 1)
-  int64_t padding = getPadding();
+  // oH = floor((iH + 2 * paddingH - dilationH * (wH - 1) - 1) / strideH + 1)
   int64_t inputHDim = (inputRank == 3) ? 1 : 2;
   int64_t outputHDim = (initRank == 3) ? 1 : 2;
 
@@ -3279,16 +3331,18 @@ LogicalResult Conv2DOp::verify() {
     int64_t iH = inputTy.getDimSize(inputHDim);
     int64_t wH = weightTy.getDimSize(2);
     int64_t oHExpected =
-        (iH + 2 * padding - dilation * (wH - 1) - 1) / stride + 1;
+        (iH + 2 * (*padding)[0] - (*dilation)[0] * (wH - 1) - 1) /
+            (*stride)[0] +
+        1;
 
     if (initTy.getDimSize(outputHDim) != oHExpected)
       return emitOpError()
              << "requires output height oH to be computed as: "
-             << "(iH + 2 * padding - dilation * (wH - 1) - 1) / stride + 1";
+             << "(iH + 2 * paddingH - dilationH * (wH - 1) - 1) / strideH + 1";
   }
 
   // Check output width oW
-  // oW = floor((iW + 2 * padding - dilation * (wW - 1) - 1) / stride + 1)
+  // oW = floor((iW + 2 * paddingW - dilationW * (wW - 1) - 1) / strideW + 1)
   int64_t inputWDim = (inputRank == 3) ? 2 : 3;
   int64_t outputWDim = (initRank == 3) ? 2 : 3;
 
@@ -3297,12 +3351,14 @@ LogicalResult Conv2DOp::verify() {
     int64_t iW = inputTy.getDimSize(inputWDim);
     int64_t wW = weightTy.getDimSize(3);
     int64_t oWExpected =
-        (iW + 2 * padding - dilation * (wW - 1) - 1) / stride + 1;
+        (iW + 2 * (*padding)[1] - (*dilation)[1] * (wW - 1) - 1) /
+            (*stride)[1] +
+        1;
 
     if (initTy.getDimSize(outputWDim) != oWExpected)
       return emitOpError()
              << "requires output width oW to be computed as: "
-             << "(iW + 2 * padding - dilation * (wW - 1) - 1) / stride + 1";
+             << "(iW + 2 * paddingW - dilationW * (wW - 1) - 1) / strideW + 1";
   }
 
   return success();
@@ -3311,9 +3367,18 @@ LogicalResult Conv2DOp::verify() {
 void Conv2DOp::build(OpBuilder &odsBuilder, OperationState &odsState,
                      ValueRange inputs, Value output, int32_t stride,
                      int32_t padding, int32_t dilation, int32_t groups) {
-  odsState.addAttribute("stride", odsBuilder.getI32IntegerAttr(stride));
-  odsState.addAttribute("padding", odsBuilder.getI32IntegerAttr(padding));
-  odsState.addAttribute("dilation", odsBuilder.getI32IntegerAttr(dilation));
+  build(odsBuilder, odsState, inputs, output,
+        odsBuilder.getI32IntegerAttr(stride),
+        odsBuilder.getI32IntegerAttr(padding),
+        odsBuilder.getI32IntegerAttr(dilation), groups);
+}
+
+void Conv2DOp::build(OpBuilder &odsBuilder, OperationState &odsState,
+                     ValueRange inputs, Value output, Attribute stride,
+                     Attribute padding, Attribute dilation, int32_t groups) {
+  odsState.addAttribute("stride", stride);
+  odsState.addAttribute("padding", padding);
+  odsState.addAttribute("dilation", dilation);
   odsState.addAttribute("groups", odsBuilder.getI32IntegerAttr(groups));
   auto outType = output.getType();
   odsState.addOperands(inputs);
