@@ -20,6 +20,9 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "llvm/ADT/STLExtras.h"
 
+#include <array>
+#include <optional>
+
 using namespace mlir;
 using namespace mlir::hivm;
 
@@ -30,6 +33,25 @@ constexpr size_t kDimFour = 4;
 
 int64_t getRankFromShapedTypeValue(Value val) {
   return cast<ShapedType>(val.getType()).getRank();
+}
+
+std::optional<std::array<int64_t, 3>> getConv3DPaddingAttr(Attribute attr) {
+  if (auto intAttr = dyn_cast<IntegerAttr>(attr)) {
+    int64_t value = intAttr.getInt();
+    return std::array<int64_t, 3>{value, value, value};
+  }
+
+  auto arrayAttr = dyn_cast<ArrayAttr>(attr);
+  if (!arrayAttr || arrayAttr.size() != 3)
+    return std::nullopt;
+
+  auto padD = dyn_cast<IntegerAttr>(arrayAttr[0]);
+  auto padH = dyn_cast<IntegerAttr>(arrayAttr[1]);
+  auto padW = dyn_cast<IntegerAttr>(arrayAttr[2]);
+  if (!padD || !padH || !padW)
+    return std::nullopt;
+
+  return std::array<int64_t, 3>{padD.getInt(), padH.getInt(), padW.getInt()};
 }
 
 template <typename HIVMOP>
@@ -699,26 +721,27 @@ ArrayAttr Conv3DL1Op::getIndexingMaps() {
         int64_t wH = packedWeightType.getDimSize(2);
         int64_t wW = packedWeightType.getDimSize(3);
         int64_t oC = packedWeightType.getDimSize(4);
-        int64_t padding = getPadding();
+        auto padding = getConv3DPaddingAttr(getPaddingAttr());
+        if (padding) {
+          int64_t oD = iD - wD + 1;
+          int64_t oH = iH + 2 * (*padding)[1] - wH + 1;
+          int64_t oW = iW + 2 * (*padding)[2] - wW + 1;
+          if (oD > 0 && oH > 0 && oW > 0 && oC > 0) {
+            AffineExpr d0 = getAffineDimExpr(0, ctx);
+            AffineExpr d6 = getAffineDimExpr(6, ctx);
+            AffineExpr d11 = getAffineDimExpr(11, ctx);
+            AffineExpr d12 = getAffineDimExpr(12, ctx);
+            AffineExpr d13 = getAffineDimExpr(13, ctx);
+            AffineExpr cOD = getAffineConstantExpr(oD, ctx);
+            AffineExpr cOC = getAffineConstantExpr(oC, ctx);
+            AffineExpr cOW = getAffineConstantExpr(oW, ctx);
 
-        int64_t oD = iD + 2 * padding - wD + 1;
-        int64_t oH = iH + 2 * padding - wH + 1;
-        int64_t oW = iW + 2 * padding - wW + 1;
-        if (oD > 0 && oH > 0 && oW > 0 && oC > 0) {
-          AffineExpr d0 = getAffineDimExpr(0, ctx);
-          AffineExpr d6 = getAffineDimExpr(6, ctx);
-          AffineExpr d11 = getAffineDimExpr(11, ctx);
-          AffineExpr d12 = getAffineDimExpr(12, ctx);
-          AffineExpr d13 = getAffineDimExpr(13, ctx);
-          AffineExpr cOD = getAffineConstantExpr(oD, ctx);
-          AffineExpr cOC = getAffineConstantExpr(oC, ctx);
-          AffineExpr cOW = getAffineConstantExpr(oW, ctx);
-
-          AffineExpr fusedNDOC = ((d0 * cOD) + d11) * cOC + d6;
-          AffineExpr fusedHW = d12 * cOW + d13;
-          indexingMaps[getInitMutable().getOperandNumber()] = AffineMap::get(
-              /*dimCount=*/14, /*symbolCount=*/0, {fusedHW, fusedNDOC}, ctx);
-          mappedRank2 = true;
+            AffineExpr fusedNDOC = ((d0 * cOD) + d11) * cOC + d6;
+            AffineExpr fusedHW = d12 * cOW + d13;
+            indexingMaps[getInitMutable().getOperandNumber()] = AffineMap::get(
+                /*dimCount=*/14, /*symbolCount=*/0, {fusedHW, fusedNDOC}, ctx);
+            mappedRank2 = true;
+          }
         }
       }
       if (!mappedRank2) {

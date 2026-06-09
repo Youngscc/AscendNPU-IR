@@ -39,6 +39,8 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/RWMutex.h"
 
+#include <array>
+
 namespace mlir {
 #define GEN_PASS_DEF_HIVMDECOMPOSEOP
 #include "bishengir/Dialect/HIVM/Transforms/Passes.h.inc"
@@ -53,6 +55,41 @@ using namespace utils;
 namespace {
 static constexpr llvm::StringLiteral conv3dDepthPadded =
     "conv3dDepthPadded";
+
+template <size_t Rank>
+FailureOr<std::array<int64_t, Rank>> getConvIntArrayAttr(Attribute attr) {
+  if (auto intAttr = dyn_cast<IntegerAttr>(attr)) {
+    int64_t value = intAttr.getInt();
+    std::array<int64_t, Rank> values;
+    values.fill(value);
+    return values;
+  }
+
+  if (auto denseAttr = dyn_cast<DenseI64ArrayAttr>(attr)) {
+    if (denseAttr.size() != Rank)
+      return failure();
+    std::array<int64_t, Rank> values;
+    for (size_t idx = 0; idx < Rank; ++idx)
+      values[idx] = denseAttr[idx];
+    return values;
+  }
+
+  if (auto arrayAttr = dyn_cast<ArrayAttr>(attr)) {
+    if (arrayAttr.size() != Rank)
+      return failure();
+
+    std::array<int64_t, Rank> values;
+    for (auto [idx, element] : llvm::enumerate(arrayAttr)) {
+      auto intAttr = dyn_cast<IntegerAttr>(element);
+      if (!intAttr)
+        return failure();
+      values[idx] = intAttr.getInt();
+    }
+    return values;
+  }
+
+  return failure();
+}
 
 //===----------------------------------------------------------------------===//
 // VCastOp Decompose
@@ -1864,26 +1901,30 @@ public:
       return failure();
     }
 
-    const int64_t padding = op.getPadding();
-    if (padding < 0) {
+    auto padding = getConvIntArrayAttr<3>(op.getPaddingAttr());
+    if (failed(padding)) {
+      return failure();
+    }
+    const int64_t padD = (*padding)[0];
+    const int64_t padH = (*padding)[1];
+    const int64_t padW = (*padding)[2];
+    if (padD < 0 || padH < 0 || padW < 0) {
       return failure();
     }
     const bool depthAlreadyPadded = op->hasAttr(conv3dDepthPadded);
     // Depth padding policy:
-    // Conv3d uses one shared padding attribute. Normalize is responsible for
-    // materializing depth padding (front/back) when padding > 0, so decompose
-    // expects that precondition via conv3dDepthPadded.
-    if (padding > 0 && !depthAlreadyPadded) {
+    // Normalize materializes D padding (front/back) when padD > 0, so
+    // decompose expects that precondition via conv3dDepthPadded. H/W padding
+    // remains logical and is forwarded to Conv2dL1.
+    if (padD > 0 && !depthAlreadyPadded) {
       return failure();
     }
-    if (iD < wD || h + 2 * padding < wH || w + 2 * padding < wW) {
+    if (iD < wD || h + 2 * padH < wH || w + 2 * padW < wW) {
       return failure();
     }
-    // Conv3d shares one padding attr. Normalize materializes depth padding;
-    // decompose keeps H/W logical padding on Conv2dL1.
     const int64_t expectedOD = iD - wD + 1;
-    const int64_t expectedOH = h + 2 * padding - wH + 1;
-    const int64_t expectedOW = w + 2 * padding - wW + 1;
+    const int64_t expectedOH = h + 2 * padH - wH + 1;
+    const int64_t expectedOW = w + 2 * padW - wW + 1;
 
     const int64_t oD = expectedOD;
     const int64_t fusedND = n * expectedOD;
@@ -1901,6 +1942,11 @@ public:
       return failure();
     }
     Location loc = op.getLoc();
+    Attribute conv2DPadding =
+        isa<IntegerAttr>(op.getPaddingAttr())
+            ? op.getPaddingAttr()
+            : rewriter.getArrayAttr({rewriter.getI64IntegerAttr(padH),
+                                     rewriter.getI64IntegerAttr(padW)});
 
     auto collapseShape =
         [&](Value src, ArrayRef<ReassociationIndices> reassociation)
@@ -2000,7 +2046,7 @@ public:
 
       auto conv2D = rewriter.create<hivm::Conv2DL1Op>(
           loc, TypeRange{}, *input2D, *weight2D, Value(), iterAcc,
-          initCondition, ValueRange{}, op.getPaddingAttr(), op.getGroupsAttr());
+          initCondition, ValueRange{}, conv2DPadding, op.getGroupsAttr());
       (void)conv2D;
       return iterAcc;
     };

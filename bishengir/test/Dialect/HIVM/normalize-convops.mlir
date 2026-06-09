@@ -2217,6 +2217,21 @@ func.func @triton_conv3d_5d_fp16_nobias_padding1_depthpad(%arg0: tensor<2x32x8x1
 }
 
 // -----
+
+// CHECK-LABEL:   func.func @triton_conv3d_5d_fp16_nobias_dhw_padding_depthpad(
+// CHECK:           %{{.*}} = tensor.empty() : tensor<2x32x1x10x13xf16>
+// CHECK:           %{{.*}} = tensor.empty() : tensor<2x32x10x10x13xf16>
+// CHECK:           %{{.*}} = hivm.hir.Conv3dL1 {conv3dDepthPadded, groups = 1 : i32, outputAlreadyNormalized, padding = [1, 2, 3]} ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<2x10x2x10x13x16xf16>, tensor<3x2x4x5x12x16xf16>, i1) outs(%{{.*}} : tensor<{{[0-9]+}}x{{[0-9]+}}xf32>) -> tensor<{{[0-9]+}}x{{[0-9]+}}xf32>
+// CHECK:           %{{.*}} = tensor.expand_shape %{{.*}} {{\[\[}}0, 1], [2]] output_shape [16, 12, 165] : tensor<{{[0-9]+}}x{{[0-9]+}}xf16> into tensor<16x12x165xf16>
+// CHECK:           %{{.*}} = tensor.expand_shape %{{.*}} {{\[\[}}0], [1], [2, 3]] output_shape [16, 12, 11, 15] : tensor<16x12x165xf16> into tensor<16x12x11x15xf16>
+// CHECK:           return %{{.*}} : tensor<2x12x8x11x15xf16>
+func.func @triton_conv3d_5d_fp16_nobias_dhw_padding_depthpad(%arg0: tensor<2x32x8x10x13xf16>, %arg1: tensor<12x32x3x4x5xf16>, %arg2: tensor<2x12x8x11x15xf16>) -> tensor<2x12x8x11x15xf16> {
+  %true = arith.constant true
+  %0 = hivm.hir.Conv3dL1 {groups = 1 : i32, padding = [1, 2, 3]} ins(%arg0, %arg1, %true : tensor<2x32x8x10x13xf16>, tensor<12x32x3x4x5xf16>, i1) outs(%arg2 : tensor<2x12x8x11x15xf16>) -> tensor<2x12x8x11x15xf16>
+  return %0 : tensor<2x12x8x11x15xf16>
+}
+
+// -----
 // CHECK-LABEL:   func.func @triton_conv3d_5d_fp16_bias_ocaligned(
 // CHECK:           %{{.*}} = arith.constant true
 // CHECK:           %{{.*}} = tensor.collapse_shape %{{.*}} {{\[\[}}0], [1], [2, 3, 4]] : tensor<2x32x8x10x13xf16> into tensor<2x32x1040xf16>
