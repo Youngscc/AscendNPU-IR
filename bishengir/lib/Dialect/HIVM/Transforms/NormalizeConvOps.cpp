@@ -25,6 +25,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Support/LLVM.h"
@@ -32,6 +33,7 @@
 
 #include "llvm/Support/Casting.h"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 
@@ -160,9 +162,44 @@ static constexpr llvm::StringLiteral conv3dDepthPadded =
 //   reshape/transpose cycles.
 //
 // conv3dDepthPadded:
-//   Explicit contract between normalize and decompose for Conv3d. When padding
-//   > 0, normalize materializes depth padding and tags the op, while decompose
-//   relies on this tag and keeps H/W padding on Conv2d attributes.
+//   Explicit contract between normalize and decompose for Conv3d. When D
+//   padding > 0, normalize materializes depth padding and tags the op, while
+//   decompose relies on this tag and keeps H/W padding on Conv2d attributes.
+
+template <size_t Rank>
+FailureOr<std::array<int64_t, Rank>> getConvIntArrayAttr(Attribute attr) {
+  if (auto intAttr = dyn_cast<IntegerAttr>(attr)) {
+    int64_t value = intAttr.getInt();
+    std::array<int64_t, Rank> values;
+    values.fill(value);
+    return values;
+  }
+
+  if (auto denseAttr = dyn_cast<DenseI64ArrayAttr>(attr)) {
+    if (denseAttr.size() != Rank)
+      return failure();
+    std::array<int64_t, Rank> values;
+    for (size_t idx = 0; idx < Rank; ++idx)
+      values[idx] = denseAttr[idx];
+    return values;
+  }
+
+  if (auto arrayAttr = dyn_cast<ArrayAttr>(attr)) {
+    if (arrayAttr.size() != Rank)
+      return failure();
+
+    std::array<int64_t, Rank> values;
+    for (auto [idx, element] : llvm::enumerate(arrayAttr)) {
+      auto intAttr = dyn_cast<IntegerAttr>(element);
+      if (!intAttr)
+        return failure();
+      values[idx] = intAttr.getInt();
+    }
+    return values;
+  }
+
+  return failure();
+}
 
 inline RoundModeAttr getRoundAttr(mlir::OpBuilder &b, Type srcType,
                                   Type dstType) {
@@ -945,17 +982,21 @@ public:
     }
 
     if constexpr (baseDims == 4) {
-      // Conv3d currently shares a single scalar padding attribute across D/H/W.
-      // Normalize consumes the depth part here and marks the op, while H/W
-      // logical padding remains in Conv2d attrs after decompose.
-      int64_t padding = op.getPadding();
-      if (padding < 0) {
+      auto padding = getConvIntArrayAttr<3>(op.getPaddingAttr());
+      if (failed(padding)) {
+        return rewriter.notifyMatchFailure(
+            op, "Conv3d padding must be a scalar or 3-element array");
+      }
+      int64_t depthPadding = (*padding)[0];
+      if (depthPadding < 0 || (*padding)[1] < 0 || (*padding)[2] < 0) {
         return rewriter.notifyMatchFailure(op, "Conv3d padding must be >= 0");
       }
-      if (!op->hasAttr(conv3dDepthPadded) && padding > 0) {
+      // Normalize consumes only D padding. H/W padding stays on Conv3dL1 and
+      // is converted to Conv2dL1 [paddingH, paddingW] during decompose.
+      if (!op->hasAttr(conv3dDepthPadded) && depthPadding > 0) {
         if (failed(
                 padDepthForConv3dInput(cast<hivm::Conv3DL1Op>(op), rewriter,
-                                       padding))) {
+                                       depthPadding))) {
           return rewriter.notifyMatchFailure(op,
                                              "Failed to pre-pad Conv3d depth");
         }
