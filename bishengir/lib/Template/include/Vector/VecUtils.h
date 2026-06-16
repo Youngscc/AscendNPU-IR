@@ -43,6 +43,11 @@ constexpr int32_t UB_LIMIT_BYTES = 196608;
 cce::printf("Warning: [%s] - This implementation uses scalar instructions, "\
   "which may result in suboptimal performance\n", (x))
 
+// Warn that an implementation is not supported yet and is skipped (no-op).
+// Used for type/combination paths that have no fallback, e.g. scalar cast of bfloat16_t.
+#define WARN_UNSUPPORTED_IMPL(x) \
+cce::printf("Warning: [%s] - This implementation is not supported yet and will be skipped\n", (x))
+
 enum class VectorOpTy : uint32_t {
   BINARY_VV_BEGIN = 100,
   VADD = 101,
