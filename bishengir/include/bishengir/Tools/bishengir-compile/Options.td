@@ -275,6 +275,12 @@ def InjectIRFromFile : DFXControlOptions<
   bit isSharedWithDownstreamToolchain = 1;
 }
 
+def SaveTemps : DFXControlOptions<
+  "Save intermediate compilation results to specified directory.",
+  "std::string",
+  "\"\""
+>;
+
 //===----------------------------------------------------------------------===//
 // General Optimization Control Options
 //===----------------------------------------------------------------------===//
