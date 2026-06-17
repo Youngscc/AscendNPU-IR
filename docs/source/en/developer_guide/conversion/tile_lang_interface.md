@@ -2,7 +2,7 @@
 
 Tile Language Ascend (**tilelang-ascend**) is a specialized variant of the tile-lang domain-specific language, specifically optimized for Huawei Ascend NPU (Neural Processing Unit) architecture. Built upon the foundation of tile-lang's Pythonic syntax and [TVM](https://tvm.apache.org/) compiler infrastructure, tilelang-ascend enables developers to efficiently create high-performance AI compute kernels tailored for Ascend processors, including operations like GEMM, vector operations, and attention mechanisms. Tilelang-ascend allows developers to focus on productivity without sacrificing the low-level optimizations necessary for state-of-the-art performance on the NPU.
 
-Within the TileLang ecosystem, we have developed an NPU Intermediate Representation (AscendNPU IR) infrastructure specifically for Ascend, enabling seamless integration into the open-source AI compiler ecosystem based on MLIR. This effort not only enhances the openness and extensibility of the compiler stack but also provides developers with a more flexible and efficient pathway for custom operator development. The compiler backend supports two technical routes: [AscendNPU IR](https://github.com/tile-ai/tilelang-ascend/tree/npuir) and [Ascend C & PTO](https://github.com/tile-ai/tilelang-ascend/tree/ascendc_pto).
+Within the TileLang ecosystem, we have developed an NPU Intermediate Representation (AscendNPU IR) infrastructure specifically for Ascend, enabling seamless integration into the open-source AI compiler ecosystem based on MLIR. This effort not only enhances the openness and extensibility of the compiler stack but also provides developers with a more flexible and efficient pathway for custom operator development. The compiler backend supports two technical routes: [AscendNPU IR](https://github.com/tile-ai/tilelang-mlir-ascend) and [Ascend C & PTO](https://github.com/tile-ai/tilelang-ascend/tree/ascendc_pto).
 
 ![image](../../../images/developer_guide/npuir_architecture.png)
 
@@ -44,7 +44,7 @@ export ACL_OP_INIT_MODE=1
 Pull the code
 
 ```bash
-git clone https://github.com/tile-ai/tilelang-ascend.git --recursive -b npuir
+git clone https://github.com/tile-ai/tilelang-mlir-ascend.git --recursive
 ```
 
 Run the installation script
@@ -53,7 +53,7 @@ Run the installation script
 > please remove the gtest include file or add the lib file or build gtest with tvm.
 
 ```bash
-cd tilelang-ascend
+cd tilelang-mlir-ascend
 # build AscendNPU-IR in 3rdparty
 bash install_npuir.sh
 # Alternative way of building with local AscendNPU-IR

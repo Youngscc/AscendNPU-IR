@@ -59,11 +59,11 @@ int64_t AddressSpaceAttr::getMappingId() const {
 }
 
 bool AddressSpaceAttr::isLinearMapping() const {
-  llvm_unreachable("AddressSpaceAttr does not support linear mapping");
+  llvm::report_fatal_error("AddressSpaceAttr does not support linear mapping");
 }
 
 int64_t AddressSpaceAttr::getRelativeIndex() const {
-  llvm_unreachable("AddressSpaceAttr does not support relative index");
+  llvm::report_fatal_error("AddressSpaceAttr does not support relative index");
 }
 
 //===----------------------------------------------------------------------===//
@@ -121,11 +121,11 @@ int64_t HIVMSubBlockMappingAttr::getMappingId() const {
 }
 
 bool HIVMSubBlockMappingAttr::isLinearMapping() const {
-  llvm_unreachable("HIVMSubBlockMappingAttr does not support linear mapping");
+  llvm::report_fatal_error("HIVMSubBlockMappingAttr does not support linear mapping");
 }
 
 int64_t HIVMSubBlockMappingAttr::getRelativeIndex() const {
-  llvm_unreachable("HIVMSubBlockMappingAttr does not support relative index");
+  llvm::report_fatal_error("HIVMSubBlockMappingAttr does not support relative index");
 }
 
 void hivm::populateHIVMAddressSpaceAttributeConversions(
@@ -657,6 +657,18 @@ LogicalResult GatherLoadOp::verify() {
                          "shape and rank as indices");
     }
   }
+  if (auto other = getOther()) {
+    auto otherType = cast<RankedTensorType>(other.getType());
+    if (otherType.getShape() != indicesType.getShape()) {
+      return emitOpError("other of hivm::GatherLoadOp must have the same "
+                         "shape and rank as indices");
+    }
+    auto otherElementType = otherType.getElementType();
+    if (otherElementType != getElementTypeOrSelf(getBase())) {
+      return emitOpError("other of hivm::GatherLoadOp must have the same "
+                         "element type as base");
+    }
+  }
   return success();
 }
 
@@ -689,6 +701,85 @@ void ScatterStoreOp::getEffects(
         &effects) {
   effects.emplace_back(MemoryEffects::Write::get(), &getBaseMutable(),
                        SideEffects::DefaultResource::get());
+}
+
+//===----------------------------------------------------------------------===//
+// IndirectStoreOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult IndirectStoreOp::verify() {
+  auto dstType = getDst().getType();
+  auto dstMemrefType = dyn_cast<MemRefType>(dstType);
+  if (!dstMemrefType) {
+    return emitError("dst must be a memref type");
+  }
+
+  auto offsetsType = getOffsets().getType();
+  auto offsetsTensorType = dyn_cast<TensorType>(offsetsType);
+  auto offsetsMemrefType = dyn_cast<MemRefType>(offsetsType);
+  if (!(offsetsTensorType || offsetsMemrefType)) {
+    return emitOpError("offset must be tensor or memref type");
+  }
+
+  auto srcType = getSrc().getType();
+  auto srcTensorType = dyn_cast<TensorType>(srcType);
+  auto srcMemrefType = dyn_cast<MemRefType>(srcType);
+  if (!(srcTensorType || srcMemrefType)) {
+    return emitOpError("src must be tensor or memref type");
+  }
+
+  auto dstElementType = dstMemrefType.getElementType();
+  auto srcElementType = srcMemrefType ? srcMemrefType.getElementType()
+                                      : srcTensorType.getElementType();
+  if (srcElementType != dstElementType) {
+    return emitOpError(
+        "src of hivm::IndirectStoreOp must have the same element type as dst");
+  }
+
+  auto offsetShape = offsetsMemrefType ? offsetsMemrefType.getShape()
+                                       : offsetsTensorType.getShape();
+  auto srcShape =
+      srcMemrefType ? srcMemrefType.getShape() : srcTensorType.getShape();
+  if (offsetShape != srcShape) {
+    return emitOpError("offsets of hivm::IndirectStoreOp must have the same "
+                       "shape and rank as src");
+  }
+
+  if (auto mask = getMask()) {
+    auto maskType = mask.getType();
+    auto maskTensorType = dyn_cast<TensorType>(maskType);
+    auto maskMemrefType = dyn_cast<MemRefType>(maskType);
+    if (!(maskTensorType || maskMemrefType)) {
+      return emitOpError("mask must be tensor or memref type");
+    }
+
+    auto maskShape =
+        maskMemrefType ? maskMemrefType.getShape() : maskTensorType.getShape();
+    if (maskShape != offsetShape) {
+      return emitOpError("mask of hivm::IndirectStoreOp must have the same "
+                         "shape and rank as offsets");
+    }
+  }
+
+  return success();
+}
+
+void IndirectStoreOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+
+  effects.emplace_back(MemoryEffects::Read::get(), &getSrcMutable(),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Read::get(), &getOffsetsMutable(),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Write::get(), &getDstMutable(),
+                       SideEffects::DefaultResource::get());
+  if (getMask()) {
+    effects.emplace_back(
+        MemoryEffects::Read::get(),
+        &getOperation()->getOpOperand(getODSOperandIndexAndLength(3).first),
+        SideEffects::DefaultResource::get());
+  }
 }
 
 PIPE CustomOp::getPipe() {
@@ -739,4 +830,37 @@ std::string CustomOp::getSymbol() {
   return "";
 }
 
+void CustomOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  if (!getNoSideEffect()) {
+    effects.emplace_back(MemoryEffects::Write::get(),
+                         SideEffects::DefaultResource::get());
+    effects.emplace_back(MemoryEffects::Read::get(),
+                         SideEffects::DefaultResource::get());
+  }
+}
+
 const DenseMap<StringRef, CustomOp::BuiltinInfo> CustomOp::kBuiltins{};
+
+//===----------------------------------------------------------------------===//
+// DebugOp
+//===----------------------------------------------------------------------===//
+
+void DebugOp::build(OpBuilder &odsBuilder, OperationState &odsState,
+                    StringRef debugtype, StringRef prefix, bool hex,
+                    Value arg) {
+  build(odsBuilder, odsState, debugtype, prefix, hex, arg, {}, {});
+}
+
+void DebugOp::build(OpBuilder &odsBuilder, OperationState &odsState,
+                    StringRef debugtype, StringRef prefix, bool hex,
+                    Value arg, hivm::TCoreTypeAttr tcoretype) {
+  build(odsBuilder, odsState, debugtype, prefix, hex, arg, tcoretype, {});
+}
+
+void DebugOp::build(OpBuilder &odsBuilder, OperationState &odsState,
+                    StringRef debugtype, StringRef prefix, bool hex,
+                    Value arg, hivm::AddressSpaceAttr memscope) {
+  build(odsBuilder, odsState, debugtype, prefix, hex, arg, {}, memscope);
+}

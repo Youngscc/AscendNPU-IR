@@ -38,6 +38,7 @@
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/LogicalResult.h"
 #include "llvm/Support/raw_ostream.h"
+#include <array>
 #include <cassert>
 #include <cstdint>
 #include <iterator>
@@ -62,6 +63,65 @@ FailureOr<size_t> getRankFromShapedTypeValue(Value val) {
     return failure();
   }
   return valType.getRank();
+}
+
+//===----------------------------------------------------------------------===//
+// Utils for Conv Ops
+//===----------------------------------------------------------------------===//
+
+template <size_t Rank>
+FailureOr<std::array<int64_t, Rank>>
+getConvIntArrayAttr(Attribute attr, StringRef attrName,
+                    function_ref<InFlightDiagnostic()> emitError) {
+  auto emitInvalidAttr = [&]() {
+    emitError() << "`" << attrName << "` must be an integer scalar or a "
+                << Rank << "-element integer array";
+    return failure();
+  };
+
+  if (auto intAttr = dyn_cast<IntegerAttr>(attr)) {
+    int64_t value = intAttr.getInt();
+    std::array<int64_t, Rank> values;
+    values.fill(value);
+    return values;
+  }
+
+  if (auto denseAttr = dyn_cast<DenseI64ArrayAttr>(attr)) {
+    if (denseAttr.size() != Rank)
+      return emitInvalidAttr();
+    std::array<int64_t, Rank> values;
+    for (size_t idx = 0; idx < Rank; ++idx)
+      values[idx] = denseAttr[idx];
+    return values;
+  }
+
+  if (auto arrayAttr = dyn_cast<ArrayAttr>(attr)) {
+    if (arrayAttr.size() != Rank)
+      return emitInvalidAttr();
+
+    std::array<int64_t, Rank> values;
+    for (auto [idx, element] : llvm::enumerate(arrayAttr)) {
+      auto intAttr = dyn_cast<IntegerAttr>(element);
+      if (!intAttr)
+        return emitInvalidAttr();
+      values[idx] = intAttr.getInt();
+    }
+    return values;
+  }
+
+  return emitInvalidAttr();
+}
+
+FailureOr<std::array<int64_t, 2>>
+getConv2DIntPairAttr(Attribute attr, StringRef attrName,
+                     function_ref<InFlightDiagnostic()> emitError) {
+  return getConvIntArrayAttr<2>(attr, attrName, emitError);
+}
+
+FailureOr<std::array<int64_t, 3>>
+getConv3DIntTripleAttr(Attribute attr, StringRef attrName,
+                       function_ref<InFlightDiagnostic()> emitError) {
+  return getConvIntArrayAttr<3>(attr, attrName, emitError);
 }
 
 //===----------------------------------------------------------------------===//
@@ -192,9 +252,9 @@ bool isInitFirstLoopIterForLocalMmadOp(LocalMmadTy *localMatmulOp) {
         isConstantRhs = false;
       }
       auto forLowerConst = getConstantFromDefine(forOp.getLowerBound());
-      
+
       if (cmpConst.has_value() && forLowerConst.has_value()) {
-        return isConstantRhs 
+        return isConstantRhs
                ? (cmpConst.value() == forLowerConst.value()) && (cmpOp.getLhs() == forOp.getInductionVar())
                : (cmpConst.value() == forLowerConst.value()) && (cmpOp.getRhs() == forOp.getInductionVar());
       }
@@ -233,11 +293,11 @@ void MmadL1Op::build(OpBuilder &odsBuilder, OperationState &odsState,
                      Value init_condition, Value real_m, Value real_k,
                      Value real_n, Value c, Value per_channel_bias,
                      UnitAttr a_transpose, UnitAttr b_transpose,
-                     UnitAttr enable_HF32) {
+                     UnitAttr enable_HF32, UnitAttr enable_i4) {
   build(odsBuilder, odsState, result_tensors, a, b, init_condition, real_m,
         real_k, real_n, c, /*sync_related_args*/ ValueRange{},
         /*unit_flag_cond*/ ValueRange{}, per_channel_bias, a_transpose, b_transpose,
-        enable_HF32, /*unit_flag_mode*/ ArrayAttr{});
+        enable_HF32, enable_i4, /*unit_flag_mode*/ ArrayAttr{});
 }
 
 int MmadL1Op::getNumSyncRelatedArgs() { return 7; }
@@ -410,7 +470,7 @@ static bool isElementwiseAddCrossLoopPattern(OpOperand &mmOut) {
 /// %init = tensor.empty()
 /// %mat = for (%iterator = %init) {
 ///   %acc_mad = mmadL1 dst(%iterator)
-///   %vec_res = VectorOp %acc_mad 
+///   %vec_res = VectorOp %acc_mad
 //    yield %vec_res
 /// }
 
@@ -574,11 +634,11 @@ void BatchMmadL1Op::build(OpBuilder &odsBuilder, OperationState &odsState,
                           Value init_condition, Value real_m, Value real_k,
                           Value real_n, Value c, Value per_channel_bias,
                           UnitAttr a_transpose, UnitAttr b_transpose,
-                          UnitAttr enable_HF32) {
+                          UnitAttr enable_HF32, UnitAttr enable_i4) {
   build(odsBuilder, odsState, result_tensors, a, b, init_condition, real_m,
         real_k, real_n, c, /*sync_related_args*/ ValueRange{},
         /*unit_flag_cond*/ ValueRange{}, per_channel_bias, a_transpose, b_transpose,
-        enable_HF32, /*unit_flag_mode*/ ArrayAttr{});
+        enable_HF32, enable_i4, /*unit_flag_mode*/ ArrayAttr{});
 }
 
 int BatchMmadL1Op::getNumSyncRelatedArgs() { return 7; }
@@ -865,6 +925,12 @@ Conv1DL1Op::getLibraryCallOperands(PatternRewriter &rewriter) {
 // Conv2DL1Op
 //===----------------------------------------------------------------------===//
 
+LogicalResult Conv2DL1Op::verify() {
+  FailureOr<std::array<int64_t, 2>> padding = getConv2DIntPairAttr(
+      getPaddingAttr(), "padding", [&]() { return emitOpError(); });
+  return failed(padding) ? failure() : success();
+}
+
 bool Conv2DL1Op::isInitConstant(std::optional<bool> cst) {
   return isInitConstantForLocalMmadOp<Conv2DL1Op>(this, cst);
 }
@@ -941,4 +1007,70 @@ Conv2DL1Op::getInputOperands(bool includeSyncRelatedArgs /*=true*/) {
               std::back_inserter(retOperands));
   }
   return retOperands;
+}
+
+SmallVector<Value>
+Conv2DL1Op::getLibraryCallOperands(PatternRewriter &rewriter) {
+  // inputs
+  SmallVector<Value> libParams =
+      getInputOperands(/*includeSyncRelatedArgs=*/false);
+
+  // outputs
+  libParams.push_back(getInit());
+
+  // conv2d attributes
+  Location loc = getLoc();
+  auto i64Ty = rewriter.getI64Type();
+  auto makeI64 = [&](int64_t val) -> Value {
+    return rewriter.create<arith::ConstantOp>(
+        loc, i64Ty, rewriter.getI64IntegerAttr(val));
+  };
+
+  libParams.push_back(makeI64(getGroups()));
+
+  FailureOr<std::array<int64_t, 2>> padding =
+      getConv2DIntPairAttr(getPaddingAttr(), "padding",
+                           [&]() { return emitOpError(); });
+  assert(!failed(padding) && "Conv2DL1Op padding must be verified");
+  libParams.push_back(makeI64((*padding)[0])); // padT
+  libParams.push_back(makeI64((*padding)[0])); // padB
+  libParams.push_back(makeI64((*padding)[1])); // padL
+  libParams.push_back(makeI64((*padding)[1])); // padR
+
+  libParams.push_back(makeI64(1)); // strideH
+  libParams.push_back(makeI64(1)); // strideW
+
+  libParams.push_back(makeI64(1)); // dilationH
+  libParams.push_back(makeI64(1)); // dilationW
+
+  // additional sync arguments
+  if (getSyncRelatedArgs().empty()) {
+    auto negOneDefaultValue = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI64Type(), rewriter.getI64IntegerAttr(-1));
+    getSyncRelatedArgsMutable().assign(ValueRange(
+        SmallVector<Value>(getNumSyncRelatedArgs(), negOneDefaultValue)));
+  }
+
+  auto syncRelatedArgs = getSyncRelatedArgs();
+  std::copy(syncRelatedArgs.begin(), syncRelatedArgs.end(),
+            std::back_inserter(libParams));
+
+  return libParams;
+}
+//===----------------------------------------------------------------------===//
+// Conv3DL1Op
+//===----------------------------------------------------------------------===//
+
+LogicalResult Conv3DL1Op::verify() {
+  FailureOr<std::array<int64_t, 3>> padding = getConv3DIntTripleAttr(
+      getPaddingAttr(), "padding", [&]() { return emitOpError(); });
+  return failed(padding) ? failure() : success();
+}
+
+bool Conv3DL1Op::isInitConstant(std::optional<bool> cst) {
+  return isInitConstantForLocalMmadOp<Conv3DL1Op>(this, cst);
+}
+
+void Conv3DL1Op::setInitCondition(Value init) {
+  getInitConditionMutable().assign(init);
 }

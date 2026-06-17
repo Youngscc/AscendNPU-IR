@@ -131,6 +131,29 @@ def MulExtOp : HFusion_Op<"mulext", [Pure, Commutative,
 }
 
 //===----------------------------------------------------------------------===//
+// MulExtUiOp
+//===----------------------------------------------------------------------===//
+
+def MulExtUiOp : HFusion_Op<"mulextui", [Pure, Commutative,
+    AllTypesMatch<["lhs", "rhs", "low", "high"]>]> {
+  let summary = [{
+    extended unsigned integer multiplication operation
+  }];
+
+  let description = [{
+    Performs (2*N)-bit multiplication on zero-extended unsigned operands. Returns two
+    N-bit results: the low and the high halves of the product. The low half has
+    the same value as the result of regular multiplication with the same operands.
+  }];
+
+  let arguments = (ins SignlessIntegerLike:$lhs, SignlessIntegerLike:$rhs);
+  let results = (outs SignlessIntegerLike:$low, SignlessIntegerLike:$high);
+
+  let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs)";
+
+}
+
+//===----------------------------------------------------------------------===//
 // InterleaveOp
 //===----------------------------------------------------------------------===//
 
@@ -336,7 +359,7 @@ def AtomicCasOp : HFusion_Op<"atomic_cas",
     Compare-And-Swap (CAS) is an atomic operation that consists of three operands:
     Memory location (V), Expected old value (A), New value (B).
     The semantics of the operation are: the value of V is updated to B,
-    only if the value of memory location V is equal to the expected old value A. 
+    only if the value of memory location V is equal to the expected old value A.
     The operation returns the original value of V regardless of whether it is updated or not.
 
     Constraints:
@@ -536,9 +559,7 @@ def GatherLoadOp : HFusion_Op<"gather_load", [
     SameVariadicOperandSize,
     AllElementTypesMatch<["base", "dst"]>,
     AllRanksMatch<["indices", "dst"]>,
-    AllShapesMatch<["indices", "dst"]>,
-    OptionalTypesMatchWith<"base and other have same element type",
-                           "base", "other", "getElementTypeOrSelf($_self)">
+    AllShapesMatch<["indices", "dst"]>
 ]> {
   let summary = [{
     Perform sparse memory loading with optional mask and other
@@ -571,7 +592,7 @@ def GatherLoadOp : HFusion_Op<"gather_load", [
                        RankedTensorOf<[I32, I64]>:$indices,
                        AnyTypeOf<[I32, I64]>:$burst_len,
                        Optional<RankedTensorOf<[I1]>>:$mask,
-                       Optional<AnyTypeOf<[AnyInteger, AnyFloat]>>:$other,
+                       Optional<AnyRankedTensor>:$other,
                        TensorOrMemref:$dst,
                        OptionalAttr<HFusion_CacheModifierAttr>:$cache,
                        OptionalAttr<HFusion_EvictionPolicyAttr>:$evict,
@@ -697,19 +718,117 @@ def MatMulMxOp : HFusion_Op<"matmul_mx", [Pure, DestinationStyleOpInterface]> {
   }];
 }
 
+
 def SignBitOp : HFusion_Op<"signbit", [
-    Pure, 
+    Pure,
     Elementwise,
-    SameOperandsAndResultShape 
+    SameOperandsAndResultShape
 ]> {
     let summary = "Extracts the sign bit of floating-point values";
     let description = [{
         Returns 1 (i8) or true (i1) if the sign bit is set, 0 otherwise.
     }];
 
-    let arguments = (ins RankedTensorOf<[F16, F32]>:$input); 
-    
-    let results = (outs RankedTensorOf<[I1, I8]>:$output); 
+    let arguments = (ins RankedTensorOf<[F16, F32]>:$input);
+
+    let results = (outs RankedTensorOf<[I1, I8]>:$output);
+}
+def ErfInvOp : HFusion_Op<"erfinv", [Pure, SameOperandsAndResultType]> {
+  let summary = [{
+    Computes the element-wise inverse error function
+  }];
+
+  let description = [{
+    Computes the inverse error function of the input tensor.
+    The input and output must have the same ranked tensor type.
+  }];
+
+  let arguments = (ins RankedTensorOf<[F16, F32]>:$input);
+  let results = (outs RankedTensorOf<[F16, F32]>:$output);
+
+  let assemblyFormat = [{
+    $input attr-dict `:` type($input) `->` type($output)
+  }];
+}
+
+def CylBesselI0Op : HFusion_Op<"cyl_bessel_i0",
+                               [Pure, SameOperandsAndResultType]> {
+  let summary = [{
+    Computes the element-wise modified Bessel function of the first kind
+  }];
+
+  let description = [{
+    Computes the modified Bessel function of the first kind of order zero
+    for the input tensor.
+    The input and output must have the same ranked tensor type.
+  }];
+
+  let arguments = (ins RankedTensorOf<[F16, F32]>:$input);
+  let results = (outs RankedTensorOf<[F16, F32]>:$output);
+
+  let assemblyFormat = [{
+    $input attr-dict `:` type($input) `->` type($output)
+  }];
+}
+
+def NextAfterOp : HFusion_Op<"nextafter", [Pure, SameOperandsAndResultType]> {
+  let summary = [{
+    Computes the element-wise next representable floating-point value
+  }];
+
+  let description = [{
+    Computes the next representable floating-point value after `x`
+    in the direction of `y`.
+    The operands and result must have the same ranked tensor type.
+  }];
+
+  let arguments = (ins
+    RankedTensorOf<[F16, F32]>:$x,
+    RankedTensorOf<[F16, F32]>:$y
+  );
+
+  let results = (outs RankedTensorOf<[F16, F32]>:$output);
+
+  let assemblyFormat = [{
+    $x `,` $y attr-dict `:` type($x) `,` type($y) `->` type($output)
+  }];
+}
+
+def HypotOp : HFusion_Op<"hypot", [Pure]> {
+  let summary = [{
+    Computes the element-wise hypotenuse of two or three tensors
+  }];
+
+  let description = [{
+    Computes:
+      hypot(x, y)    = sqrt(x * x + y * y)
+      hypot(x, y, z) = sqrt(x * x + y * y + z * z)
+
+    The third operand is optional. Therefore this op supports exactly
+    2-input and 3-input forms.
+
+    BF16 is supported only for the 2-input form. The 3-input form supports
+    F16 and F32.
+  }];
+
+  let arguments = (ins
+    RankedTensorOf<[BF16, F16, F32]>:$x,
+    RankedTensorOf<[BF16, F16, F32]>:$y,
+    Optional<RankedTensorOf<[BF16, F16, F32]>>:$z
+  );
+
+  let results = (outs
+    RankedTensorOf<[BF16, F16, F32]>:$output
+  );
+
+  let assemblyFormat = [{
+    $x `,` $y (`,` $z^)?
+    attr-dict
+    `:` type($x) `,` type($y) (`,` type($z)^)? `->` type($output)
+  }];
+
+  let hasVerifier = 1;
+
 }
 
 #endif // BISHENGIR_DIALECT_HFUSION_IR_HFUSIONOPS_TD

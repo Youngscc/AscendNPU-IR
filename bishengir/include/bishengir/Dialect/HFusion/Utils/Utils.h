@@ -364,6 +364,21 @@ const float INVTRIG_P0 = 0.16668899232596927f;
 const float INVTRIG_P1 = 0.073496900982905745f;
 const float INVTRIG_P2 = 0.059274584886282809f;
 } // namespace trig
+ 
+// ============================================================================
+// lgamma constants (Lanczos approximation with g=7, n=8)
+// Reference: torch-mlir/stablehlo ChloLegalizeToStablehlo.cpp
+// ============================================================================
+namespace lgamma_const {
+// Lanczos approximation constants (g=7, n=8) from torch-mlir
+constexpr double LANCZOS_G = 7.0;
+constexpr double LANCZOS_C0 = 0.99999999999980993227684700473478;
+constexpr double LANCZOS_COEFFS[] = {
+    676.520368121885098567009190444019, -1259.13921672240287047156078755283,
+    771.3234287776530788486528258894,   -176.61502916214059906584551354,
+    12.507343278686904814458936853,     -0.13857109526572011689554707,
+    9.984369578019570859563e-6,         1.50563273514931155834e-7};
+} // namespace lgamma_const
 } // namespace hfusion
 } // namespace mlir
 

@@ -19,6 +19,7 @@
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Dialect/HIVM/IR/HIVMImpl.h"
 #include "bishengir/Dialect/HIVM/IR/HIVMInterfaces.h"
+#include "bishengir/Dialect/HIVM/Transforms/DistributedTransformUtils.h"
 #include "bishengir/Dialect/HIVM/Transforms/Passes.h"
 #include "bishengir/Dialect/HIVM/Utils/Utils.h"
 #include "bishengir/Dialect/Scope/IR/Scope.h"
@@ -182,7 +183,7 @@ static SmallVector<Value> getOutOperands(Operation *op) {
   }
 
   // TODO: should we get the last operands as out operands by default?
-  llvm_unreachable("unsupported op to get out operands");
+  llvm::report_fatal_error("unsupported op to get out operands");
 }
 
 void replaceResultWithInitOperand(Operation *op) {
@@ -265,6 +266,12 @@ struct RemoveUselessMarkOps : public OpRewritePattern<annotation::MarkOp> {
     }
 
     Value src = markOp.getSrc();
+    // TODO: The subsequent logic should be handled correctly for mark, rather
+    // than applying special processing.
+    Operation *defOp = src.getDefiningOp();
+    if (isa<hivm::FixpipeOp, hivm::StoreOp>(defOp)) {
+      return failure();
+    }
 
     bool isOnlyMark = llvm::all_of(src.getUsers(), [](Operation *user) {
       return isa<annotation::MarkOp>(user);
@@ -323,8 +330,35 @@ void postProcessVectorFunc(func::FuncOp func) {
 
 static bool isLoopOfCoreType(scf::ForOp forOp, TCoreType coreType) {
   FailureOr<TCoreType> inferredCoreType = getCoreType(forOp);
+  if (auto coreTypeAttr = forOp->getAttrOfType<hivm::TCoreTypeAttr>(
+        hivm::kPipelinedLoopCoreTypeAttrName)) {
+    return coreType == coreTypeAttr.getTcoretype();
+  }
   return llvm::succeeded(inferredCoreType) &&
          coreType == inferredCoreType.value();
+}
+
+static void inferDistributedCoreType(func::FuncOp mixedFunc) {
+  auto rectifyCoreType = [mixedFunc](hivm::TCoreType &cur) {
+    auto funcCoreType = mixedFunc
+                            ->getAttrOfType<hivm::TFuncCoreTypeAttr>(
+                                hivm::TFuncCoreTypeAttr::name)
+                            .getFuncCoreType();
+    if (cur == TCoreType::CUBE_AND_VECTOR) {
+      return kTFuncCoreType2TCoreType.at(funcCoreType);
+    }
+    return cur;
+  };
+  mixedFunc->walk([&rectifyCoreType](Operation *op) {
+    if (isDistributedTypeCustomOp(op)) {
+      if (auto res = hivm::detail::queryCoreTypeHelper(op)) {
+        auto coreType = rectifyCoreType(res.value());
+        auto coreTypeAttr =
+            hivm::TCoreTypeAttr::get(op->getContext(), coreType);
+        op->setAttr(hivm::TCoreTypeAttr::name, coreTypeAttr);
+      }
+    }
+  });
 }
 
 // erase ops of given core type from function
@@ -335,6 +369,12 @@ void SplitMixKernelPass::filterMixFunc(OpBuilder &builder,
       filterCoreType == TCoreType::CUBE ? TCoreType::VECTOR : TCoreType::CUBE;
 
   SmallVector<Operation *> toSinkOutOfLoop;
+  // TODO: Refactor filter logic: First infer all op's core type, then filter
+  // and erase ops according to core type does not match.
+
+  // because of filter will erase op during walk, distributed op needs infer
+  // core type before filter
+  inferDistributedCoreType(mixedFunc);
   mixedFunc.walk<WalkOrder::PostOrder>([&](Operation *op) {
     if (auto forOp = dyn_cast<scf::ForOp>(op)) {
       if (isLoopOfCoreType(forOp, filterCoreType)) {

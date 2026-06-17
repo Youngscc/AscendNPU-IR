@@ -98,7 +98,7 @@ Operation *getInsertPoint(Operation *op, int &resultIndx) {
   auto yieldValueIndx = findIdx(llvm::to_vector(yieldOperand->getOperands()),
                                 op->getResult(resultIndx));
   if (!yieldValueIndx.has_value())
-    llvm_unreachable("yield value must have user");
+    llvm::report_fatal_error("yield value must have user");
   resultIndx = yieldValueIndx.value();
   return getInsertPoint(yieldParentOp, resultIndx);
 }
@@ -154,6 +154,9 @@ bool isAccumulation(Operation *op) {
 
   if (auto conv2d = dyn_cast<hivm::Conv2DL1Op>(op))
     return isAccumulationImpl(op, conv2d.getInit());
+
+  if (auto conv3d = dyn_cast<hivm::Conv3DL1Op>(op))
+    return isAccumulationImpl(op, conv3d.getInit());
 
   return false;
 }
@@ -310,7 +313,7 @@ std::optional<FixpipePreReluMode> getReluMode(OpType op) {
   if constexpr (std::is_same_v<OpType, hivm::VReluOp>) {
     return hivm::symbolizeFixpipePreReluMode("NORMAL_RELU");
   }
-  llvm_unreachable("unsupported ReluValue");
+  llvm::report_fatal_error("unsupported ReluValue");
 }
 
 Type getInitType(Value v, hivm::FixpipePreQuantMode quant,
@@ -323,7 +326,7 @@ Type getInitType(Value v, hivm::FixpipePreQuantMode quant,
     return rewriter.getBF16Type();
   if (quant == FixpipePreQuantMode::S322I8)
     return rewriter.getI8Type();
-  llvm_unreachable("unsupported QuantMode");
+  llvm::report_fatal_error("unsupported QuantMode");
 }
 
 int64_t getSiftedUsersNum(Value v) {
@@ -646,11 +649,11 @@ public:
         /*pre_quant=*/nullptr,
         /*pre_relu=*/nullptr, /*channel_split=*/nullptr);
     fixpipeOp->setAttr(usedForDebugOp, rewriter.getBoolAttr(true));
+    auto tcoretype = op.getTcoretypeAttr();
+    auto memscope = op.getMemscopeAttr();
     rewriter.replaceOpWithNewOp<DebugOp>(
         op, op.getDebugtype(), op.getPrefix(), op.getHex(),
-        fixpipeOp.getResultTensor(),
-        hivm::TCoreTypeAttr::get(op->getContext(),
-                                 hivm::TCoreType::CUBE_OR_VECTOR));
+        fixpipeOp.getResultTensor(), tcoretype, memscope);
     LDBG("InsertFixpipeForDevicePrint");
     return success();
   }
@@ -670,6 +673,7 @@ void populateInlineFixpipePatterns(RewritePatternSet &patterns) {
   patterns.add<InsertFixpipeOpPattern<hivm::BatchMmadL1Op>>(ctx);
   patterns.add<InsertFixpipeForConvOpPattern<hivm::Conv1DL1Op>>(ctx);
   patterns.add<InsertFixpipeForConvOpPattern<hivm::Conv2DL1Op>>(ctx);
+  patterns.add<InsertFixpipeForConvOpPattern<hivm::Conv3DL1Op>>(ctx);
   patterns.add<InlineFixpipeOpPattern>(ctx);
 }
 

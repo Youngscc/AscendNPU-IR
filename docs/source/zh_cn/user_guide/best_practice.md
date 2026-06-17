@@ -123,7 +123,8 @@ BLOCK_K = 128
 
 ### 定界
 
-- **现象** 算子选项规避超时报错，导致算子卡死的部分原因是与硬件同步相关，其中可能涉及核内/间同步，或涉及流水同步。若遇上算子卡死的情况，你可以尝试在调用Kernel时，传入以下入参，修改二进制的同步逻辑，以规避算子卡死的问题。
+- **现象** 算子选项规避超时报错，算子卡死的部分原因是与硬件同步相关，其中可能涉及核内/间同步，或涉及流水同步。若遇上算子卡死的情况，你可以尝试在调用Kernel时，传入以下入参，修改二进制的同步逻辑，以规避算子卡死的问题。
+  
 - **写法样例**
 
 | 编译选项 | 数值 | 说明 |
@@ -218,7 +219,7 @@ hivm.hir.load ins(%collapse_shape : memref<256x99xi8, strided<[99, 1]>, #hivm.ad
 
 ### triton not op不合理的实现，导致额外占用内存
 
-Triton Not OP的实现，在NPU-IR中，被转成VOR、VAND、VNOT、VAND等一些列操作来处理，实际上可以只执行VNOT操作：
+Triton Not OP的实现，在NPU-IR中，被转成VOR、VAND、VNOT、VAND等一系列操作来处理，实际上可以只执行VNOT操作：
 
 mlir代码如下：
 
@@ -242,7 +243,7 @@ mlir代码如下：
 
     第2行，申请一块大小为65536xi8的UB空间；
 
-    第3行，将第1行的GM中的形状为65536xi8的数据，COPY到第2行的现状为65536xi8的UB空间中；
+    第3行，将第1行的GM中的形状为65536xi8的数据，COPY到第2行的形状为65536xi8的UB空间中；
     
     第4行，申请一块大小为65536xi8的UB空间；
 
@@ -682,7 +683,7 @@ module attributes {hacc.target = #hacc.target<"Ascend910B3">} {
 在昇腾硬件上，布尔类型（i1）的张量在全局内存（GM）中实际是按i8（一个字节）存储的。当Triton Ascend处理以i1张量作为输入的运算时
 ，它会将i1视为i8搬入，但某些情况下（例如作为tl.where的条件掩码）又需要将结果转换回i1，导致不必要的类型转换，带来性能损耗。
 
-为了解决这个问题，提供了compile_hint: "bitwise_mask:。通过该提示，编译器可以识别出该i1张量是作为位掩码使用的，从而直接按位操作，避免中间的类型转换，提升性能
+为了解决这个问题，提供了compile_hint: "bitwise_mask"。通过该提示，编译器可以识别出该i1张量是作为位掩码使用的，从而直接按位操作，避免中间的类型转换，提升性能。
 
 具体使用方法只需在where后的结果加上`compile_hint("bitwise_mask")`即可，参考以下代码段：
 
@@ -906,6 +907,95 @@ def test_where_lt_case1(param_list):
 #### 限制
 
 - 由于Triton前端会将i1转换为i8，如果对其他类型如i16/i32等进行bitwise_mask操作反而会带来性能损耗，因此此功能只支持i8类型的mask
+
+### 使用手动对齐提升尾轴不对齐场景的编译器优化效率
+
+#### 问题描述
+
+在Triton算子开发中，当张量的尾轴维度较小（如4）且未对齐到硬件建议的32字节（对应8个float32元素）时，编译器后端在处理此类非对齐形状时，往往难以生成最优的连续访存和向量化指令，导致性能无法充分发挥。为获得更好的编译器优化效果，推荐开发者在前端kernel中通过手动填充（padding）或mask加载的方式，将数据尾轴维度显式对齐到合适的宽度，从而为编译器提供对齐友好的数据布局。这样能够简化后端的优化决策，显著提升执行效率。
+
+#### 算子示例
+
+以下展示了尾轴为4的两种kernel实现：版本1直接使用4作为尾轴维度，未做对齐处理，性能较差；版本2通过mask加载将尾轴维度对齐至8，是推荐的优化写法。
+
+**版本1：尾轴未对齐（存在优化瓶颈）**
+
+```python
+@triton.jit
+def kernel(in_ptr, out_ptr, batch_size,
+              D: tl.constexpr, iters: tl.constexpr,
+              eps: tl.constexpr, group: tl.constexpr):
+    lin = tl.arange(0, D * D)
+    pid0 = tl.program_id(0) * group
+    pids = pid0 + tl.arange(0, group)
+    mask = pids < batch_size
+    off = pids[:, None] * (D * D)
+
+    # 直接加载 D×D 矩阵，无对齐填充
+    mat = tl.load(in_ptr + off + lin[None, :], mask=mask[:, None])
+    mat = mat.reshape(group, D, D)
+
+    row_max = tl.max(mat, axis=2)
+    mat = tl.exp(mat - row_max[:, :, None])
+    for _ in range(iters):
+        row_sum = tl.sum(mat, axis=2)
+        mat = mat / (row_sum[:, :, None] + eps)
+        col_sum = tl.sum(mat, axis=1)
+        mat = mat / (col_sum[:, None, :] + eps)
+
+    mat_flat = tl.reshape(mat, (group, D * D))
+    tl.store(out_ptr + off + lin[None, :], mat_flat, mask=mask[:, None])
+```
+
+**版本2：手动对齐（推荐）**
+
+```python
+@triton.jit
+def kernel_opt(in_ptr, out_ptr, batch_size,
+                  D: tl.constexpr, iters: tl.constexpr,
+                  eps: tl.constexpr, group: tl.constexpr,
+                  ALIGN: tl.constexpr = 8):
+    pid0 = tl.program_id(0) * group
+    pids = pid0 + tl.arange(0, group)
+    p_mask = pids < batch_size
+
+    # 基于原始 D×D 形状，每次加载 ALIGN 个元素
+    off_base = pids[:, None, None] * (D * D)
+    row_idx = tl.arange(0, D)[:, None]
+    col_idx = tl.arange(0, ALIGN)[None, :]
+    offs = row_idx * D + col_idx
+    valid_cols = col_idx < D
+
+    # 通过掩码将无效列填充为 -inf，实现手动对齐
+    # 形状 (group, D, ALIGN)
+    mat = tl.load(
+        in_ptr + off_base + offs[None, :, :],
+        mask=p_mask[:, None, None] & valid_cols[None, :, :],
+        other=float('-inf')
+    )
+
+    # 归一化计算（无效列在 exp 后变为 0，不影响结果）
+    row_max = tl.max(mat, axis=2)
+    mat = tl.exp(mat - row_max[:, :, None])
+    for _ in range(iters):
+        row_sum = tl.sum(mat, axis=2)
+        mat = mat / (row_sum[:, :, None] + eps)
+        col_sum = tl.sum(mat, axis=1)
+        mat = mat / (col_sum[:, None, :] + eps)
+
+    # 按 ALIGN 对齐宽度写回
+    out_flat = tl.reshape(mat, (group, D * ALIGN))
+    tl.store(out_ptr + pids[:, None] * (D * ALIGN)
+             + tl.arange(0, D * ALIGN)[None, :],
+             out_flat, mask=p_mask[:, None])
+```
+
+版本2通过手动将尾轴维度对齐到8，编译器可以直接利用连续、对齐的访存模式生成高效指令，避免了因尾轴不对齐可能引入的额外处理开销，从而提升整体性能。
+
+#### 限制
+
+- 手动对齐要求 `ALIGN` 为编译期常量，且应等于硬件建议的对齐宽度。
+- 填充值（如 `-inf`）需与后续计算兼容，确保不影响最终结果（例如 `exp(-inf) = 0`）。
 
 ## CV类
 

@@ -130,7 +130,7 @@ hivm::CompareMode mapCompareModeHFusionToHiVM(hfusion::CompareFn hsCmpMode) {
   case hfusion::CompareFn::vgt:
     return hivm::CompareMode::GT;
   default:
-    llvm_unreachable(
+    llvm::report_fatal_error(
         "mapCompareModeHFusionToHiVM: unsupported hfusion::CompareFn");
   }
 }
@@ -197,7 +197,7 @@ Operation *convertUnaryLinalgOp(ElemwiseOpConvertor &b, linalg::UnaryFn kind) {
   case linalg::UnaryFn::abs:
     return b.create<hivm::VAbsOp>();
   default:
-    llvm_unreachable("unsupported linalg unary operation kind");
+    llvm::report_fatal_error("unsupported linalg unary operation kind");
   }
 }
 
@@ -221,7 +221,7 @@ Operation *convertBinaryLinalgOp(ElemwiseOpConvertor &b,
   case linalg::BinaryFn::min_unsigned:
     return b.create<hivm::VMinOp>();
   default:
-    llvm_unreachable("unsupported linalg binary operation kind");
+    llvm::report_fatal_error("unsupported linalg binary operation kind");
   }
 }
 
@@ -249,7 +249,7 @@ Operation *convertUnaryHFusionOp(ElemwiseOpConvertor &b,
   case hfusion::UnaryFn::erf:
     return b.create<hivm::VErfOp>();
   default:
-    llvm_unreachable("unsupported hfusion unary operation kind");
+    llvm::report_fatal_error("unsupported hfusion unary operation kind");
   }
 }
 
@@ -274,7 +274,7 @@ Operation *convertBinaryHFusionOp(ElemwiseOpConvertor &b,
   case hfusion::BinaryFn::mod:
     return b.create<hivm::VModOp>();
   default:
-    llvm_unreachable("unsupported hfusion binary operation kind");
+    llvm::report_fatal_error("unsupported hfusion binary operation kind");
   }
 }
 
@@ -424,7 +424,7 @@ LogicalResult elementwiseMatchAndRewriteHelper(Operation *op,
     hfusion::TernaryFn kind = hfusion::TernaryFn::select;
     hivmOp = convertTernaryHFusionOp(builder, kind);
   } else {
-    llvm_unreachable("undhandled conversion");
+    llvm::report_fatal_error("undhandled conversion");
   }
   convertInvalidScalarOperands(hivmOp);
   rewriter.replaceOp(op, hivmOp->getResults());
@@ -574,7 +574,7 @@ struct LinalgToHIVMTransposeOp : public OpRewritePattern<linalg::TransposeOp> {
           "linalg::TansposeOp should have pure buffer or tensor Semantics!");
     }
     Value outputValue = op.hasPureBufferSemantics() ? op.getInit() : op.getResult().getBase();
-      
+
     Operation *withoutAlignMarkOp = nullptr;
     for (auto *user : outputValue.getUsers()) {
       if (auto markOp = dyn_cast<annotation::MarkOp>(user)) {
@@ -653,7 +653,7 @@ struct HFusionToHIVMGatherOp : public OpRewritePattern<hfusion::GatherOp> {
 };
 
 //===----------------------------------------------------------------------===//
-// HFusionToHIVMGatherMaskOp 
+// HFusionToHIVMGatherMaskOp
 //===----------------------------------------------------------------------===//
 struct HFusionToHIVMGatherMaskOp : public OpRewritePattern<hfusion::GatherMaskOp> {
   using OpRewritePattern<hfusion::GatherMaskOp>::OpRewritePattern;
@@ -666,9 +666,9 @@ struct HFusionToHIVMGatherMaskOp : public OpRewritePattern<hfusion::GatherMaskOp
     }
 
     auto resultTypeRange = op.hasPureBufferSemantics()
-                               ? TypeRange()  
-                               : TypeRange(op->getResultTypes());  
-    mlir::ValueRange dstOperands = op.getInit();                        
+                               ? TypeRange()
+                               : TypeRange(op->getResultTypes());
+    mlir::ValueRange dstOperands = op.getInit();
     rewriter.replaceOpWithNewOp<hivm::VGatherMaskOp>(
         op,
         resultTypeRange,
@@ -734,7 +734,7 @@ hivm::AtomicKind mapAtomicKindHFusionToHiVM(hfusion::AtomicKind hsAtKind) {
     hvAtKind = hivm::AtomicKind::UMIN;
     break;
   default:
-    llvm_unreachable("Unsupported atomic kind");
+    llvm::report_fatal_error("Unsupported atomic kind");
   }
   return hvAtKind;
 }
@@ -813,9 +813,7 @@ struct HFusionPrintOpToHIVMDebugOp : public OpRewritePattern<hfusion::PrintOp> {
     Value opArg = op.getArg();
 
     (void)(rewriter.replaceOpWithNewOp<hivm::DebugOp>(
-        op, HIVMDebugTypePrint, op.getPrefix(), op.getHex(), opArg,
-        hivm::TCoreTypeAttr::get(op->getContext(),
-                                 hivm::TCoreType::CUBE_OR_VECTOR)));
+        op, HIVMDebugTypePrint, op.getPrefix(), op.getHex(), opArg));
 
     return success();
   }
@@ -836,9 +834,7 @@ struct HFusionAssertOpToHIVMDebugOp
     rewriter.setInsertionPoint(op);
 
     (void)(rewriter.replaceOpWithNewOp<hivm::DebugOp>(
-        op, HIVMDebugTypeAssert, op.getMsg(), false /* hex */, op.getCond(),
-        hivm::TCoreTypeAttr::get(op->getContext(),
-                                 hivm::TCoreType::CUBE_OR_VECTOR)));
+        op, HIVMDebugTypeAssert, op.getMsg(), false /* hex */, op.getCond()));
 
     return success();
   }
@@ -877,6 +873,31 @@ struct HFusionToHIVMMulExtOp : public OpRewritePattern<hfusion::MulExtOp> {
         ValueRange{dsts});
     convertInvalidScalarOperands(hivmMulExtOp);
     rewriter.replaceOp(op, hivmMulExtOp);
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// HFusionToHIVMMulExtUiOp
+//===----------------------------------------------------------------------===//
+
+struct HFusionToHIVMMulExtUiOp : public OpRewritePattern<hfusion::MulExtUiOp> {
+  using OpRewritePattern<hfusion::MulExtUiOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(hfusion::MulExtUiOp op,
+                                PatternRewriter &rewriter) const override {
+    // convert hfusion::MulExtUiOp to hivm::VMulExtUiOp
+    Value lhs = op.getLhs();
+    Value rhs = op.getRhs();
+    SmallVector<Value> dsts;
+    if (failed(
+            tensor::getOrCreateDestinations(rewriter, op.getLoc(), op, dsts)))
+      return failure();
+    auto hivmMulExtUiOp = rewriter.create<hivm::VMulExtUiOp>(
+        op->getLoc(), op->getResultTypes(), ValueRange({lhs, rhs}),
+        ValueRange{dsts});
+    convertInvalidScalarOperands(hivmMulExtUiOp);
+    rewriter.replaceOp(op, hivmMulExtUiOp);
     return success();
   }
 };
@@ -1063,10 +1084,34 @@ struct HFusionToHIVMConv2DOp : public OpRewritePattern<hfusion::Conv2DOp> {
     auto weight = op.getWeight();
     auto bias = op.getBias();
     auto group = op.getGroups();
-    auto padding = op.getPadding();
+    auto padding = op.getPaddingAttr();
     Value initCondition =
         rewriter.create<arith::ConstantIntOp>(op->getLoc(), 1, int1Type);
     rewriter.replaceOpWithNewOp<hivm::Conv2DL1Op>(op, resType, input, weight,
+                                                  bias, init, initCondition,
+                                                  ValueRange{}, padding, group);
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// HFusionToHIVMConv3DOp
+//===----------------------------------------------------------------------===//
+struct HFusionToHIVMConv3DOp : public OpRewritePattern<hfusion::Conv3DOp> {
+  using OpRewritePattern<hfusion::Conv3DOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(hfusion::Conv3DOp op,
+                                PatternRewriter &rewriter) const override {
+    mlir::IntegerType int1Type = rewriter.getIntegerType(1);
+    auto resType = op->getResults().front().getType();
+    auto init = op.getInit();
+    auto input = op.getInput();
+    auto weight = op.getWeight();
+    auto bias = op.getBias();
+    auto group = op.getGroups();
+    auto padding = op.getPaddingAttr();
+    Value initCondition =
+        rewriter.create<arith::ConstantIntOp>(op->getLoc(), 1, int1Type);
+    rewriter.replaceOpWithNewOp<hivm::Conv3DL1Op>(op, resType, input, weight,
                                                   bias, init, initCondition,
                                                   ValueRange{}, padding, group);
     return success();
@@ -1237,6 +1282,7 @@ void populateLowerHFusionToHIVMPattern(RewritePatternSet &patterns) {
     HFusionAssertOpToHIVMDebugOp,
     HFusionToHIVMBarrierOp,
     HFusionToHIVMMulExtOp,
+    HFusionToHIVMMulExtUiOp,
     HfusionToHIVMInterleaveOp,
     HFusionToHIVMDeinterleaveOp,
     HFusionToHIVMFlipOp,
@@ -1248,7 +1294,8 @@ void populateLowerHFusionToHIVMPattern(RewritePatternSet &patterns) {
     HFusionToHIVMAtomicXchgOp,
     HFusionToHIVMAtomicRMWOp,
     HFusionToHIVMConv1DOp,
-    HFusionToHIVMConv2DOp
+    HFusionToHIVMConv2DOp,
+    HFusionToHIVMConv3DOp
   >(patterns.getContext());
   // clang-format on
 }
@@ -1313,6 +1360,12 @@ public:
       if (markOp.isAnnotatedBy(hivm::TileMixCubeNumAttr::name))
         markOp.erase();
     });
+
+    moduleOp->walk([&](annotation::MarkOp markOp) {
+      if (markOp.isAnnotatedBy("enable_i4"))
+        markOp.erase();
+    });
+
   }
 };
 } // namespace

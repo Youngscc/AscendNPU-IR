@@ -331,6 +331,9 @@ def HIVM_TCoreTypeAttr : HIVM_Attr<"TCoreType", "tcore_type"> {
   let description = [{
     HIVM op core type attribute.
   }];
+  let constBuilderCall =
+      "::mlir::hivm::TCoreTypeAttr::get($_builder.getContext(), "
+      "::mlir::hivm::TCoreType::CUBE_OR_VECTOR)";
 }
 
 def HIVM_TCoreTypeMarkerAttr : HIVM_Attr<"TCoreTypeMarker", "tcore_type_marker"> {
@@ -1189,6 +1192,16 @@ def HIVM_PreloadLocalBufferAttr
     : HIVM_Attr<"PreloadLocalBuffer", "preload_local_buffer"> {
   let description = [{
     Specifies that related op is preload local buffer.
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// Distributed
+//===----------------------------------------------------------------------===//
+
+def HIVM_IsDistributedAttr : HIVM_Attr<"IsDistributed", "is_distributed"> {
+  let description = [{
+    Specifies an op is about distributed.
   }];
 }
 

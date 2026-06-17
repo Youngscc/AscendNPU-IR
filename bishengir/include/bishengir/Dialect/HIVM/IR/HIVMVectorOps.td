@@ -596,6 +596,24 @@ def VMulExtOp : HIVM_ElementwiseBinaryOp<"vmulext",
   let extraClassDeclaration = elemwiseOpBaseDecls;
 }
 
+def VMulExtUiOp : HIVM_ElementwiseBinaryOp<"vmulextui",
+    [SameOperandsElementType,
+     OperElemTypeConstraints<[0, 1], [I32]>,
+     VectorOnlyTrait<0>,
+    DeclareOpInterfaceMethods<ImplByScalarOpInterface>
+    ]> {
+  let summary = [{
+    Elementwise Binary Vector Unsigned Integer Multiplication that Calculates
+    the Most Significant 32-bits.
+  }];
+  let description = baseClassDescription # [{
+    Additional constraints:
+      1. The input/init operands and result have the same element type.
+      2. Support Vector-Vector operation.
+  }];
+  let extraClassDeclaration = elemwiseOpBaseDecls;
+}
+
 def VSubOp
     : HIVM_ElementwiseBinaryOp<
           "vsub", [SameOperandsElementType,
@@ -1139,6 +1157,14 @@ def VReduceOp : HIVM_VectorOp<"vreduce",
              op == ReduceOperation::max_with_index_left ||
              op == ReduceOperation::min_with_index_right ||
              op == ReduceOperation::max_with_index_right;
+    }
+
+    static bool isWithIndex(ReduceOperation op) {
+      return isArgminOrArgmax(op);
+    }
+
+    bool isWithIndex() {
+      return isWithIndex(getArithAttr().getReduceOp());
     }
   }];
 }

@@ -267,7 +267,7 @@ void MemLivenessAnalysis::RecursionIR(Region *region, Liveness live) {
     return WalkResult::advance();
   });
   if (result == WalkResult::interrupt()) {
-    llvm_unreachable("PlanMemory Traverse IR Failed! ");
+    llvm::report_fatal_error("PlanMemory Traverse IR Failed! ");
   }
 }
 
@@ -715,7 +715,7 @@ void MemLivenessAnalysis::UpdateOperandGenInfo(OpInfo *opInfo, Value operand) {
     genKillMap[opInfo].gen.push_back(operand);
     buffer2status[iter_buffer->first] = BufferStatus::GENED;
   } else if (iter_buffer->second == BufferStatus::KILLED) {
-    llvm_unreachable("The buffer memory has been released and cannot be used "
+    llvm::report_fatal_error("The buffer memory has been released and cannot be used "
                      "again! ");
   }
 }
@@ -870,30 +870,71 @@ bool MemLivenessAnalysis::IsBlockAfter(Block *afterBlock,
     return false;
   }
   assert(afterBlock != nullptr && beforeBlock != nullptr);
-  mlir::Region *region = beforeBlock->getParent();
-  assert(region != nullptr);
-  for (auto it = region->begin(); it != region->end(); ++it) {
-    if (&*it == beforeBlock) {
-      for (++it; it != region->end(); ++it) {
-        if (&*it == afterBlock) {
-          return true;
+  mlir::Region *beforeRegion = beforeBlock->getParent();
+  mlir::Region *afterRegion = afterBlock->getParent();
+  assert(beforeRegion != nullptr && afterRegion != nullptr);
+  if (beforeRegion == afterRegion) {
+    for (auto it = beforeRegion->begin(); it != beforeRegion->end(); ++it) {
+      if (&*it == beforeBlock) {
+        for (++it; it != beforeRegion->end(); ++it) {
+          if (&*it == afterBlock) {
+            return true;
+          }
         }
+        break;
       }
-      break;
     }
+  } else {
+    unsigned beforeIndex = beforeRegion->getRegionNumber();
+    unsigned afterIndex = afterRegion->getRegionNumber();
+    return beforeIndex < afterIndex;
   }
+
   return false;
 }
 
-bool MemLivenessAnalysis::IsDeadAfterBlock(Value value, Block *block) const {
-  for (auto &useOperand : value.getUses()) {
-    Operation *useOp = useOperand.getOwner();
-    assert(useOp != nullptr);
-    Block *useBlock = useOp->getBlock();
-    if (useBlock != block && IsBlockAfter(useBlock, block)) {
-      return false;
+bool MemLivenessAnalysis::IsDeadAfterOp(Value value,
+                                           Operation *operation) const {
+  auto *moduleBlock = utils::getTopLevelModuleOp(operation).getBody();
+  // trace all blocks that contains ifOp until moduleBlock.
+  DenseMap<Block *, Operation *> block2Op;
+  DenseMap<Operation *, Operation *> parentToChild;
+  Operation *childOp = nullptr;
+  for (auto *op = operation; op != nullptr && op->getBlock() != moduleBlock;
+       op = op->getParentOp()) {
+    block2Op.try_emplace(op->getBlock(), op);
+    if (childOp) {
+      parentToChild[op] = childOp;
+    }
+    childOp = op;
+  }
+  for (Operation *user : value.getUsers()) {
+    // trace all blocks that contains user until funcBlock.
+    Operation *userChildOp = nullptr;
+    for (auto *op = user; op != nullptr; op = op->getParentOp()) {
+      auto it = block2Op.find(op->getBlock());
+      // Check whether the block of userOp is same as the block of currentOp
+      if (op->getBlock() != moduleBlock && it != block2Op.end()) {
+        auto *currentOp = it->second;
+        auto currChildIt = parentToChild.find(currentOp);
+        // check whether parent ops are same, ex: if then ... else ...
+        if (currentOp == op && userChildOp != nullptr &&
+            currChildIt != parentToChild.end() &&
+            IsBlockAfter(userChildOp->getBlock(), currChildIt->second->getBlock())) {
+          return false;
+        }
+        // once different parent ops in same block, check the order
+        if (currentOp->isBeforeInBlock(op)) {
+          return false;
+        } else {
+          // CurrentOp is after UserOp, check the next user
+          break;
+        }
+      }
+      userChildOp = op;
     }
   }
+
   return true;
 }
 
@@ -901,7 +942,7 @@ bool MemLivenessAnalysis::AllDeadAfter(Operation *op, SetVector<Value> aliasVec,
                                        Liveness live) const {
   for (auto aliasBuffer : aliasVec) {
     if (!live.isDeadAfter(aliasBuffer, op) ||
-        !IsDeadAfterBlock(aliasBuffer, op->getBlock())) {
+        !IsDeadAfterOp(aliasBuffer, op)) {
       return false;
     }
   }
@@ -920,7 +961,7 @@ BufferInfo MemLivenessAnalysis::GenerateBufferInfo(Operation *op,
                  operand.getDefiningOp())) {
     return GetBufferInfo(op, operand, hivm::AddressSpace::GM);
   }
-  llvm_unreachable("buffer must has BufferInfo !");
+  llvm::report_fatal_error("buffer must has BufferInfo !");
 }
 
 BufferInfo MemLivenessAnalysis::GetBufferInfo(Operation *op, Value operand,
@@ -935,7 +976,7 @@ BufferInfo MemLivenessAnalysis::GetBufferInfo(Operation *op, Value operand,
   std::optional<int64_t> totalStaticSize =
       utils::getStaticTotalSize(memRefType.getShape());
   if (!totalStaticSize.has_value()) {
-    llvm_unreachable(
+    llvm::report_fatal_error(
         "Failed to obtain op buffer shape size which should be static.");
   }
   bufferInfo.constBits =
@@ -1797,7 +1838,7 @@ MemPlan::GetBufferSpaceInfo(hivm::AddressSpace &space) const {
   case hivm::AddressSpace::L0C:
     return std::make_pair(l0cAlignSize, l0cSpaceSize);
   default:
-    llvm_unreachable("Temporarily unsupported memory buffer space !");
+    llvm::report_fatal_error("Temporarily unsupported memory buffer space !");
   }
 }
 

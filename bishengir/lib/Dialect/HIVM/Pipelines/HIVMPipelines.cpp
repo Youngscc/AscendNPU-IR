@@ -144,6 +144,21 @@ bufferizationPipeline(OpPassManager &pm,
   }
 }
 
+static void hivmAutoInsertLdStForMixCVPipeline(
+    OpPassManager &pm, const HIVMPipelineOptions &hivmPipelineOptions) {
+  InsertLoadStoreForMixCVOptions options;
+  options.enableLegacy = hivmPipelineOptions.enableLegacyInsertLoadStoreForMixCV;
+  if (options.enableLegacy) {
+    pm.nest<func::FuncOp>().addPass(
+        mlir::hivm::createInsertLoadStoreForMixCVPass(options));
+  } else {
+    pm.nest<func::FuncOp>().addPass(
+        mlir::hivm::createInsertLoadStoreForMixCVPass(options));
+    pm.nest<func::FuncOp>().addPass(
+        mlir::hivm::createInsertLoadStoreForScalarPass());
+  }
+}
+
 static void hivmPreBufferizationOptimizationPipeline(
     OpPassManager &pm, const HIVMPipelineOptions &hivmPipelineOptions) {
   // HIVM brc/reduce op's operands have the same rank, so after converting from
@@ -159,8 +174,7 @@ static void hivmPreBufferizationOptimizationPipeline(
   pm.addPass(mlir::hivm::createNormalizeBitwiseSelectPass());
   pm.addPass(mlir::hivm::createInlineFixpipePass());
   if (!hivmPipelineOptions.disableAutoCVWorkSpaceManage) {
-    pm.nest<func::FuncOp>().addPass(
-        mlir::hivm::createInsertLoadStoreForMixCVPass());
+    hivmAutoInsertLdStForMixCVPipeline(pm, hivmPipelineOptions);
   }
   pm.nest<func::FuncOp>().addPass(createTileBatchMMIntoLoopPass());
 
@@ -169,8 +183,7 @@ static void hivmPreBufferizationOptimizationPipeline(
   pm.addPass(mlir::hivm::createInlineFixpipePass());
 
   if (!hivmPipelineOptions.disableAutoCVWorkSpaceManage) {
-    pm.nest<func::FuncOp>().addPass(
-        mlir::hivm::createInsertLoadStoreForMixCVPass());
+    hivmAutoInsertLdStForMixCVPipeline(pm, hivmPipelineOptions);
     pm.addPass(createInsertWorkSpaceForMixCVPass());
     pm.nest<func::FuncOp>().addPass(createBindWorkSpaceArgPass());
   }
@@ -204,9 +217,7 @@ static void hivmPreBufferizationOptimizationPipeline(
   if (!hivmPipelineOptions.disableAutoCVWorkSpaceManage) {
     // Software pipelining Cube and Vector operations
     CVPipeliningOptions pipelineOptions;
-    pipelineOptions.enableAutoBalance =
-        hivmPipelineOptions.enableHIVMAutoCVBalance;
-    pipelineOptions.enableAutoPreload =
+    pipelineOptions.enableSkewMode =
         hivmPipelineOptions.enablePreload;
     pm.nest<func::FuncOp>().addPass(createCVPipeliningPass(pipelineOptions));
   }

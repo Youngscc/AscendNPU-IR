@@ -73,9 +73,20 @@ static constexpr llvm::StringLiteral kBufferSizeInByteAttr =
 
 static constexpr llvm::StringLiteral kLogicalBlockNumAttr = "logical_block_num";
 
+static constexpr llvm::StringLiteral kTilingDimMappingAttrName =
+    "tiling_dim_mapping";
+
+static constexpr llvm::StringLiteral kMayImplicitTransposeWithLastAxis =
+    "MayImplicitTransposeWithLastAxis";
+
 const std::string Ascend910BCubeTriple = "ascend_910b_cube-unknown-cce-unknown";
 const std::string Ascend910BDataLayout =
     "e-i1:8:32-i8:8:32-i16:16:32-i64:64-f16:16:32-v16:16-v32:32-n64-S64";
+
+// Marks the iteration-counter alloca created by NormalizeMatmul::initCounter so
+// downstream passes (e.g. CVPipelining) can recognize it.
+static constexpr llvm::StringLiteral kNormalizeMatmulCounterAttr =
+    "normalize_matmul_counter";
 
 // The amount of data processed by the VBITSORT instruction in one repeat.
 constexpr const int VBITSORT_NUM_PER_REPEAT = 32;

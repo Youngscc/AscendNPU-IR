@@ -92,6 +92,16 @@ func.func @test_acos(%arg0: tensor<10x20xf32>) -> tensor<10x20xf32> {
 
 // -----
 
+// CHECK-LABEL: func.func @test_sinh
+func.func @test_sinh(%arg0 : tensor<6x6xf32>) -> tensor<6x6xf32> {
+  // CHECK:       %[[EMPTY:.*]] = tensor.empty()
+  // CHECK:       %[[RET:.*]] = hfusion.elemwise_unary {fun = #hfusion.unary_fn<sinh>}
+  %ret = math.sinh %arg0 : tensor<6x6xf32>
+  return %ret : tensor<6x6xf32>
+}
+
+// -----
+
 // CHECK-LABEL: func @test_asin
 // CHECK-SAME: (%[[ARG:.*]]: tensor<10x20xf32>) -> tensor<10x20xf32>
 func.func @test_asin(%arg0: tensor<10x20xf32>) -> tensor<10x20xf32> {
@@ -102,6 +112,29 @@ func.func @test_asin(%arg0: tensor<10x20xf32>) -> tensor<10x20xf32> {
   return %0 : tensor<10x20xf32>
 }
 
+// -----
+
+// CHECK-LABEL: func @test_atanh
+// CHECK-SAME: (%[[ARG:.*]]: tensor<10x20xf32>) -> tensor<10x20xf32>
+func.func @test_atanh(%arg0: tensor<10x20xf32>) -> tensor<10x20xf32> {
+  // CHECK: %[[DEST:.*]] = tensor.empty
+  // CHECK: %[[ATANH:.*]] = hfusion.elemwise_unary {fun = #hfusion.unary_fn<atanh>} ins(%[[ARG]] : tensor<10x20xf32>) outs(%[[DEST]] : tensor<10x20xf32>)
+  // CHECK: return %[[ATANH]]
+  %0 = math.atanh %arg0 : tensor<10x20xf32>
+  return %0 : tensor<10x20xf32>
+}
+
+// -----
+
+// CHECK-LABEL: func @test_acosh
+// CHECK-SAME: (%[[ARG:.*]]: tensor<10x20xf32>) -> tensor<10x20xf32>
+func.func @test_acosh(%arg0: tensor<10x20xf32>) -> tensor<10x20xf32> {
+  // CHECK: %[[DEST:.*]] = tensor.empty
+  // CHECK: %[[ACOSH:.*]] = hfusion.elemwise_unary {fun = #hfusion.unary_fn<acosh>} ins(%[[ARG]] : tensor<10x20xf32>) outs(%[[DEST]] : tensor<10x20xf32>)
+  // CHECK: return %[[ACOSH]]
+  %0 = math.acosh %arg0 : tensor<10x20xf32>
+  return %0 : tensor<10x20xf32>
+}
 
 // -----
 
