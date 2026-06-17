@@ -126,6 +126,7 @@ init_variables() {
   BUILD_BISHENGIR_A5="OFF"
   SHMEM_BUILD_TEMPLATE="OFF"
   COLLECT_BINARY="OFF"
+  ENABLE_BSPUB="OFF"
 
   # Thread count: 3/4 of CPU cores (fallback to 1 if detection fails)
   if [[ "$OS_TYPE" == "Darwin" ]]; then
@@ -176,6 +177,7 @@ usage() {
                 [--skip-rpath]
                 [--enable-cpu-runner]
                 [--build-bishengir-a5]
+                [--enable-bspub]
                 [--collect-binary OUTPUT_DIR]
 
     Options:
@@ -208,6 +210,7 @@ usage() {
       --torch-mlir-source-dir DIR          Torch-MLIR project's root directory. (Default: 'third-party/torch-mlir')
       --enable-cpu-runner                  Enable the compilation of CPU runner targets
       --build-bishengir-a5                 Whether to build bishengir-a5. (Default: disabled)
+      --enable-bspub                       Enable BSPUB DaVinci BiShengIR build. (Default: disabled)
       --collect-binary [OUTPUT_DIR]      Collect built binaries and bc files to OUTPUT_DIR. Automatically
                                            detects A5 build artifacts in bishengir-a5-src/build-a5/install/.
                                            This is a standalone mode that skips the build process.
@@ -423,6 +426,10 @@ parse_arguments() {
                 BUILD_BISHENGIR_A5="ON"
                 shift
                 ;;
+            --enable-bspub)
+                ENABLE_BSPUB="ON"
+                shift
+                ;;
             --collect-binary)
                 if [[ -n "$2" && "$2" != -* ]]; then
                     COLLECT_BINARY="$2"
@@ -627,6 +634,7 @@ cmake_generate() {
     -DCMAKE_SKIP_RPATH="${build_skip_rpath_option}" \
     -DLLVM_INSTALL_UTILS=ON \
     -DCMAKE_INSTALL_PREFIX="${INSTALL_PREFIX}" \
+    -DLLVM_BSPUB_DAVINCI_BISHENGIR="${ENABLE_BSPUB}" \
     -DBSPUB_DAVINCI_BISHENGIR=ON \
     -DBISHENGIR_PUBLISH="${BISHENGIR_PUBLISH}" \
     -DBISHENG_COMPILER_PATH="${BISHENG_COMPILER}" \
