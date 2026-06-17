@@ -4359,4 +4359,3 @@ func.func @test_normalize_shift_right_i32(%arg0: tensor<16x32xi32>, %arg1: tenso
   %ret = hfusion.elemwise_binary {fun = #hfusion.binary_fn<shrsi>} ins(%arg0, %arg1 : tensor<16x32xi32>, tensor<16x32xi32>) outs(%dst : tensor<16x32xi32>) -> tensor<16x32xi32>
   return %ret : tensor<16x32xi32>
 }
-
