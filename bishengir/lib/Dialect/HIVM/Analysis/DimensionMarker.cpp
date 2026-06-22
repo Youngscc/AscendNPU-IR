@@ -188,11 +188,14 @@ bool DimensionAnalyzer::processOperation(Operation *op, Value current) {
         processVTransposeOp(op);
         return true;
       })
-      .Case<hivm::MatmulOp, hivm::MixMatmulOp, hivm::MmadL1Op>(
-          [this](Operation *op) {
-            processMatmulOp(op, isATransposed(op), isBTransposed(op));
-            return true;
-          })
+      .Case<hivm::MatmulOp, hivm::MixMatmulOp>([this](Operation *op) {
+        processMatmulOp(op, isATransposed(op), isBTransposed(op));
+        return true;
+      })
+      .Case<hivm::MmadL1Op>([this](auto op) {
+        processMmadL1Op(op, isATransposed(op), isBTransposed(op));
+        return true;
+      })
       .Case<hivm::VGatherOp>([this](auto op) {
         processVGatherOp(op);
         return true;
@@ -634,6 +637,28 @@ void DimensionAnalyzer::processScopeOp(scope::ScopeOp op) {
   }
 }
 
+void DimensionAnalyzer::processMmadL1Op(hivm::MmadL1Op op, bool isTransposeA,
+                                        bool isTransposeB) {
+  Value operandA = op.getA();
+  Value operandB = op.getB();
+  Value mmadResult = op.getResult(0);
+  auto dimRefsA = getArgumentRefOrCreateDummy(operandA);
+  auto dimRefsB = getArgumentRefOrCreateDummy(operandB);
+  int kAxisIdxA = isTransposeA ? 0 : 1;
+  int kAxisIdxB = isTransposeB ? 1 : 0;
+  joinShape(dimRefsA[kAxisIdxA], dimRefsB[kAxisIdxB]);
+  int mAxisIdxA = isTransposeA ? 1 : 0;
+  int nAxisIdxB = isTransposeB ? 0 : 1;
+  SmallVector<int64_t> resultDimRefs = {dimRefsA[mAxisIdxA],
+                                        dimRefsB[nAxisIdxB]};
+  argumentsRef_.push_back(resultDimRefs);
+  int64_t resultRefIdx = static_cast<int64_t>(argumentsRef_.size() - 1);
+  initCollapseOrVerify(mmadResult, resultRefIdx);
+  for (Value val : op->getResults()) {
+    processValue(val, mmadResult);
+  }
+}
+
 void DimensionAnalyzer::combineInferable() {
   DimensionAnalyzerBase::combineInferable();
   for (const auto &arg : argumentList_) {
@@ -717,6 +742,12 @@ void DimensionAnalyzer::markDimensions() {
       }
     } else if (auto vbrcOp = dyn_cast<hivm::VBrcOp>(op)) {
 
+    } else if (auto mmadOp = dyn_cast<hivm::MmadL1Op>(op)) {
+      LDBG("Marking mmadL1 reduction axis: " << mmadOp);
+      auto dimRefsA = getArgumentRefOrCreateDummy(mmadOp.getA());
+      int kAxisIdxA = mmadOp.getATranspose() ? 0 : 1;
+      int64_t kAxisRootId = solverCollapserElem_->find(dimRefsA[kAxisIdxA]);
+      tilingDimKindMapForCollapser[kAxisRootId] = TilingDimensionKind::Reduce;
     } else if (auto insertOp = dyn_cast<tensor::InsertSliceOp>(op)) {
       processSlice(insertOp);
     } else if (auto extractOp = dyn_cast<tensor::ExtractSliceOp>(op)) {
