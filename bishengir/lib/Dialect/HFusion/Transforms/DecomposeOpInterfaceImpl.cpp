@@ -214,8 +214,11 @@ struct IsInfDecomposeInterface
     return SmallVector<Value>{genericOp.getResult(0)};
   }
 
-  bishengir::DecomposePhase getDecomposePhase(Operation *op) const {
+    bishengir::DecomposePhase getDecomposePhase(Operation *op) const {
     return bishengir::DecomposePhase::NO_CONSTRAINT;
+  }
+};
+
     // SortDecomposeInterface implements the decomposition logic for
     // hfusion.sort. It lowers the high-level sort operation into nested loops
     // (scf.for) using a bubble sort algorithm specifically targeting the last
