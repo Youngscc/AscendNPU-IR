@@ -1192,6 +1192,7 @@ void TileAndBindSubBlockPass::runOnOperation() {
 #endif
 }
 
-std::unique_ptr<Pass> mlir::hivm::createTileAndBindSubBlockPass() {
-  return std::make_unique<TileAndBindSubBlockPass>();
+std::unique_ptr<Pass> mlir::hivm::createTileAndBindSubBlockPass(
+    const TileAndBindSubBlockOptions &options) {
+  return std::make_unique<TileAndBindSubBlockPass>(options);
 }
