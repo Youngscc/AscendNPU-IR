@@ -1036,6 +1036,9 @@ LogicalResult handleExtractSliceOp(tensor::CollapseShapeOp collapseOp,
                                    Operation *userOp) {
   auto reassociation = collapseOp.getReassociationIndices();
   auto extractSliceOp = dyn_cast<tensor::ExtractSliceOp>(userOp);
+  auto srcShape = utils::getShape(collapseOp.getSrc().getType());
+  if (llvm::any_of(srcShape, ShapedType::isDynamic))
+    return failure();
   SmallVector<OpFoldResult> newMixedOffsets;
   SmallVector<OpFoldResult> newMixedSizes;
   SmallVector<OpFoldResult> newMixedStrides;
