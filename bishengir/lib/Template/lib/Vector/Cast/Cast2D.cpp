@@ -33,6 +33,9 @@ scalar_cast_2d_with_mode(memref_t<__ubuf__ SRC_T, 2> *src,
   if constexpr (std::is_same<SRC_T, bfloat16_t>::value ||
                 std::is_same<DST_T, bfloat16_t>::value) {
     // scalar cast bfloat16_t is not supported yet
+#ifdef ENABLE_CPU_TRACE_INTRINSIC
+    WARN_UNSUPPORTED_IMPL("scalar cast bfloat16_t is not supported yet, skipped");
+#endif
     return;
   }
 
