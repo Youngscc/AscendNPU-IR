@@ -148,6 +148,8 @@ static void hivmAutoInsertLdStForMixCVPipeline(
     OpPassManager &pm, const HIVMPipelineOptions &hivmPipelineOptions) {
   InsertLoadStoreForMixCVOptions options;
   options.enableLegacy = hivmPipelineOptions.enableLegacyInsertLoadStoreForMixCV;
+  if (!hivmPipelineOptions.enableTritonKernelCompile)
+      options.enableLegacy = true;
   if (options.enableLegacy) {
     pm.nest<func::FuncOp>().addPass(
         mlir::hivm::createInsertLoadStoreForMixCVPass(options));
