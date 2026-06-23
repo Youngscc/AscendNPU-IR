@@ -95,7 +95,8 @@ std::optional<int> getExpandedDim(
 
 std::optional<int> getCollapsedDim(
     int dim, const ArrayRef<ReassociationIndices> &collapseReassociations,
-    ArrayRef<int64_t> collapseSrcShapes, std::string alignDimAttrName) {
+    ArrayRef<int64_t> collapseSrcShapes, std::string alignDimAttrName,
+    bool isContiguous = true) {
   for (size_t i = 0; i < collapseReassociations.size(); i++) {
     const auto &group = collapseReassociations[i];
     if (group.back() < dim) {
@@ -109,11 +110,40 @@ std::optional<int> getCollapsedDim(
     if (alignDimAttrName == hivm::StrideAlignDimsAttr::name.str()) {
       if (!lastDimOfNotOne.has_value()) {
         return i;
-      } else if (lastDimOfNotOne.value() <= dim) {
+      }
+      if (lastDimOfNotOne.value() <= dim) {
         return i;
-      } else if (lastDimOfNotOne.value() > dim) {
+      }
+      // `dim` falls before the last non-unit dim: not collapsible as-is. We may
+      // borrow a non-unit dim to stand in for it, but only when the unit prefix
+      // of this group (every dim from the group start up to and including
+      // `dim`) carries no stride meaning and the source memref is contiguous so
+      // stride relations hold across dims.
+      auto allOnesFromGroupStartToDim = [&]() {
+        for (int d : group) {
+          if (d > dim) {
+            break;
+          }
+          if (collapseSrcShapes[d] != 1) {
+            return false;
+          }
+        }
+        return true;
+      };
+      if (!isContiguous || !allOnesFromGroupStartToDim()) {
         return std::nullopt;
       }
+      // Borrow from a preceding group: walk groups towards lower indices,
+      // skipping any that are all-unit, and return the first one that holds a
+      // non-unit dim.
+      for (int j = static_cast<int>(i) - 1; j >= 0; --j) {
+        std::optional<int> prevLastDimOfNotOne = std::nullopt;
+        if (countNotOneDim(collapseReassociations[j], collapseSrcShapes,
+                           prevLastDimOfNotOne) > 0) {
+          return j;
+        }
+      }
+      return std::nullopt;
     }
 
     if (alignDimAttrName == hivm::AllocAlignDimsAttr::name.str()) {
@@ -155,12 +185,16 @@ LogicalResult propagateAlignInfoByCollapse(
   LDBG("op propagate " << (isPropagateUp ? "up" : "down") << ": " << op);
   LLVM_DEBUG(dump(alignDims, alignBytes, DEBUG_TYPE));
 
-  auto propagateFromShapes =
-      cast<MemRefType>(propagateFromValue.getType()).getShape();
+  auto propagateFromTy = cast<MemRefType>(propagateFromValue.getType());
+  auto propagateFromShapes = propagateFromTy.getShape();
+  // Borrowing across dims is only sound for a contiguous source memref, where
+  // stride relations hold. The borrow paths are gated on this flag.
+  bool isContiguous = propagateFromTy.getLayout().getAffineMap().isIdentity();
   llvm::SmallVector<int32_t> mappedAlignDims(alignDims.size());
   for (size_t i = 0; i < alignDims.size(); ++i) {
     auto mappedDim = getCollapsedDim(alignDims[i], reassociations,
-                                     propagateFromShapes, alignDimAttrName);
+                                     propagateFromShapes, alignDimAttrName,
+                                     isContiguous);
     if (!mappedDim.has_value()) {
       return op.emitError() << "cannot align " << alignDims[i] << " axis for "
                             << propagateFromValue;

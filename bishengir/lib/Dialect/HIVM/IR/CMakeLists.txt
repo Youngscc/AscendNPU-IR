@@ -33,9 +33,11 @@ add_bishengir_dialect_library(BiShengIRHIVMDialect
   HIVMSynchronizationOps.cpp
   HIVMTraits.cpp
   HIVMVectorOps.cpp
+  ../Utils/Utils.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/bishengir/Dialect/HIVM
+  ${MLIR_MAIN_INCLUDE_DIR}/bishengir/Dialect/HIVM/Utils
 
   DEPENDS
   BiShengIRHIVMIncGen
@@ -45,9 +47,12 @@ add_bishengir_dialect_library(BiShengIRHIVMDialect
   BiShengIRHIVMMacroOpsIncGen
   BiShengIRHIVMVectorOpsIncGen
   BiShengIRHIVMSynchronizationOpsIncGen
+  BiShengIRScopeIncGen
 
   LINK_LIBS PUBLIC
   BiShengIRAnnotationDialect
+  BiShengIRScopeDialect
+  MLIRBufferizationDialect
   MLIRArithDialect
   MLIRDestinationStyleOpInterface
   MLIRLinalgDialect

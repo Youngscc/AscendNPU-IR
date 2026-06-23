@@ -178,13 +178,72 @@ ninja -j32
 
 AscendNPU IR binaries are installed with the CANN toolkit; see [CANN Package Installation](#cann-package-installation) above.
 
+## Using Docker Images
+
+Use Docker images for development and verification without environment configuration.
+
+### Reuse CANN Image
+
+The CANN toolkit package includes complete AscendNPU IR binaries, and you can reuse the CANN Docker image.
+
+Find relevant tags based on hardware platform and CANN version at [https://quay.io/repository/ascend/cann?tab=tags](https://quay.io/repository/ascend/cann?tab=tags). For example: `ascend/cann:9.0.0-a3-openeuler24.03-py3.12`
+
+### Build Local Image
+
+Developers can also build local images using the architecture-specific Dockerfiles in the `docker` directory.
+All architectures include the Ascend CANN Toolkit package and the latest compiled AscendNpu IR. Install ops packages and Torch-related components to explore more features.
+
+Base image information for different architectures:
+
+ - **x86_64**: Based on `ubuntu:22.04`
+ - **aarch64**: Based on `openeuler/openeuler:24.03`
+
+Build command:
+
+```bash
+# Build x86_64 image
+docker build -t ascendnpu-ir:latest -f docker/Dockerfile.x86_64 .
+```
+
+### Image Usage
+
+```bash
+IMAGE_NAME="ascendnpu-ir:latest"      # CANN image can be `ascend/cann:9.0.0-a3-openeuler24.03-py3.12`
+# The environment inside provides direct access to AscendNPU-IR tools such as bisheng-compile
+docker run -it \
+  --net=host --privileged \            # Host mode for development
+  --security-opt seccomp=unconfined \  # Disable security restrictions
+  --device=/dev/davinci0 \             # Mount NPU devices
+  --device=/dev/davinci1 \
+  --device=/dev/davinci2 \
+  --device=/dev/davinci3 \
+  --device=/dev/davinci4 \
+  --device=/dev/davinci5 \
+  --device=/dev/davinci6 \
+  --device=/dev/davinci7 \
+  --device=/dev/davinci_manager \
+  --device=/dev/devmm_svm \
+  --device=/dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi \ # Mount dcmi and other devices
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+  -v /etc/ascend_install.info:/etc/ascend_install.info \
+  --name ascendnpu-ir   \              # Container name
+  -v $(pwd):/workspace  \              # Mount current directory to container
+  -w /workspace         \
+  $IMAGE_NAME  /bin/bash
+
+bishengir-compile --version # View AscendNPU IR version information
+```
+
 ## Running Tests
 
 ### Build Test Target
 
 ```bash
 # From the build directory
-cmake --build . --target "check-bishengir"
+cmake --build . --target "check-mlir;check-bishengir"
 ```
 
 This runs `check-mlir` and `check-bishengir`, executing the BiShengIR test suite via llvm-lit.

@@ -246,7 +246,11 @@ void DimensionAnalyzer::computeTilingDimImpl(
       }
     }
     usedParentIdx.clear();
+    std::optional<size_t> forcedDim = inferForcedTilingDim<StoreOpTy>(op);
     for (size_t i = 0; i < rank; i++) {
+      if (forcedDim.has_value() && i != forcedDim.value()) {
+        continue;
+      }
       Dimension dim(src, i);
       if (isParallelDim(dim)) {
         if (ShapedType::isDynamic(shape[i]) || shape[i] == 1) {
@@ -261,6 +265,70 @@ void DimensionAnalyzer::computeTilingDimImpl(
       }
     }
   });
+}
+
+int64_t DimensionAnalyzer::getGlobalTilingAxisId(Value v) {
+  int64_t localDimIdx = getTilingDim(v);
+  if (localDimIdx == -1)
+    return -1;
+  auto args = DimensionAnalyzerBase::getArgumentRef(v);
+  return solverCollapserElem_->find(args[localDimIdx]);
+}
+
+/// Infer whether it is necessary to enforce a specific tiling dimension.
+///
+/// For Matrix Multiplication (C = A * B):
+/// - If A is loaded inside the loop and B is outside, the loop marches along
+/// the M-axis.
+/// - If B is loaded inside the loop and A is outside, the loop marches along
+/// the N-axis.
+template <typename StoreOpTy>
+std::optional<size_t> DimensionAnalyzer::inferForcedTilingDim(StoreOpTy op) {
+  auto hasLoadProducerInsideScope = [this](Value rootVal) -> bool {
+    SmallVector<Value, 4> worklist = {rootVal};
+    llvm::SmallPtrSet<Operation *, 8> visited;
+    while (!worklist.empty()) {
+      Value currVal = worklist.pop_back_val();
+      Operation *defOp = currVal.getDefiningOp();
+
+      if (!defOp || !this->op_->isProperAncestor(defOp))
+        continue;
+      if (!visited.insert(defOp).second)
+        continue;
+
+      if (isa<hivm::LoadOp>(defOp))
+        return true;
+
+      for (Value opnd : defOp->getOperands())
+        worklist.push_back(opnd);
+    }
+    return false;
+  };
+
+  if constexpr (std::is_same_v<StoreOpTy, hivm::FixpipeOp>) {
+    Operation *curr = op.getSrc().getDefiningOp();
+
+    while (curr && !isa<hivm::MmadL1Op>(curr) && curr->getNumOperands() > 0) {
+      curr = curr->getOperand(0).getDefiningOp();
+    }
+
+    if (auto mmadOp = dyn_cast_or_null<hivm::MmadL1Op>(curr)) {
+      bool isAInside = hasLoadProducerInsideScope(mmadOp.getA());
+      bool isBInside = hasLoadProducerInsideScope(mmadOp.getB());
+
+      if (isAInside && !isBInside) {
+        LDBG("Forced tiling dim 0 (M-axis) based on internal Load A");
+        return 0;
+      }
+
+      if (!isAInside && isBInside) {
+        LDBG("Forced tiling dim 1 (N-axis) based on internal Load B");
+        return 1;
+      }
+    }
+  }
+
+  return std::nullopt;
 }
 
 } // namespace detail

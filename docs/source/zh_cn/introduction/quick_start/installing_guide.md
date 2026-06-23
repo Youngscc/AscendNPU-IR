@@ -178,6 +178,64 @@ ninja -j32
 
 AscendNPU-IR二进制会随CANN toolkit包一起安装，参见上文 [CANN 包安装](#cann包安装)。
 
+## 直接使用Docker镜像
+
+使用Docker镜像进行开发与验证，无需配置环境。
+
+### 复用CANN镜像
+
+CANN Toolkit包中会包含完整的AscendNPU IR二进制，Docker镜像可以复用CANN的镜像。
+
+可以在[https://quay.io/repository/ascend/cann?tab=tags](https://quay.io/repository/ascend/cann?tab=tags) 中根据硬件平台和CANN版本查找相关的标签使用。例如 `ascend/cann:9.0.0-a3-openeuler24.03-py3.12`
+
+### 构建本地镜像
+
+开发者也可以独立构建本地镜像，可参考`docker`目录中内置的不同架构的Dockerfile。
+对于不同架构，均包含Ascend CANN Toolkit包 与最新编译的AscendNPU IR。可自行安装ops包与Torch相关组件体验更多内容。
+不同架构下的基础镜像信息为：
+
+ - **x86_64**: 基于 `ubuntu:22.04`
+ - **aarch64**: 基于 `openeuler/openeuler:24.03`
+
+构建方式：
+
+```bash
+# 构建x86_64镜像
+docker build -t ascendnpu-ir:latest -f docker/Dockerfile.x86_64 .
+```
+
+### 镜像使用
+
+```bash
+IMAGE_NAME="ascendnpu-ir:latest"       # CANN 镜像可以为 `ascend/cann:9.0.0-a3-openeuler24.03-py3.12`
+#  进入后的环境可直接使用AscendNPU-IR 相关工具，如 bisheng-compile 等
+docker run -it \
+  --net=host --privileged \            # 主机模式开发
+  --security-opt seccomp=unconfined \  # 关闭安全限制
+  --device=/dev/davinci0 \             # 挂载NPU设备
+  --device=/dev/davinci1 \
+  --device=/dev/davinci2 \
+  --device=/dev/davinci3 \
+  --device=/dev/davinci4 \
+  --device=/dev/davinci5 \
+  --device=/dev/davinci6 \
+  --device=/dev/davinci7 \
+  --device=/dev/davinci_manager \
+  --device=/dev/devmm_svm \
+  --device=/dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi \ # 挂载dcmi等设备
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+  -v /etc/ascend_install.info:/etc/ascend_install.info \
+  --name ascendnpu-ir   \              # 容器名称
+  -v $(pwd):/workspace  \              # 挂载当前目录到容器
+  -w /workspace         \
+  $IMAGE_NAME  /bin/bash
+
+bishengir-compile --version # 可以看到AscendNPU IR 的版本信息
+```
+
 ## 运行测试
 
 ### 编译测试Target

@@ -500,8 +500,13 @@ public:
   /// Get all the ops to tile.
   ArrayRef<OpToTile> getOpTileInfo() const { return opsToTileAndFuse; }
 
-  /// Record the tiling params for the `op`.
   void recordOpToTile(Operation *op, TilingParams &&tilingParams) {
+    recordOpToTile(op, generateOpToTileTag(), std::move(tilingParams));
+  };
+
+  /// Record the tiling params for the `op`.
+  void recordOpToTile(Operation *op, const std::string &customTag,
+                      TilingParams &&tilingParams) {
     LDBG("Try to record op to tile...");
     if (!op)
       return;
@@ -520,7 +525,7 @@ public:
 
     OpToTile opTileInfo;
     opTileInfo.op = op;
-    opTileInfo.tag = generateOpToTileTag();
+    opTileInfo.tag = customTag;
     opTileInfo.tilingParams = std::move(tilingParams);
     lazySetAttr(op, opTileInfo.tag, UnitAttr::get(op->getContext()));
 
@@ -545,8 +550,8 @@ public:
   }
 
   /// Create the transform sequence to tile the loop.
-  transform::NamedSequenceOp createTransformSequence(OpBuilder &builder,
-                                                     Location loc) {
+  virtual transform::NamedSequenceOp createTransformSequence(OpBuilder &builder,
+                                                             Location loc) {
     return builder.create<transform::NamedSequenceOp>(
         loc,
         /*symName=*/transform::TransformDialect::kTransformEntryPointSymbolName,
@@ -587,50 +592,14 @@ public:
     lazyActions.clear();
   }
 
-private:
-  std::string generateOpToTileTag() const {
-    return llvm::formatv(kOpToTile.data(), getIdx(), opsToTileAndFuse.size())
-        .str();
-  }
-
-  void recordLazyAction(std::function<void()> action) {
-    lazyActions.push_back(std::move(action));
-  }
-
+protected:
   //===--------------------------------------------------------------------===//
   // Utils for constructing transform sequence.
   //===--------------------------------------------------------------------===//
 
   /// Define the common body builder to perform loop tiling, fusing, and fuse
   /// into.
-  transform_utils::SequenceBodyBuilderFn getBodyBuilder() {
-    return [this](OpBuilder &builder, Location loc, BlockArgument ba) {
-      this->funcHandle = transform_utils::getFuncHandle(builder, loc, ba);
-
-      SmallVector<Value> tiledLoopHandles;
-      for (const OpToTile &info : getOpTileInfo()) {
-        // Step 1(a): Match the ops to tile
-        auto opHandle =
-            transform_utils::getMatchHandle(builder, loc, ba, info.tag);
-        // Step 1(b): Tile the op
-        auto tiledHandle = transform_utils::createTileUsingForOp(
-            builder, loc, opHandle, info.tilingParams.tileSizes);
-
-        // There should only be one tiling dimension
-        tiledLoopHandles.emplace_back(tiledHandle.getLoops().front());
-      }
-      transform_utils::applyCleanUpPatterns(builder, loc, this->funcHandle);
-      // Step 2: Fuse independent loops together
-      Value fusedLoop =
-          transform_utils::fuseLoops(builder, loc, tiledLoopHandles);
-
-      // Step 3: Fuse producers into tiled loop
-      auto producersToFuse = transform_utils::getMatchHandle(
-          builder, loc, ba, generateProducerTag(), /*reverse=*/true);
-      createForEachFuseIntoBlock(builder, loc, producersToFuse, fusedLoop);
-      builder.create<transform::YieldOp>(loc);
-    };
-  }
+  virtual transform_utils::SequenceBodyBuilderFn getBodyBuilder() { return {}; }
 
   /// Create a `for_each` loop to fuse producers into loop one-by-one, while
   /// performing canonicalization.
@@ -667,6 +636,19 @@ private:
     transform::ForeachOp::ensureTerminator(body, builder, foreach.getLoc());
   }
 
+  /// Function handle in the transform sequence.
+  Value funcHandle{};
+
+private:
+  std::string generateOpToTileTag() const {
+    return llvm::formatv(kOpToTile.data(), getIdx(), opsToTileAndFuse.size())
+        .str();
+  }
+
+  void recordLazyAction(std::function<void()> action) {
+    lazyActions.push_back(std::move(action));
+  }
+
 private:
   /// Unique ID of the loop.
   size_t idx{0};
@@ -682,14 +664,59 @@ private:
 
   /// A collection of lazy actions to be applied.
   std::vector<std::function<void()>> lazyActions;
-
-  /// Function handle in the transform sequence.
-  Value funcHandle{};
 };
 
 //===----------------------------------------------------------------------===//
 // Cube Loop Information.
 //===----------------------------------------------------------------------===//
+
+class CubeBranch {
+public:
+  CubeBranch(size_t branchIdx, hivm::FixpipeOp fixpipe, hivm::MmadL1Op mmad)
+      : branchIdx(branchIdx), fixpipe(fixpipe), mmad(mmad) {}
+
+  size_t getBranchIdx() const { return branchIdx; }
+  hivm::FixpipeOp getFixpipe() const { return fixpipe; }
+  hivm::MmadL1Op getMmad() const { return mmad; }
+  ArrayRef<Operation *> getProducers() const { return producers; }
+
+  void addProducer(Operation *op) { producers.push_back(op); }
+
+  std::string getTileTag(size_t loopIdx) const {
+    return llvm::formatv("op_to_tile_{0}_branch_{1}", loopIdx, branchIdx).str();
+  }
+
+private:
+  size_t branchIdx;
+  hivm::FixpipeOp fixpipe;
+  hivm::MmadL1Op mmad;
+  SmallVector<Operation *, 4> producers;
+};
+
+class CubeLoopGroup {
+public:
+  CubeLoopGroup(size_t groupIdx) : groupIdx(groupIdx) {}
+
+  ArrayRef<CubeBranch> getBranches() const { return branches; }
+  MutableArrayRef<CubeBranch> getBranchesMutable() { return branches; }
+  const TilingParams &getGroupTilingParams() const { return groupTilingParams; }
+
+  void addBranch(CubeBranch branch) { branches.push_back(std::move(branch)); }
+  void setGroupTilingParams(TilingParams params) {
+    groupTilingParams = std::move(params);
+  }
+
+  std::string getGroupProducerTag(size_t loopIdx) const {
+    return llvm::formatv("cube_producer_to_fuse_{0}_group_{1}", loopIdx,
+                         groupIdx)
+        .str();
+  }
+
+private:
+  size_t groupIdx;
+  SmallVector<CubeBranch, 2> branches;
+  TilingParams groupTilingParams;
+};
 
 class CubeLoopInfo : public LoopInfo {
 public:
@@ -700,19 +727,55 @@ public:
     return T->getLoopType() == hivm::TCoreType::CUBE;
   }
 
-  void setFixpipeOp(hivm::FixpipeOp op) { fixpipeOp = op; }
-  hivm::FixpipeOp getFixpipeOp() { return fixpipeOp; }
-
   void setTileCubeAttr(bool hasAttr) { hasTileCubeAttr = hasAttr; }
   bool getTileCubeAttr() { return hasTileCubeAttr; }
 
-  void setTiledDim(std::optional<int64_t> dim) { tiledDim = dim; }
-  std::optional<int64_t> getTiledDim() { return tiledDim; }
+  void addLoopGroup(CubeLoopGroup group) { groups.push_back(std::move(group)); }
+  ArrayRef<CubeLoopGroup> getLoopGroups() const { return groups; }
+
+  transform_utils::SequenceBodyBuilderFn getBodyBuilder() override {
+    return [this](OpBuilder &builder, Location loc, BlockArgument ba) {
+      this->funcHandle = transform_utils::getFuncHandle(builder, loc, ba);
+
+      for (const auto &group : groups) {
+        SmallVector<Value> tiledLoopHandles;
+
+        // Tiling all Fixpipes within the group
+        for (const auto &branch : group.getBranches()) {
+          auto opHandle = transform_utils::getMatchHandle(
+              builder, loc, ba, branch.getTileTag(this->getIdx()));
+          auto tiledHandle = transform_utils::createTileUsingForOp(
+              builder, loc, opHandle, group.getGroupTilingParams().tileSizes);
+          tiledLoopHandles.emplace_back(tiledHandle.getLoops().front());
+        }
+
+        Value fusedLoop;
+        if (tiledLoopHandles.size() == 1) {
+          fusedLoop = tiledLoopHandles.front();
+        } else {
+          // Fusing all base fixpipes in the group
+          transform_utils::applyCleanUpPatterns(builder, loc, this->funcHandle);
+          fusedLoop =
+              transform_utils::fuseLoops(builder, loc, tiledLoopHandles);
+        }
+
+        // Fusing all producer in the group
+        auto groupProducersToFuse = transform_utils::getMatchHandle(
+            builder, loc, ba, group.getGroupProducerTag(this->getIdx()),
+            /*reverse=*/true);
+
+        this->createForEachFuseIntoBlock(builder, loc, groupProducersToFuse,
+                                         fusedLoop);
+      }
+
+      transform_utils::applyCleanUpPatterns(builder, loc, this->funcHandle);
+      builder.create<transform::YieldOp>(loc);
+    };
+  }
 
 private:
-  hivm::FixpipeOp fixpipeOp{nullptr};
   bool hasTileCubeAttr{false};
-  std::optional<int64_t> tiledDim;
+  SmallVector<CubeLoopGroup, 2> groups;
 };
 
 //===----------------------------------------------------------------------===//
@@ -734,6 +797,35 @@ public:
     RewritePatternSet patterns(ctx);
     patterns.add<RemoveDummyStore>(ctx);
     return applyPatternsGreedily(module, std::move(patterns));
+  }
+
+  transform_utils::SequenceBodyBuilderFn getBodyBuilder() override {
+    return [this](OpBuilder &builder, Location loc, BlockArgument ba) {
+      this->funcHandle = transform_utils::getFuncHandle(builder, loc, ba);
+
+      SmallVector<Value> tiledLoopHandles;
+      for (const OpToTile &info : getOpTileInfo()) {
+        // Step 1(a): Match the ops to tile
+        auto opHandle =
+            transform_utils::getMatchHandle(builder, loc, ba, info.tag);
+        // Step 1(b): Tile the op
+        auto tiledHandle = transform_utils::createTileUsingForOp(
+            builder, loc, opHandle, info.tilingParams.tileSizes);
+
+        // There should only be one tiling dimension
+        tiledLoopHandles.emplace_back(tiledHandle.getLoops().front());
+      }
+      transform_utils::applyCleanUpPatterns(builder, loc, this->funcHandle);
+      // Step 2: Fuse independent loops together
+      Value fusedLoop =
+          transform_utils::fuseLoops(builder, loc, tiledLoopHandles);
+
+      // Step 3: Fuse producers into tiled loop
+      auto producersToFuse = transform_utils::getMatchHandle(
+          builder, loc, ba, generateProducerTag(), /*reverse=*/true);
+      createForEachFuseIntoBlock(builder, loc, producersToFuse, fusedLoop);
+      builder.create<transform::YieldOp>(loc);
+    };
   }
 };
 
@@ -761,7 +853,29 @@ private:
   template <typename OpType> LogicalResult collectCubeLoopInfo(OpType cubeLoop);
   template <typename OpType>
   LogicalResult collectVectorLoopInfo(OpType vectorLoop);
-  std::optional<TilingParams> calculateFixpipeTiling(CubeLoopInfo &info) const;
+
+  // Obtains independent cube calculation branch.
+  template <typename OpType>
+  LogicalResult extractCubeBranches(hivm::detail::DimensionAnalyzer &analyzer,
+                                    OpType cubeLoop,
+                                    SmallVectorImpl<CubeBranch> &allBranches);
+
+  // Extract the common axis of the branch for fusion.
+  LogicalResult
+  groupBranchesByCommonAxis(hivm::detail::DimensionAnalyzer &analyzer,
+                            ArrayRef<CubeBranch> allBranches,
+                            SmallVectorImpl<CubeLoopGroup> &loopGroups,
+                            int64_t targetTripCount, bool hasTileCubeAttr);
+  std::optional<TilingParams>
+  calculateGroupTiling(hivm::detail::DimensionAnalyzer &analyzer,
+                       ArrayRef<CubeBranch> branches, int64_t targetTripCount,
+                       bool hasTileCubeAttr);
+  bool canFitBranchInBuffer(ArrayRef<CubeBranch> branches,
+                            int64_t targetTripCount, bool hasTileCubeAttr);
+
+  /// Check if L0C-resident accumulation requires skipping tiling.
+  bool hasL0CAccumulation(ArrayRef<CubeBranch> allBranches,
+                          int64_t targetTripCount, bool hasTileCubeAttr);
 
   /// Main entry to apply transformation
   LogicalResult applyTransformation(ModuleOp topLevelModule, LoopInfo &info);
@@ -887,119 +1001,6 @@ tryCollectTilingInfoForTerminate(TerminateType terminateOp, Value yieldedVal,
   info.lazySetAttr(dummyStore, kDummyStore.str(),
                    UnitAttr::get(dummyStore->getContext()));
   return success();
-}
-
-/// Trace down from the LoadOp to the MmadL1Op while marking intermediate ops as
-/// producers to fuse-into.
-void markOpTouchingMMAD(hivm::LoadOp load, CubeLoopInfo &info) {
-  // Ignore memref loads because the targeted loads should be tensor or
-  // has been converted to tensor.
-  bool isMemRefLoad = load.hasPureBufferSemantics();
-  if (isMemRefLoad)
-    return;
-
-  // Record all operations that operated on the inputs to mmad
-  SmallVector<Operation *> trace{load};
-  Operation *maybeMmadL1Op =
-      traceConsumerTo<hivm::MmadL1Op>(load.getResult(0).getDefiningOp(), trace);
-
-  if (!maybeMmadL1Op)
-    return;
-
-  auto mmadL1Op = dyn_cast<hivm::MmadL1Op>(maybeMmadL1Op);
-  std::optional<Operation *> ADefOp = traceDefOp<hivm::LoadOp>(mmadL1Op.getA());
-  std::optional<Operation *> BDefOp = traceDefOp<hivm::LoadOp>(mmadL1Op.getB());
-  std::optional<Operation *> maybeReinterpretCastOp =
-      traceDefOp<memref::ReinterpretCastOp>(load.getSrc());
-  bool isFromEntryBlock{false};
-  // If the source of load op originates from entry block, we will not tile it
-  if (maybeReinterpretCastOp.has_value()) {
-    if (auto reinterpretCastOp = dyn_cast<memref::ReinterpretCastOp>(
-            maybeReinterpretCastOp.value())) {
-      auto viewSrc = reinterpretCastOp.getViewSource();
-      if (auto blockArg = dyn_cast<mlir::BlockArgument>(viewSrc)) {
-        mlir::Block *ownerBlock = blockArg.getOwner();
-        if (ownerBlock->isEntryBlock()) {
-          isFromEntryBlock = true;
-        }
-      }
-    }
-  }
-
-  auto tileDim = info.getTiledDim();
-  if (tileDim.has_value() && isFromEntryBlock &&
-      maybeMmadL1Op->hasAttr(hivm::TileMixCubeNumAttr::name)) {
-    // if tiled dim is not from this load op, we will not tile it
-    if (tileDim.value() == 1 && ADefOp.value() == load)
-      return;
-    if (tileDim.value() == 0 && BDefOp.value() == load)
-      return;
-  }
-
-  // Also consider the loaded operands as potential producers
-  trace.append(
-      {load.getSource().getDefiningOp(), load.getTarget().getDefiningOp()});
-
-  // Tag the producers so that we can fuse into later.
-  llvm::for_each(trace, [&load, &info](Operation *op) {
-    if (!op)
-      return;
-
-    info.lazySetAttr(op, info.generateProducerTag(),
-                     UnitAttr::get(load.getContext()));
-  });
-}
-
-/// Calculate the tiling parms for the fixpipe op in the cube loop.
-///
-/// Rules:
-///   1) Select the largest axis in [M, N] to tile.
-///   2) If L0C fits, we will not tile it. This might not always be the case
-///      because L1 may not fit.
-std::optional<TilingParams>
-TileCubeVectorLoopPass::calculateFixpipeTiling(CubeLoopInfo &info) const {
-  auto fixpipeOp = info.getFixpipeOp();
-  auto dstType = fixpipeOp.getDstOperandType();
-  if (!dstType.hasStaticShape()) {
-    LDBG("Fixpipe dst doesn't have static shape");
-    return std::nullopt;
-  }
-
-  auto maybeStaticTotalSize = mlir::utils::getStaticTotalSizeInBits(
-      dstType.getShape(), dstType.getElementType());
-  if (!maybeStaticTotalSize.has_value()) {
-    LDBG("Failed to calculate static total size for fixpipe dst");
-    return std::nullopt;
-  }
-
-  LDBG("Total size required in L0C: " << maybeStaticTotalSize.value());
-  const int64_t kL0CSizeInBits = hacc::utils::getIntegerSpecValue(
-      this->spec.getSpecForIdentifierEnum(hacc::DeviceSpec::L0C_SIZE));
-  bool hasTileCubeAttr = info.getTileCubeAttr();
-  if (maybeStaticTotalSize.value() <= kL0CSizeInBits &&
-      info.getTripCount() != 1 && !hasTileCubeAttr) {
-    LDBG("No need to tile because the data can fit on L0C");
-    fixpipeOp.emitWarning(
-        "Ignoring candidate cube loop trip count because it's suboptimal");
-    info.setTripCount(1);
-    return std::nullopt;
-  }
-
-  [[maybe_unused]] int64_t calculatedTripCount =
-      llvm::divideCeilSigned(maybeStaticTotalSize.value(), kL0CSizeInBits);
-  LDBG("Calculated minimum trip count: " << calculatedTripCount);
-
-  TilingParams result;
-  assert(dstType.getRank() == 2 && "MmadL1 operand rank must be two");
-  // Tile the larger dimension
-  int64_t singleTileDim =
-      dstType.getDimSize(0) >= dstType.getDimSize(1) ? 0 : 1;
-  info.setTiledDim(singleTileDim);
-  result.tiledDims = {singleTileDim};
-  result.tileSizes = SmallVector<int64_t>(dstType.getRank(), 0);
-  result.tileSizes[singleTileDim] = llvm::divideCeilSigned(
-      dstType.getDimSize(singleTileDim), info.getTripCount());
-  return result;
 }
 
 template <typename OpType>
@@ -1173,70 +1174,356 @@ std::optional<int64_t> getMixCubeLoopNumber(OpType cubeLoop,
   return tileCubeLoopNum;
 }
 
-/// Collect cube loop information.
+// Extract independent cube computation branch.
+template <typename OpType>
+LogicalResult TileCubeVectorLoopPass::extractCubeBranches(
+    hivm::detail::DimensionAnalyzer &analyzer, OpType cubeLoop,
+    SmallVectorImpl<CubeBranch> &allBranches) {
+
+  SmallVector<hivm::FixpipeOp, 4> fixpipeOps;
+  cubeLoop->walk(
+      [&](hivm::FixpipeOp fixpipeOp) { fixpipeOps.push_back(fixpipeOp); });
+
+  if (fixpipeOps.empty()) {
+    return success();
+  }
+
+  auto collectProducers = [&](Value operand, CubeBranch &branch) {
+    SmallVector<Value> worklist = {operand};
+    llvm::SmallPtrSet<Operation *, 4> visited;
+
+    while (!worklist.empty()) {
+      Value current = worklist.pop_back_val();
+      Operation *defOp = current.getDefiningOp();
+
+      if (!defOp || !cubeLoop->isProperAncestor(defOp))
+        continue;
+      if (!visited.insert(defOp).second)
+        continue;
+      branch.addProducer(defOp);
+
+      if (auto loadOp = dyn_cast<hivm::LoadOp>(defOp)) {
+        if (loadOp.hasPureBufferSemantics())
+          continue;
+        if (Operation *srcDef = loadOp.getSource().getDefiningOp()) {
+          branch.addProducer(srcDef);
+        }
+        if (Operation *dstDef = loadOp.getTarget().getDefiningOp()) {
+          branch.addProducer(dstDef);
+        }
+        continue;
+      }
+
+      for (Value opnd : defOp->getOperands()) {
+        worklist.push_back(opnd);
+      }
+    }
+  };
+
+  size_t branchIdx = 0;
+  for (auto fixpipeOp : fixpipeOps) {
+    std::optional<Operation *> maybeMmad =
+        traceDefOp<hivm::MmadL1Op>(fixpipeOp.getSource());
+    auto mmadL1 = dyn_cast_or_null<hivm::MmadL1Op>(maybeMmad.value_or(nullptr));
+
+    if (!mmadL1) {
+      return fixpipeOp.emitOpError(
+          "Cannot find matmul producer for fixpipe in this branch");
+    }
+
+    CubeBranch branch(branchIdx++, fixpipeOp, mmadL1);
+    int64_t branchAxisId = analyzer.getGlobalTilingAxisId(fixpipeOp.getSrc());
+
+    if (analyzer.getGlobalTilingAxisId(mmadL1.getA()) == branchAxisId) {
+      collectProducers(mmadL1.getA(), branch);
+    }
+
+    if (analyzer.getGlobalTilingAxisId(mmadL1.getB()) == branchAxisId) {
+      collectProducers(mmadL1.getB(), branch);
+    }
+
+    allBranches.push_back(std::move(branch));
+  }
+
+  return success();
+}
+
+std::optional<TilingParams> TileCubeVectorLoopPass::calculateGroupTiling(
+    hivm::detail::DimensionAnalyzer &analyzer, ArrayRef<CubeBranch> branches,
+    int64_t targetTripCount, bool hasTileCubeAttr) {
+
+  if (branches.empty())
+    return std::nullopt;
+
+  Value firstSrc = branches.front().getFixpipe().getSrc();
+  int64_t commonDimIdx = analyzer.getTilingDim(firstSrc);
+  if (commonDimIdx == -1) {
+    LDBG("No valid tiling dimension found for fixpipe src. Aborting fusion to "
+         "prevent invalid memory access.");
+    return std::nullopt;
+  }
+
+  auto firstDstType = branches.front().getFixpipe().getDstOperandType();
+  if (!firstDstType.hasStaticShape()) {
+    LDBG("Fixpipe dst doesn't have static shape.");
+    return std::nullopt;
+  }
+
+  auto firstShape = firstDstType.getShape();
+  int64_t commonDimSize = firstShape[commonDimIdx];
+  for (const auto &branch : branches) {
+    auto shape = branch.getFixpipe().getDstOperandType().getShape();
+    if (shape[commonDimIdx] != commonDimSize) {
+      LDBG("Branch shape mismatch on chosen common axis. Fusion impossible.");
+      return std::nullopt;
+    }
+  }
+
+  TilingParams params;
+  params.tiledDims = {static_cast<int>(commonDimIdx)};
+  params.tileSizes = SmallVector<int64_t>(firstShape.size(), 0);
+  params.tileSizes[commonDimIdx] =
+      llvm::divideCeilSigned(commonDimSize, targetTripCount);
+
+  return params;
+}
+
+// Check whether the fixpipe destination data for all branches can fit
+// entirely within the L0C buffer.  For a single branch the individual size
+// is compared; for multiple branches the total size is summed.
+bool TileCubeVectorLoopPass::canFitBranchInBuffer(ArrayRef<CubeBranch> branches,
+                                                  int64_t targetTripCount,
+                                                  bool hasTileCubeAttr) {
+  if (branches.empty() || targetTripCount == 1 || hasTileCubeAttr)
+    return false;
+
+  const int64_t kL0CSizeInBits = hacc::utils::getIntegerSpecValue(
+      this->spec.getSpecForIdentifierEnum(hacc::DeviceSpec::L0C_SIZE));
+
+  auto getSizeBits = [&](const CubeBranch &branch) -> std::optional<int64_t> {
+    auto dstType = branch.getFixpipe().getDstOperandType();
+    if (!dstType.hasStaticShape())
+      return std::nullopt;
+    return mlir::utils::getStaticTotalSizeInBits(dstType.getShape(),
+                                                 dstType.getElementType());
+  };
+
+  if (branches.size() == 1) {
+    auto maybeSize = getSizeBits(branches.front());
+    if (!maybeSize.has_value())
+      return false;
+    if (maybeSize.value() <= kL0CSizeInBits) {
+      return true;
+    }
+    return false;
+  }
+
+  // Multi-branch: sum the sizes of all fixpipe destinations.
+  int64_t totalSizeBits = 0;
+  for (const auto &branch : branches) {
+    auto maybeSize = getSizeBits(branch);
+    if (!maybeSize.has_value())
+      return false;
+    totalSizeBits += maybeSize.value();
+  }
+  if (totalSizeBits <= kL0CSizeInBits) {
+    return true;
+  }
+  return false;
+}
+
+// Check whether the cube loop has L0C-resident MmadL1 accumulation, which
+// requires skipping tiling to preserve correct partial-result accumulation.
+bool TileCubeVectorLoopPass::hasL0CAccumulation(
+    ArrayRef<CubeBranch> allBranches, int64_t targetTripCount,
+    bool hasTileCubeAttr) {
+
+  for (const auto &branch : allBranches) {
+    auto mmad = branch.getMmad();
+    if (!mmad)
+      continue;
+    Value accFlag = mmad.getOperand(2);
+    if (!accFlag)
+      continue;
+    if (!matchPattern(accFlag, m_Constant())) {
+      LDBG("MmadL1 has non-constant accumulate flag, L0C accumulation"
+           " detected");
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// Branches that share same tiling axis are merged into same CubeLoopGroup, so
+// that they can fused into the same sub loop.
+LogicalResult TileCubeVectorLoopPass::groupBranchesByCommonAxis(
+    hivm::detail::DimensionAnalyzer &analyzer, ArrayRef<CubeBranch> allBranches,
+    SmallVectorImpl<CubeLoopGroup> &loopGroups, int64_t targetTripCount,
+    bool hasTileCubeAttr) {
+
+  DenseMap<int64_t, SmallVector<CubeBranch, 2>> axisIdToGroups;
+  SmallVector<CubeBranch, 2> independentBranches;
+
+  for (const auto &branch : allBranches) {
+    Value fixpipeSrc = branch.getFixpipe().getSrc();
+    int64_t globalAxisId = analyzer.getGlobalTilingAxisId(fixpipeSrc);
+
+    if (globalAxisId == -1) {
+      LDBG("Warning: Branch fixpipe lacks a valid global tiling axis.");
+      branch.getFixpipe().emitWarning(
+          "Failed to find a spatial global axis for tiling.");
+      return failure();
+    }
+
+    axisIdToGroups[globalAxisId].push_back(branch);
+  }
+
+  auto createGroup = [&](ArrayRef<CubeBranch> branches) -> LogicalResult {
+    if (branches.empty())
+      return success();
+
+    CubeLoopGroup group(loopGroups.size());
+    for (auto &b : branches)
+      group.addBranch(b);
+
+    std::optional<TilingParams> params = calculateGroupTiling(
+        analyzer, branches, targetTripCount, hasTileCubeAttr);
+    if (!params) {
+      LDBG("Failed to calculate tiling params for group.");
+      return failure();
+    }
+
+    group.setGroupTilingParams(std::move(*params));
+    loopGroups.push_back(std::move(group));
+    return success();
+  };
+
+  for (auto &it : axisIdToGroups) {
+    if (failed(createGroup(it.second)))
+      return failure();
+  }
+
+  return success();
+}
+
+/// Collect tiling and fusion information for Cube loops.
 ///
-/// We assume that the cube loop always have the following structure:
+/// Expected IR Structure (Multi-Branch Scenario):
 /// ```mlir
-/// for ... {
-///   %a = memref.alloc
-///   hivm.hir.load ins(%arg_a) outs(%a)
-///   %b = hivm.hir.load ins(%arg_b) outs(...)
-///   %result = hivm.hir.mmadL1 ins(%a, %b)
-///   hivm.hir.fixpipe ins(%result)
-/// }
+///   // --- Branch 1 ---
+///   %a1 = hivm.hir.load ins(%global_a) outs(%buf_a)
+///   %b1 = hivm.hir.load ins(%global_b1) outs(%buf_b1)
+///   %mmad1 = hivm.hir.mmadL1 ins(%a1, %b1)
+///   hivm.hir.fixpipe ins(%mmad1) outs(%out1)
+///
+///   // --- Branch 2 ---
+///   // May share inputs or just share the same tiling axis with Branch 1
+///   %b2 = hivm.hir.load ins(%global_b2) outs(%buf_b2)
+///   %mmad2 = hivm.hir.mmadL1 ins(%a1, %b2)
+///   hivm.hir.fixpipe ins(%mmad2) outs(%out2)
 /// ```
-/// Note that the load of matrix A/B are not necessarily in the loop.
+/// This function analyzes structured Cube operations within a loop, extracts
+/// independent compute branches, groups them by their common tiling axis,
+/// and tags them for downstream Transform Dialect tiling and fusion.
 template <typename OpType>
 LogicalResult TileCubeVectorLoopPass::collectCubeLoopInfo(OpType cubeLoop) {
   CubeLoopInfo info(loopsToTile.size(),
                     static_cast<int64_t>(this->tiledMixCubeLoopNumber));
-  if (info.getTripCount() == 1)
-    return success();
 
-  // Locate the single fixpipe op
-  hivm::FixpipeOp singleFixpipeOp = nullptr;
-  auto walkResult =
-      cubeLoop->walk([&singleFixpipeOp](hivm::FixpipeOp fixpipeOp) {
-        if (!singleFixpipeOp)
-          singleFixpipeOp = fixpipeOp;
-        else
-          return WalkResult::interrupt();
-        return WalkResult::advance();
-      });
-  if (walkResult.wasInterrupted())
-    return cubeLoop.emitOpError(
-        "Currently don't support multiple fixpipe in cube loop");
-
-  if (!singleFixpipeOp)
-    return cubeLoop.emitOpError("Cannot find fixpipe in cube loop");
-
-  info.setFixpipeOp(singleFixpipeOp);
-
-  // set mix cube loop number depending on TileMixCubeNumAttr
   auto tileCubeLoopNum = getMixCubeLoopNumber(cubeLoop, info);
   if (tileCubeLoopNum.has_value()) {
     info.setTileCubeAttr(true);
     info.setTripCount(tileCubeLoopNum.value());
   }
 
-  // Calculate fixpipe tiling
-  auto maybeTilingResult = calculateFixpipeTiling(info);
-  if (!maybeTilingResult.has_value())
-    return singleFixpipeOp.emitOpError("Failed to calculate tiling");
+  if (info.getTripCount() == 1)
+    return success();
 
-  info.recordOpToTile(singleFixpipeOp, std::move(*maybeTilingResult));
+  hivm::detail::DimensionAnalyzer analyzer(cubeLoop.getOperation());
+  if (failed(analyzer.initialize()))
+    return failure();
+  analyzer.computeTilingDim(false);
 
-  std::optional<Operation *> maybeMmadL1Op =
-      traceDefOp<hivm::MmadL1Op>(singleFixpipeOp.getSource());
-  if (!maybeMmadL1Op.has_value() || !isa<hivm::MmadL1Op>(maybeMmadL1Op.value()))
-    return cubeLoop.emitOpError("Cannot find matmul in cube loop");
+  SmallVector<CubeBranch, 4> allBranches;
+  if (failed(extractCubeBranches(analyzer, cubeLoop, allBranches))) {
+    return cubeLoop.emitOpError("Failed to extract compute branches");
+  }
+  if (allBranches.empty())
+    return success();
 
-  // Only tile the load ops inside the for loop.
-  cubeLoop.walk([&info](hivm::LoadOp load) { markOpTouchingMMAD(load, info); });
+  // If the cube loop uses L0C-resident MmadL1 accumulation, tiling would
+  // break the partial-result accumulation pattern.
+  if (hasL0CAccumulation(allBranches, info.getTripCount(),
+                         info.getTileCubeAttr())) {
+    LDBG("Skipping cube loop tiling: L0C accumulation detected");
+    info.setTripCount(1);
+    return success();
+  }
 
-  // Finish collecting all info
+  if (canFitBranchInBuffer(allBranches, info.getTripCount(),
+                           info.getTileCubeAttr())) {
+    LDBG("No need to tile because sum of branches can fit on L0C");
+    info.setTripCount(1);
+    return success();
+  }
+
+  SmallVector<CubeLoopGroup, 2> loopGroups;
+  if (failed(groupBranchesByCommonAxis(analyzer, allBranches, loopGroups,
+                                       info.getTripCount(),
+                                       info.getTileCubeAttr()))) {
+    return cubeLoop.emitOpError("Failed to resolve axis and grouping");
+  }
+
+  auto fuseTagAttr = UnitAttr::get(&getContext());
+
+  auto isFromEntryBlock = [](hivm::LoadOp loadOp) -> bool {
+    auto maybeReinterpretCastOp =
+        traceDefOp<memref::ReinterpretCastOp>(loadOp.getSource());
+    if (maybeReinterpretCastOp.has_value()) {
+      if (auto castOp = dyn_cast<memref::ReinterpretCastOp>(
+              maybeReinterpretCastOp.value())) {
+        if (auto blockArg =
+                dyn_cast<mlir::BlockArgument>(castOp.getViewSource())) {
+          return blockArg.getOwner()->isEntryBlock();
+        }
+      }
+    }
+    return false;
+  };
+
+  for (auto &group : loopGroups) {
+    for (auto &branch : group.getBranchesMutable()) {
+
+      info.recordOpToTile(branch.getFixpipe(), branch.getTileTag(info.getIdx()),
+                          TilingParams(group.getGroupTilingParams()));
+
+      std::string groupTag = group.getGroupProducerTag(info.getIdx());
+      info.lazySetAttr(branch.getMmad(), groupTag, fuseTagAttr);
+
+      // If Load does not have split axis, no need to pull it into tile loop
+      int64_t groupAxisId =
+          analyzer.getGlobalTilingAxisId(branch.getFixpipe().getSrc());
+      for (Operation *op : branch.getProducers()) {
+        if (auto loadOp = dyn_cast<hivm::LoadOp>(op)) {
+          int64_t loadAxisId =
+              analyzer.getGlobalTilingAxisId(loadOp.getResult(0));
+          if (loadAxisId != groupAxisId) {
+            if (info.getTileCubeAttr() && isFromEntryBlock(loadOp)) {
+              LDBG("Skipping fuse tag for global weight LoadOp: " << loadOp);
+              continue;
+            }
+          }
+        }
+
+        info.lazySetAttr(op, groupTag, fuseTagAttr);
+      }
+    }
+    info.addLoopGroup(std::move(group));
+  }
+
   info.commitLazyActions();
-  loopsToTile.emplace_back(std::make_unique<CubeLoopInfo>(info));
+  loopsToTile.emplace_back(std::make_unique<CubeLoopInfo>(std::move(info)));
   return success();
 }
 
