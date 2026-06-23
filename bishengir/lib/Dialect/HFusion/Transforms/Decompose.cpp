@@ -100,7 +100,7 @@ std::unique_ptr<Pass> createDecomposePass(const DecomposeOptions &options) {
 
 } // namespace mlir::hfusion
 
+namespace mlir {
 namespace {
 #define GEN_PASS_REGISTRATION
-#include "bishengir/Dialect/HFusion/Transforms/Passes.h.inc"
-} // namespace
+#include "bishengir/Dialect/HFusion/Transforms/Passes
