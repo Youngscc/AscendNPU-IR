@@ -1,19 +1,21 @@
 // RUN: bishengir-opt --hfusion-decompose="hfusion-decompose-phase=after-hfusion-flatten" %s -split-input-file -verify-diagnostics | FileCheck %s
+// RUN: bishengir-opt --hfusion-decompose="hfusion-decompose-phase=before-lower-to-loops" %s -split-input-file -verify-diagnostics | FileCheck %s --check-prefix=CPU
+
+
 
 // CHECK-LABEL: func.func @test_isfinite
 func.func @test_isfinite() -> tensor<8192xi1> {
   // CHECK: %[[ZERO:.*]] = tensor.empty() : tensor<8192xf32>
   %0 = tensor.empty() : tensor<8192xf32>
-  // CHECK: %[[ISINF:.*]] = hfusion.isinf %[[ZERO:.*]] : tensor<8192xf32> -> tensor<8192xi1>
-  // CHECK: %[[ISNAN:.*]] = hfusion.isnan %[[ZERO:.*]] : tensor<8192xf32> -> tensor<8192xi1>
-  // CHECK: %[[VOROUTPUT:.*]] = tensor.empty() : tensor<8192xi1>
-  // CHECK: %[[VOR:.*]] = hfusion.elemwise_binary {fun = #hfusion.binary_fn<vor>} ins(%[[ISINF:.*]], %[[ISNAN:.*]] : tensor<8192xi1>, tensor<8192xi1>) outs(%[[VOROUTPUT:.*]] : tensor<8192xi1>) -> tensor<8192xi1>
-  // CHECK: %[[VNOTOUTPUT:.*]] = tensor.empty() : tensor<8192xi1>
-  // CHECK: %[[VNOT:.*]] = hfusion.elemwise_unary {fun = #hfusion.unary_fn<vnot>} ins(%[[VOR:.*]] : tensor<8192xi1>) outs(%[[VNOTOUTPUT:.*]] : tensor<8192xi1>) -> tensor<8192xi1>
-  // CHECK: return %[[VNOT:.*]] : tensor<8192xi1>
+  // CHECK: %[[ISINF:.*]] = hfusion.isinf
+  // CHECK: %[[ISNAN:.*]] = hfusion.isnan %[[ZERO]]
+  // CHECK: %[[VOR:.*]] = hfusion.elemwise_binary {fun = #hfusion.binary_fn<vor>} ins(%[[ISINF]], %[[ISNAN]]
+  // CHECK: %[[VNOT:.*]] = hfusion.elemwise_unary {fun = #hfusion.unary_fn<vnot>} ins(%[[VOR]]
+  // CHECK: return %[[VNOT]]
   %2 = hfusion.isfinite %0 : tensor<8192xf32> -> tensor<8192xi1>
   return %2 : tensor<8192xi1>
 }
+
 
 // -----
 
@@ -186,6 +188,27 @@ func.func @histogram_mask(%arg0: tensor<8xi32>, %mask: tensor<8xi1>)
 
 
 // -----
+// CHECK-LABEL: func.func @test_isinf_decompose
+// CHECK: hfusion.isinf
+
+// CPU-LABEL: func.func @test_isinf_decompose
+// CPU-NOT: hfusion.isinf
+module {
+  func.func @test_isinf_decompose(%arg0: tensor<4xf32>) -> tensor<4xi1> {
+    // CPU-DAG: %[[POS_INF:.*]] = arith.constant 0x7F800000 : f32
+    // CPU-DAG: %[[NEG_INF:.*]] = arith.constant 0xFF800000 : f32
+    // CPU: linalg.generic
+    // CPU: ^bb0(%[[IN:.*]]: f32, %[[OUT:.*]]: i1):
+    // CPU:   %[[IS_POS:.*]] = arith.cmpf oeq, %[[IN]], %[[POS_INF]] : f32
+    // CPU:   %[[IS_NEG:.*]] = arith.cmpf oeq, %[[IN]], %[[NEG_INF]] : f32
+    // CPU:   %[[RES:.*]] = arith.ori %[[IS_POS]], %[[IS_NEG]] : i1
+    // CPU:   linalg.yield %[[RES]] : i1
+    %0 = hfusion.isinf %arg0 : tensor<4xf32> -> tensor<4xi1>
+    return %0 : tensor<4xi1>
+  }
+}
+
+// -----
 
 // CHECK-LABEL:   func.func @histogram_nomask_i16(
 // CHECK-SAME:                                    %[[VAL_0:.*]]: tensor<16xi16>) -> tensor<4xi32> {
@@ -292,3 +315,4 @@ func.func @histogram_nomask_i64(%arg0: tensor<128xi64>) -> tensor<16xi32> {
   %res = hfusion.histogram %arg0, 16 : tensor<128xi64> -> tensor<16xi32>
   return %res : tensor<16xi32>
 }
+
