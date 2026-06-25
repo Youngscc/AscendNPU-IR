@@ -1572,6 +1572,19 @@ void TileCubeVectorLoopPass::runOnOperation() {
   }
   this->spec = maybeSpecInterface.value();
 
+  // Return early if cv-pipelining is not enabled.
+  bool hasPipelinedLoops = false;
+  topLevelModule->walk([&hasPipelinedLoops](Operation *op) {
+    if (isa<scf::ForOp, scope::ScopeOp>(op) &&
+        op->hasAttr(hivm::kPipelinedLoopCoreTypeAttrName)) {
+      hasPipelinedLoops = true;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  if (!hasPipelinedLoops)
+    return;
+
   // Preprocessing step: lift copy from memref dialect to tensor dialect
   // because tiling is so much easier in tensor-land.
   if (failed(liftMemRefLoadsInLoop(topLevelModule))) {
