@@ -174,7 +174,7 @@ struct IsInfDecomposeInterface
         rewriter.create<arith::ConstantFloatOp>(loc, negInf, floatType);
 
     // Create the output tensor (boolean type).
-    auto resultType = isInfOp.getOutput().getType().cast<RankedTensorType>();
+    auto resultType = mlir::cast<RankedTensorType>(isInfOp.getOutput().getType());
     Value initTensor = rewriter.create<tensor::EmptyOp>(
         loc, resultType.getShape(), rewriter.getI1Type());
 
@@ -215,7 +215,7 @@ struct IsInfDecomposeInterface
   }
 
     bishengir::DecomposePhase getDecomposePhase(Operation *op) const {
-      return bishengir::DecomposePhase::AFTER_HFUSION_FLATTEN;
+      return bishengir::DecomposePhase::BEFORE_LOWER_TO_LOOPS;
     }
 };
 
