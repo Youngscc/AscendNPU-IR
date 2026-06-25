@@ -17,6 +17,7 @@
 
 #include "bishengir/Config/bishengir-config.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
+#include "bishengir/Dialect/HIVM/IR/HIVMImpl.h"
 #include "bishengir/Dialect/HIVM/Transforms/Passes.h"
 #include "bishengir/Dialect/HIVM/Utils/Utils.h"
 #include "bishengir/Dialect/Utils/Util.h"
@@ -66,8 +67,8 @@ using namespace mlir;
 using namespace mlir::hivm;
 
 namespace {
-static constexpr llvm::StringLiteral fixpipeAlreadyInserted =
-    "fixpipe_already_inserted";
+static constexpr llvm::StringLiteral mmadFixpipeForResultAlreadyInserted =
+    "fixpipe_for_result_already_inserted";
 
 static constexpr llvm::StringLiteral elideAfterBufferize =
     "elide_after_bufferize";
@@ -249,9 +250,9 @@ Value createTiledMmadL1(hivm::BatchMmadL1Op batchmmOp,
       batchmmOp.getRealK(), batchmmOp.getRealN(), /*C=*/newOutput,
       batchmmOp.getPerChannelBias(), batchmmOp.getATransposeAttr(),
       batchmmOp.getBTransposeAttr(), batchmmOp.getEnable_HF32Attr(), batchmmOp.getEnable_I4Attr());
-  if (batchmmOp->getAttr(fixpipeAlreadyInserted)) {
-    tiledMmad->setAttr(fixpipeAlreadyInserted,
-                       batchmmOp->getAttr(fixpipeAlreadyInserted));
+  if (batchmmOp->getAttr(mmadFixpipeForResultAlreadyInserted)) {
+    tiledMmad->setAttr(mmadFixpipeForResultAlreadyInserted,
+                       batchmmOp->getAttr(mmadFixpipeForResultAlreadyInserted));
   }
   return tiledMmad.getResultTensors()[0];
 }
@@ -280,17 +281,32 @@ struct TensorChainInfo {
   SmallVector<Value> initArgs;
 };
 
-TensorChainInfo collectTensorChainInitArgs(
+struct MemrefChainInfo {
+  SmallVector<int> indices;
+  SmallVector<Value> rootMemrefs;
+};
+
+std::pair<TensorChainInfo, MemrefChainInfo> collectTensorChainInitArgs(
     const SmallVector<SmallVector<Operation *>> &allUseChains) {
-  TensorChainInfo info;
+  TensorChainInfo tensorInfo;
+  MemrefChainInfo memrefInfo;
+
   for (int i = 0; i < static_cast<int>(allUseChains.size()); ++i) {
     auto fixpipe = dyn_cast<hivm::FixpipeOp>(allUseChains[i].front());
     if (isa<TensorType>(fixpipe.getDst().getType())) {
-      info.indices.push_back(i);
-      info.initArgs.push_back(fixpipe.getDst());
+      tensorInfo.indices.push_back(i);
+      tensorInfo.initArgs.push_back(fixpipe.getDst());
+    } else if (auto rootMemref = traceDefOp<memref::AllocOp>(fixpipe.getDst())) {
+      memrefInfo.indices.push_back(i);
+      memrefInfo.rootMemrefs.push_back(rootMemref.value()->getResult(0));
+    } else if (auto rootMemref =
+                   traceDefOp<bishengir::memref_ext::AllocWorkspaceOp>(
+                       fixpipe.getDst())) {
+      memrefInfo.indices.push_back(i);
+      memrefInfo.rootMemrefs.push_back(rootMemref.value()->getResult(0));
     }
   }
-  return info;
+  return std::make_pair(tensorInfo, memrefInfo);
 }
 
 Operation *getLastChainOp(
@@ -305,21 +321,55 @@ Operation *getLastChainOp(
   return lastChainOp;
 }
 
-SmallVector<Operation *>
-collectDownstreamOpsToMove(
-    ArrayRef<int> tensorChainIndices,
+SmallVector<Operation *> collectDownstreamOpsToMove(
+    ArrayRef<int> tensorChainIndices, MemrefChainInfo &memrefInfo,
     const SmallVector<SmallVector<Operation *>> &allUseChains,
     Operation *lastChainOp) {
-  SmallVector<Operation *> fixpipeOps;
-  for (int idx : tensorChainIndices)
-    fixpipeOps.push_back(allUseChains[idx].front());
+  SmallVector<Operation *> tensorFixpipeOps;
+  for (int idx : tensorChainIndices) {
+    tensorFixpipeOps.push_back(allUseChains[idx].front());
+  }
 
   SmallVector<Operation *> opsToMove;
   SmallVector<Operation *> worklist;
-  for (Operation *fixpipeOp : fixpipeOps) {
+  for (Operation *fixpipeOp : tensorFixpipeOps) {
     for (Operation *user : fixpipeOp->getUsers())
       if (!lastChainOp->isBeforeInBlock(user))
         worklist.push_back(user);
+  }
+
+  for (Value rootMemref : memrefInfo.rootMemrefs) {
+    // TODO: Add more operations which can be moved with memref semantics
+    rootMemref.getParentBlock()->walk([&](DebugOp debugOp) {
+      if (auto debugRootMemref =
+              traceDefOp<memref::AllocOp>(debugOp.getArg())) {
+        if (debugRootMemref.value()->getResult(0) == rootMemref) {
+          Operation *sameBlockOp = debugOp;
+          while (sameBlockOp &&
+                 sameBlockOp->getBlock() != lastChainOp->getBlock()) {
+            sameBlockOp = sameBlockOp->getParentOp();
+          }
+
+          if (sameBlockOp && !lastChainOp->isBeforeInBlock(sameBlockOp)) {
+            worklist.push_back(sameBlockOp);
+          }
+        }
+      } else if (auto debugRootMemref =
+                     traceDefOp<bishengir::memref_ext::AllocWorkspaceOp>(
+                         debugOp.getArg())) {
+        if (debugRootMemref.value()->getResult(0) == rootMemref) {
+          Operation *sameBlockOp = debugOp;
+          while (sameBlockOp &&
+                 sameBlockOp->getBlock() != lastChainOp->getBlock()) {
+            sameBlockOp = sameBlockOp->getParentOp();
+          }
+
+          if (sameBlockOp && !lastChainOp->isBeforeInBlock(sameBlockOp)) {
+            worklist.push_back(sameBlockOp);
+          }
+        }
+      }
+    });
   }
 
   SmallPtrSet<Operation *, 8> seen;
@@ -335,9 +385,8 @@ collectDownstreamOpsToMove(
     }
   }
 
-  llvm::sort(opsToMove, [](Operation *a, Operation *b) {
-    return a->isBeforeInBlock(b);
-  });
+  llvm::sort(opsToMove,
+             [](Operation *a, Operation *b) { return a->isBeforeInBlock(b); });
   return opsToMove;
 }
 
@@ -471,12 +520,12 @@ public:
       return failure();
 
     // 2. Identify tensor-type chains for iter args
-    auto tensorInfo = collectTensorChainInitArgs(*allUseChains);
+    auto [tensorInfo, memrefInfo] = collectTensorChainInitArgs(*allUseChains);
 
     // 3. Collect downstream users and check move safety .
     Operation *lastChainOp = getLastChainOp(*allUseChains);
     auto opsToMove = collectDownstreamOpsToMove(
-        tensorInfo.indices, *allUseChains, lastChainOp);
+        tensorInfo.indices, memrefInfo, *allUseChains, lastChainOp);
     if (failed(checkOpsMoveSafety(opsToMove, batchmmOp)))
       return failure();
 
