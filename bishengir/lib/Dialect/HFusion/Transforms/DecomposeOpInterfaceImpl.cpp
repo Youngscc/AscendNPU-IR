@@ -219,6 +219,99 @@ struct IsInfDecomposeInterface
     }
 };
 
+
+struct FlipDecomposeInterface
+    : public bishengir::BiShengIRAggregatedOpInterface::ExternalModel<
+          FlipDecomposeInterface, hfusion::FlipOp> {
+  FailureOr<SmallVector<Value>> decomposeOperation(Operation *op,
+                                                   OpBuilder &rewriter) const {
+    auto flipOp = llvm::dyn_cast<hfusion::FlipOp>(op);
+    if (!flipOp)
+      return failure();
+
+    Location loc = op->getLoc();
+    Value input = flipOp.getInput();
+
+    auto inputType = dyn_cast<RankedTensorType>(input.getType());
+    if (!inputType)
+      return failure();
+
+    auto resultType = dyn_cast<RankedTensorType>(flipOp.getOutput().getType());
+    if (!resultType)
+      return failure();
+
+    int64_t rank = inputType.getRank();
+    if (rank <= 0 || resultType.getRank() != rank)
+      return failure();
+
+    int64_t axis = flipOp.getFlipAxis();
+    if (axis < 0)
+      axis += rank;
+    if (axis < 0 || axis >= rank)
+      return failure();
+
+    // Keep this CPU decompose path conservative for now: only static shape.
+    for (int64_t dim : inputType.getShape()) {
+      if (dim == ShapedType::kDynamic)
+        return failure();
+    }
+    for (int64_t dim : resultType.getShape()) {
+      if (dim == ShapedType::kDynamic)
+        return failure();
+    }
+
+    int64_t axisSize = inputType.getDimSize(axis);
+    if (axisSize <= 0)
+      return failure();
+
+    // Length-1 flip is a no-op.
+    if (axisSize == 1)
+      return SmallVector<Value>{input};
+
+    Type elementType = resultType.getElementType();
+
+    Value initTensor = rewriter.create<tensor::EmptyOp>(
+        loc, resultType.getShape(), elementType);
+
+    SmallVector<AffineExpr> inputExprs;
+    inputExprs.reserve(rank);
+
+    for (int64_t i = 0; i < rank; ++i) {
+      AffineExpr dimExpr = rewriter.getAffineDimExpr(i);
+      if (i == axis) {
+        inputExprs.push_back(rewriter.getAffineConstantExpr(axisSize - 1) -
+                             dimExpr);
+      } else {
+        inputExprs.push_back(dimExpr);
+      }
+    }
+
+    AffineMap inputMap =
+        AffineMap::get(rank, 0, inputExprs, rewriter.getContext());
+    AffineMap outputMap = rewriter.getMultiDimIdentityMap(rank);
+
+    SmallVector<AffineMap> indexingMaps = {inputMap, outputMap};
+    SmallVector<utils::IteratorType> iteratorTypes(
+        rank, utils::IteratorType::parallel);
+
+    auto genericOp = rewriter.create<linalg::GenericOp>(
+        loc, resultType, ValueRange{input}, ValueRange{initTensor},
+        indexingMaps, iteratorTypes,
+        /*doc=*/"",
+        /*library_call=*/"",
+        [&](OpBuilder &b, Location nestedLoc, ValueRange args) {
+          b.create<linalg::YieldOp>(nestedLoc, args[0]);
+        });
+
+    return SmallVector<Value>{genericOp.getResult(0)};
+  }
+
+  bishengir::DecomposePhase getDecomposePhase(Operation *op) const {
+    return bishengir::DecomposePhase::BEFORE_LOWER_TO_LOOPS;
+  }
+};
+
+
     // SortDecomposeInterface implements the decomposition logic for
     // hfusion.sort. It lowers the high-level sort operation into nested loops
     // (scf.for) using a bubble sort algorithm specifically targeting the last
@@ -441,6 +534,7 @@ struct IsInfDecomposeInterface
     registry.addExtension(
         +[](MLIRContext *ctx, hfusion::HFusionDialect *dialect) {
           hfusion::IsInfOp::attachInterface<IsInfDecomposeInterface>(*ctx);
+          hfusion::FlipOp::attachInterface<FlipDecomposeInterface>(*ctx);
           hfusion::SortOp::attachInterface<SortDecomposeInterface>(*ctx);
         });
   }
