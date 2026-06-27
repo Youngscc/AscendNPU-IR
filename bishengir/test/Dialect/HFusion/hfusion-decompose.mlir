@@ -316,3 +316,16 @@ func.func @histogram_nomask_i64(%arg0: tensor<128xi64>) -> tensor<16xi32> {
   return %res : tensor<16xi32>
 }
 
+// -----
+
+// CHECK-LABEL: func.func @test_flip_decompose
+// CHECK: hfusion.flip
+
+// CPU-LABEL: func.func @test_flip_decompose
+// CPU-NOT: hfusion.flip
+// CPU: linalg.generic
+// CPU: linalg.yield
+func.func @test_flip_decompose(%arg0: tensor<4x8x8xf32>) -> tensor<4x8x8xf32> {
+  %0 = hfusion.flip %arg0 : tensor<4x8x8xf32> flip_axis = 2 -> tensor<4x8x8xf32>
+  return %0 : tensor<4x8x8xf32>
+}
