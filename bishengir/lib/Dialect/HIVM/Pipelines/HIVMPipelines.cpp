@@ -226,6 +226,7 @@ static void hivmPreBufferizationOptimizationPipeline(
   // Call canonicalize before inline OTF broadcast to optimize redundant 1-to-1
   // broadcasts.
   pm.addPass(bishengir::createExtendedCanonicalizerPass());
+  canonicalizationHIVMPipeline(pm);
   pm.nest<func::FuncOp>().addPass(createInlineOTFBroadcastPass());
   if (!hivmPipelineOptions.disableAutoCVWorkSpaceManage) {
     // Software pipelining Cube and Vector operations
