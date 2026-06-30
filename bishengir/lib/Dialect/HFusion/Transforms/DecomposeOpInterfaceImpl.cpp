@@ -311,6 +311,122 @@ struct FlipDecomposeInterface
   }
 };
 
+struct AtomicXchgDecomposeInterface
+    : public bishengir::BiShengIRAggregatedOpInterface::ExternalModel<
+          AtomicXchgDecomposeInterface, hfusion::AtomicXchgOp> {
+private:
+  Value getDimValue(OpBuilder &rewriter, Location loc, Value memrefOrTensor,
+                    ShapedType shapedTy, int64_t dim) const {
+    int64_t staticDim = shapedTy.getShape()[dim];
+    if (staticDim != ShapedType::kDynamic)
+      return rewriter.create<arith::ConstantIndexOp>(loc, staticDim);
+
+    if (isa<MemRefType>(memrefOrTensor.getType()))
+      return rewriter.create<memref::DimOp>(loc, memrefOrTensor, dim);
+    return rewriter.create<tensor::DimOp>(loc, memrefOrTensor, dim);
+  }
+
+void emitAtomicXchgBody(OpBuilder &rewriter, Location loc, Value input,
+                        Value dst, Value mask,
+                        ArrayRef<Value> indices) const {
+  Value srcVal = rewriter.create<memref::LoadOp>(loc, input, indices);
+
+  auto doAtomicExchange = [&](OpBuilder &b, Location bodyLoc) {
+      Type elementType = cast<MemRefType>(dst.getType()).getElementType();
+      
+      b.create<memref::AtomicRMWOp>(
+          bodyLoc, 
+          elementType, 
+          arith::AtomicRMWKind::assign, 
+          srcVal, 
+          dst, 
+          indices);
+  };
+
+  if (mask) {
+    Value pred = rewriter.create<memref::LoadOp>(loc, mask, indices);
+    auto ifOp = rewriter.create<scf::IfOp>(loc, pred, /*withElseRegion=*/false);
+
+    Block *thenBlock = &ifOp.getThenRegion().front();
+    OpBuilder thenBuilder = OpBuilder::atBlockBegin(thenBlock);
+    doAtomicExchange(thenBuilder, loc);
+  } else {
+    doAtomicExchange(rewriter, loc);
+  }
+}
+
+  void emitLoops(OpBuilder &rewriter, Location loc, Value input, Value dst,
+                 Value mask, ShapedType shapedTy, int64_t dim,
+                 SmallVector<Value> &indices) const {
+    int64_t rank = shapedTy.getRank();
+    if (dim == rank) {
+      emitAtomicXchgBody(rewriter, loc, input, dst, mask, indices);
+      return;
+    }
+
+    Value lb = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value step = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value ub = getDimValue(rewriter, loc, dst, shapedTy, dim);
+
+    auto forOp = rewriter.create<scf::ForOp>(loc, lb, ub, step);
+
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPoint(forOp.getBody()->getTerminator());
+
+      Value iv = forOp.getInductionVar();
+      indices.push_back(iv);
+      emitLoops(rewriter, loc, input, dst, mask, shapedTy, dim + 1, indices);
+      indices.pop_back();
+
+    }
+  }
+
+public:
+  FailureOr<SmallVector<Value>> decomposeOperation(Operation *op,
+                                                   OpBuilder &rewriter) const {
+    auto atomicOp = dyn_cast<hfusion::AtomicXchgOp>(op);
+    if (!atomicOp)
+      return failure();
+
+    Location loc = op->getLoc();
+
+    Value input = atomicOp.getInput();
+    Value dst = atomicOp.getDst();
+    Value mask = atomicOp.getMask();
+
+    auto inputTy = dyn_cast<MemRefType>(input.getType());
+    auto dstTy = dyn_cast<MemRefType>(dst.getType());
+    if (!inputTy || !dstTy)
+      return failure();
+
+    if (atomicOp->getNumResults() != 0)
+      return failure();
+
+    if (inputTy.getRank() != dstTy.getRank())
+      return failure();
+
+    if (inputTy.getElementType() != dstTy.getElementType())
+      return failure();
+
+    if (mask) {
+      auto maskTy = dyn_cast<MemRefType>(mask.getType());
+      if (!maskTy)
+        return failure();
+      if (maskTy.getRank() != dstTy.getRank())
+        return failure();
+    }
+
+    SmallVector<Value> indices;
+    emitLoops(rewriter, loc, input, dst, mask, dstTy, /*dim=*/0, indices);
+
+    return SmallVector<Value>{};
+  }
+
+  bishengir::DecomposePhase getDecomposePhase(Operation *op) const {
+    return bishengir::DecomposePhase::BEFORE_LOWER_TO_LOOPS;
+  }
+};
 
     // SortDecomposeInterface implements the decomposition logic for
     // hfusion.sort. It lowers the high-level sort operation into nested loops
@@ -536,5 +652,6 @@ struct FlipDecomposeInterface
           hfusion::IsInfOp::attachInterface<IsInfDecomposeInterface>(*ctx);
           hfusion::FlipOp::attachInterface<FlipDecomposeInterface>(*ctx);
           hfusion::SortOp::attachInterface<SortDecomposeInterface>(*ctx);
+          hfusion::AtomicXchgOp::attachInterface<AtomicXchgDecomposeInterface>(*ctx);
         });
   }
