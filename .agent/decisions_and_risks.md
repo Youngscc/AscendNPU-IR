@@ -2,86 +2,54 @@
 
 ## 已做判断
 
-### 1. 当前任务不依赖 CANN 或昇腾卡
-
-原因：
-
-PlanMemory overflow 是 BiShengIR 内部静态 IR 规划阶段的问题。只要 IR 已经到 HIVM/memref
-层级，macOS 上的 `bishengir-opt` 就能复现。
-
-### 2. 估算器应该运行在 PlanMemory 之前
-
-原因：
-
-真实 overflow 一旦由 `hivm-plan-memory` 发出，就可能被 retry/fallback 机制捕获。用户目标是提前预测，避免进入这一流程。
-
-### 3. 精确估算不应完全外置
-
-原因：
-
-PlanMemory 有 liveness、alias、inplace、多缓冲、retry 顺序等内部逻辑。外部脚本很难完全复刻。
-
-### 4. 记忆文件不放入 docs
-
-原因：
-
-这些内容是任务上下文，不是项目用户文档，不应该影响 Sphinx build。
+- 当前任务不依赖 CANN、`hivmc` 或真实昇腾卡。
+- 当前主线是逐 pass 内存行为模拟，不是完整影子编译器。
+- 每个 pass 后都可记录 memory effect，但不一定能输出 PlanMemory 级精确峰值。
+- 精确值必须尽量复用 PlanMemory 或后续 dry-run oracle，避免复制一套漂移算法。
+- local `MarkMultiBuffer` 后是第一优先 exact checkpoint。
+- 早期 tensor/HFusion 阶段要用 `symbolic` 或 `concrete_structural`，不能制造假精度。
 
 ## 主要风险
 
-### 风险 1: 估算位置过早
+### 过早精确化
 
-如果估算在 `AllocExtraBuffer` 或 `MarkMultiBuffer` 之前运行，会漏掉后续新增或扩张的 buffer。
+bufferization、scope inference、extra buffer、multi-buffer 尚未完成时，UB/L1/L0C
+峰值很可能无法和真实 PlanMemory 对齐。
 
-缓解：
+缓解：按 `symbolic`、`concrete_structural`、`exact_plan` 分层输出，并记录
+`blocking_dependency`。
 
-把 estimator 放在 local `createPlanMemoryPass` 前一刻。
+### 动态 shape
 
-### 风险 2: 预测输出触发 fallback
+PlanMemory 精确规划依赖静态 buffer size。动态 shape 需要明确策略：
 
-现有 retry policy 会查找 overflow diagnostic pattern。
+```text
+拒绝 / 上界 / 符号表达 / 从 tiling 或 compile config 取具体值
+```
 
-缓解：
+### 和 PlanMemory 漂移
 
-预测输出不要使用 `ub overflow`、`cbuf overflow`、`cc overflow` 这类文本。
+外部独立算法很容易漏掉 liveness、alias、inplace、multi-buffer、rollback、
+spec-level、20 seed retry。
 
-### 风险 3: 动态 shape
+缓解：exact checkpoint 复用 PlanMemory 内部类，或后续重新实现 dry-run oracle。
 
-动态 shape 无法简单静态求精确字节数。
+### 预测输出误触发 fallback
 
-缓解方案需要用户确认：
+外层 retry policy 会匹配类似 `ub overflow`、`cbuf overflow`、`cc overflow` 的文本。
 
-- 拒绝动态 shape；
-- 使用上界；
-- 符号化表达；
-- 从 compile config 或 tiling 参数中取具体值。
+缓解：预测输出使用 `predicted_over_capacity`，不要打印原始 overflow 短语。
 
-### 风险 4: 和真实 PlanMemory 行为漂移
+### `requires` 误解
 
-如果估算器复制了一套独立算法，后续 PlanMemory 修改后容易不一致。
+PlanMemory 的 `requires N bits` 不是裸 buffer size，也不是所有 UB buffer 求和；它来自
+失败后重新规划失败 scope 得到的峰值地址边界。
 
-缓解：
-
-复用 PlanMemory 内部类和函数，避免双份逻辑。
-
-### 风险 5: PlanMemory 当前有 retry 顺序
-
-`PlanMemoryPass::runOnOperation()` 当前最多尝试 20 次 deterministic shuffle seed。
-
-估算器必须明确：
-
-- 是报告第 1 次尝试的需求；
-- 还是模拟全部尝试，报告是否存在可行布局；
-- 还是报告 worst case。
-
-用户要“精确避免真实 overflow”，更合理的是模拟真实 PlanMemory 的全部尝试策略。
+缓解：使用 PlanMemory 或后续 dry-run oracle 的结果作为基准。
 
 ## 开放问题
 
-- 用户实际失败命令是什么？
-- 用户实际打开了哪些 compile options？
-- 输入是否总是 `.ttadapter`？
-- 是否必须覆盖 workspace，还是只覆盖 local memory？
-- 动态 shape 如何处理？
-- 估算结果是否只报警，还是自动调小 tile size？
-- JSON 输出路径应该如何指定？
+- 逐 pass trace 用 PassManager instrumentation，还是显式 checkpoint pass？
+- early symbolic buffer 和最终 concrete memref 是否需要稳定 lineage ID？
+- dynamic shape 的策略选哪一种？
+- 输出只报告风险，还是最终要反馈到 tiling/autoschedule 自动调参？

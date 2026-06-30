@@ -2,45 +2,33 @@
 
 ## 什么时候更新
 
-后续 agent 在以下情况需要更新本目录：
+以下情况需要更新 `.agent/`：
 
-- 发现新的关键代码路径。
-- 确认新的编译选项会影响内存估算。
-- 跑了新的复现实验。
-- 实现了新的 pass、工具或 JSON schema。
-- 用户澄清了目标、输入格式或环境。
-- 某个之前的判断被推翻。
+- 用户澄清目标、输入格式、输出格式或边界。
+- 发现新的关键代码路径或 pass 依赖。
+- 新增/修改 estimator、trace、JSON schema 或测试。
+- 新实验推翻了已有判断。
 
 ## 更新规则
 
-1. 不把任务记忆写入 `docs/`。
-2. 不记录用户私有 IR 的具体内容，除非用户明确同意。
-3. 每次更新尽量写清楚：
-   - 日期或上下文；
-   - 做了什么；
-   - 得到什么结论；
-   - 哪些仍然不确定。
-4. 新增代码后，要更新 [code_map.md](code_map.md)。
-5. 新增命令或实验结果后，要更新 [reproduction.md](reproduction.md)。
-6. 设计变化后，要更新 [estimation_design.md](estimation_design.md)。
-7. 关键判断和风险变化后，要更新 [decisions_and_risks.md](decisions_and_risks.md)。
+- 不写入 `docs/`。
+- 不记录用户私有 IR 的具体内容，除非用户明确允许。
+- 优先精简：把结论写进现有核心文件，不再新增长版历史报告。
+- 新代码路径更新 [code_map.md](code_map.md)。
+- 方案变化更新 [pass_memory_modeling_guide.md](pass_memory_modeling_guide.md)。
+- 目标/边界变化更新 [task_context.md](task_context.md)。
+- 风险/开放问题变化更新 [decisions_and_risks.md](decisions_and_risks.md)。
 
-## 推荐续接流程
-
-后续 agent 接手时：
+## 接手流程
 
 1. 读 [README.md](README.md)。
 2. 读 [task_context.md](task_context.md)。
-3. 根据任务类型选择：
-   - 要写代码：读 [code_map.md](code_map.md)、[estimation_design.md](estimation_design.md)。
-   - 要复现：读 [reproduction.md](reproduction.md)。
-   - 要判断方案：读 [decisions_and_risks.md](decisions_and_risks.md)。
-4. 开始操作仓库。
-5. 完成后更新对应记忆文件。
+3. 读 [pass_memory_modeling_guide.md](pass_memory_modeling_guide.md)。
+4. 需要定位代码时读 [code_map.md](code_map.md)。
+5. 完成后按本协议更新记忆。
 
-## 不要做的事
+## 不要做
 
-- 不要把 CANN/hivmc 问题当成当前估算任务的 blocker。
-- 不要为了记忆系统修改项目正式文档。
-- 不要删除已有用户改动。
-- 不要把估算器做成完全脱离 PlanMemory 的重复实现，除非用户明确只需要粗估。
+- 不把 CANN/hivmc/真实卡问题当成当前任务 blocker。
+- 不把早期 symbolic 阶段写成 exact PlanMemory 结论。
+- 不恢复旧的完整快照或长篇调研报告，除非用户明确要求。

@@ -31,9 +31,49 @@
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/SCF/Transforms/Passes.h"
 #include "mlir/Pass/PassManager.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include <cstdlib>
 
 namespace mlir {
 namespace hivm {
+
+namespace {
+struct DumpIRBeforePlanMemoryPass
+    : public PassWrapper<DumpIRBeforePlanMemoryPass,
+                         OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(DumpIRBeforePlanMemoryPass)
+
+  StringRef getArgument() const override {
+    return "hivm-dump-ir-before-plan-memory-debug";
+  }
+
+  StringRef getDescription() const override {
+    return "Dump IR immediately before local PlanMemory when requested";
+  }
+
+  void runOnOperation() override {
+    const char *path = std::getenv("BISHENGIR_DUMP_BEFORE_PLAN_MEMORY");
+    if (path == nullptr || path[0] == '\0')
+      return;
+
+    std::error_code ec;
+    llvm::raw_fd_ostream os(path, ec, llvm::sys::fs::OF_Text);
+    if (ec) {
+      llvm::errs() << "[WARNING] Failed to dump IR before PlanMemory to "
+                   << path << ": " << ec.message() << "\n";
+      return;
+    }
+    getOperation().print(os);
+    os << "\n";
+  }
+};
+
+std::unique_ptr<Pass> createDumpIRBeforePlanMemoryPass() {
+  return std::make_unique<DumpIRBeforePlanMemoryPass>();
+}
+} // namespace
 
 void canonicalizationHIVMPipeline(OpPassManager &pm) {
   pm.addPass(createArithToAffineConversionPass());
@@ -372,6 +412,7 @@ static void hivmPostBufferizationOptimizationPipeline(
       hivmPipelineOptions.limitAutoMultiBufferBuffer;
   pm.nest<func::FuncOp>().addPass(
       createMarkMultiBufferPass(multiBufferOptions));
+  pm.addPass(createDumpIRBeforePlanMemoryPass());
   PlanMemoryOptions planMemoryOption;
   planMemoryOption.enableMemoryDisplay =
       hivmPipelineOptions.enableMemoryDisplay;

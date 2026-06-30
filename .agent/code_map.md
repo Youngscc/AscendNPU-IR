@@ -1,94 +1,33 @@
 # Code Map
 
-## PlanMemory 主实现
-
-文件：
+## Pipeline 入口
 
 ```text
-bishengir/lib/Dialect/HIVM/Transforms/PlanMemory.cpp
-bishengir/include/bishengir/Dialect/HIVM/Transforms/PlanMemory.h
+bishengir/tools/bishengir-compile/bishengir-compile.cpp
+bishengir/lib/Tools/bishengir-compile/BiShengIRCompileMain.cpp
+bishengir/lib/Tools/bishengir-compile/PassPipeline.cpp
 ```
 
-关键点：
-
-- `MemLivenessAnalysis::build()` 收集 liveness、buffer 信息、gen/kill 等。
-- `MemPlan::plan()` 执行具体规划。
-- `MemPlan::EmitPlanMemoryFailureInfo()` 发出 overflow 诊断。
-- `PlanMemoryPass::runOnOperation()` 是 pass 入口。
-- 当前实现会做最多 20 次 deterministic retry，尝试不同 buffer 顺序。
-
-overflow 诊断大致格式：
+主流程：
 
 ```text
-<scope> overflow, requires <bits> bits while <bits> bits available!
+buildBiShengHIRPipeline
+  CanonicalizeModule
+  AppendDeviceSpec
+  HFusion pipeline
+  ConvertToHIVM pipeline
+  OptimizeHIVM pipeline
 ```
 
-## PlanMemory 容量常量
-
-在 `PlanMemory.cpp` 中硬编码：
+## HFusion / Convert / HIVM pipeline
 
 ```text
-UB align:   32 bytes
-UB size:    192 KiB
-L1 align:   32 bytes
-L1 size:    512 KiB
-L0C align:  512 bytes
-L0C size:   128 KiB
-```
-
-对应变量：
-
-```text
-ubAlignSize
-ubSpaceSize
-l1AlignSize
-l1SpaceSize
-l0cAlignSize
-l0cSpaceSize
-```
-
-## Pass 定义
-
-文件：
-
-```text
-bishengir/include/bishengir/Dialect/HIVM/Transforms/Passes.td
-```
-
-PlanMemory pass:
-
-```text
-hivm-plan-memory
-```
-
-重要选项：
-
-```text
-mem-plan-mode=local-mem-plan
-mem-plan-mode=global-work-space-plan
-enable-memory-display=true
-enable-global-workspace-reuse=true
-restrict-inplace-as-isa=true
-```
-
-## HIVM Pipeline 中的位置
-
-文件：
-
-```text
+bishengir/lib/Dialect/HFusion/Pipelines/HFusionPipelines.cpp
+bishengir/lib/Dialect/HIVM/Pipelines/ConvertToHIVMPipeline.cpp
 bishengir/lib/Dialect/HIVM/Pipelines/HIVMPipelines.cpp
 ```
 
-PlanMemory 跑两次：
-
-1. Global workspace plan:
-
-```text
-inferAndSetBufferSizePipeline
-createPlanMemoryPass(memMode = GLOBAL_WORKSPACE_PLAN)
-```
-
-2. Local memory plan:
+local PlanMemory 前最关键片段在 `HIVMPipelines.cpp`：
 
 ```text
 createAllocExtraBufferPass
@@ -99,40 +38,77 @@ createMarkMultiBufferPass
 createPlanMemoryPass(default LOCAL_MEM_PLAN)
 ```
 
-用户当前任务最重要的是第二次 local memory plan 前的状态。
+完整阶段划分见 [pass_memory_modeling_guide.md](pass_memory_modeling_guide.md)。
 
-## 编译选项和 fallback
-
-文件：
+## PlanMemory
 
 ```text
-bishengir/include/bishengir/Tools/bishengir-compile/Options.td
-bishengir/lib/Tools/bishengir-compile/PassPipeline.cpp
-bishengir/lib/Tools/bishengir-compile/BiShengIRCompileMain.cpp
-bishengir/lib/Tools/RetriablePassManager/RetriablePassManager.cpp
-bishengir/lib/Tools/RetriablePassManager/OverFlowPolicyBase.cpp
+bishengir/lib/Dialect/HIVM/Transforms/PlanMemory.cpp
+bishengir/include/bishengir/Dialect/HIVM/Transforms/PlanMemory.h
+bishengir/include/bishengir/Dialect/HIVM/Transforms/Passes.td
 ```
 
-关键事实：
+关键类/函数：
 
-- `bishengir-compile` 会用 `RetriablePassManager` 包住 pipeline。
-- 某些模式下遇到 overflow 会 retry。
-- 现有 overflow retry policy 可能会关闭 `enable-code-motion` 或 `enable-auto-multi-buffer` 后重试。
-- 用户想要在这个真实 overflow 发生前预测，避免进入 retry。
+```text
+MemLivenessAnalysis::build
+MemLivenessAnalysis::GetBufferInfo
+MemPlan::plan
+MemPlan::PlanLocalMemAddress
+MemPlan::PlanMemAddressOfWholeLocalBuffer
+MemPlan::EmitPlanMemoryFailureInfo
+PlanMemoryPass::runOnOperation
+```
+
+PlanMemory local 容量常量：
+
+```text
+UB:  32 bytes align, 192 KiB
+L1:  32 bytes align, 512 KiB
+L0C: 512 bytes align, 128 KiB
+```
+
+`requires N bits` 来自失败后按 PlanMemory 规则重新规划失败 scope 得到的
+`max(bitsOffset + alignedConstBits)`，不是裸 buffer size 求和。
+
+## Dry-run estimator / oracle
+
+当前代码已回退 `hivm-estimate-memory` 实现；后续如果重新实现，应放在
+PlanMemory-ready checkpoint，复用 `MemLivenessAnalysis` 和 `MemPlan`，但不做最终
+IR rewrite，也不要输出会触发 fallback 的 overflow 文本。
 
 ## MemoryDisplay
-
-文件：
 
 ```text
 bishengir/lib/Dialect/HIVM/Transforms/MemoryDisplay.cpp
 bishengir/include/bishengir/Dialect/HIVM/Transforms/MemoryDisplay.h
 ```
 
-用途：
+可用于交叉验证 buffer、offset、extent、lifetime、source location、tmpbuf 标记。
+注意它仍在 PlanMemory 内部执行，不是前置模型本身。
 
-- PlanMemory 成功或失败时，可以收集 buffer、offset、extent、lifetime、source location。
-- `enable-memory-display=true` 时会生成 JSON。
-- 默认输出名可能是 `memory_info.json`、`memory_info_aic.json`、`memory_info_aiv.json`。
+## Debug / 复现命令
 
-这个机制适合借鉴，但不完全等同于用户要的前置估算器，因为它仍然在 PlanMemory 内部执行。
+只验证 PlanMemory，不需要 CANN/hivmc/真实卡：
+
+```bash
+build/bin/bishengir-opt \
+  bishengir/test/Dialect/HIVM/plan-memory.mlir \
+  --split-input-file \
+  --hivm-plan-memory='mem-plan-mode=local-mem-plan'
+```
+
+对 PlanMemory-ready IR 跑真实 local plan 和 MemoryDisplay：
+
+```bash
+build/bin/bishengir-opt input.mlir \
+  --hivm-plan-memory='mem-plan-mode=local-mem-plan enable-memory-display=true'
+```
+
+如果需要完整 pipeline 中 local PlanMemory 前 IR，当前代码支持：
+
+```text
+BISHENGIR_DUMP_BEFORE_PLAN_MEMORY=/tmp/before_plan_memory.mlir
+```
+
+该环境变量控制的 debug pass 位于 `MarkMultiBuffer` 和 local `PlanMemory` 之间。
