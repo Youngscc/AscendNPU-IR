@@ -15,6 +15,8 @@ dry-run oracle 校验模型结果。
 - [task_context.md](task_context.md): 当前目标、边界、已确认事实。
 - [pass_memory_modeling_guide.md](pass_memory_modeling_guide.md): 逐阶段建模方案和实施顺序。
 - [code_map.md](code_map.md): 当前需要看的代码入口、pipeline 位置和调试命令。
+- [pass_sequence_to_second_planmemory.md](pass_sequence_to_second_planmemory.md): 从输入到第二次
+  PlanMemory 的 pass 顺序，含常见完整 config 下的 helper pipeline 展开。
 - [decisions_and_risks.md](decisions_and_risks.md): 已做判断、风险、开放问题。
 - [update_protocol.md](update_protocol.md): 后续维护规则。
 

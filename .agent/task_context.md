@@ -43,6 +43,9 @@ local peak 混算。
   dry-run oracle。
 - 如果输入还在 tensor/TTIR/HFusion 层级，必须先经过 lowering、bufferization、
   mem scope 推断等阶段。
+- `bishengir-compile` 直接输入应是可解析为 MLIR `ModuleOp` 的 IR 文本；Python
+  算子文件不能直接作为该 pipeline 输入，需先由前端转换成 Torch/HFusion/HIVM 等
+  MLIR IR。
 - 不是每个 pass 后都有 PlanMemory 级精确峰值。早期阶段应输出 symbolic 或
   concrete structural 状态，不能伪装成 exact。
 - local `MarkMultiBuffer` 后最接近真实 local PlanMemory 输入，是第一优先校验点。

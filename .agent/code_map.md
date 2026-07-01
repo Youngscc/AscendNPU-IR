@@ -39,6 +39,8 @@ createPlanMemoryPass(default LOCAL_MEM_PLAN)
 ```
 
 完整阶段划分见 [pass_memory_modeling_guide.md](pass_memory_modeling_guide.md)。
+从输入到第二次 PlanMemory 的展开 pass 顺序见
+[pass_sequence_to_second_planmemory.md](pass_sequence_to_second_planmemory.md)。
 
 ## PlanMemory
 
@@ -112,3 +114,8 @@ BISHENGIR_DUMP_BEFORE_PLAN_MEMORY=/tmp/before_plan_memory.mlir
 ```
 
 该环境变量控制的 debug pass 位于 `MarkMultiBuffer` 和 local `PlanMemory` 之间。
+
+根目录本地辅助脚本 `run.sh` 支持 `bash run.sh [options] [input.mlir]`，
+也支持 `--input FILE` / `--output FILE`。`--dump` / `--no-dump` 或环境变量
+`PRINT_INTERMEDIATE_DUMPS=0|1` 用于控制是否开启 `--mlir-print-ir-after-all`、
+IR tree dump、local PlanMemory 前 dump 和 coarse dump 汇总。
