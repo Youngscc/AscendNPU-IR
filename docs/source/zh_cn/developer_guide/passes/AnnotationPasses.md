@@ -2,4 +2,4 @@
 
 ## `-annotation-lowering`
 
-将 annotation 方言降级。
+将annotation方言降级。

@@ -28,14 +28,14 @@ hivm.hir.atomic_cas ins(%src0, %src1 : memref<?xf32>, memref<?xf32>) outs(%dst :
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 可变参数，类型为 Tensor 或 Memref |
-| `dst` | 类型为 Tensor 或 Memref |
+| `src` | 可变参数，类型为Tensor或Memref |
+| `dst` | 类型为Tensor或Memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result_tensor` | 类型为 Tensor 或 Memref |
+| `result_tensor` | 类型为Tensor或Memref |
 
 ### `hivm.hir.atomic_rmw` (hivm::AtomicRMWOp)
 
@@ -65,13 +65,13 @@ hivm.hir.atomic_rmw ins(%src : memref<?xf32>) outs(%dst : memref<?xf32>) atomic_
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 任意类型 |
-| `dst` | 类型为 Tensor 或 Memref |
+| `dst` | 类型为Tensor或Memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result_tensor` | 类型为 Tensor 或 Memref |
+| `result_tensor` | 类型为Tensor或Memref |
 
 ### `hivm.hir.atomic_xchg` (hivm::AtomicXchgOp)
 
@@ -99,18 +99,18 @@ hivm.hir.atomic_xchg ins(%src : memref<?xf32>) outs(%dst : memref<?xf32>)
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 任意类型 |
-| `dst` | 类型为 Tensor 或 Memref |
-| `mask` | 类型为 Tensor 或 Memref |
+| `dst` | 类型为Tensor或Memref |
+| `mask` | 类型为Tensor或Memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result_tensor` | 类型为 Tensor 或 Memref |
+| `result_tensor` | 类型为Tensor或Memref |
 
 ### `hivm.hir.batchMmadL1` (hivm::BatchMmadL1Op)
 
-**功能：** 从 L1 内存层级执行批处理矩阵乘加操作，支持批处理维度。
+**功能：** 从L1内存层级执行批处理矩阵乘加操作，支持批处理维度。
 
 **语法：**
 
@@ -149,22 +149,22 @@ hivm.hir.batchMmadL1 ins(%A, %B, %init, %m, %k, %n : memref<2x32x64xf16>, memref
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `a` | 类型为 Tensor 或 Memref |
-| `b` | 类型为 Tensor 或 Memref |
-| `init_condition` | 1 位无符号整数 |
-| `real_m` | index 类型 |
-| `real_k` | index 类型 |
-| `real_n` | index 类型 |
-| `c` | 类型为 Tensor 或 Memref |
-| `sync_related_args` | 可变参数，64 位无符号整数 |
-| `unit_flag_cond` | 1 位无符号整数 |
-| `per_channel_bias` | 类型为 Tensor 或 Memref |
+| `a` | 类型为Tensor或Memref |
+| `b` | 类型为Tensor或Memref |
+| `init_condition` | 1位无符号整数 |
+| `real_m` | index类型 |
+| `real_k` | index类型 |
+| `real_n` | index类型 |
+| `c` | 类型为Tensor或Memref |
+| `sync_related_args` | 可变参数，64位无符号整数 |
+| `unit_flag_cond` | 1位无符号整数 |
+| `per_channel_bias` | 类型为Tensor或Memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result_tensors` | 可变参数，任意类型的 ranked tensor |
+| `result_tensors` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.bitcast` (hivm::BitcastOp)
 
@@ -198,7 +198,7 @@ operation ::= `hivm.hir.bitcast` $src `:` type($src) `->` type($result) attr-dic
 
 ### `hivm.hir.convert_layout` (hivm::ConvertLayoutOp)
 
-**功能：** 将 memref 从一种数据布局转换为另一种布局，不复制或修改数据。
+**功能：** 将memref从一种数据布局转换为另一种布局，不复制或修改数据。
 
 **语法：**
 
@@ -218,13 +218,13 @@ operation ::= `hivm.hir.convert_layout` $source attr-dict `:` functional-type(op
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `source` | 任意类型值的 ranked 或 unranked memref |
+| `source` | 任意类型值的ranked或unranked memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 任意类型值的 ranked 或 unranked memref |
+| `result` | 任意类型值的ranked或unranked memref |
 
 ### `hivm.hir.copy` (hivm::CopyOp)
 
@@ -254,15 +254,15 @@ hivm.hir.copy ins(%src : memref<16x16xf16, #hivm.address_space<ub>>) outs(%dst :
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 类型为 Tensor 或 Memref |
-| `dst` | 类型为 Tensor 或 Memref |
+| `src` | 类型为Tensor或Memref |
+| `dst` | 类型为Tensor或Memref |
 | `pad_value` | 任意类型 |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result_tensor` | 任意类型的 ranked tensor |
+| `result_tensor` | 任意类型的ranked tensor |
 
 ### `hivm.hir.create_sync_block_lock` (hivm::CreateSyncBlockLockOp)
 
@@ -286,13 +286,13 @@ hivm.hir.create_sync_block_lock() from %arg : from memref<?xi8> to memref<1xi64>
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `lockArg` | 任意类型值的 memref |
+| `lockArg` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `memref` | 任意类型值的 memref |
+| `memref` | 任意类型值的memref |
 
 ### `hivm.hir.custom` (hivm::CustomOp)
 
@@ -345,7 +345,7 @@ hivm.hir.dcci(#hivm.DCCIMode<single_cache_line>, #hivm.DataCacheKind<ub>, %ptr :
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `ptr` | 任意类型值的 memref |
+| `ptr` | 任意类型值的memref |
 
 ### `hivm.hir.debug` (hivm::DebugOp)
 
@@ -367,7 +367,7 @@ hivm.hir.debug %arg {debugtype = "print", prefix = "value"} : f32
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `arg` | 整数、浮点数、Tensor 或 Memref |
+| `arg` | 整数、浮点数、Tensor或Memref |
 
 ### `hivm.hir.finish_debug` (hivm::FinishDebugOp)
 
@@ -389,7 +389,7 @@ hivm.hir.finish_debug
 
 ### `hivm.hir.fixpipe` (hivm::FixpipeOp)
 
-**功能：** 从 L0C 到其他内存层级的数据搬移操作，支持前级量化、前级 ReLU、逐元素加法、后级 ReLU、后级量化及布局变换。
+**功能：** 从L0C到其他内存层级的数据搬移操作，支持前级量化、前级ReLU、逐元素加法、后级ReLU、后级量化及布局变换。
 
 **语法：**
 
@@ -413,19 +413,19 @@ hivm.hir.fixpipe ins(%src : memref<16x16xf16, #hivm.address_space<l0c>>) outs(%d
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 任意类型值的 shaped 类型 |
-| `dst` | 任意类型值的 shaped 类型 |
-| `unit_flag_cond` | 1 位无符号整数 |
+| `src` | 任意类型值的shaped类型 |
+| `dst` | 任意类型值的shaped类型 |
+| `unit_flag_cond` | 1位无符号整数 |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result_tensor` | 任意类型的 ranked tensor |
+| `result_tensor` | 任意类型的ranked tensor |
 
 ### `hivm.hir.get_block_idx` (hivm::GetBlockIdxOp)
 
-**功能：** 获取当前设备线程用于并行化的 block 索引。
+**功能：** 获取当前设备线程用于并行化的block索引。
 
 **语法：**
 
@@ -445,11 +445,11 @@ operation ::= `hivm.hir.get_block_idx` attr-dict `->` type($result)
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 64 位无符号整数 |
+| `result` | 64位无符号整数 |
 
 ### `hivm.hir.get_block_num` (hivm::GetBlockNumOp)
 
-**功能：** 获取当前设备线程用于并行化的 block 数量。
+**功能：** 获取当前设备线程用于并行化的block数量。
 
 **语法：**
 
@@ -469,7 +469,7 @@ operation ::= `hivm.hir.get_block_num` attr-dict `->` type($result)
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 64 位无符号整数 |
+| `result` | 64位无符号整数 |
 
 ### `hivm.hir.get_sub_block_idx` (hivm::GetSubBlockIdxOp)
 
@@ -493,7 +493,7 @@ operation ::= `hivm.hir.get_sub_block_idx` attr-dict `->` type($result)
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 64 位无符号整数 |
+| `result` | 64位无符号整数 |
 
 ### `hivm.hir.get_sub_block_num` (hivm::GetSubBlockNumOp)
 
@@ -517,7 +517,7 @@ operation ::= `hivm.hir.get_sub_block_num` attr-dict `->` type($result)
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 64 位无符号整数 |
+| `result` | 64位无符号整数 |
 
 ### `hivm.hir.get_sys_cnt` (hivm::GetSysCntOp)
 
@@ -541,7 +541,7 @@ operation ::= `hivm.hir.get_sys_cnt` attr-dict `->` type($result)
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 64 位无符号整数 |
+| `result` | 64位无符号整数 |
 
 ### `hivm.hir.init_debug` (hivm::InitDebugOp)
 
@@ -593,10 +593,10 @@ hivm.load ins(%src : memref<16x16xf16, #hivm.address_space<gm>>) outs(%dst : mem
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 类型为 Tensor 或 Memref |
-| `dst` | 类型为 Tensor 或 Memref |
+| `src` | 类型为Tensor或Memref |
+| `dst` | 类型为Tensor或Memref |
 | `pad_value` | 任意类型 |
-| `left_padding_num` | index 类型 |
+| `left_padding_num` | index类型 |
 | `right_padding_num` | 任意类型 |
 | `init_condition` | 任意类型 |
 
@@ -604,11 +604,11 @@ hivm.load ins(%src : memref<16x16xf16, #hivm.address_space<gm>>) outs(%dst : mem
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result_tensor` | 任意类型的 ranked tensor |
+| `result_tensor` | 任意类型的ranked tensor |
 
 ### `hivm.hir.load_scalar` (hivm::LoadScalarOp)
 
-**功能：** 从 LLVM 指针地址加载标量值。
+**功能：** 从LLVM指针地址加载标量值。
 
 **语法：**
 
@@ -626,7 +626,7 @@ operation ::= `hivm.hir.load_scalar` attr-dict $addr `:` type($addr) `->` type($
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `addr` | LLVM 指针类型 |
+| `addr` | LLVM指针类型 |
 
 **结果：**
 
@@ -669,27 +669,27 @@ hivm.hir.matmul ins(%A, %B : memref<32x64xf16>, memref<64x32xf16>) outs(%C : mem
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `a` | 任意类型值的 shaped 类型 |
-| `b` | 任意类型值的 shaped 类型 |
-| `tilingParams` | 任意类型值的 shaped 类型 |
-| `bias` | 任意类型值的 shaped 类型 |
-| `descale` | 任意类型值的 shaped 类型 |
-| `blockSizes` | 可变参数，64 位无符号整数 |
-| `processSizes` | 可变参数，64 位无符号整数 |
-| `swizzleOffset` | 64 位无符号整数 |
-| `swizzleDirection` | 64 位无符号整数 |
-| `epiloguePTiles` | 64 位无符号整数 |
-| `c` | 任意类型值的 shaped 类型 |
+| `a` | 任意类型值的shaped类型 |
+| `b` | 任意类型值的shaped类型 |
+| `tilingParams` | 任意类型值的shaped类型 |
+| `bias` | 任意类型值的shaped类型 |
+| `descale` | 任意类型值的shaped类型 |
+| `blockSizes` | 可变参数，64位无符号整数 |
+| `processSizes` | 可变参数，64位无符号整数 |
+| `swizzleOffset` | 64位无符号整数 |
+| `swizzleDirection` | 64位无符号整数 |
+| `epiloguePTiles` | 64位无符号整数 |
+| `c` | 任意类型值的shaped类型 |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.mix_group_matmul` (hivm::MixGroupMatmulOp)
 
-**功能：** 执行分组矩阵乘法，支持按专家分配 token 并与后向量函数融合。
+**功能：** 执行分组矩阵乘法，支持按专家分配token并与后向量函数融合。
 
 **语法：**
 
@@ -726,32 +726,32 @@ hivm.hir.mix_group_matmul ins(%A, %B, %tokens : memref<128x64xf16>, memref<64x32
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `a` | 任意类型值的 shaped 类型 |
-| `b` | 任意类型值的 shaped 类型 |
-| `tokens_per_expert` | 任意类型值的 shaped 类型 |
-| `postVecFuncIns` | 可变参数，任意类型值的 shaped 类型 |
-| `postVecFuncOuts` | 可变参数，任意类型值的 shaped 类型 |
-| `workspaceIns` | 可变参数，任意类型值的 shaped 类型 |
-| `tilingParams` | 任意类型值的 shaped 类型 |
-| `commParams` | 任意类型值的 shaped 类型 |
-| `bias` | 任意类型值的 shaped 类型 |
-| `descale` | 任意类型值的 shaped 类型 |
-| `blockSizes` | 可变参数，64 位无符号整数 |
-| `processSizes` | 可变参数，64 位无符号整数 |
-| `swizzleOffset` | 64 位无符号整数 |
-| `swizzleDirection` | 64 位无符号整数 |
-| `epiloguePTiles` | 64 位无符号整数 |
-| `c` | 任意类型值的 shaped 类型 |
+| `a` | 任意类型值的shaped类型 |
+| `b` | 任意类型值的shaped类型 |
+| `tokens_per_expert` | 任意类型值的shaped类型 |
+| `postVecFuncIns` | 可变参数，任意类型值的shaped类型 |
+| `postVecFuncOuts` | 可变参数，任意类型值的shaped类型 |
+| `workspaceIns` | 可变参数，任意类型值的shaped类型 |
+| `tilingParams` | 任意类型值的shaped类型 |
+| `commParams` | 任意类型值的shaped类型 |
+| `bias` | 任意类型值的shaped类型 |
+| `descale` | 任意类型值的shaped类型 |
+| `blockSizes` | 可变参数，64位无符号整数 |
+| `processSizes` | 可变参数，64位无符号整数 |
+| `swizzleOffset` | 64位无符号整数 |
+| `swizzleDirection` | 64位无符号整数 |
+| `epiloguePTiles` | 64位无符号整数 |
+| `c` | 任意类型值的shaped类型 |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.mix_matmul` (hivm::MixMatmulOp)
 
-**功能：** 执行矩阵乘法，支持与后向量函数进行 tile 级融合。
+**功能：** 执行矩阵乘法，支持与后向量函数进行tile级融合。
 
 **语法：**
 
@@ -787,30 +787,30 @@ hivm.hir.mix_matmul ins(%A, %B : memref<32x64xf16>, memref<64x32xf16>) outs(%C :
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `a` | 任意类型值的 shaped 类型 |
-| `b` | 任意类型值的 shaped 类型 |
-| `postVecFuncIns` | 可变参数，任意类型值的 shaped 类型 |
-| `workspaceIns` | 可变参数，任意类型值的 shaped 类型 |
-| `tilingParams` | 任意类型值的 shaped 类型 |
-| `commParams` | 任意类型值的 shaped 类型 |
-| `bias` | 任意类型值的 shaped 类型 |
-| `descale` | 任意类型值的 shaped 类型 |
-| `blockSizes` | 可变参数，64 位无符号整数 |
-| `processSizes` | 可变参数，64 位无符号整数 |
-| `swizzleOffset` | 64 位无符号整数 |
-| `swizzleDirection` | 64 位无符号整数 |
-| `epiloguePTiles` | 64 位无符号整数 |
-| `c` | 任意类型值的 shaped 类型 |
+| `a` | 任意类型值的shaped类型 |
+| `b` | 任意类型值的shaped类型 |
+| `postVecFuncIns` | 可变参数，任意类型值的shaped类型 |
+| `workspaceIns` | 可变参数，任意类型值的shaped类型 |
+| `tilingParams` | 任意类型值的shaped类型 |
+| `commParams` | 任意类型值的shaped类型 |
+| `bias` | 任意类型值的shaped类型 |
+| `descale` | 任意类型值的shaped类型 |
+| `blockSizes` | 可变参数，64位无符号整数 |
+| `processSizes` | 可变参数，64位无符号整数 |
+| `swizzleOffset` | 64位无符号整数 |
+| `swizzleDirection` | 64位无符号整数 |
+| `epiloguePTiles` | 64位无符号整数 |
+| `c` | 任意类型值的shaped类型 |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.mmadL1` (hivm::MmadL1Op)
 
-**功能：** 从 L1 内存层级执行矩阵乘加操作。
+**功能：** 从L1内存层级执行矩阵乘加操作。
 
 **语法：**
 
@@ -849,26 +849,26 @@ hivm.hir.mmadL1 ins(%A, %B, %init, %m, %k, %n : memref<32x64xf16>, memref<64x32x
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `a` | 类型为 Tensor 或 Memref |
-| `b` | 类型为 Tensor 或 Memref |
-| `init_condition` | 1 位无符号整数 |
-| `real_m` | index 类型 |
-| `real_k` | index 类型 |
-| `real_n` | index 类型 |
-| `c` | 类型为 Tensor 或 Memref |
-| `sync_related_args` | 可变参数，64 位无符号整数 |
-| `unit_flag_cond` | 1 位无符号整数 |
-| `per_channel_bias` | 类型为 Tensor 或 Memref |
+| `a` | 类型为Tensor或Memref |
+| `b` | 类型为Tensor或Memref |
+| `init_condition` | 1位无符号整数 |
+| `real_m` | index类型 |
+| `real_k` | index类型 |
+| `real_n` | index类型 |
+| `c` | 类型为Tensor或Memref |
+| `sync_related_args` | 可变参数，64位无符号整数 |
+| `unit_flag_cond` | 1位无符号整数 |
+| `per_channel_bias` | 类型为Tensor或Memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result_tensors` | 可变参数，任意类型的 ranked tensor |
+| `result_tensors` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.nd2nz` (hivm::ND2NZOp)
 
-**功能：** 执行即时 ND 到 NZ 布局变换的数据拷贝操作。
+**功能：** 执行即时ND到NZ布局变换的数据拷贝操作。
 
 **语法：**
 
@@ -894,8 +894,8 @@ hivm.hir.nd2nz ins(%src : memref<32x32xf16>) outs(%dst : memref<32x32xf16>) {dst
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 任意类型值的 shaped 类型 |
-| `dst` | 任意类型值的 shaped 类型 |
+| `src` | 任意类型值的shaped类型 |
+| `dst` | 任意类型值的shaped类型 |
 | `pad_value` | 任意类型 |
 | `init_condition` | 任意类型 |
 
@@ -903,11 +903,11 @@ hivm.hir.nd2nz ins(%src : memref<32x32xf16>) outs(%dst : memref<32x32xf16>) {dst
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result_tensor` | 可变参数，任意类型的 ranked tensor |
+| `result_tensor` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.nz2nd` (hivm::NZ2NDOp)
 
-**功能：** 从 L1 到全局内存执行 NZ2ND 转换的数据拷贝操作。
+**功能：** 从L1到全局内存执行NZ2ND转换的数据拷贝操作。
 
 **语法：**
 
@@ -930,18 +930,18 @@ hivm.hir.nz2nd ins(%src : memref<32x32xf16, #hivm.address_space<l1>>) outs(%dst 
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 类型为 Tensor 或 Memref |
-| `dst` | 类型为 Tensor 或 Memref |
+| `src` | 类型为Tensor或Memref |
+| `dst` | 类型为Tensor或Memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result_tensor` | 任意类型的 ranked tensor |
+| `result_tensor` | 任意类型的ranked tensor |
 
 ### `hivm.hir.pipe_barrier` (hivm::PipeBarrierOp)
 
-**功能：** 在指定 pipe 上插入屏障，用于同步。
+**功能：** 在指定pipe上插入屏障，用于同步。
 
 **语法：**
 
@@ -957,7 +957,7 @@ hivm.hir.pipe_barrier [#hivm.pipe<PIPE_V>]
 
 ### `hivm.hir.pointer_cast` (hivm::PointerCastOp)
 
-**功能：** 将指定的 64 位整型地址转换为 memref。
+**功能：** 将指定的64位整型地址转换为memref。
 
 **语法：**
 
@@ -983,18 +983,18 @@ operation ::= `hivm.hir.pointer_cast` `(`$addrs `)` (`[` $dynamicSizes^`]`)? att
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `addrs` | 可变参数，64 位无符号整数 |
-| `dynamicSizes` | 可变参数，index 类型 |
+| `addrs` | 可变参数，64位无符号整数 |
+| `dynamicSizes` | 可变参数，index类型 |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 任意类型值的 memref |
+| `result` | 任意类型值的memref |
 
 ### `hivm.hir.set_ffts_base_addr` (hivm::SetFFTSBaseAddrOp)
 
-**功能：** 设置 FFTS 同步机制的基础地址。
+**功能：** 设置FFTS同步机制的基础地址。
 
 **语法：**
 
@@ -1014,7 +1014,7 @@ hivm.hir.set_ffts_base_addr %base_addr
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `ffts_base_addr` | 64 位无符号整数 |
+| `ffts_base_addr` | 64位无符号整数 |
 
 ### `hivm.hir.set_flag` (hivm::SetFlagOp)
 
@@ -1040,7 +1040,7 @@ hivm.hir.set_flag [#hivm.pipe<PIPE_V>, #hivm.pipe<PIPE_M>, #hivm.event<EVENT_ID0
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `dynamic_event_id` | 64 位无符号整数 |
+| `dynamic_event_id` | 64位无符号整数 |
 
 ### `hivm.hir.set_mask_norm` (hivm::SetMaskNormOp)
 
@@ -1085,14 +1085,14 @@ hivm.store ins(%src : memref<16x16xf16, #hivm.address_space<ub>>) outs(%dst : me
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 类型为 Tensor 或 Memref |
-| `dst` | 类型为 Tensor 或 Memref |
+| `src` | 类型为Tensor或Memref |
+| `dst` | 类型为Tensor或Memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result_tensor` | 任意类型的 ranked tensor |
+| `result_tensor` | 任意类型的ranked tensor |
 
 ### `hivm.hir.sync_block` (hivm::SyncBlockOp)
 
@@ -1117,11 +1117,11 @@ hivm.hir.sync_block [#hivm.sync_block_mode<ALL>] {tvector_pipe = #hivm.pipe<PIPE
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `ffts_base_addr` | 64 位无符号整数 |
+| `ffts_base_addr` | 64位无符号整数 |
 
 ### `hivm.hir.sync_block_lock` (hivm::SyncBlockLockOp)
 
-**功能：** 等待锁变量等于当前 block 索引，实现块间同步。
+**功能：** 等待锁变量等于当前block索引，实现块间同步。
 
 **语法：**
 
@@ -1139,7 +1139,7 @@ hivm.hir.sync_block_lock lock_var(%lock : memref<1xi64>)
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `lock_var` | 64 位无符号整数的 1D memref |
+| `lock_var` | 64位无符号整数的1D memref |
 
 ### `hivm.hir.sync_block_set` (hivm::SyncBlockSetOp)
 
@@ -1166,8 +1166,8 @@ hivm.hir.sync_block_set [#hivm.tcore_type<CUBE>, #hivm.pipe<PIPE_M>, #hivm.pipe<
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `dynamic_flag_id` | 64 位无符号整数 |
-| `ffts_base_addr` | 64 位无符号整数 |
+| `dynamic_flag_id` | 64位无符号整数 |
+| `ffts_base_addr` | 64位无符号整数 |
 
 ### `hivm.hir.sync_block_unlock` (hivm::SyncBlockUnlockOp)
 
@@ -1189,7 +1189,7 @@ hivm.hir.sync_block_unlock lock_var(%lock : memref<1xi64>)
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `lock_var` | 64 位无符号整数的 1D memref |
+| `lock_var` | 64位无符号整数的1D memref |
 
 ### `hivm.hir.sync_block_wait` (hivm::SyncBlockWaitOp)
 
@@ -1212,7 +1212,7 @@ hivm.hir.sync_block_wait [#hivm.tcore_type<VECTOR>, #hivm.pipe<PIPE_V>, #hivm.pi
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `dynamic_flag_id` | 64 位无符号整数 |
+| `dynamic_flag_id` | 64位无符号整数 |
 
 ### `hivm.hir.vabs` (hivm::VAbsOp)
 
@@ -1241,15 +1241,15 @@ hivm.hir.vabs ins(%src : memref<32xf32>) outs(%dst : memref<32xf32>)
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 可变参数，任意类型值的 shaped 类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `src` | 可变参数，任意类型值的shaped类型 |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vadd` (hivm::VAddOp)
 
@@ -1279,14 +1279,14 @@ hivm.hir.vadd ins(%src0, %src1 : memref<32xf32>, memref<32xf32>) outs(%dst : mem
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vand` (hivm::VAndOp)
 
@@ -1316,14 +1316,14 @@ hivm.hir.vand ins(%src0, %src1 : memref<32xi32>, memref<32xi32>) outs(%dst : mem
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.varange` (hivm::VArangeOp)
 
@@ -1352,15 +1352,15 @@ hivm.hir.varange offset[%o] strides[%s0, %s1] outs(%dst : memref<32xf32>)
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `dst` | 类型为 Tensor 或 Memref |
-| `offset` | index 类型 |
-| `strides` | 可变参数，index 类型 |
+| `dst` | 类型为Tensor或Memref |
+| `offset` | index类型 |
+| `strides` | 可变参数，index类型 |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 任意类型的 ranked tensor |
+| `result` | 任意类型的ranked tensor |
 
 ### `hivm.hir.vbrc` (hivm::VBrcOp)
 
@@ -1391,14 +1391,14 @@ hivm.hir.vbrc ins(%src : memref<1xi32>) outs(%dst : memref<?xi32>) broadcast_dim
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 任意类型 |
-| `dst` | 类型为 Tensor 或 Memref |
-| `temp_buffer` | 任意类型值的 memref |
+| `dst` | 类型为Tensor或Memref |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vcast` (hivm::VCastOp)
 
@@ -1430,18 +1430,18 @@ hivm.hir.vcast ins(%src : memref<32xf32>) outs(%dst : memref<32xi32>) {round_mod
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vcmp` (hivm::VCmpOp)
 
-**功能：** 逐元素执行二元向量比较，结果存入 bool 向量。
+**功能：** 逐元素执行二元向量比较，结果存入bool向量。
 
 **语法：**
 
@@ -1467,13 +1467,13 @@ hivm.hir.vcmp ins(%src0, %src1 : memref<32xf32>, memref<32xf32>) outs(%dst : mem
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
+| `dst` | 可变参数，任意类型值的shaped类型 |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vconcat` (hivm::VConcatOp)
 
@@ -1500,13 +1500,13 @@ hivm.hir.vconcat dim(1) ins(%0, %1 : tensor<136x2048xf32>, tensor<136x2048xf32>)
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 类型为 Tensor 或 Memref |
+| `dst` | 类型为Tensor或Memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vcos` (hivm::VCosOp)
 
@@ -1535,13 +1535,13 @@ hivm.hir.vcos ins(%src : memref<32xf32>) outs(%dst : memref<32xf32>)
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
+| `dst` | 可变参数，任意类型值的shaped类型 |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vcumprod` (hivm::VCumprodOp)
 
@@ -1570,14 +1570,14 @@ hivm.hir.vcumprod ins(%src : memref<?xf32>) outs(%dst : memref<?xf32>) cum_dims 
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 类型为 Tensor 或 Memref |
-| `dst` | 类型为 Tensor 或 Memref |
+| `src` | 类型为Tensor或Memref |
+| `dst` | 类型为Tensor或Memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vcumsum` (hivm::VCumsumOp)
 
@@ -1606,14 +1606,14 @@ hivm.hir.vcumsum ins(%src : memref<?xf32>) outs(%dst : memref<?xf32>) cum_dims :
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 类型为 Tensor 或 Memref |
-| `dst` | 类型为 Tensor 或 Memref |
+| `src` | 类型为Tensor或Memref |
+| `dst` | 类型为Tensor或Memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vdeinterleave` (hivm::VDeinterleaveOp)
 
@@ -1641,14 +1641,14 @@ hivm.hir.vdeinterleave ins(%src : memref<32x16xf32>) outs(%dst0, %dst1 : memref<
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 类型为 Tensor 或 Memref |
-| `dst` | 可变参数，类型为 Tensor 或 Memref |
+| `src` | 类型为Tensor或Memref |
+| `dst` | 可变参数，类型为Tensor或Memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vdiv` (hivm::VDivOp)
 
@@ -1678,14 +1678,14 @@ hivm.hir.vdiv ins(%src0, %src1 : memref<32xf32>, memref<32xf32>) outs(%dst : mem
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.verf` (hivm::VErfOp)
 
@@ -1714,13 +1714,13 @@ hivm.hir.verf ins(%src : memref<32xf32>) outs(%dst : memref<32xf32>)
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
+| `dst` | 可变参数，任意类型值的shaped类型 |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vexp` (hivm::VExpOp)
 
@@ -1749,15 +1749,15 @@ hivm.hir.vexp ins(%src : memref<32xf32>) outs(%dst : memref<32xf32>)
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 可变参数，任意类型值的 shaped 类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `src` | 可变参数，任意类型值的shaped类型 |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vflip` (hivm::VFlipOp)
 
@@ -1784,14 +1784,14 @@ hivm.hir.vflip ins(%src : memref<32x16xf32>) outs(%dst : memref<32x16xf32>) flip
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 类型为 Tensor 或 Memref |
-| `dst` | 类型为 Tensor 或 Memref |
+| `src` | 类型为Tensor或Memref |
+| `dst` | 类型为Tensor或Memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vgather` (hivm::VGatherOp)
 
@@ -1819,16 +1819,16 @@ hivm.hir.vgather ins(%src : memref<32x16xf32>) indices(%idx : memref<32x8xi32>) 
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 类型为 Tensor 或 Memref |
-| `indices` | 类型为 Tensor 或 Memref |
-| `dst` | 类型为 Tensor 或 Memref |
-| `temp_buffer` | 任意类型值的 memref |
+| `src` | 类型为Tensor或Memref |
+| `indices` | 类型为Tensor或Memref |
+| `dst` | 类型为Tensor或Memref |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vinterleave` (hivm::VInterleaveOp)
 
@@ -1857,14 +1857,14 @@ hivm.hir.vinterleave ins(%src0, %src1 : memref<32x8xf32>, memref<32x8xf32>) outs
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 类型为 Tensor 或 Memref |
-| `temp_buffer` | 任意类型值的 memref |
+| `dst` | 类型为Tensor或Memref |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vln` (hivm::VLnOp)
 
@@ -1893,15 +1893,15 @@ hivm.hir.vln ins(%src : memref<32xf32>) outs(%dst : memref<32xf32>)
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 可变参数，任意类型值的 shaped 类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `src` | 可变参数，任意类型值的shaped类型 |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vmax` (hivm::VMaxOp)
 
@@ -1931,14 +1931,14 @@ hivm.hir.vmax ins(%src0, %src1 : memref<32xf32>, memref<32xf32>) outs(%dst : mem
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vmin` (hivm::VMinOp)
 
@@ -1968,14 +1968,14 @@ hivm.hir.vmin ins(%src0, %src1 : memref<32xf32>, memref<32xf32>) outs(%dst : mem
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vmod` (hivm::VModOp)
 
@@ -2004,13 +2004,13 @@ hivm.hir.vmod ins(%src0, %src1 : memref<32xi32>, memref<32xi32>) outs(%dst : mem
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
+| `dst` | 可变参数，任意类型值的shaped类型 |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vmul` (hivm::VMulOp)
 
@@ -2040,18 +2040,18 @@ hivm.hir.vmul ins(%src0, %src1 : memref<32xf32>, memref<32xf32>) outs(%dst : mem
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vmulext` (hivm::VMulExtOp)
 
-**功能：** 逐元素执行二元向量乘法，并计算高 32 位结果。
+**功能：** 逐元素执行二元向量乘法，并计算高32位结果。
 
 **语法：**
 
@@ -2076,17 +2076,17 @@ hivm.hir.vmulext ins(%src0, %src1 : memref<32xi32>, memref<32xi32>) outs(%dst : 
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
+| `dst` | 可变参数，任意类型值的shaped类型 |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vmulextended` (hivm::VMulextendedOp)
 
-**功能：** 对两个 tensor 执行向量乘法，同时获取高 16 位和低 16 位结果。
+**功能：** 对两个tensor执行向量乘法，同时获取高16位和低16位结果。
 
 **语法：**
 
@@ -2109,15 +2109,15 @@ hivm.hir.vmulextended ins(%src0, %src1 : memref<32xi16>, memref<32xi16>) outs(%d
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 可变参数，类型为 Tensor 或 Memref |
-| `dst` | 可变参数，类型为 Tensor 或 Memref |
-| `temp_buffer` | 任意类型值的 memref |
+| `src` | 可变参数，类型为Tensor或Memref |
+| `dst` | 可变参数，类型为Tensor或Memref |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vnot` (hivm::VNotOp)
 
@@ -2146,15 +2146,15 @@ hivm.hir.vnot ins(%src : memref<32xi32>) outs(%dst : memref<32xi32>)
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 可变参数，任意类型值的 shaped 类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `src` | 可变参数，任意类型值的shaped类型 |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vor` (hivm::VOrOp)
 
@@ -2184,18 +2184,18 @@ hivm.hir.vor ins(%src0, %src1 : memref<32xi32>, memref<32xi32>) outs(%dst : memr
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vpad` (hivm::VPadOp)
 
-**功能：** 对输入向量进行填充，类似 `tensor.pad` 语义。
+**功能：** 对输入向量进行填充，类似`tensor.pad`语义。
 
 **语法：**
 
@@ -2221,17 +2221,17 @@ hivm.hir.vpad ins(%src : tensor<2x16xf32>) outs(%dst: tensor<?x16xf32>) low[%fir
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 类型为 Tensor 或 Memref |
-| `dst` | 类型为 Tensor 或 Memref |
+| `src` | 类型为Tensor或Memref |
+| `dst` | 类型为Tensor或Memref |
 | `pad_value` | 任意类型 |
-| `low` | 可变参数，index 类型 |
-| `high` | 可变参数，index 类型 |
+| `low` | 可变参数，index类型 |
+| `high` | 可变参数，index类型 |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vpow` (hivm::VPowOp)
 
@@ -2261,14 +2261,14 @@ hivm.hir.vpow ins(%src0, %src1 : memref<32xf32>, memref<32xf32>) outs(%dst : mem
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vrec` (hivm::VRecOp)
 
@@ -2297,15 +2297,15 @@ hivm.hir.vrec ins(%src : memref<32xf32>) outs(%dst : memref<32xf32>)
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 可变参数，任意类型值的 shaped 类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `src` | 可变参数，任意类型值的shaped类型 |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vreduce` (hivm::VReduceOp)
 
@@ -2335,20 +2335,20 @@ hivm.hir.vreduce <add> ins(%src : memref<?xf32>) outs(%dst : memref<1xf32>) redu
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 类型为 Tensor 或 Memref |
-| `dst` | 可变参数，类型为 Tensor 或 Memref |
-| `temp_buffer` | 任意类型值的 memref |
-| `indices` | 类型为 Tensor 或 Memref |
+| `src` | 类型为Tensor或Memref |
+| `dst` | 可变参数，类型为Tensor或Memref |
+| `temp_buffer` | 任意类型值的memref |
+| `indices` | 类型为Tensor或Memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vrelu` (hivm::VReluOp)
 
-**功能：** 逐元素计算向量的 ReLU 激活函数。
+**功能：** 逐元素计算向量的ReLU激活函数。
 
 **语法：**
 
@@ -2373,15 +2373,15 @@ hivm.hir.vrelu ins(%src : memref<32xf32>) outs(%dst : memref<32xf32>)
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 可变参数，任意类型值的 shaped 类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `src` | 可变参数，任意类型值的shaped类型 |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vrsqrt` (hivm::VRsqrtOp)
 
@@ -2410,15 +2410,15 @@ hivm.hir.vrsqrt ins(%src : memref<32xf32>) outs(%dst : memref<32xf32>)
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 可变参数，任意类型值的 shaped 类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `src` | 可变参数，任意类型值的shaped类型 |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vsel` (hivm::VSelOp)
 
@@ -2448,14 +2448,14 @@ hivm.hir.vsel ins(%cond, %src0, %src1 : memref<32xi1>, memref<32xf32>, memref<32
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vshl` (hivm::VShLOp)
 
@@ -2485,14 +2485,14 @@ hivm.hir.vshl ins(%src_vec, %shift : memref<32xi32>, i32) outs(%dst : memref<32x
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vshr` (hivm::VShROp)
 
@@ -2523,14 +2523,14 @@ hivm.hir.vshr ins(%src_vec, %shift : memref<32xi32>, i32) outs(%dst : memref<32x
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vsin` (hivm::VSinOp)
 
@@ -2559,13 +2559,13 @@ hivm.hir.vsin ins(%src : memref<32xf32>) outs(%dst : memref<32xf32>)
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
+| `dst` | 可变参数，任意类型值的shaped类型 |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vsort` (hivm::VSortOp)
 
@@ -2595,15 +2595,15 @@ hivm.hir.vsort ins(%src : memref<?xf32>) outs(%dst : memref<?xf32>) descending =
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 类型为 Tensor 或 Memref |
-| `dst` | 可变参数，类型为 Tensor 或 Memref |
-| `temp_buffer` | 任意类型值的 memref |
+| `src` | 类型为Tensor或Memref |
+| `dst` | 可变参数，类型为Tensor或Memref |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vsqrt` (hivm::VSqrtOp)
 
@@ -2632,15 +2632,15 @@ hivm.hir.vsqrt ins(%src : memref<32xf32>) outs(%dst : memref<32xf32>)
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 可变参数，任意类型值的 shaped 类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `src` | 可变参数，任意类型值的shaped类型 |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vsub` (hivm::VSubOp)
 
@@ -2670,14 +2670,14 @@ hivm.hir.vsub ins(%src0, %src1 : memref<32xf32>, memref<32xf32>) outs(%dst : mem
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vtanh` (hivm::VTanhOp)
 
@@ -2706,13 +2706,13 @@ hivm.hir.vtanh ins(%src : memref<32xf32>) outs(%dst : memref<32xf32>)
 | 操作数 | 说明 |
 | :----: | ---- |
 | `src` | 可变参数，任意类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
+| `dst` | 可变参数，任意类型值的shaped类型 |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vtranspose` (hivm::VTransposeOp)
 
@@ -2742,15 +2742,15 @@ hivm.hir.vtranspose ins(%src : memref<32x8xf32>) outs(%dst : memref<8x32xf32>) p
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 类型为 Tensor 或 Memref |
-| `dst` | 类型为 Tensor 或 Memref |
-| `temp_buffer` | 任意类型值的 memref |
+| `src` | 类型为Tensor或Memref |
+| `dst` | 类型为Tensor或Memref |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.vxor` (hivm::VXorOp)
 
@@ -2779,15 +2779,15 @@ hivm.hir.vxor ins(%src0, %src1 : memref<32xi32>, memref<32xi32>) outs(%dst : mem
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `src` | 可变参数，任意类型值的 shaped 类型 |
-| `dst` | 可变参数，任意类型值的 shaped 类型 |
-| `temp_buffer` | 任意类型值的 memref |
+| `src` | 可变参数，任意类型值的shaped类型 |
+| `dst` | 可变参数，任意类型值的shaped类型 |
+| `temp_buffer` | 任意类型值的memref |
 
 **结果：**
 
 | 结果 | 说明 |
 | :--: | ---- |
-| `result` | 可变参数，任意类型的 ranked tensor |
+| `result` | 可变参数，任意类型的ranked tensor |
 
 ### `hivm.hir.wait_flag` (hivm::WaitFlagOp)
 
@@ -2813,17 +2813,17 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 | 操作数 | 说明 |
 | :----: | ---- |
-| `dynamic_event_id` | 64 位无符号整数 |
+| `dynamic_event_id` | 64位无符号整数 |
 
 ## 属性
 
 ### AddressSpaceAttr
 
-**功能：** 定义 HIVM 地址空间映射属性，映射到 GM、L1、L0A、L0B、L0C 和 UB。
+**功能：** 定义HIVM地址空间映射属性，映射到GM、L1、L0A、L0B、L0C和UB。
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| address_space | `::mlir::hivm::AddressSpace` | 类型为 AddressSpace 的枚举 |
+| address_space | `::mlir::hivm::AddressSpace` | 类型为AddressSpace的枚举 |
 
 ### AlignKindAttr
 
@@ -2831,7 +2831,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| value | `::mlir::hivm::AlignKind` | 类型为 AlignKind 的枚举 |
+| value | `::mlir::hivm::AlignKind` | 类型为AlignKind的枚举 |
 
 ### AllocAlignDimsAttr
 
@@ -2847,11 +2847,11 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 ### AtomicKindAttr
 
-**功能：** 定义 StoreOp 的原子操作类型。
+**功能：** 定义StoreOp的原子操作类型。
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| value | `::mlir::hivm::AtomicKind` | 类型为 AtomicKind 的枚举 |
+| value | `::mlir::hivm::AtomicKind` | 类型为AtomicKind的枚举 |
 
 ### AxisKindAttr
 
@@ -2859,7 +2859,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| value | `::mlir::hivm::AxisKind` | 类型为 AxisKind 的枚举 |
+| value | `::mlir::hivm::AxisKind` | 类型为AxisKind的枚举 |
 
 ### HIVMBlockMappingAttr
 
@@ -2871,19 +2871,19 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 ### CompareModeAttr
 
-**功能：** 定义 VCmpOp 的比较模式。
+**功能：** 定义VCmpOp的比较模式。
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| value | `::mlir::hivm::CompareMode` | 类型为 CompareMode 的枚举 |
+| value | `::mlir::hivm::CompareMode` | 类型为CompareMode的枚举 |
 
 ### DCCIModeAttr
 
-**功能：** 定义 DCCI 模式。
+**功能：** 定义DCCI模式。
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| value | `::mlir::hivm::DCCIMode` | 类型为 DCCIMode 的枚举 |
+| value | `::mlir::hivm::DCCIMode` | 类型为DCCIMode的枚举 |
 
 ### DataCacheKindAttr
 
@@ -2891,15 +2891,15 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| value | `::mlir::hivm::DataCacheKind` | 类型为 DataCacheKind 的枚举 |
+| value | `::mlir::hivm::DataCacheKind` | 类型为DataCacheKind的枚举 |
 
 ### DataLayoutAttr
 
-**功能：** 定义 HIVM 数据布局映射属性，包括 DOTA_ND、DOTB_ND、DOTC_ND、zN、nZ 和 ND，支持转置标识。
+**功能：** 定义HIVM数据布局映射属性，包括DOTA_ND、DOTB_ND、DOTC_ND、zN、nZ和ND，支持转置标识。
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| data_layout | `::mlir::hivm::DataLayout` | 类型为 DataLayout 的枚举 |
+| data_layout | `::mlir::hivm::DataLayout` | 类型为DataLayout的枚举 |
 | transpose | `std::optional<bool>` | 转置标识 |
 | fractalSizes | `std::optional<DenseI64ArrayAttr>` | 分形尺寸 |
 
@@ -2909,15 +2909,15 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| value | `::mlir::hivm::DeinterleaveMode` | 类型为 DeinterleaveMode 的枚举 |
+| value | `::mlir::hivm::DeinterleaveMode` | 类型为DeinterleaveMode的枚举 |
 
 ### DescaleModeAttr
 
-**功能：** 定义 MatmulOp 的反量化模式。
+**功能：** 定义MatmulOp的反量化模式。
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| value | `::mlir::hivm::DescaleMode` | 类型为 DescaleMode 的枚举 |
+| value | `::mlir::hivm::DescaleMode` | 类型为DescaleMode的枚举 |
 
 ### DisableAutoInjectBlockSyncAttr
 
@@ -2931,33 +2931,33 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| event | `::mlir::hivm::EVENT` | 类型为 EVENT 的枚举 |
+| event | `::mlir::hivm::EVENT` | 类型为EVENT的枚举 |
 
 ### FixpipePreQuantModeAttr
 
-**功能：** 定义 Fixpipe 前级量化模式。
+**功能：** 定义Fixpipe前级量化模式。
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| value | `::mlir::hivm::FixpipePreQuantMode` | 类型为 FixpipePreQuantMode 的枚举 |
+| value | `::mlir::hivm::FixpipePreQuantMode` | 类型为FixpipePreQuantMode的枚举 |
 
 ### FixpipePreReluModeAttr
 
-**功能：** 定义 Fixpipe 前级 ReLU 模式。
+**功能：** 定义Fixpipe前级ReLU模式。
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| value | `::mlir::hivm::FixpipePreReluMode` | 类型为 FixpipePreReluMode 的枚举 |
+| value | `::mlir::hivm::FixpipePreReluMode` | 类型为FixpipePreReluMode的枚举 |
 
 ### HIVMFuncDynMemrefArgsAttr
 
-**功能：** 标记函数中动态 memref 参数的索引数组。
+**功能：** 标记函数中动态memref参数的索引数组。
 
 无参数。
 
 ### InsertSliceSourceIndexAttr
 
-**功能：** 指定 VConcatOp 中的插入片段的源操作数。
+**功能：** 指定VConcatOp中的插入片段的源操作数。
 
 无参数。
 
@@ -2973,7 +2973,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| padmode | `::mlir::hivm::PadMode` | 类型为 PadMode 的枚举 |
+| padmode | `::mlir::hivm::PadMode` | 类型为PadMode的枚举 |
 
 ### ParallelLoopAttr
 
@@ -2983,11 +2983,11 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 ### PipeAttr
 
-**功能：** 定义操作所属的 pipe。
+**功能：** 定义操作所属的pipe。
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| pipe | `::mlir::hivm::PIPE` | 类型为 PIPE 的枚举 |
+| pipe | `::mlir::hivm::PIPE` | 类型为PIPE的枚举 |
 
 ### ReduceOpAttr
 
@@ -2995,15 +2995,15 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| reduce_op | `::mlir::hivm::ReduceOperation` | 类型为 ReduceOperation 的枚举 |
+| reduce_op | `::mlir::hivm::ReduceOperation` | 类型为ReduceOperation的枚举 |
 
 ### RoundModeAttr
 
-**功能：** 定义 VCastOp 的舍入模式。
+**功能：** 定义VCastOp的舍入模式。
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| value | `::mlir::hivm::RoundMode` | 类型为 RoundMode 的枚举 |
+| value | `::mlir::hivm::RoundMode` | 类型为RoundMode的枚举 |
 
 ### StorageAlignedAttr
 
@@ -3029,7 +3029,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| sub_block | `::mlir::hivm::MappingId` | 类型为 MappingId 的枚举 |
+| sub_block | `::mlir::hivm::MappingId` | 类型为MappingId的枚举 |
 
 ### SyncBlockInstrModeAttr
 
@@ -3037,7 +3037,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| sync_instr_mode | `::mlir::hivm::SyncBlockInstrMode` | 类型为 SyncBlockInstrMode 的枚举 |
+| sync_instr_mode | `::mlir::hivm::SyncBlockInstrMode` | 类型为SyncBlockInstrMode的枚举 |
 
 ### SyncBlockModeAttr
 
@@ -3045,7 +3045,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| sync_mode | `::mlir::hivm::SyncBlockMode` | 类型为 SyncBlockMode 的枚举 |
+| sync_mode | `::mlir::hivm::SyncBlockMode` | 类型为SyncBlockMode的枚举 |
 
 ### TCoreTypeAttr
 
@@ -3053,7 +3053,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| tcoretype | `::mlir::hivm::TCoreType` | 类型为 TCoreType 的枚举 |
+| tcoretype | `::mlir::hivm::TCoreType` | 类型为TCoreType的枚举 |
 
 ### TCoreTypeMarkerAttr
 
@@ -3061,7 +3061,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| tcoretype | `::mlir::hivm::TCoreType` | 类型为 TCoreType 的枚举 |
+| tcoretype | `::mlir::hivm::TCoreType` | 类型为TCoreType的枚举 |
 
 ### TFuncCoreTypeAttr
 
@@ -3069,15 +3069,15 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| funcCoreType | `::mlir::hivm::TFuncCoreType` | 类型为 TFuncCoreType 的枚举 |
+| funcCoreType | `::mlir::hivm::TFuncCoreType` | 类型为TFuncCoreType的枚举 |
 
 ### TModuleCoreTypeAttr
 
-**功能：** 定义模块的核心类型，根据模块内函数类型自动推断为 AIC、AIV 或 MIX。
+**功能：** 定义模块的核心类型，根据模块内函数类型自动推断为AIC、AIV或MIX。
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| moduleCoreType | `::mlir::hivm::TModuleCoreType` | 类型为 TModuleCoreType 的枚举 |
+| moduleCoreType | `::mlir::hivm::TModuleCoreType` | 类型为TModuleCoreType的枚举 |
 
 ### TPartOfMixAttr
 
@@ -3087,11 +3087,11 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 ### TypeFnAttr
 
-**功能：** 定义 VCastOp 的转换类型。
+**功能：** 定义VCastOp的转换类型。
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| value | `::mlir::hivm::TypeFn` | 类型为 TypeFn 的枚举 |
+| value | `::mlir::hivm::TypeFn` | 类型为TypeFn的枚举 |
 
 ### UnitFlagAttr
 
@@ -3099,7 +3099,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| unit_flag | `::mlir::hivm::UNIT_FLAG` | 类型为 UNIT_FLAG 的枚举 |
+| unit_flag | `::mlir::hivm::UNIT_FLAG` | 类型为UNIT_FLAG的枚举 |
 
 ### UnlikelyConditionAttr
 
@@ -3113,13 +3113,13 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 | 参数 | C++ 类型 | 说明 |
 | :--: | :------: | ---- |
-| value | `::mlir::hivm::VFMode` | 类型为 VFMode 的枚举 |
+| value | `::mlir::hivm::VFMode` | 类型为VFMode的枚举 |
 
 ## 枚举
 
 ### AddressSpace
 
-**功能：** 定义 HIVM 地址空间。
+**功能：** 定义HIVM地址空间。
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :------: | :--: | ---------- |
@@ -3143,7 +3143,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 ### AtomicKind
 
-**功能：** 定义 StoreOp 的原子操作类型。
+**功能：** 定义StoreOp的原子操作类型。
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :------: | :--: | ---------- |
@@ -3171,7 +3171,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 ### CompareMode
 
-**功能：** 定义 VCmpOp 的比较模式。
+**功能：** 定义VCmpOp的比较模式。
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :------: | :--: | ---------- |
@@ -3184,7 +3184,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 ### DCCIMode
 
-**功能：** 定义 DCCI 模式。
+**功能：** 定义DCCI模式。
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :------: | :--: | ---------- |
@@ -3204,7 +3204,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 ### DataLayout
 
-**功能：** 定义 HIVM 数据布局类型。
+**功能：** 定义HIVM数据布局类型。
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :------: | :--: | ---------- |
@@ -3227,7 +3227,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 ### DescaleMode
 
-**功能：** 定义 MatmulOp 的反量化模式。
+**功能：** 定义MatmulOp的反量化模式。
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :------: | :--: | ---------- |
@@ -3237,7 +3237,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 ### EVENT
 
-**功能：** 定义同步事件 ID。
+**功能：** 定义同步事件ID。
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :------: | :--: | ---------- |
@@ -3252,7 +3252,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 ### FixpipePreQuantMode
 
-**功能：** 定义 Fixpipe 前级量化模式。
+**功能：** 定义Fixpipe前级量化模式。
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :------: | :--: | ---------- |
@@ -3263,7 +3263,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 ### FixpipePreReluMode
 
-**功能：** 定义 Fixpipe 前级 ReLU 模式。
+**功能：** 定义Fixpipe前级ReLU模式。
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :------: | :--: | ---------- |
@@ -3293,7 +3293,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 ### MatmulBiasMode
 
-**功能：** 定义局部 MatmulOp 的偏置模式。
+**功能：** 定义局部MatmulOp的偏置模式。
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :------: | :--: | ---------- |
@@ -3314,7 +3314,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 ### PadMode
 
-**功能：** 定义 LoadOp 的填充模式。
+**功能：** 定义LoadOp的填充模式。
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :------: | :--: | ---------- |
@@ -3324,7 +3324,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 ### PIPE
 
-**功能：** 定义 HIVM 操作所属的 pipe。
+**功能：** 定义HIVM操作所属的pipe。
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :------: | :--: | ---------- |
@@ -3346,7 +3346,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 ### ReduceOperation
 
-**功能：** 定义 VReduceOp 的规约操作类型。
+**功能：** 定义VReduceOp的规约操作类型。
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :------: | :--: | ---------- |
@@ -3367,7 +3367,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 ### RoundMode
 
-**功能：** 定义 VCastOp 的舍入模式。
+**功能：** 定义VCastOp的舍入模式。
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :------: | :--: | ---------- |
@@ -3436,7 +3436,7 @@ hivm.hir.wait_flag [#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_V>, #hivm.event<EVENT_ID
 
 ### TypeFn
 
-**功能：** 定义 VCastOp 的转换类型。
+**功能：** 定义VCastOp的转换类型。
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :------: | :--: | ---------- |

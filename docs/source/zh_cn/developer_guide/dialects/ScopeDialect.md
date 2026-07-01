@@ -1,12 +1,12 @@
 # `scope` 方言
 
-Scope 方言用于定义代码作用域区域。
+Scope方言用于定义代码作用域区域。
 
 ## 操作定义
 
 ### `scope.return` (scope::ReturnOp)
 
-**功能：** `scope.scope` 区域内部的终结返回操作。
+**功能：** `scope.scope`区域内部的终结返回操作。
 
 **语法：**
 
@@ -53,7 +53,7 @@ scope.scope : () -> () {
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `no_inline` | `::mlir::UnitAttr` | 单元属性，标记禁止内联 |
 

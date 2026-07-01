@@ -7,19 +7,19 @@
 
 ## `-compose-collapse-expand`
 
-**功能：** 组合 collapse 与 expand 操作。
+**功能：** 组合collapse与expand操作。
 
 ## `-convert-non-contiguous-reshape-to-copy`
 
-**功能：** 为非连续且可能重关联的 reshape 操作生成 copy 算子。
+**功能：** 为非连续且可能重关联的reshape操作生成copy算子。
 
 ## `-convert-to-hivm-op`
 
-**功能：** 将其他方言的算子转换为 HIVM 算子。
+**功能：** 将其他方言的算子转换为HIVM算子。
 
 ## `-cv-pipelining`
 
-**功能：** 为多缓冲 mix-cv 操作的 Cube 与 Vector 核心开启流水线优化。
+**功能：** 为多缓冲mix-cv操作的Cube与Vector核心开启流水线优化。
 
 **选项：**
 
@@ -27,11 +27,11 @@
 
 ## `-hivm-add-ffts-to-syncblocksetop`
 
-**功能：** 将 FFTS（arg0）添加到 SyncBlockSetOp 算子中。
+**功能：** 将FFTS（arg0）添加到SyncBlockSetOp算子中。
 
 ## `-hivm-aggregated-decompose-op`
 
-**功能：** 分解实现了 hivm AggregatedOpInterface 接口的 hivm 算子。
+**功能：** 分解实现了hivm AggregatedOpInterface接口的hivm算子。
 
 **选项：**
 
@@ -39,9 +39,9 @@
 
 ## `-hivm-align-alloc-size`
 
-**功能：** 自动对齐特殊 hivm 算子所需的 memref.alloc 内存大小，满足访问对齐要求。
+**功能：** 自动对齐特殊hivm算子所需的memref.alloc内存大小，满足访问对齐要求。
 
-部分特殊 hivm 算子的访问大小必须对齐到硬件单元粒度，该 Pass 会调整对应 memref.alloc 的分配大小，避免越界访问。
+部分特殊hivm算子的访问大小必须对齐到硬件单元粒度，该Pass会调整对应memref.alloc的分配大小，避免越界访问。
 
 ## `-hivm-alloc-extra-buffer`
 
@@ -51,7 +51,7 @@
 
 **功能：** 自动推断缓冲区大小。
 
-该 Pass 通过插入 annotation.mark 算子完成缓冲区大小的推断。
+该Pass通过插入annotation.mark算子完成缓冲区大小的推断。
 
 ## `-hivm-bind-sub-block`
 
@@ -59,51 +59,51 @@
 
 ## `-hivm-bind-sync-block-lock-arg`
 
-**功能：** 将携带 hacc.syncblocklock 属性的函数参数绑定到 CreateSyncBlockLockOp 算子。
+**功能：** 将携带hacc.syncblocklock属性的函数参数绑定到CreateSyncBlockLockOp算子。
 
 ## `-hivm-bind-workspace-arg`
 
-**功能：** 将携带 hacc.workspace 属性的函数参数绑定到 AllocWorkspaceOp 算子。
+**功能：** 将携带hacc.workspace属性的函数参数绑定到AllocWorkspaceOp算子。
 
 ## `-hivm-bubble-up-extract-slice`
 
-**功能：** 上提 extract-slice 算子。
+**功能：** 上提extract-slice算子。
 
 ## `-hivm-clone-tensor-empty`
 
-**功能：** 根据 hivm 算子将输出克隆为不同的空张量。
+**功能：** 根据hivm算子将输出克隆为不同的空张量。
 
-该 Pass 会为 hivm 算子的输出克隆生成独立的 tensor.empty。
+该Pass会为hivm算子的输出克隆生成独立的tensor.empty。
 
 ## `-hivm-constantize-buffer-size`
 
 **功能：** 尝试将动态形状的缓冲区转换为常量形态。
 
-该 Pass 通过对原始形状取上界，将动态形状缓冲区转换为静态常量。转换成功后会创建新的静态形状 alloc，并通过 subview 映射回原始形状，供后续流程使用。
+该Pass通过对原始形状取上界，将动态形状缓冲区转换为静态常量。转换成功后会创建新的静态形状alloc，并通过subview映射回原始形状，供后续流程使用。
 
 ## `-hivm-decompose-op`
 
-**功能：** 依据硬件能力将复合 hivm 算子拆解为多个基础 hivm 算子。
+**功能：** 依据硬件能力将复合hivm算子拆解为多个基础hivm算子。
 
-该 Pass 会根据硬件支持能力拆分复合算子，例如硬件不支持直接的 f32 转 i8 类型转换时，会拆解为 f32 转 f16、f16 转 i8 两步转换操作。
+该Pass会根据硬件支持能力拆分复合算子，例如硬件不支持直接的f32转i8类型转换时，会拆解为f32转f16、f16转i8两步转换操作。
 
-动态场景下，会为额外分配的缓冲区创建携带 buffer_size_in_byte 属性的 annotation.markOp，该属性值与原始算子的 src 或 dst 操作数对应大小一致。
+动态场景下，会为额外分配的缓冲区创建携带buffer_size_in_byte属性的annotation.markOp，该属性值与原始算子的src或dst操作数对应大小一致。
 
 ## `-hivm-enable-multi-buffer`
 
 **功能：** 为算子启用多缓冲优化。
 
-对于标记了 `hivm.multi_buffer` 属性的算子，该 Pass 会为其开启多缓冲机制。
+对于标记了`hivm.multi_buffer`属性的算子，该Pass会为其开启多缓冲机制。
 
 ## `-hivm-enable-stride-align`
 
-**功能：** 依据步幅对齐标记调整 memref 的分配对齐方式。
+**功能：** 依据步幅对齐标记调整memref的分配对齐方式。
 
-该 Pass 会根据 storage_align 注解标记，重新分配 memref 内存以满足对齐要求。
+该Pass会根据storage_align注解标记，重新分配memref内存以满足对齐要求。
 
 ## `-hivm-flatten-ops`
 
-**功能：** 展平 HIVM 算子。
+**功能：** 展平HIVM算子。
 
 ## `-hivm-graph-sync-solver`
 
@@ -115,7 +115,7 @@
 
 ## `-hivm-infer-data-layout`
 
-**功能：** 推断 HIVM 算子的数据布局。
+**功能：** 推断HIVM算子的数据布局。
 
 ## `-hivm-infer-func-core-type`
 
@@ -123,11 +123,11 @@
 
 ## `-hivm-infer-mem-scope`
 
-**功能：** 推断 HIVM 算子的内存作用域。
+**功能：** 推断HIVM算子的内存作用域。
 
 ## `-hivm-init-entry-kernel`
 
-**功能：** 在入口 Kernel 的起始位置插入 set_mask_norm() 调用。
+**功能：** 在入口Kernel的起始位置插入set_mask_norm() 调用。
 
 ## `-hivm-inject-block-sync`
 
@@ -135,9 +135,9 @@
 
 **选项：**
 
-- `-block-all-sync`：为 HIVM injectBlockSync 启用全量块同步注入。
+- `-block-all-sync`：为HIVM injectBlockSync启用全量块同步注入。
 - `-assume-alive-loops`：假定所有循环（forOp、whileOp）至少执行一次。
-- `-disable-auto-inject-block-sync`：切换自动 set/wait 插入逻辑，始终保留 SetFFTSBaseAddrOp。
+- `-disable-auto-inject-block-sync`：切换自动set/wait插入逻辑，始终保留SetFFTSBaseAddrOp。
 
 ## `-hivm-inject-sync`
 
@@ -151,163 +151,163 @@
 
 ## `-hivm-inline-fixpipe`
 
-**功能：** 将算子转换为 HIVM Fixpipe 算子。
+**功能：** 将算子转换为HIVM Fixpipe算子。
 
 ## `-hivm-inline-load-copy`
 
-**功能：** 内联复制类 load 操作。
+**功能：** 内联复制类load操作。
 
 ## `-hivm-inline-otf-broadcast`
 
-**功能：** 内联 OTF 广播操作。
+**功能：** 内联OTF广播操作。
 
 ## `-hivm-inline-otf-load-store`
 
-**功能：** 即时内联 Load 与 Store 操作。
+**功能：** 即时内联Load与Store操作。
 
 ## `-hivm-insert-infer-sync-block-lock-num-and-init-func`
 
 **功能：** 为主机端插入同步块锁数量推断与初始化的回调函数。
 
-该 Pass 会统计全部静态同步块锁的数量并完成初始化，同时创建主机回调函数返回该数值。
+该Pass会统计全部静态同步块锁的数量并完成初始化，同时创建主机回调函数返回该数值。
 
 ## `-hivm-insert-infer-task-type-func`
 
 **功能：** 推断模块的任务类型，并生成对应的主机端返回函数。
 
-该 Pass 会检测模块类型，包括 CubeVectorMix、CubeOnly、VectorOnly、Unknown 四类，同时生成主机端函数 `<original_func>_infer_task_type_function`，返回编码了任务类型的 i8 常量，并标注对应的 HACC 主机函数属性。
+该Pass会检测模块类型，包括CubeVectorMix、CubeOnly、VectorOnly、Unknown四类，同时生成主机端函数`<original_func>_infer_task_type_function`，返回编码了任务类型的i8常量，并标注对应的HACC主机函数属性。
 
 ## `-hivm-insert-infer-workspace-size-func`
 
 **功能：** 为主机端插入工作空间大小推断的回调函数。
 
-该 Pass 会在 plan-workspace Pass 执行后统计总静态工作空间大小，并创建主机回调函数返回该数值。
+该Pass会在plan-workspace Pass执行后统计总静态工作空间大小，并创建主机回调函数返回该数值。
 
 ## `-hivm-insert-init-and-finish-for-debug`
 
-**功能：** 插入调试用的 init 与 finish 操作。
+**功能：** 插入调试用的init与finish操作。
 
 ## `-hivm-insert-load-store-for-mix-cv`
 
-**功能：** 为 mix cv 场景插入 load 与 store 操作。
+**功能：** 为mix cv场景插入load与store操作。
 
 ## `-hivm-insert-nz2nd-for-debug`
 
-**功能：** 插入调试用的 nz2nd 操作。
+**功能：** 插入调试用的nz2nd操作。
 
 ## `-hivm-lift-lowest-stride`
 
-**功能：** 抬升 hivm 操作数的最低维步幅。
+**功能：** 抬升hivm操作数的最低维步幅。
 
-对于绝大多数 hivm 结构化算子，若最后一个维度不连续，则会抬升操作数的最低维步幅，使最后一维变为连续。例外算子：MacroOp、VArangeOp。
+对于绝大多数hivm结构化算子，若最后一个维度不连续，则会抬升操作数的最低维步幅，使最后一维变为连续。例外算子：MacroOp、VArangeOp。
 
-例如：类型为 memref<16xf16, strided<[8]>> 的操作数，经过该 Pass 处理后变为 memref<16x1xf32, strided<[8, 1]>>，最后一维满足连续要求。
+例如：类型为`memref<16xf16, strided<[8]>>` 的操作数，经过该Pass处理后变为`memref<16x1xf32, strided<[8, 1]>>`，最后一维满足连续要求。
 
 ## `-hivm-lift-zero-rank`
 
 ## `-hivm-lower-create-sync-block-lock`
 
-**功能：** 将 CreateSyncBlockLockOp 降级为 ViewOp。
+**功能：** 将CreateSyncBlockLockOp降级为ViewOp。
 
 ## `-hivm-lower-to-loops`
 
-**功能：** 将 hivm 算子降级为循环实现。
+**功能：** 将hivm算子降级为循环实现。
 
 ## `-hivm-map-forall-to-blocks`
 
-**功能：** 将 forall 循环映射到 hivm 块。
+**功能：** 将forall循环映射到hivm块。
 
-该 Pass 将每个 scf.forall 算子一对一映射到 HIVM 块算子，并将 scf.forall 的归纳变量重写为 hivm block idx 算子。
+该Pass将每个scf.forall算子一对一映射到HIVM块算子，并将scf.forall的归纳变量重写为hivm block idx算子。
 
 ## `-hivm-mark-disable-load`
 
-**功能：** 标记需要禁用 dcache 的 memref.load 操作。
+**功能：** 标记需要禁用dcache的memref.load操作。
 
 ## `-hivm-mark-multi-buffer`
 
-**功能：** 为 HIVM 算子标记多缓冲属性。
+**功能：** 为HIVM算子标记多缓冲属性。
 
-当 enable-auto 选项开启时，该 Pass 会自动为 hivm 算子标记多缓冲属性；作用域为 L0C 的缓冲区不会被标记。若 enable-auto 关闭，则不执行任何操作。
+当enable-auto选项开启时，该Pass会自动为hivm算子标记多缓冲属性；作用域为L0C的缓冲区不会被标记。若enable-auto关闭，则不执行任何操作。
 
 **选项：**
 
 - `-enable-auto`：自动标记多缓冲。
 - `-limit-auto-multi-buffer-only-for-local-buffer`：禁用工作空间的多缓冲标记。
 - `-limit-auto-multi-buffer-of-local-buffer`：限制本地缓冲区的自动多缓冲行为。
-- `-limit-mix-auto-multi-buffer-buffer`：在 cube、vector 上禁用多缓冲或不做限制。
+- `-limit-mix-auto-multi-buffer-buffer`：在cube、vector上禁用多缓冲或不做限制。
 - `-set-workspace-multibuffer`：覆盖工作空间的多缓冲数量配置。
 
 ## `-hivm-mark-real-core-type`
 
-**功能：** 使用 core-type 属性标记标量算子。
+**功能：** 使用core-type属性标记标量算子。
 
 **选项：**
 
-- `-remove-core-type-attrs`：移除所有核心类型属性，开启后该 Pass 变为清理 Pass。
+- `-remove-core-type-attrs`：移除所有核心类型属性，开启后该Pass变为清理Pass。
 
 ## `-hivm-mark-stride-align`
 
-**功能：** 自动为 hivm 算子的操作数标注 stride_align 标记。
+**功能：** 自动为hivm算子的操作数标注stride_align标记。
 
-该 Pass 会遍历所有 hivm 算子，为其 memref 类型操作数自动添加 storage_align 注解标记。
+该Pass会遍历所有hivm算子，为其memref类型操作数自动添加storage_align注解标记。
 
 ## `-hivm-memref-alloc-to-alloca`
 
-**功能：** 将局部 AllocOp 转换为 AllocaOp。
+**功能：** 将局部AllocOp转换为AllocaOp。
 
-该 Pass 会将所有非全局内存空间的 memref.alloc 替换为 memref.alloca。
+该Pass会将所有非全局内存空间的memref.alloc替换为memref.alloca。
 
 ## `-hivm-normalize-loop-iterator`
 
-**功能：** 在 plan-memory 执行前，规范化循环迭代器的特殊状态。
+**功能：** 在plan-memory执行前，规范化循环迭代器的特殊状态。
 
 ## `-hivm-normalize-matmul`
 
-**功能：** 规范化 hivm 矩阵乘算子。
+**功能：** 规范化hivm矩阵乘算子。
 
 ## `-hivm-opt-func-output`
 
-**功能：** 在 bufferization 完成后优化函数输出。
+**功能：** 在bufferization完成后优化函数输出。
 
-该 Pass 会尝试移除不必要的地址返回操作。
+该Pass会尝试移除不必要的地址返回操作。
 
 ## `-hivm-opt-single-point`
 
-**功能：** 通过标量运算优化单点 hivm 算子。
+**功能：** 通过标量运算优化单点hivm算子。
 
-该 Pass 借助标量操作完成单点 hivm 算子的优化。
+该Pass借助标量操作完成单点hivm算子的优化。
 
 ## `-hivm-plan-memory`
 
-**功能：** 为 HIVM 算子执行内存规划。
+**功能：** 为HIVM算子执行内存规划。
 
 **选项：**
 
-- `-mem-plan-mode`：内存规划模式，默认为 LOCAL_MEM_PLAN。
+- `-mem-plan-mode`：内存规划模式，默认为LOCAL_MEM_PLAN。
 - `-enable-global-workspace-reuse`：启用全局工作空间复用，默认关闭。
-- `-restrict-inplace-as-isa`：限制内存就地操作与 ISA 保持一致，默认关闭。
+- `-restrict-inplace-as-isa`：限制内存就地操作与ISA保持一致，默认关闭。
 
 ## `-hivm-recognize-deinterleave-op`
 
 **功能：** 识别解交错算子，优化非连续内存访问。
 
-该 Pass 通过解交错方式优化非连续的内存访问行为。
+该Pass通过解交错方式优化非连续的内存访问行为。
 
 ## `-hivm-reduce-rank-subview`
 
-**功能：** 通过 subview 实现降维处理。
+**功能：** 通过subview实现降维处理。
 
 ## `-hivm-set-buffer-size`
 
 ## `-hivm-split-mix-kernel`
 
-**功能：** 将 Mix 设备函数拆分为 AICube 与 AIVector 两个独立函数。
+**功能：** 将Mix设备函数拆分为AICube与AIVector两个独立函数。
 
-该 Pass 会将 mix kernel 拆分为独立的 AICube kernel 和 AIVector kernel，并将父模块标记为 Mix 模块。
+该Pass会将mix kernel拆分为独立的AICube kernel和AIVector kernel，并将父模块标记为Mix模块。
 
 **注意事项：**
 
-- 若在主机函数内调用 Mix kernel，会为最终的 Kernel 启动生成函数声明；当前不支持在设备函数内调用 Mix kernel。
+- 若在主机函数内调用Mix kernel，会为最终的Kernel启动生成函数声明；当前不支持在设备函数内调用Mix kernel。
 
 **转换示例：**
 
@@ -335,7 +335,7 @@ func (workspace) attribute {tcore_type = #hivm.tcore_type<VECTOR>} {
 
 ## `-hivm-sync-block-hoisting`
 
-**功能：** 若 syncblock 的 lock 与 unlock 操作位于 scf.for 或 scf.while 循环内，则将其上提到父区域。
+**功能：** 若syncblock的lock与unlock操作位于scf.for或scf.while循环内，则将其上提到父区域。
 
 ## `-hivm-tile-batchmm-into-loop`
 
@@ -343,20 +343,20 @@ func (workspace) attribute {tcore_type = #hivm.tcore_type<VECTOR>} {
 
 ## `-insert-workspace-for-mix-cv`
 
-**功能：** 为 mix cv 场景插入工作空间。
+**功能：** 为mix cv场景插入工作空间。
 
 ## `-tile-cube-vector-loop`
 
-**功能：** 在本地缓冲区上对 cube 与 vector 循环执行分块。
+**功能：** 在本地缓冲区上对cube与vector循环执行分块。
 
-该 Pass 会在本地缓冲区维度对 cube 和 vector 操作做二次分块，主要目的包括：
+该Pass会在本地缓冲区维度对cube和vector操作做二次分块，主要目的包括：
 
 1. 减少高开销的核间同步次数。
 2. 支持更大的分块尺寸。
 
 **选项：**
 
-- `-tile-mix-vector-loop`：mix kernel 分块后向量循环的迭代次数。
-- `-tile-mix-cube-loop`：mix kernel 分块后 cube 循环的迭代次数。
+- `-tile-mix-vector-loop`：mix kernel分块后向量循环的迭代次数。
+- `-tile-mix-cube-loop`：mix kernel分块后cube循环的迭代次数。
 
 ## `-triton-global-kernel-args-to-hivm-op`
