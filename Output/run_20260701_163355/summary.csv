@@ -1,0 +1,3 @@
+input_file,oracle_status,oracle_returncode,work_dir,model_UB_peak_bits,oracle_UB_status,oracle_UB_peak_bits,oracle_UB_required_bits,oracle_UB_capacity_bits,delta_model_minus_oracle_UB_bits,model_L1_peak_bits,oracle_L1_status,oracle_L1_peak_bits,oracle_L1_required_bits,oracle_L1_capacity_bits,delta_model_minus_oracle_L1_bits,model_L0C_peak_bits,oracle_L0C_status,oracle_L0C_peak_bits,oracle_L0C_required_bits,oracle_L0C_capacity_bits,delta_model_minus_oracle_L0C_bits,errors
+data/fake_attn_fwd.ttadapter,success,0,Output/run_20260701_163355/fake_attn_fwd.ttadapter,768,success,512,512,1572864,256,,,,,,,,,,,,,
+data/fake_attn_fwd_overflow.ttadapter,failed,1,Output/run_20260701_163355/fake_attn_fwd_overflow.ttadapter,3145728,fail,2097152,2097152,1572864,1048576,,,,,,,,,,,,,

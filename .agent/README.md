@@ -17,6 +17,8 @@ dry-run oracle 校验模型结果。
 - [code_map.md](code_map.md): 当前需要看的代码入口、pipeline 位置和调试命令。
 - [pass_sequence_to_second_planmemory.md](pass_sequence_to_second_planmemory.md): 从输入到第二次
   PlanMemory 的 pass 顺序，含常见完整 config 下的 helper pipeline 展开。
+- [pass_order_code_locations.md](pass_order_code_locations.md): 到第二次 PlanMemory 的细粒度
+  pass 顺序及其在 pipeline 中的 addPass 代码位置。
 - [decisions_and_risks.md](decisions_and_risks.md): 已做判断、风险、开放问题。
 - [update_protocol.md](update_protocol.md): 后续维护规则。
 

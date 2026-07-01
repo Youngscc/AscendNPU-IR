@@ -1,0 +1,78 @@
+[
+  {
+    "after_plan_mlir": "/Users/YokeLove/huawei/AscendNPU-IR/Output/run_20260701_163355/fake_attn_fwd.ttadapter/after_plan.mlir",
+    "errors": [],
+    "input_file": "data/fake_attn_fwd.ttadapter",
+    "memory_info_files": [
+      "Output/run_20260701_163355/fake_attn_fwd.ttadapter/memory_info_aiv.json"
+    ],
+    "model_json": "Output/run_20260701_163355/fake_attn_fwd.ttadapter/model.json",
+    "model_peaks": {
+      "UB": {
+        "capacity_bits": 1572864,
+        "error_info": "",
+        "peak_bits": 768,
+        "peak_bytes": 96,
+        "required_bits": 768,
+        "scope": "UB",
+        "source": "s8.5_text_model:max_function",
+        "status": "predicted"
+      }
+    },
+    "oracle_peaks": {
+      "UB": {
+        "capacity_bits": 1572864,
+        "error_info": "",
+        "peak_bits": 512,
+        "peak_bytes": 64,
+        "required_bits": 512,
+        "scope": "UB",
+        "source": "Output/run_20260701_163355/fake_attn_fwd.ttadapter/memory_info_aiv.json",
+        "status": "success"
+      }
+    },
+    "oracle_returncode": 0,
+    "oracle_status": "success",
+    "stderr_file": "Output/run_20260701_163355/fake_attn_fwd.ttadapter/oracle.stderr.txt",
+    "stdout_file": "Output/run_20260701_163355/fake_attn_fwd.ttadapter/oracle.stdout.txt",
+    "work_dir": "Output/run_20260701_163355/fake_attn_fwd.ttadapter"
+  },
+  {
+    "after_plan_mlir": null,
+    "errors": [],
+    "input_file": "data/fake_attn_fwd_overflow.ttadapter",
+    "memory_info_files": [
+      "Output/run_20260701_163355/fake_attn_fwd_overflow.ttadapter/memory_info_aiv.json"
+    ],
+    "model_json": "Output/run_20260701_163355/fake_attn_fwd_overflow.ttadapter/model.json",
+    "model_peaks": {
+      "UB": {
+        "capacity_bits": 1572864,
+        "error_info": "",
+        "peak_bits": 3145728,
+        "peak_bytes": 393216,
+        "required_bits": 3145728,
+        "scope": "UB",
+        "source": "s8.5_text_model:max_function",
+        "status": "predicted"
+      }
+    },
+    "oracle_peaks": {
+      "UB": {
+        "capacity_bits": 1572864,
+        "error_info": "ub overflow, requires 2097152 bits while 1572864 bits available! (possible reason: tiling basic block is too large or block number is more than what user expect due to multi-buffer feature is enabled and some ops need extra local buffer.)",
+        "peak_bits": 2097152,
+        "peak_bytes": 262144,
+        "required_bits": 2097152,
+        "scope": "UB",
+        "source": "Output/run_20260701_163355/fake_attn_fwd_overflow.ttadapter/memory_info_aiv.json",
+        "status": "fail"
+      }
+    },
+    "oracle_returncode": 1,
+    "oracle_status": "failed",
+    "stderr_file": "Output/run_20260701_163355/fake_attn_fwd_overflow.ttadapter/oracle.stderr.txt",
+    "stdout_file": "Output/run_20260701_163355/fake_attn_fwd_overflow.ttadapter/oracle.stdout.txt",
+    "work_dir": "Output/run_20260701_163355/fake_attn_fwd_overflow.ttadapter"
+  }
+]

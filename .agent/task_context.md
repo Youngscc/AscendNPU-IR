@@ -49,6 +49,26 @@ local peak 混算。
 - 不是每个 pass 后都有 PlanMemory 级精确峰值。早期阶段应输出 symbolic 或
   concrete structural 状态，不能伪装成 exact。
 - local `MarkMultiBuffer` 后最接近真实 local PlanMemory 输入，是第一优先校验点。
+- 第一版 exact 校验以 local `MarkMultiBuffer` 后 IR 作为起点，suffix 基本只有
+  `PlanMemory(local)`。把起点往前推时，后续 suffix pass 不是“无影响尾巴”，而是
+  必须一起建模的内存管理优化逻辑；oracle 峰值表示 checkpoint IR 经同一 suffix
+  到 PlanMemory 后的结果。
+- `memory_modeling/` 已有 Python 框架骨架：核心 dataclass、S8 反向 checkpoint
+  注册表、text scanner、CLI，以及兼容旧用法的 `s0_snapshot` 入口。当前仍是轻量
+  structural scan，不是 MLIR typed parser 或 PlanMemory dry-run。
+- `memory_modeling/s8_local_model.py` 已实现 S8.5 第一版文本模型：输入为
+  `createMarkMultiBufferPass` 后 dump 出来的 IR，解析 local `memref.alloc` 的
+  scope/static size/multi-buffer/lifetime，并给出保守 predicted peak。它不模拟
+  NormalizeLoopIterator、完整 alias/inplace、dmaFirstPipelineOpt、spec-level allocation
+  或 20 seed retry，必须继续用真实 PlanMemory oracle 校验。
+- `memory_modeling/run_adapters.py` 是当前批量验证入口：默认扫描 `data/` 下所有
+  非隐藏普通文件，对每个文件运行 S8.5 Python 模型和 `bishengir-opt` local
+  PlanMemory + MemoryDisplay oracle。主输出是 UB 对比优先的
+  `comparison.json`/`comparison.csv`，每个 case 目录保留 `memory.json`、
+  `suffix_input.mlir`、成功时的 `after_plan.mlir`、原始 `memory_info*.json` 和必要时
+  的 `oracle.log`。2026-07-01 smoke：`fake_attn_fwd.ttadapter` oracle UB peak 为
+  512 bits，当前模型预测 768 bits；overflow fake adapter oracle UB required/peak
+  为 2097152 bits，当前模型预测 3145728 bits。
 
 ## 不要再分心的问题
 

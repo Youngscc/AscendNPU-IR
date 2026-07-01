@@ -169,7 +169,7 @@ LiftLowestStride
 
 精度：`concrete_structural`。
 
-### S8 Local PlanMemory-ready
+### S8 Local PlanMemory-ready suffix
 
 代表流程：
 
@@ -191,8 +191,49 @@ PlanMemory(local)
 - InlineLoadCopy 改变 copy/load 形态。
 - MarkMultiBuffer 决定 local multi-buffer 倍数。
 
-这是第一优先落点。`MarkMultiBuffer` 后应使用真实 PlanMemory，或后续重新实现的
-dry-run oracle，对模型做 exact 校验。
+这是第一优先落点，但要按反向 checkpoint 推进：
+
+```text
+S8.5 MarkMultiBuffer 后
+  起点：PlanMemory-ready IR。
+  suffix：createDumpIRBeforePlanMemoryPass -> PlanMemory(local)。
+  目标：校验模型能否复现 PlanMemory 的 liveness、alignment、scope peak、
+        inplace/reuse、multi-buffer offset 和 20 seed retry 后结果。
+  备注：DumpIRBeforePlanMemory 是环境变量控制的 debug/no-op pass；真正改变内存语义
+        的 suffix 是 PlanMemory(local)，其内部还会先跑 NormalizeLoopIterator。
+
+S8.4 InlineLoadCopy 后
+  suffix：MarkMultiBuffer -> createDumpIRBeforePlanMemoryPass
+          -> PlanMemory(local)。
+  目标：新增建模 MarkMultiBuffer 如何添加/更新 MultiBufferAttr，以及 local buffer
+        倍数如何影响峰值。
+
+S8.3 canonicalizationHIVMPipeline 后
+  suffix：InlineLoadCopy -> MarkMultiBuffer -> createDumpIRBeforePlanMemoryPass
+          -> PlanMemory(local)。
+  目标：新增建模 InlineLoadCopy 对 copy/load 形态、def-use 和 lifetime 的影响。
+
+S8.2 InferHIVMMemScope 后
+  suffix：canonicalizationHIVMPipeline -> InlineLoadCopy -> MarkMultiBuffer
+          -> createDumpIRBeforePlanMemoryPass -> PlanMemory(local)。
+  目标：新增建模 canonicalization、CSE、DSE、single-point opt 对 buffer 集合和
+        lifetime 的影响。
+
+S8.1 AllocExtraBuffer 后
+  suffix：InferHIVMMemScope -> canonicalizationHIVMPipeline -> InlineLoadCopy
+          -> MarkMultiBuffer -> createDumpIRBeforePlanMemoryPass
+          -> PlanMemory(local)。
+  目标：新增建模 extra buffer 创建后如何推断 scope，并如何进入最终 local plan。
+
+S8.0 AFTER_LIFT_LOWEST_STRIDE decompose 后
+  suffix：AllocExtraBuffer -> ... -> PlanMemory(local)。
+  目标：新增建模 AllocExtraBuffer 之前的 local memref baseline，为 S7 继续前推做准备。
+```
+
+`MarkMultiBuffer` 后是第一版 exact checkpoint 的起点，不是终点。起点继续往前移时，
+suffix 里的 pass 不能被假设为“不影响峰值”；它们就是新增的内存管理优化建模对象。
+oracle 结果表示“checkpoint IR 经过同一条 suffix 后的 PlanMemory 峰值”，不是
+checkpoint IR 的纯瞬时峰值。
 
 精度：`MarkMultiBuffer` 后为 `exact_plan`；更早子点多为 `concrete_structural`。
 
@@ -243,9 +284,13 @@ blocking_dependency
 
 ## 推荐实施顺序
 
-1. 先做 S8：`AllocExtraBuffer -> InferHIVMMemScope -> InlineLoadCopy -> MarkMultiBuffer`。
-2. 用真实 PlanMemory 或后续 dry-run oracle 对齐 local UB/L1/L0C
-   required/capacity/headroom。
-3. 再向前覆盖 S5-S7，追踪 concrete memref 如何变成 PlanMemory-ready 输入。
-4. 最后覆盖 S1-S4，解释 HFusion/tiling/config 如何导致后续内存压力。
-5. 全链路 trace 中，每个 pass 都输出 effect；只有满足前提的点标为 `exact_plan`。
+1. 先做 S8.5：从 `MarkMultiBuffer` 后 IR 直接跑真实 local PlanMemory，建立
+   PlanMemory-ready oracle。
+2. 再反向推进 S8.4、S8.3、S8.2、S8.1、S8.0；每前推一个 checkpoint，就把新增
+   suffix pass 的内存 effect 纳入模型。
+3. 之后覆盖 S7：layout、align、buffer size、rank/stride 稳定化。
+4. 再覆盖 S6-S5：post-bufferization 早期变换和 OneShotBufferize 产生的 memref lineage。
+5. 最后覆盖 S1-S4，解释 HFusion/tiling/config 如何导致后续内存压力。
+6. 全链路 trace 中，每个 pass 都输出 effect；只有 PlanMemory-ready 或带完整
+   oracle suffix 的点标为 `exact_plan`，早期点继续使用 `symbolic` 或
+   `concrete_structural`。
