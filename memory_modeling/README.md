@@ -87,8 +87,10 @@ files under `data/` by default, runs the S8.5 Python model, then invokes
 directory contains a top-level `comparison.csv`/`comparison.json` focused on UB:
 model peak, AscendIR peak computed from max address offset, delta, overflow
 required bits, and capacity. Each per-file directory keeps `memory.json`,
-`suffix_input.mlir`, `after_plan.mlir` when planning succeeds, raw
-`memory_info*.json`, and `oracle.log` only when the oracle prints output.
+`model_memory_info.json`, `suffix_input.mlir`, `after_plan.mlir` when planning
+succeeds, raw `memory_info*.json`, and `oracle.log` only when the oracle prints
+output. `model_memory_info.json` is the Python model side per-buffer view with
+model offsets, extents, lifetimes, and end addresses.
 
 ## Reverse Modeling Rule
 

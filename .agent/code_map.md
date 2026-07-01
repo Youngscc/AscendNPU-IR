@@ -114,8 +114,8 @@ run_adapters.py
                 批量验证入口：扫描 data/ 下所有非隐藏普通文件，逐个运行 S8.5
                 Python 模型和 bishengir-opt local PlanMemory + MemoryDisplay oracle，
                 输出 UB 对比优先的 comparison.json/comparison.csv；每个 case 保留
-                memory.json、suffix_input.mlir、after_plan.mlir、memory_info*.json
-                和必要时的 oracle.log
+                memory.json、model_memory_info.json、suffix_input.mlir、
+                after_plan.mlir、memory_info*.json 和必要时的 oracle.log
 cli.py         通用 CLI，可列 checkpoint 或扫描输入
 s0_snapshot.py 兼容旧 S0 入口，内部转调 scanner/create_report
 ```
@@ -175,8 +175,10 @@ python3 -m memory_modeling.run_adapters \
 `ub_model_peak_bits`、`ub_ascendir_peak_bits_from_max_addr`、
 `ub_delta_model_minus_ascendir_bits`、`ub_overflow_required_bits` 和
 `ub_capacity_bits`。每个输入文件一个子目录，包含 `memory.json`、
-`suffix_input.mlir`、成功时的 `after_plan.mlir`、原始 `memory_info*.json`，以及
-oracle 有输出时的 `oracle.log`。
+`model_memory_info.json`、`suffix_input.mlir`、成功时的 `after_plan.mlir`、原始
+`memory_info*.json`，以及 oracle 有输出时的 `oracle.log`。
+`model_memory_info.json` 是 Python 模型侧逐 buffer 视图，包含 model offset、
+extent、end address、lifetime、size/aligned size 和 multi-buffer copy index。
 
 如果需要完整 pipeline 中 local PlanMemory 前 IR，当前代码支持：
 

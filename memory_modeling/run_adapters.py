@@ -11,6 +11,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from .core import MemoryScope, to_jsonable
 from .s8_local_model import LOCAL_SCOPE_INFO
@@ -39,6 +40,7 @@ class AdapterRunResult:
     work_dir: str
     suffix_input_mlir: str | None = None
     memory_json: str | None = None
+    model_memory_info_json: str | None = None
     oracle_returncode: int | None = None
     oracle_status: str = "not_run"
     ub_model_peak_bits: int | None = None
@@ -115,8 +117,94 @@ def discover_inputs(data_dir: Path, patterns: list[str]) -> list[Path]:
     return inputs
 
 
-def model_scope_peaks(input_file: Path) -> dict[str, ScopePeak]:
+def bits_to_bytes(bits: int | None) -> int | None:
+    if bits is None:
+        return None
+    return (bits + 7) // 8
+
+
+def bits_to_kib(bits: int | None) -> float | None:
+    byte_count = bits_to_bytes(bits)
+    if byte_count is None:
+        return None
+    return byte_count / 1024
+
+
+def build_model_memory_info(report: Any) -> dict[str, Any]:
+    buffers_by_id = {buffer.stable_id: buffer for buffer in report.state.buffers}
+    functions = report.state.metadata.get("functions", {})
+    records: list[dict[str, Any]] = []
+
+    for function_name, function_info in functions.items():
+        allocations_by_scope = function_info.get("allocations", {})
+        for scope, allocations in allocations_by_scope.items():
+            memory_info_array: list[dict[str, Any]] = []
+            for allocation in allocations:
+                buffer = buffers_by_id.get(allocation["buffer"])
+                if buffer is None:
+                    continue
+                size_bits = buffer.size_bits
+                aligned_size_bits = buffer.aligned_size_bits
+                offset_bits = int(allocation["offset_bits"])
+                extent_bits = int(allocation["size_bits"])
+                memory_info_array.append(
+                    {
+                        "name": buffer.stable_id,
+                        "raw_name": buffer.attrs.get("raw_name"),
+                        "function": function_name,
+                        "type": buffer.type_text,
+                        "scope": scope,
+                        "copy_index": allocation["copy_index"],
+                        "start": allocation["start"],
+                        "end": allocation["end"],
+                        "offset_bits": offset_bits,
+                        "offset_bytes": bits_to_bytes(offset_bits),
+                        "extent_bits": extent_bits,
+                        "extent_bytes": bits_to_bytes(extent_bits),
+                        "end_addr_bits": offset_bits + extent_bits,
+                        "end_addr_bytes": bits_to_bytes(offset_bits + extent_bits),
+                        "size_bits": size_bits,
+                        "size_bytes": bits_to_bytes(size_bits),
+                        "aligned_size_bits": aligned_size_bits,
+                        "aligned_size_bytes": bits_to_bytes(aligned_size_bits),
+                        "multi_buffer_factor": buffer.multi_buffer_factor,
+                        "use_count": buffer.attrs.get("use_count"),
+                        "element_type": buffer.attrs.get("element_type"),
+                        "element_bits": buffer.attrs.get("element_bits"),
+                        "shape": buffer.attrs.get("shape"),
+                    }
+                )
+            peak_bits = function_info.get("scope_peaks_bits", {}).get(scope, 0)
+            records.append(
+                {
+                    "function": function_name,
+                    "scope": scope,
+                    "status": "model",
+                    "peak_bits": peak_bits,
+                    "peak_bytes": bits_to_bytes(peak_bits),
+                    "peak_kib": bits_to_kib(peak_bits),
+                    "memory_info_array": memory_info_array,
+                }
+            )
+
+    return {
+        "source": "s8.5_text_model",
+        "input_file": report.input_file,
+        "checkpoint": report.checkpoint.checkpoint_id,
+        "precision": report.state.precision.value,
+        "Record": records,
+        "blockers": report.state.blockers,
+    }
+
+
+def model_scope_peaks(
+    input_file: Path, model_memory_info_path: Path
+) -> dict[str, ScopePeak]:
     report = create_report(input_file, checkpoint_id="S8.5")
+    model_memory_info_path.write_text(
+        json.dumps(build_model_memory_info(report), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     peaks: dict[str, ScopePeak] = {}
     for peak in report.state.peaks:
         scope = peak.scope.value
@@ -254,6 +342,7 @@ def write_case_memory_json(result: AdapterRunResult, path: Path) -> None:
             "capacity_bits": result.ub_capacity_bits,
         },
         "artifacts": {
+            "model_memory_info_json": result.model_memory_info_json,
             "after_plan_mlir": result.after_plan_mlir,
             "memory_info_files": result.memory_info_files or [],
             "oracle_log": result.oracle_log,
@@ -276,11 +365,13 @@ def run_one(
     work_dir.mkdir(parents=True, exist_ok=True)
     suffix_input = work_dir / "suffix_input.mlir"
     memory_json = work_dir / "memory.json"
+    model_memory_info = work_dir / "model_memory_info.json"
     shutil.copyfile(input_file, suffix_input)
     result = AdapterRunResult(
         input_file=str(input_file),
         work_dir=str(work_dir),
         suffix_input_mlir=str(suffix_input),
+        model_memory_info_json=str(model_memory_info),
         memory_info_files=[],
         errors=[],
     )
@@ -288,7 +379,7 @@ def run_one(
     model_peaks: dict[str, ScopePeak] = {}
     oracle_peaks: dict[str, ScopePeak] = {}
     try:
-        model_peaks = model_scope_peaks(input_file)
+        model_peaks = model_scope_peaks(input_file, model_memory_info)
     except Exception as exc:  # noqa: BLE001 - keep batch runner moving.
         result.errors = (result.errors or []) + [f"model failed: {exc}"]
 
@@ -331,6 +422,7 @@ def write_csv(results: list[AdapterRunResult], path: Path) -> None:
         "ub_overflow_required_bits",
         "ub_capacity_bits",
         "memory_json",
+        "model_memory_info_json",
         "suffix_input_mlir",
         "after_plan_mlir",
         "oracle_log",

@@ -1,0 +1,25 @@
+{
+  "artifacts": {
+    "after_plan_mlir": "/Users/YokeLove/huawei/AscendNPU-IR/Output/memory_modeling_adapters/model_info_smoke/fake_attn_fwd.ttadapter/after_plan.mlir",
+    "memory_info_files": [
+      "Output/memory_modeling_adapters/model_info_smoke/fake_attn_fwd.ttadapter/memory_info_aiv.json"
+    ],
+    "model_memory_info_json": "Output/memory_modeling_adapters/model_info_smoke/fake_attn_fwd.ttadapter/model_memory_info.json",
+    "oracle_log": null
+  },
+  "errors": [],
+  "input_file": "data/fake_attn_fwd.ttadapter",
+  "oracle_returncode": 0,
+  "oracle_status": "success",
+  "suffix_input_mlir": "Output/memory_modeling_adapters/model_info_smoke/fake_attn_fwd.ttadapter/suffix_input.mlir",
+  "ub": {
+    "ascendir_peak_bits_from_max_addr": 512,
+    "ascendir_peak_bytes_from_max_addr": 64,
+    "capacity_bits": 1572864,
+    "delta_model_minus_ascendir_bits": 256,
+    "model_peak_bits": 768,
+    "model_peak_bytes": 96,
+    "overflow": false,
+    "overflow_required_bits": null
+  }
+}

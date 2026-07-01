@@ -1,0 +1,105 @@
+{
+  "Record": [
+    {
+      "function": "_attn_fwd",
+      "memory_info_array": [
+        {
+          "aligned_size_bits": 1048576,
+          "aligned_size_bytes": 131072,
+          "copy_index": 0,
+          "element_bits": 16,
+          "element_type": "f16",
+          "end": 28,
+          "end_addr_bits": 1048576,
+          "end_addr_bytes": 131072,
+          "extent_bits": 1048576,
+          "extent_bytes": 131072,
+          "function": "_attn_fwd",
+          "multi_buffer_factor": 1,
+          "name": "%q_ub",
+          "offset_bits": 0,
+          "offset_bytes": 0,
+          "raw_name": "%q_ub",
+          "scope": "UB",
+          "shape": [
+            65536
+          ],
+          "size_bits": 1048576,
+          "size_bytes": 131072,
+          "start": 15,
+          "type": "memref<65536xf16, #hivm.address_space<ub>>",
+          "use_count": 3
+        },
+        {
+          "aligned_size_bits": 1048576,
+          "aligned_size_bytes": 131072,
+          "copy_index": 0,
+          "element_bits": 16,
+          "element_type": "f16",
+          "end": 28,
+          "end_addr_bits": 2097152,
+          "end_addr_bytes": 262144,
+          "extent_bits": 1048576,
+          "extent_bytes": 131072,
+          "function": "_attn_fwd",
+          "multi_buffer_factor": 1,
+          "name": "%k_ub",
+          "offset_bits": 1048576,
+          "offset_bytes": 131072,
+          "raw_name": "%k_ub",
+          "scope": "UB",
+          "shape": [
+            65536
+          ],
+          "size_bits": 1048576,
+          "size_bytes": 131072,
+          "start": 16,
+          "type": "memref<65536xf16, #hivm.address_space<ub>>",
+          "use_count": 3
+        },
+        {
+          "aligned_size_bits": 1048576,
+          "aligned_size_bytes": 131072,
+          "copy_index": 0,
+          "element_bits": 16,
+          "element_type": "f16",
+          "end": 33,
+          "end_addr_bits": 3145728,
+          "end_addr_bytes": 393216,
+          "extent_bits": 1048576,
+          "extent_bytes": 131072,
+          "function": "_attn_fwd",
+          "multi_buffer_factor": 1,
+          "name": "%acc_ub",
+          "offset_bits": 2097152,
+          "offset_bytes": 262144,
+          "raw_name": "%acc_ub",
+          "scope": "UB",
+          "shape": [
+            65536
+          ],
+          "size_bits": 1048576,
+          "size_bytes": 131072,
+          "start": 17,
+          "type": "memref<65536xf16, #hivm.address_space<ub>>",
+          "use_count": 3
+        }
+      ],
+      "peak_bits": 3145728,
+      "peak_bytes": 393216,
+      "peak_kib": 384.0,
+      "scope": "UB",
+      "status": "model"
+    }
+  ],
+  "blockers": [
+    "NormalizeLoopIterator is not simulated; use oracle if loop iter/yield conflicts exist",
+    "alias/inplace analysis is simplified; interval reuse is conservative",
+    "dmaFirstPipelineOpt/spec-level allocation/20 seed retry are not simulated",
+    "text parser only; verify against C++ PlanMemory oracle"
+  ],
+  "checkpoint": "S8.5",
+  "input_file": "data/fake_attn_fwd_overflow.ttadapter",
+  "precision": "concrete_structural",
+  "source": "s8.5_text_model"
+}

@@ -65,10 +65,12 @@ local peak 混算。
   非隐藏普通文件，对每个文件运行 S8.5 Python 模型和 `bishengir-opt` local
   PlanMemory + MemoryDisplay oracle。主输出是 UB 对比优先的
   `comparison.json`/`comparison.csv`，每个 case 目录保留 `memory.json`、
-  `suffix_input.mlir`、成功时的 `after_plan.mlir`、原始 `memory_info*.json` 和必要时
-  的 `oracle.log`。2026-07-01 smoke：`fake_attn_fwd.ttadapter` oracle UB peak 为
-  512 bits，当前模型预测 768 bits；overflow fake adapter oracle UB required/peak
-  为 2097152 bits，当前模型预测 3145728 bits。
+  `model_memory_info.json`、`suffix_input.mlir`、成功时的 `after_plan.mlir`、原始
+  `memory_info*.json` 和必要时的 `oracle.log`。`model_memory_info.json` 是模型侧逐
+  buffer 视图，包含 model offset、extent、end address、lifetime、size/aligned size
+  和 multi-buffer copy index。2026-07-01 smoke：`fake_attn_fwd.ttadapter` oracle UB
+  peak 为 512 bits，当前模型预测 768 bits；overflow fake adapter oracle UB
+  required/peak 为 2097152 bits，当前模型预测 3145728 bits。
 
 ## 不要再分心的问题
 

@@ -14,8 +14,9 @@
   blockers；不宣称等价于真实 PlanMemory。
 - `memory_modeling/run_adapters.py` 作为当前批量 validation harness：默认跑 `data/`
   下所有非隐藏普通文件，主输出为 UB 对比优先的 `comparison.csv`/`comparison.json`；
-  per-case 输出保留 `memory.json`、suffix 前 IR、真实 PlanMemory/MemoryDisplay
-  artifacts 和必要日志。oracle 非零返回默认记录并继续，便于把 overflow case 也纳入对照。
+  per-case 输出保留 `memory.json`、`model_memory_info.json`、suffix 前 IR、真实
+  PlanMemory/MemoryDisplay artifacts 和必要日志。oracle 非零返回默认记录并继续，
+  便于把 overflow case 也纳入对照。
 - 每个 pass 后都可记录 memory effect，但不一定能输出 PlanMemory 级精确峰值。
 - 精确值必须尽量复用 PlanMemory 或后续 dry-run oracle，避免复制一套漂移算法。
 - local `MarkMultiBuffer` 后是第一优先 exact checkpoint。
