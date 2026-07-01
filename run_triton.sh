@@ -1,0 +1,1 @@
+TRITON_DEBUG=1 TRITON_ALWAYS_COMPILE=1 MLIR_ENABLE_DUMP=1 TRITON_KERNEL_DUMP=1 TRITON_DUMP_DIR=./data python extracted_stages/s0_original_baseline_5800us.py
