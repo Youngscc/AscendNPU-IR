@@ -421,8 +421,8 @@ Solver::getMultiBufferEventIdInfo(Occurrence *occ1, Occurrence *occ2,
       return {};
     }
     auto [setOcc, waitOcc] = getSetWaitOcc(occ1, occ2);
-    if (!parLoop1->isProperAncestor(setOcc) ||
-        !parLoop1->isProperAncestor(waitOcc)) {
+    if (Occurrence::getParentloop(setOcc) != parLoop1 ||
+        Occurrence::getParentloop(waitOcc) != parLoop1) {
       return {};
     }
   } else {
@@ -433,10 +433,12 @@ Solver::getMultiBufferEventIdInfo(Occurrence *occ1, Occurrence *occ2,
     multibufferLoop = multibufferLoopOpt.value();
     assert(multibufferLoop != nullptr);
     auto [setOcc, waitOcc] = getSetWaitOcc(occ1, occ2);
-    if (!setOcc->getParentWithOp(multibufferLoop,
-                                 /*assertExists=*/false) ||
-        !waitOcc->getParentWithOp(multibufferLoop,
-                                  /*assertExists=*/false)) {
+    Operation *multibufferLoopOp = multibufferLoop.getOperation();
+    auto *setParentLoop = Occurrence::getParentloop(setOcc);
+    auto *waitParentLoop = Occurrence::getParentloop(waitOcc);
+    if (!setParentLoop || !setParentLoop->op ||
+        setParentLoop->op->op != multibufferLoopOp || !waitParentLoop ||
+        !waitParentLoop->op || waitParentLoop->op->op != multibufferLoopOp) {
       return {};
     }
   }
@@ -644,12 +646,28 @@ EventIdInfo Solver::getEventIdInfo(Occurrence *occ1, Occurrence *occ2,
   return singleEventId;
 }
 
+// Exclude the edge unless its multibuffer loop is a parent loop enclosing the
+// candidate (a proper ancestor of both candidate occurrences).
+static bool
+candidateMultiBufferLoopExcludesEdge(Occurrence *candidateOcc1,
+                                     Occurrence *candidateOcc2,
+                                     const ConflictPair *edge) {
+  Occurrence *edgeLoopOcc = edge->backwardSyncLoopOcc;
+  if (edgeLoopOcc == nullptr) {
+    return false;
+  }
+  bool edgeLoopIsCandidateParent =
+      edgeLoopOcc->isProperAncestor(candidateOcc1) &&
+      edgeLoopOcc->isProperAncestor(candidateOcc2);
+  return !edgeLoopIsCandidateParent;
+}
+
 // Graph-based check to determine if adding a sync between occ1 and occ2 would
 // block progress. Uses GraphSolver (Dijkstra) to estimate minimal reachable
 // index.
 bool Solver::checkGraphConflict(
     Occurrence *occ1, Occurrence *occ2, CorePipeInfo corePipeSrc,
-    CorePipeInfo corePipeDst, EventIdInfo eventIdInfo,
+    CorePipeInfo corePipeDst, std::optional<EventIdInfo> eventIdInfo,
     std::optional<int> startIndex, std::optional<int> endIndex,
     const llvm::SmallVector<ConflictPair *> &extraConflictPairs,
     const llvm::SmallVector<ConflictPair *> &ignoreConflictPairs) {
@@ -671,7 +689,14 @@ bool Solver::checkGraphConflict(
       return;
     }
     if (conflictPair->isInnerBackward) {
-      if ((eventIdInfo.eventIdNum * eventIdInfo.eventIdRepeatNum) <
+      if (candidateMultiBufferLoopExcludesEdge(occ1, occ2, conflictPair)) {
+        return;
+      }
+      int64_t candidateEventIdProduct =
+          eventIdInfo.has_value()
+              ? eventIdInfo->eventIdNum * eventIdInfo->eventIdRepeatNum
+              : 1;
+      if (candidateEventIdProduct <
           (conflictPair->eventIdInfo.eventIdNum *
            conflictPair->eventIdInfo.eventIdRepeatNum)) {
         return;
@@ -1977,7 +2002,15 @@ void Solver::handleConflict(Occurrence *occ1, Occurrence *occ2,
                             RWOperation *rwOp1, RWOperation *rwOp2,
                             CorePipeInfo corePipeSrc, CorePipeInfo corePipeDst,
                             EventIdInfo eventIdInfo, bool isUseless) {
-  if (!checkGraphConflict(occ1, occ2, corePipeSrc, corePipeDst, eventIdInfo)) {
+  bool isBarrier = corePipeSrc == corePipeDst;
+  auto unitFlagInfo =
+      isBarrier ? std::nullopt : checkUnitFlagPatterns(occ1, occ2);
+  std::optional<EventIdInfo> checkEventIdInfo;
+  if (!isBarrier && !unitFlagInfo) {
+    checkEventIdInfo = eventIdInfo;
+  }
+  if (!checkGraphConflict(occ1, occ2, corePipeSrc, corePipeDst,
+                          checkEventIdInfo)) {
     return;
   }
   LLVM_DEBUG({
@@ -1988,9 +2021,9 @@ void Solver::handleConflict(Occurrence *occ1, Occurrence *occ2,
     llvm::dbgs() << occ2->syncIrIndex << ' ' << occ2->startIndex << ' '
                  << occ2->endIndex << ' ' << rwOp2->str(0, false) << '\n';
   });
-  if (corePipeSrc == corePipeDst) {
+  if (isBarrier) {
     handleBarrierConflict(occ1, occ2, corePipeSrc, corePipeDst, isUseless);
-  } else if (auto unitFlagInfo = checkUnitFlagPatterns(occ1, occ2)) {
+  } else if (unitFlagInfo) {
     handleUnitFlagConflict(occ1, occ2, corePipeSrc, corePipeDst,
                            unitFlagInfo.value(), isUseless);
   } else {

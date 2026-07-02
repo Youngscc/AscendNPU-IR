@@ -242,7 +242,7 @@ protected:
   // Graph-based conflict checking and memory conflict detection helpers.
   bool checkGraphConflict(
       Occurrence *occ1, Occurrence *occ2, CorePipeInfo corePipeSrc,
-      CorePipeInfo corePipeDst, EventIdInfo eventIdInfo,
+      CorePipeInfo corePipeDst, std::optional<EventIdInfo> eventIdInfo,
       std::optional<int> startIndex = {}, std::optional<int> endIndex = {},
       const llvm::SmallVector<ConflictPair *> &extraConflictPairs = {},
       const llvm::SmallVector<ConflictPair *> &ignoreConflictPairs = {});
