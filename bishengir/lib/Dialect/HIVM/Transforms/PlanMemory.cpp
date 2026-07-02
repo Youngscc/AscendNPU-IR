@@ -715,8 +715,8 @@ void MemLivenessAnalysis::UpdateOperandGenInfo(OpInfo *opInfo, Value operand) {
     genKillMap[opInfo].gen.push_back(operand);
     buffer2status[iter_buffer->first] = BufferStatus::GENED;
   } else if (iter_buffer->second == BufferStatus::KILLED) {
-    llvm::report_fatal_error("The buffer memory has been released and cannot be used "
-                     "again! ");
+    llvm::report_fatal_error(
+        "The buffer memory has been released and cannot be used again! ");
   }
 }
 
@@ -894,7 +894,7 @@ bool MemLivenessAnalysis::IsBlockAfter(Block *afterBlock,
 }
 
 bool MemLivenessAnalysis::IsDeadAfterOp(Value value,
-                                           Operation *operation) const {
+                                        Operation *operation) const {
   auto *moduleBlock = utils::getTopLevelModuleOp(operation).getBody();
   // trace all blocks that contains ifOp until moduleBlock.
   DenseMap<Block *, Operation *> block2Op;
@@ -920,7 +920,8 @@ bool MemLivenessAnalysis::IsDeadAfterOp(Value value,
         // check whether parent ops are same, ex: if then ... else ...
         if (currentOp == op && userChildOp != nullptr &&
             currChildIt != parentToChild.end() &&
-            IsBlockAfter(userChildOp->getBlock(), currChildIt->second->getBlock())) {
+            IsBlockAfter(userChildOp->getBlock(),
+                         currChildIt->second->getBlock())) {
           return false;
         }
         // once different parent ops in same block, check the order
@@ -941,8 +942,7 @@ bool MemLivenessAnalysis::IsDeadAfterOp(Value value,
 bool MemLivenessAnalysis::AllDeadAfter(Operation *op, SetVector<Value> aliasVec,
                                        Liveness live) const {
   for (auto aliasBuffer : aliasVec) {
-    if (!live.isDeadAfter(aliasBuffer, op) ||
-        !IsDeadAfterOp(aliasBuffer, op)) {
+    if (!live.isDeadAfter(aliasBuffer, op) || !IsDeadAfterOp(aliasBuffer, op)) {
       return false;
     }
   }
@@ -2034,10 +2034,14 @@ bool MemPlan::VerifyConflictStage1(
   // Multi-buffer reuse multi buffer
 
   // Multi-buffer case: require enough multibuffer entries for all buffer
-  // instances.
-  if (e->multiBufferNum > 1 && otherBufferEntries.size() < e->multiBufferNum) {
+  // instances, and only first buffer(not other relation entries) can reuse in
+  // level1.
+  auto otherBufferEntriesSize = otherBufferEntries.size();
+  if (e->multiBufferNum > 1 &&
+      (otherBufferEntriesSize < e->multiBufferNum - 1 ||
+       e->otherBufferRelationEntries.empty())) {
     // Not enough historical multibuffer entries to match current multi-buffer
-    // requirement.
+    // requirement, or current entry is not first buffer.
     return true;
   }
 
@@ -2045,7 +2049,7 @@ bool MemPlan::VerifyConflictStage1(
   // entry conflicts with historical records at its offset, the whole
   // multi-buffer reuse fails. Only when all required multibuffer entries are
   // conflict-free can we reuse (return false).
-  for (uint32_t i = 0; i < e->multiBufferNum; ++i) {
+  for (uint32_t i = 0; i < otherBufferEntriesSize; ++i) {
     StorageEntry *multiRelationMultiBufferEntry = otherBufferEntries[i];
     if (!multiRelationMultiBufferEntry) {
       return true;
@@ -2152,6 +2156,8 @@ void MemPlan::PlanRelationOtherBufferEntryAddress(
       if (StorageEntry *re = e->otherBufferRelationEntries[i])
         re->bitsOffset = otherBufferOffsets[i];
     }
+  } else {
+    llvm_unreachable("Does not support other buffer entries reuse in level1!");
   }
 }
 
