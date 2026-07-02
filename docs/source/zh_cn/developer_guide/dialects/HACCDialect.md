@@ -8,7 +8,7 @@
 
 **语法：** `#hacc.block_dim`
 
-**功能：** HACC 函数块维度属性。
+**功能：** HACC函数块维度属性。
 
 ### CachedIOAttr
 
@@ -20,7 +20,7 @@
 
 **语法：** `#hacc.dummy_func`
 
-**功能：** HACC 虚拟函数标识属性。
+**功能：** HACC虚拟函数标识属性。
 
 ### ExportAsDAGAttr
 
@@ -50,7 +50,7 @@
 
 | 参数名 | C++类型 | 说明 |
 | :-------: | :-------: | ----------- |
-| function_kind | `::mlir::hacc::HACCFuncType` | 枚举类型 HACCFuncType |
+| function_kind | `::mlir::hacc::HACCFuncType` | 枚举类型HACCFuncType |
 
 ### GetTilingStructSizeFunctionAttr
 
@@ -86,7 +86,7 @@
 
 | 参数名 | C++类型 | 说明 |
 | :-------: | :-------: | ----------- |
-| host_func_type | `::mlir::hacc::HostFuncType` | 枚举类型 HostFuncType |
+| host_func_type | `::mlir::hacc::HostFuncType` | 枚举类型HostFuncType |
 
 ### InferOutputShapeFunctionAttr
 
@@ -379,7 +379,7 @@ HACC主机函数细分类型枚举
 
 ### HACCToLLVMIRTranslateAttr
 
-取值范围：32位无符号整数 0、1、2
+取值范围：32位无符号整数0、1、2
 
 | 枚举符号 | 数值 | 字符串标识 |
 | :----: | :---: | ------ |

@@ -1,6 +1,6 @@
 # `annotation` 方言
 
-`annotation` 方言用于提供注解操作，可为指定操作附加扩展属性。
+`annotation`方言用于提供注解操作，可为指定操作附加扩展属性。
 
 ```mlir
 // 标记额外属性
@@ -37,7 +37,7 @@ annotation.mark %target {key : val}
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `keys` | `::mlir::ArrayAttr` | 字符串数组属性 |
 

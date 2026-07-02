@@ -6,9 +6,9 @@ Hybrid Fusion（HFusion）方言。
 
 ### `hfusion.arange` (hfusion::ArangeOp)
 
-**功能：** 生成序列，与标准 arange 存在差异，支持偏移量（默认值0）与多维场景并配套多维步长。偏移量、步长定义规则与内存描述符保持一致。
+**功能：** 生成序列，与标准arange存在差异，支持偏移量（默认值0）与多维场景并配套多维步长。偏移量、步长定义规则与内存描述符保持一致。
 
-三维 arange 取值计算公式：
+三维arange取值计算公式：
 `arange[i, j, k] = offset + stride[0] * i + stride[1] * j + stride[2] * k`
 
 **特性：** `AttrSizedOperandSegments`、`SingleBlockImplicitTerminator<mlir::linalg::YieldOp>`、`SingleBlock`
@@ -19,8 +19,8 @@ Hybrid Fusion（HFusion）方言。
 
 | 操作数 | 说明 |
 | :-----: | ----------- |
-| `offset` | index 类型偏移值 |
-| `strides` | 变长 index 类型步长数组 |
+| `offset` | index类型偏移值 |
+| `strides` | 变长index类型步长数组 |
 | `init` | 任意类型带形状初始化张量 |
 
 **结果：**
@@ -41,7 +41,7 @@ operation ::= `hfusion.assert` $msg attr-dict $cond `:` type($cond)
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `msg` | `::mlir::StringAttr` | 字符串提示文本 |
 
@@ -126,7 +126,7 @@ hfusion.atomic_rmw ins(%src : memref<?xf32>) outs(%dst : memref<?xf32>) atomic_k
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `atomic_kind` | `::mlir::hfusion::AtomicKindAttr` | 原子操作类型，可选值：none、add、max、min、and、or、xor、cas、xchg、umax、umin |
 
@@ -228,7 +228,7 @@ operation ::= `hfusion.barrier` attr-dict
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `round_mode` | `::mlir::hfusion::RoundModeAttr` | 舍入模式：RINT、ROUND、FLOOR、CEIL、TRUNC、ODD |
 | `enable_overflow` | `::mlir::BoolAttr` | 是否开启溢出检测 |
@@ -256,7 +256,7 @@ operation ::= `hfusion.barrier` attr-dict
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `compare_fn` | `::mlir::hfusion::CompareFnAttr` | 比较函数：veq、vne、vle、vlt、vge、vgt、vule、vult、vuge、vugt |
 
@@ -275,7 +275,7 @@ operation ::= `hfusion.barrier` attr-dict
 
 ### `hfusion.cumprod` (hfusion::CumprodOp)
 
-**功能：** 在指定维度计算张量累积乘积，reverse 控制累积方向，当前仅支持单维度累积。
+**功能：** 在指定维度计算张量累积乘积，reverse控制累积方向，当前仅支持单维度累积。
 
 **语法：**
 
@@ -289,7 +289,7 @@ operation ::= `hfusion.cumprod` $input attr-dict `:` type($input) `cum_dims` `=`
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `cum_dims` | `::mlir::DenseI64ArrayAttr` | 累积维度数组，维度序号升序排列 |
 | `reverse` | `::mlir::BoolAttr` | 是否反向累积 |
@@ -308,7 +308,7 @@ operation ::= `hfusion.cumprod` $input attr-dict `:` type($input) `cum_dims` `=`
 
 ### `hfusion.cumsum` (hfusion::CumsumOp)
 
-**功能：** 在指定维度计算张量累积和，reverse 控制累积方向，当前仅支持单维度累积。
+**功能：** 在指定维度计算张量累积和，reverse控制累积方向，当前仅支持单维度累积。
 
 **语法：**
 
@@ -322,7 +322,7 @@ operation ::= `hfusion.cumsum` $input attr-dict `:` type($input) `cum_dims` `=` 
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `cum_dims` | `::mlir::DenseI64ArrayAttr` | 累积维度数组，维度序号升序排列 |
 | `reverse` | `::mlir::BoolAttr` | 是否反向累积 |
@@ -358,7 +358,7 @@ operation ::= `hfusion.deinterleave` $input custom<HFusionDeinterleave>($channel
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `channelIndex` | `::mlir::IntegerAttr` | 64位无符号整数，通道输出控制标识 |
 
@@ -383,7 +383,7 @@ operation ::= `hfusion.deinterleave` $input custom<HFusionDeinterleave>($channel
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `fun` | `::mlir::hfusion::BinaryFnAttr` | 二元运算函数：vor、vand、vxor、minf、maxf、powf、mod、modui、shli、shrsi、shrui、ldexp、ceildivsi、ceildivui、floordivsi、powi、minnumf、maxnumf |
 | `cast` | `::mlir::hfusion::TypeFnAttr` | 类型转换规则：cast_signed、cast_unsigned、bitcast |
@@ -410,7 +410,7 @@ operation ::= `hfusion.deinterleave` $input custom<HFusionDeinterleave>($channel
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `fun` | `::mlir::hfusion::UnaryFnAttr` | 一元运算函数：relu、sqrt、rsqrt、rec、vnot、tanh、sin、cos、atan、tan、absi、erf、log2、log10、log1p、exp2、expm1、ilogb |
 | `cast` | `::mlir::hfusion::TypeFnAttr` | 类型转换规则：cast_signed、cast_unsigned、bitcast |
@@ -448,7 +448,7 @@ operation ::= `hfusion.flip` $input attr-dict `:` type($input)
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `flip_axis` | `::mlir::IntegerAttr` | 64位无符号整数，待翻转维度序号 |
 
@@ -473,7 +473,7 @@ operation ::= `hfusion.flip` $input attr-dict `:` type($input)
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `axis` | `::mlir::IntegerAttr` | 64位无符号整数，收集维度序号 |
 
@@ -525,7 +525,7 @@ operation ::= `hfusion.histogram` $input `,` $num_bins (`,` $mask^)? attr-dict `
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `num_bins` | `::mlir::IntegerAttr` | 64位无符号整数，直方图分箱总数 |
 
@@ -686,15 +686,15 @@ operation ::= `hfusion.mulext` $lhs `,` $rhs attr-dict `:` type($lhs)
 
 | 操作数 | 说明 |
 | :-----: | ----------- |
-| `lhs` | signless-integer-like 类型 |
-| `rhs` | signless-integer-like 类型 |
+| `lhs` | signless-integer-like类型 |
+| `rhs` | signless-integer-like类型 |
 
 **结果：**
 
 | 结果 | 说明 |
 | :----: | ----------- |
-| `low` | 乘积低半段，signless-integer-like 类型 |
-| `high` | 乘积高半段，signless-integer-like 类型 |
+| `low` | 乘积低半段，signless-integer-like类型 |
+| `high` | 乘积高半段，signless-integer-like类型 |
 
 ### `hfusion.print` (hfusion::PrintOp)
 
@@ -708,7 +708,7 @@ operation ::= `hfusion.print` $prefix attr-dict $arg `:` type($arg)
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `prefix` | `::mlir::StringAttr` | 打印前缀文本 |
 | `hex` | `::mlir::BoolAttr` | 是否以十六进制打印 |
@@ -728,7 +728,7 @@ operation ::= `hfusion.print` $prefix attr-dict $arg `:` type($arg)
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `reduce_kind` | `::mlir::hfusion::ReduceWithIndexKindAttr` | 规约类型（最大/最小，含无符号分支） |
 | `tie_break_left` | `::mlir::BoolAttr` | 等值时是否取左侧索引 |
@@ -780,8 +780,8 @@ operation ::= `hfusion.print` $prefix attr-dict $arg `:` type($arg)
 
 - `src`：待排序的张量/memref
 - `dst_value`：用于存储排序后值的张量/memref
-- `dst_index`：用于存储与 dst_value 对应的索引的张量/memref
-- `descending`：决定按升序还是降序排序。默认为 false，即升序
+- `dst_index`：用于存储与dst_value对应的索引的张量/memref
+- `descending`：决定按升序还是降序排序。默认为false，即升序
 - `sort_axis`：待排序的轴
 
 **语法：**
@@ -803,7 +803,7 @@ operation ::= `hfusion.sort` attr-dict `ins` `(` $src `:` type($src) `)`
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `descending` | `::mlir::BoolAttr` | 是否降序排列 |
 | `sort_axis` | `::mlir::IntegerAttr` | 64位无符号整数，排序维度序号 |
@@ -829,7 +829,7 @@ operation ::= `hfusion.sort` attr-dict `ins` `(` $src `:` type($src) `)`
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `atomic_kind` | `::mlir::hfusion::AtomicKindAttr` | 原子操作类型，可选值：none、add、max、min、and、or、xor、cas、xchg、umax、umin |
 
@@ -848,7 +848,7 @@ operation ::= `hfusion.sort` attr-dict `ins` `(` $src `:` type($src) `)`
 
 ### `hfusion.symbolic_dim` (hfusion::SymbolicDimOp)
 
-**功能：** 通过符号名称引用符号维度，返回 index 类型数值。
+**功能：** 通过符号名称引用符号维度，返回index类型数值。
 
 **语法：**
 
@@ -862,7 +862,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 **属性：**
 
-| 属性名 | MLIR 类型 | 说明 |
+| 属性名 | MLIR类型 | 说明 |
 | :-----: | ----------- | ---- |
 | `symbolName` | `::mlir::SymbolRefAttr` | 符号维度引用 |
 
@@ -870,7 +870,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 | 结果 | 说明 |
 | :----: | ----------- |
-| `result` | index 类型维度值 |
+| `result` | index类型维度值 |
 
 ## 属性
 
@@ -891,7 +891,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 | 参数名 | C++类型 | 说明 |
 | :-------: | :-------: | ----------- |
-| value | `::mlir::hfusion::AtomicKind` | AtomicKind 枚举值 |
+| value | `::mlir::hfusion::AtomicKind` | AtomicKind枚举值 |
 
 ### BinaryFnAttr
 
@@ -910,7 +910,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 | 参数名 | C++类型 | 说明 |
 | :-------: | :-------: | ----------- |
-| value | `::mlir::hfusion::BinaryFn` | BinaryFn 枚举值 |
+| value | `::mlir::hfusion::BinaryFn` | BinaryFn枚举值 |
 
 ### CompareFnAttr
 
@@ -929,7 +929,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 | 参数名 | C++类型 | 说明 |
 | :-------: | :-------: | ----------- |
-| value | `::mlir::hfusion::CompareFn` | CompareFn 枚举值 |
+| value | `::mlir::hfusion::CompareFn` | CompareFn枚举值 |
 
 ### BindSubBlockAttr
 
@@ -952,7 +952,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 | 参数名 | C++类型 | 说明 |
 | :-------: | :-------: | ----------- |
-| fusion_kind | `::mlir::hfusion::FusionKind` | FusionKind 枚举值 |
+| fusion_kind | `::mlir::hfusion::FusionKind` | FusionKind枚举值 |
 
 ### InsertSliceSourceIndexAttr
 
@@ -985,7 +985,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 | 参数名 | C++类型 | 说明 |
 | :-------: | :-------: | ----------- |
-| reduce_with_index_kind | `::mlir::hfusion::ReduceWithIndexKind` | ReduceWithIndexKind 枚举值 |
+| reduce_with_index_kind | `::mlir::hfusion::ReduceWithIndexKind` | ReduceWithIndexKind枚举值 |
 
 ### ReturnOperandNumAttr
 
@@ -1026,7 +1026,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 | 参数名 | C++类型 | 说明 |
 | :-------: | :-------: | ----------- |
-| value | `::mlir::hfusion::RoundMode` | RoundMode 枚举值 |
+| value | `::mlir::hfusion::RoundMode` | RoundMode枚举值 |
 
 ### TernaryFnAttr
 
@@ -1044,7 +1044,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 | 参数名 | C++类型 | 说明 |
 | :-------: | :-------: | ----------- |
-| value | `::mlir::hfusion::TernaryFn` | TernaryFn 枚举值 |
+| value | `::mlir::hfusion::TernaryFn` | TernaryFn枚举值 |
 
 ### TypeFnAttr
 
@@ -1063,7 +1063,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 | 参数名 | C++类型 | 说明 |
 | :-------: | :-------: | ----------- |
-| value | `::mlir::hfusion::TypeFn` | TypeFn 枚举值 |
+| value | `::mlir::hfusion::TypeFn` | TypeFn枚举值 |
 
 ### UnaryFnAttr
 
@@ -1082,13 +1082,13 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 | 参数名 | C++类型 | 说明 |
 | :-------: | :-------: | ----------- |
-| value | `::mlir::hfusion::UnaryFn` | UnaryFn 枚举值 |
+| value | `::mlir::hfusion::UnaryFn` | UnaryFn枚举值 |
 
 ## 枚举
 
 ### AtomicKind
 
-**取值范围：** 32位无符号整数 0~10
+**取值范围：** 32位无符号整数0~10
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :----: | :---: | ------ |
@@ -1106,7 +1106,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 ### BinaryFn
 
-**取值范围：** 32位无符号整数 0~17
+**取值范围：** 32位无符号整数0~17
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :----: | :---: | ------ |
@@ -1131,7 +1131,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 ### CastMode
 
-**取值范围：** 32位无符号整数 0~8
+**取值范围：** 32位无符号整数0~8
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :----: | :---: | ------ |
@@ -1147,7 +1147,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 ### CompareFn
 
-**取值范围：** 32位无符号整数 0~9
+**取值范围：** 32位无符号整数0~9
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :----: | :---: | ------ |
@@ -1210,7 +1210,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 ### MmMapMode
 
-**取值范围：** 32位无符号整数 0~1
+**取值范围：** 32位无符号整数0~1
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :----: | :---: | ------ |
@@ -1219,7 +1219,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 ### ReduceWithIndexKind
 
-**取值范围：** 32位无符号整数 0~3
+**取值范围：** 32位无符号整数0~3
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :----: | :---: | ------ |
@@ -1230,7 +1230,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 ### RoundMode
 
-**取值范围：** 32位无符号整数 0~6
+**取值范围：** 32位无符号整数0~6
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :----: | :---: | ------ |
@@ -1244,7 +1244,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 ### TaylorMode
 
-**取值范围：** 32位无符号整数 0~1
+**取值范围：** 32位无符号整数0~1
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :----: | :---: | ------ |
@@ -1253,7 +1253,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 ### TernaryFn
 
-**取值范围：** 32位无符号整数 仅0
+**取值范围：** 32位无符号整数仅0
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :----: | :---: | ------ |
@@ -1261,7 +1261,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 ### TypeFn
 
-**取值范围：** 32位无符号整数 0~2
+**取值范围：** 32位无符号整数0~2
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :----: | :---: | ------ |
@@ -1271,7 +1271,7 @@ operation ::= `hfusion.symbolic_dim` $symbolName attr-dict `:` type($result)
 
 ### UnaryFn
 
-**取值范围：** 32位无符号整数 0~17
+**取值范围：** 32位无符号整数0~17
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :----: | :---: | ------ |

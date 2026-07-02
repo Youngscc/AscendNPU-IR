@@ -1,12 +1,12 @@
 # 编译与执行示例
 
-本示例展示如何用 `bishengir-compile` 将 IR 编译为设备端二进制，并基于 CANN 提供的 runtime 接口完成注册与上板执行。
+本示例展示如何用`bishengir-compile`将`IR`编译为设备端二进制，并基于`CANN`提供的`runtime`接口完成注册与上板执行。
 
-**前置条件**：已完成 [构建安装](installing_guide.md)，且 `bishengir-compile` 已加入 PATH，CANN 环境已安装并完成 `set_env.sh` 配置。
+**前置条件**：已完成[构建安装](installing_guide.md)，且`bishengir-compile`已加入`PATH`，`CANN`环境已安装并完成`set_env.sh`配置。
 
 ## IR 编译
 
-准备一段 VecAdd 的 MLIR（可从其他 IR 转换得到）：
+准备一段`VecAdd`的`MLIR`（可从其他`IR`转换得到）：
 
 ```mlir
 // add.mlir
@@ -24,18 +24,18 @@ module {
 }
 ```
 
-使用 `bishengir-compile` 生成设备端二进制：
+使用`bishengir-compile`生成设备端二进制：
 
 ```bash
 # 编译命令
 bishengir-compile add.mlir -enable-hivm-compile -o kernel.o
 ```
 
-生成的 `kernel.o` 即为可在 NPU 上执行的算子二进制。
+生成的`kernel.o`即为可在`NPU`上执行的算子二进制。
 
 ## Runtime 注册与上板执行
 
-以下 C++ 代码实现 CANN runtime 所需的算子注册与调用接口，编译后与 `kernel.o` 一起即可上板执行。
+以下`C++`代码实现`CANN runtime`所需的算子注册与调用接口，编译后与`kernel.o`一起即可上板执行。
 
 ```cpp
 // main.cpp
@@ -200,7 +200,7 @@ int main() {
 }
 ```
 
-编译可执行文件（`main.cpp` 会读取当前目录下的 `kernel.o` 并完成注册与调用）：
+编译可执行文件（`main.cpp`会读取当前目录下的`kernel.o`并完成注册与调用）：
 
 ```bash
 # 先加载 CANN 环境（若已写入 shell 配置可省略）；路径以实际安装为准，参见《构建安装》
@@ -211,7 +211,7 @@ PROF_INC=${ASCEND_HOME_PATH}/include/experiment/msprof
 PKG_INC=${ASCEND_HOME_PATH}/pkg_inc
 RT_LIB=${ASCEND_HOME_PATH}/lib64
 
-g++ main.cpp -I${RT_INC}  -I${PROF_INC} -I${PKG_INC} -L ${RT_LIB} -l runtime -l ascendcl -o vec-add
+g++ main.cpp -I${RT_INC} -I${PROF_INC} -I${PKG_INC} -L ${RT_LIB} -l runtime -l ascendcl -o vec-add
 ```
 
 运行示例：

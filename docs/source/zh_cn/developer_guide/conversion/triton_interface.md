@@ -1,6 +1,6 @@
 # Triton接入
 
-[Triton Ascend](https://gitcode.com/Ascend/triton-ascend/) 是一个协助 Triton 接入 Ascend 平台的重要组件。完成 Triton Ascend 的构建与安装后，使用者在执行 Triton 算子时，即可选用 Ascend 作为后端。
+[Triton Ascend](https://gitcode.com/Ascend/triton-ascend/) 是一个协助Triton接入Ascend平台的重要组件。完成Triton Ascend的构建与安装后，使用者在执行Triton算子时，即可选用Ascend作为后端。
 
 ## 安装与执行
 
@@ -12,9 +12,9 @@
 
 #### 安装Ascend CANN
 
-AscendNPU-IR端到端运行依赖CANN环境。
+AscendNPU IR端到端运行依赖CANN环境。
 
-1. 下载 CANN 包：需下载 toolkit 包及与硬件对应的 ops 包，可从 [昇腾社区 CANN 下载页](https://www.hiascend.com/cann/download) 获取。
+1. 下载CANN包：需下载toolkit包及与硬件对应的ops包，可从[昇腾社区 CANN 下载页](https://www.hiascend.com/cann/download)获取。
 
 2. 安装CANN包：
 
@@ -142,25 +142,25 @@ def test_lt(param_list):
 
 Triton Ascend将Triton方言的高级GPU抽象操作逐级下降为Linalg、HFusion和HIVM等目标方言，最终生成可在Ascend NPU上高效执行的优化中间表示。下表详细列出了各类Triton操作与其在下降过程中所对应的Ascend NPU IR操作。
 
-| Triton Op | 目标 Ascend NPU IR Op | 描述 |
+| Triton Op | 目标Ascend NPU IR Op | 描述 |
 | :--- | :--- | :--- |
-| **访存类 Op** | | |
+| **访存类Op** | | |
 | `triton::StoreOp` | `memref::copy` | 将数据存储到内存 |
 | `triton::LoadOp` | `memref::copy` + `bufferization::ToTensorOp` | 从内存加载数据 |
-| `triton::AtomicRMWOp` | `hivm::StoreOp` 或 `hfusion::AtomicXchgOp` | 执行原子的读-修改-写操作 |
+| `triton::AtomicRMWOp` | `hivm::StoreOp`或`hfusion::AtomicXchgOp` | 执行原子的读-修改-写操作 |
 | `triton::AtomicCASOp` | `linalg::GenericOp` | 执行原子的比较并交换操作 |
-| `triton::GatherOp` | 先转换为`func::CallOp`（调用 `triton_gather`）<br>再转换为`hfusion::GatherOp` | 根据索引收集数据 |
-| **指针运算类 Op** | | |
+| `triton::GatherOp` | 先转换为`func::CallOp`（调用`triton_gather`）<br>再转换为`hfusion::GatherOp` | 根据索引收集数据 |
+| **指针运算类Op** | | |
 | `triton::AddPtrOp` | `memref::ReinterpretCast` | 对指针进行偏移运算 |
 | `triton::PtrToIntOp` | `arith::IndexCastOp` | 将指针转换为整数 |
 | `triton::IntToPtrOp` | `hivm::PointerCastOp` | 将整数转换为指针 |
 | `triton::AdvanceOp` | `memref::ReinterpretCastOp` | 推进指针位置 |
-| **程序信息类 Op** | | |
-| `triton::GetProgramIdOp` | `functionOp` 的参数 | 获取当前程序的ID |
-| `triton::GetNumProgramsOp` | `functionOp` 的参数 | 获取总程序数量 |
-| `triton::AssertOp` | 先转换为`func::CallOp`（调用 `triton_assert`）<br>再转换为`hfusion::AssertOp` | 断言操作 |
-| `triton::PrintOp` | 先转换为`func::CallOp`（调用 `triton_print`）<br>再转换为`hfusion::PrintOp` | 打印操作 |
-| **张量操作类 Op** | | |
+| **程序信息类Op** | | |
+| `triton::GetProgramIdOp` | `functionOp`的参数 | 获取当前程序的ID |
+| `triton::GetNumProgramsOp` | `functionOp`的参数 | 获取总程序数量 |
+| `triton::AssertOp` | 先转换为`func::CallOp`（调用`triton_assert`）<br>再转换为`hfusion::AssertOp` | 断言操作 |
+| `triton::PrintOp` | 先转换为`func::CallOp`（调用`triton_print`）<br>再转换为`hfusion::PrintOp` | 打印操作 |
+| **张量操作类Op** | | |
 | `triton::ReshapeOp` | `tensor::ReshapeOp` | 改变张量形状 |
 | `triton::ExpandDimsOp` | `tensor::ExpandShapeOp` | 扩展张量维度 |
 | `triton::BroadcastOp` | `linalg::BroadcastOp` | 广播张量 |
@@ -170,8 +170,8 @@ Triton Ascend将Triton方言的高级GPU抽象操作逐级下降为Linalg、HFus
 | `triton::CatOp` | `tensor::InsertSliceOp` | 拼接张量 |
 | `triton::MakeRangeOp` | `linalg::GenericOp` | 创建一个包含连续整数的张量 |
 | `triton::SplatOp` | `linalg::FillOp` | 用标量值填充张量 |
-| `triton::SortOp` | 先转换为`func::CallOp`（调用 `triton_sort`）<br>再转换为`hfusion::SortOp` | 对张量进行排序 |
-| **数值计算类 Op** | | |
+| `triton::SortOp` | 先转换为`func::CallOp`（调用`triton_sort`）<br>再转换为`hfusion::SortOp` | 对张量进行排序 |
+| **数值计算类Op** | | |
 | `triton::MulhiUIOp` | `arith::MulSIExtendedOp` | 无符号整数乘法，返回高位结果 |
 | `triton::PreciseDivFOp` | `arith::DivFOp` | 执行高精度浮点除法 |
 | `triton::PreciseSqrtOp` | `math::SqrtOp` | 执行高精度浮点平方根 |
@@ -179,16 +179,16 @@ Triton Ascend将Triton方言的高级GPU抽象操作逐级下降为Linalg、HFus
 | `triton::ClampFOp` | `tensor::EmptyOp` + `linalg::FillOp` | 将浮点数限制在指定范围内 |
 | `triton::DotOp` | `linalg::MatmulOp` | 执行通用矩阵乘法 |
 | `triton::DotScaledOp` | `linalg::MatmulOp` | 执行带缩放因子的矩阵乘法 |
-| `triton::ascend::FlipOp` | 先转换为`func::CallOp`（调用 `triton_flip`）<br>再转换为`hfusion::FlipOp` | 执行带缩放因子的矩阵乘法 |
-| **归约类 Op** | | |
+| `triton::ascend::FlipOp` | 先转换为`func::CallOp`（调用`triton_flip`）<br>再转换为`hfusion::FlipOp` | 执行带缩放因子的矩阵乘法 |
+| **归约类Op** | | |
 | `triton::ArgMinOp` | `linalg::ReduceOp` | 返回张量中最小值的索引 |
 | `triton::ArgMaxOp` | `linalg::ReduceOp` | 返回张量中最大值的索引 |
 | `triton::ReduceOp` | `linalg::ReduceOp` | 通用归约操作 |
-| `triton::ScanOp` | 先转换为`func::CallOp`（调用 `triton_cumsum` 或 `triton_cumprod`）<br>再转换为`hfusion::CumsumOp`及`hfusion::CumprodOp` | 执行扫描操作（如累计和、累计积） |
+| `triton::ScanOp` | 先转换为`func::CallOp`（调用`triton_cumsum`或`triton_cumprod`）<br>再转换为`hfusion::CumsumOp`及`hfusion::CumprodOp` | 执行扫描操作（如累计和、累计积） |
 
 ## Triton拓展操作
 
-AscendNPU-IR增量提供了语言特性，其中Triton-Ascend基于NPU IR扩展了一部分操作，若要使能相关能力，你需要import以下的模块。
+AscendNPU IR增量提供了语言特性，其中Triton-Ascend基于NPU IR扩展了一部分操作，若要使能相关能力，你需要import以下的模块。
 
 ```python
 import triton.language.extra.cann.extension as al
@@ -310,7 +310,7 @@ def triton_matmul_exp():
 
 #### parallel
 
-昇腾扩展了 Python 标准的 `range` 功能，增加具有**并行执行语义**的`parallel`迭代器。
+昇腾扩展了Python标准的`range`功能，增加具有并行执行语义的`parallel`迭代器。
 
 **参数说明**：
 
@@ -324,7 +324,7 @@ def triton_matmul_exp():
 
 **限制**：
 
-目前 Atlas A2 最多支持2个Vector核。
+目前Atlas A2最多支持2个Vector核。
 
 **写法样例**：
 
@@ -367,7 +367,7 @@ def triton_where_lt_case1():
 
 #### multibuffer
 
-`multibuffer` 是用于为现有张量设置多重缓冲（Double Buffering）的函数，通过编译器提示优化数据流和计算重叠。
+`multibuffer`是用于为现有张量设置多重缓冲（Double Buffering）的函数，通过编译器提示优化数据流和计算重叠。
 
 **参数说明**：
 
@@ -483,8 +483,8 @@ def index_select_manual_kernel():
 | 参数名 | 类型 | 描述 | 默认值 |
 |--------|------|------|--------|
 | `ptr` | tensor | 输入张量 | - |
-| `dim` | int 或 tl.constexpr[int] | 要排序的维度 | `-1` |
-| `descending` | bool 或 tl.constexpr[bool] | 排序方向，`True`表示降序，`False`表示升序 | `False` |
+| `dim` | int或tl.constexpr[int] | 要排序的维度 | `-1` |
+| `descending` | bool或tl.constexpr[bool] | 排序方向，`True`表示降序，`False`表示升序 | `False` |
 
 **写法样例**：
 
@@ -507,7 +507,7 @@ def sort_kernel_2d():
 | 参数名 | 类型 | 描述 |
 |--------|------|------|
 | `ptr` | tensor | 输入张量 |
-| `dim` | int 或 tl.constexpr[int] | 要翻转的维度 |
+| `dim` | int或tl.constexpr[int] | 要翻转的维度 |
 
 **写法样例**：
 
@@ -614,12 +614,12 @@ def select_index():
 
 **约束条件**：
 
-- `ptr` 和 `value` 必须具有相同的秩。
-- `ptr.dtype` 目前仅支持 `float16`、`bfloat16`、`float32`。
-- `index` 必须是整数张量。如果 `index.rank` != 1，将被重塑为1D。
-- `index.numel` 必须等于 `value.shape[dim]`。
-- `value` 支持 2~5 维张量。
-- `dim` 必须有效（0 ≤ dim < rank(value) - 1）。
+- `ptr`和`value`必须具有相同的秩。
+- `ptr.dtype`目前仅支持`float16`、`bfloat16`、`float32`。
+- `index`必须是整数张量。如果`index.rank` != 1，将被重塑为1D。
+- `index.numel`必须等于`value.shape[dim]`。
+- `value`支持2~5维张量。
+- `dim`必须有效（0 ≤ dim < rank(value) - 1）。
 
 **写法样例**：
 
@@ -660,7 +660,7 @@ def put_index():
 **返回值**：
 
 - **类型**: tensor
-- **描述**: 位于UB中的结果张量，形状与 `index.shape` 相同。
+- **描述**: 位于UB中的结果张量，形状与`index.shape`相同。
 
 **散点收集规则**：
 
@@ -678,13 +678,13 @@ def put_index():
 
 **约束条件**：
 
-- `src` 和 `index` 必须具有相同的秩。
-- `src.dtype` 目前仅支持 `float16`、`bfloat16`、`float32`。
-- `index` 必须是整数张量，秩在 1 到 5 之间。
-- `dim` 必须有效（0 ≤ dim < rank(index)）。
-- `other` 必须是标量值。
-- 对于每个不等于 `dim` 的维度 `i`，`index.size[i]` ≤ `src.size[i]`。
-- 输出形状与 `index.shape` 相同。如果 `index` 为 None，输出张量将是与 `index` 形状相同的空张量。
+- `src`和`index`必须具有相同的秩。
+- `src.dtype`目前仅支持`float16`、`bfloat16`、`float32`。
+- `index`必须是整数张量，秩在1到5之间。
+- `dim`必须有效（0 ≤ dim < rank(index)）。
+- `other`必须是标量值。
+- 对于每个不等于`dim`的维度`i`，`index.size[i]` ≤ `src.size[i]`。
+- 输出形状与`index.shape`相同。如果`index`为None，输出张量将是与`index`形状相同的空张量。
 
 **写法样例**：
 
@@ -737,12 +737,12 @@ def gather():
 
 **约束条件**：
 
-- `ptr`、`index` 和 `value` 必须具有相同的秩。
-- `ptr.dtype` 目前仅支持 `float16`、`bfloat16`、`float32`。
-- `index` 必须是整数张量，秩在 1 到 5 之间。
-- `dim` 必须有效（0 ≤ dim < rank(index)）。
-- 对于每个不等于 `dim` 的维度 `i`，`index.size[i]` ≤ `ptr.size[i]`。
-- 输出形状与 `index.shape` 相同。如果 `index` 为 None，输出张量将是与 `index` 形状相同的空张量。
+- `ptr`、`index`和`value`必须具有相同的秩。
+- `ptr.dtype`目前仅支持`float16`、`bfloat16`、`float32`。
+- `index`必须是整数张量，秩在1到5之间。
+- `dim`必须有效（0 ≤ dim < rank(index)）。
+- 对于每个不等于`dim`的维度`i`，`index.size[i]` ≤ `ptr.size[i]`。
+- 输出形状与`index.shape`相同。如果`index`为None，输出张量将是与`index`形状相同的空张量。
 
 **写法样例**：
 
@@ -772,7 +772,7 @@ def scatter():
 | 参数名 | 类型 | 描述 |
 |--------|------|------|
 | `src` | tensor (pointer type) | 源张量指针（位于GM中） |
-| `dim` | int 或 constexpr | 沿其选择索引的维度 |
+| `dim` | int或constexpr | 沿其选择索引的维度 |
 | `index` | tensor | 要选择的索引的一维张量（位于UB中） |
 | `src_shape` | List[Union[int, tensor]] | 源张量的完整形状（可以是整数或张量） |
 | `src_offset` | List[Union[int, tensor]] | 读取的起始偏移量（可以是整数或张量） |
@@ -780,15 +780,15 @@ def scatter():
 
 **约束条件**：
 
-- `read_shape[dim]` 必须为 `-1`。
-- `src_offset[dim]` 可以为 `-1`（将被忽略）。
-- 边界处理：当 `src_offset + read_shape > src_shape` 时，会自动截断到 `src_shape` 边界。
-- **不进行检查** `index` 是否包含越界值。
+- `read_shape[dim]`必须为`-1`。
+- `src_offset[dim]`可以为`-1`（将被忽略）。
+- 边界处理：当`src_offset + read_shape > src_shape`时，会自动截断到`src_shape`边界。
+- 不进行检查`index`是否包含越界值。
 
 **返回值**：
 
 - **返回类型**: tensor
-- **描述**: 位于UB中的结果张量，其形状中的 `dim` 维度被替换为 `index` 的长度。
+- **描述**: 位于UB中的结果张量，其形状中的`dim`维度被替换为`index`的长度。
 
 **写法样例**：
 
@@ -831,10 +831,10 @@ class my_custom_op:
 
 注册一个最简单的定制操作要求至少提供name、core、pipe、mode这些基本属性，其中：
 
-- name 操作名称，是这个定制操作的唯一标识符，如果省略则默认使用类名。
-- core 表示运行在哪种昇腾核上。
-- pipe 表示对应的流水线。
-- mode 表示使用的编程模式。
+- name操作名称，是这个定制操作的唯一标识符，如果省略则默认使用类名。
+- core表示运行在哪种昇腾核上。
+- pipe表示对应的流水线。
+- mode表示使用的编程模式。
 
 #### 使用定制操作
 
@@ -962,7 +962,7 @@ class my_custom_op:
 
 ```
 
-这样，`al.custom('my_custom_op', ...)` 就会固定对应设备侧的 `_my_custom_op_symbol_name_(...)` 函数。
+这样，`al.custom('my_custom_op', ...)`就会固定对应设备侧的`_my_custom_op_symbol_name_(...)`函数。
 
 #### 动态符号名
 
@@ -991,8 +991,8 @@ class my_custom_op:
 
 如果实现定制操作的函数需要从源代码或字节码编译产生，则需要在注册定制操作类的时候分别配置`source`和`compile`属性：
 
-- source 实现定制操作函数的源代码或字节码文件路径。
-- compile 实现定制操作函数的编译命令，其中可以用`%<`和`%@`分别表示源文件和目标文件（与Makefile类似）。
+- source实现定制操作函数的源代码或字节码文件路径。
+- compile实现定制操作函数的编译命令，其中可以用`%<`和`%@`分别表示源文件和目标文件（与Makefile类似）。
 
 与符号名类似，这两个属性也可以静态配置或在注册类构造函数中动态配置，例如：
 

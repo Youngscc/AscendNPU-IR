@@ -1,6 +1,6 @@
 # `memref_ext` 方言
 
-扩展 memref 方言，提供内存相关扩展操作。
+扩展memref方言，提供内存相关扩展操作。
 
 ## 操作定义
 
@@ -30,8 +30,8 @@ memref_ext.alloc_workspace(%dynamic) from %arg offset = [%offset] : from memref<
 | 操作数 | 说明 |
 | :-----: | ----------- |
 | `workspaceArg` | 任意类型内存视图 |
-| `dynamicSize` | 变长 index 动态尺寸 |
-| `offset` | 变长 index 偏移量 |
+| `dynamicSize` | 变长index动态尺寸 |
+| `offset` | 变长index偏移量 |
 
 **结果：**
 
@@ -43,7 +43,7 @@ memref_ext.alloc_workspace(%dynamic) from %arg offset = [%offset] : from memref<
 
 ### CmpFPredicate
 
-**取值范围：** 64位无符号整数 0~15
+**取值范围：** 64位无符号整数0~15
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :----: | :---: | ------ |
@@ -66,7 +66,7 @@ memref_ext.alloc_workspace(%dynamic) from %arg offset = [%offset] : from memref<
 
 ### CmpIPredicate
 
-**取值范围：** 64位无符号整数 0~9
+**取值范围：** 64位无符号整数0~9
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :----: | :---: | ------ |
@@ -105,7 +105,7 @@ memref_ext.alloc_workspace(%dynamic) from %arg offset = [%offset] : from memref<
 
 ### AtomicRMWKind
 
-**取值范围：** 64位无符号整数 0~14
+**取值范围：** 64位无符号整数0~14
 
 | 枚举符号 | 数值 | 标识字符串 |
 | :----: | :---: | ------ |

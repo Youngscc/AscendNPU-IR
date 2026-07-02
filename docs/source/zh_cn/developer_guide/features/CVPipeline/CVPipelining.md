@@ -1,18 +1,18 @@
 # Cube-Vector 软件流水优化
 
-本文介绍 HIVM 中的 **CV Pipelining** Pass。该Pass针对CV类kernel进行优化。在阅读本文之前，建议先阅读 [CV Optimization](../CV/CVOptimization.md)，了解CV编译相关术语。
+本文介绍HIVM中的CV Pipelining `Pass`。该`Pass`针对CV类`kernel`进行优化。在阅读本文之前，建议先阅读[CV Optimization](../CV/CVOptimization.md)，了解CV编译相关术语。
 
 ## 硬件背景
 
 昇腾核心中包括Cube核心（负责矩阵乘相关运算）与Vector核心（负责其他向量运算）。这两个核心可以在没有相互依赖的情况下并行异步运行，提高硬件利用率是性能优化中尤其重要的一部分。
 
-对MIX算子中有多个Cube与Vector指令相互依赖的循环的场景进行优化（例如FlashAttention等算子）。 通过并行Vector与Cube核心，获得更高的硬件利用率（ILP），达到更高的性能。
+对MIX算子中有多个Cube与Vector指令相互依赖的循环的场景进行优化（例如FlashAttention等算子）。通过并行Vector与Cube核心，获得更高的硬件利用率（ILP），达到更高的性能。
 
 该功能使用了Multi-Buffering优化，会导致部分UB空间占用更多，因此需要根据实际场景调整软流水的阶段数来达到最好的性能。
 
 ## 算法原理
 
-寻找适当的for 循环，将Cube与Vector指令分开成独立的Work Item, 建立每个Work Item之间的数据依赖并将其中需要扩展成multi-buffer的tensor扩展，将原循环unroll后，再将每个Work Item放至单独循环中。
+寻找适当的`for`循环，将Cube与Vector指令分开成独立的`Work Item`，建立每个`Work Item`之间的数据依赖并将其中需要扩展成`multi-buffer`的`tensor`扩展，将原循环`unroll`后，再将每个`Work Item`放至单独循环中。
 
 Before:
 
@@ -58,14 +58,14 @@ scf.for 0 to N step 3*S {
 
 | 选项 | 默认值 | 含义 |
 |------|--------|------|
-| `set-workspace-multibuffer` | 2 | 软件流水的阶段数，同时也是Multi-Buffering的数量|
+| `set-workspace-multibuffer` | 2 | 软件流水的阶段数，同时也是Multi-Buffering的数量 |
 
 ## 约束能力
 
-1. Pipeline的循环只有scf.for与scf.if op拥有region/block, 并且其region内只能有cube或vector指令。
-2. 迭代间的数据依赖必须可以被分离至独自的Work Item
-    - 以下情况无法开启cv-pipelining：`v0` 与 `v1`无法被提取至同一Work Item（因为中间有Cube依赖），但是`arg0`的定义在`v1`，却被`v0`用到。该情况CV-Pipelining不会开启
-    - 若`Cube`没有用到`v0`, 那么`v0`会下沉至`v1`同一个Work Item, CV-Pipelining会生效
+1. Pipeline的循环只有`scf.for`与`scf.if` op拥有region/block，并且其region内只能有cube或vector指令。
+2. 迭代间的数据依赖必须可以被分离至独自的`Work Item`
+    - 以下情况无法开启`cv-pipelining`：`v0`与`v1`无法被提取至同一`Work Item`（因为中间有Cube依赖），但是`arg0`的定义在`v1`，却被`v0`用到。该情况`CV-Pipelining`不会开启
+    - 若`Cube`没有用到`v0`，那么`v0`会下沉至`v1`同一个`Work Item`，`CV-Pipelining`会生效
 
 ```mlir
 scf.for iter_args(%arg0 = %init) {
