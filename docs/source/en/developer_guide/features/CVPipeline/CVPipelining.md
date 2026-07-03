@@ -58,6 +58,15 @@ scf.for 0 to N step 3*S {
 | Option | Default | Description |
 |--------|--------|-------------|
 | `set-workspace-multibuffer` | 2 | Number of software pipeline stages and multi-buffering count |
+| `--enable-lazy-loading` | false | Enable lazy load in CV pipelining. Load ops can be cloned into multiple work items to reduce intermediate buffer expansion. |
+
+### Operator hints
+
+Lazy load can also be enabled for a specific operator by adding the `cv_pipeline_lazy_load` compile hint:
+
+```python
+extension.compile_hint(t, "cv_pipeline_lazy_load", True)
+```
 
 ## Constraints
 
