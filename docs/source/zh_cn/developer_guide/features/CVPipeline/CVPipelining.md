@@ -63,7 +63,7 @@ scf.for 0 to N step 3*S {
 
 ### 算子侧提示
 
-也可以在算子侧通过`cv_pipeline_lazy_load`编译提示为指定算子开启Lazy Load功能：
+也可以在算子侧通过`cv_pipeline_lazy_load`编译提示为指定tensor开启Lazy Load功能：
 
 ```python
 extension.compile_hint(t, "cv_pipeline_lazy_load", True)

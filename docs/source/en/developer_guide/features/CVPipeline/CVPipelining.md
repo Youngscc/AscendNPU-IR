@@ -62,7 +62,7 @@ scf.for 0 to N step 3*S {
 
 ### Operator hints
 
-Lazy load can also be enabled for a specific operator by adding the `cv_pipeline_lazy_load` compile hint:
+Lazy load can also be enabled for a specific tensor by adding the `cv_pipeline_lazy_load` compile hint:
 
 ```python
 extension.compile_hint(t, "cv_pipeline_lazy_load", True)
