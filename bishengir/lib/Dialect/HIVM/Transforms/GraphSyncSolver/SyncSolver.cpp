@@ -421,8 +421,8 @@ Solver::getMultiBufferEventIdInfo(Occurrence *occ1, Occurrence *occ2,
       return {};
     }
     auto [setOcc, waitOcc] = getSetWaitOcc(occ1, occ2);
-    if (Occurrence::getParentloop(setOcc) != parLoop1 ||
-        Occurrence::getParentloop(waitOcc) != parLoop1) {
+    if (setOcc->getParentOfType<Loop>() != parLoop1 ||
+        waitOcc->getParentOfType<Loop>() != parLoop1) {
       return {};
     }
   } else {
@@ -433,9 +433,12 @@ Solver::getMultiBufferEventIdInfo(Occurrence *occ1, Occurrence *occ2,
     multibufferLoop = multibufferLoopOpt.value();
     assert(multibufferLoop != nullptr);
     auto [setOcc, waitOcc] = getSetWaitOcc(occ1, occ2);
+    // TODO: This still matches the multibuffer loop through the MLIR loop op
+    // (LoopLikeOpInterface) rather than the solver occurrence; unify it with the
+    // solver loop nest once the a5 PR is merged.
     Operation *multibufferLoopOp = multibufferLoop.getOperation();
-    auto *setParentLoop = Occurrence::getParentloop(setOcc);
-    auto *waitParentLoop = Occurrence::getParentloop(waitOcc);
+    auto *setParentLoop = setOcc->getParentOfType<Loop>();
+    auto *waitParentLoop = waitOcc->getParentOfType<Loop>();
     if (!setParentLoop || !setParentLoop->op ||
         setParentLoop->op->op != multibufferLoopOp || !waitParentLoop ||
         !waitParentLoop->op || waitParentLoop->op->op != multibufferLoopOp) {
@@ -646,22 +649,6 @@ EventIdInfo Solver::getEventIdInfo(Occurrence *occ1, Occurrence *occ2,
   return singleEventId;
 }
 
-// Exclude the edge unless its multibuffer loop is a parent loop enclosing the
-// candidate (a proper ancestor of both candidate occurrences).
-static bool
-candidateMultiBufferLoopExcludesEdge(Occurrence *candidateOcc1,
-                                     Occurrence *candidateOcc2,
-                                     const ConflictPair *edge) {
-  Occurrence *edgeLoopOcc = edge->backwardSyncLoopOcc;
-  if (edgeLoopOcc == nullptr) {
-    return false;
-  }
-  bool edgeLoopIsCandidateParent =
-      edgeLoopOcc->isProperAncestor(candidateOcc1) &&
-      edgeLoopOcc->isProperAncestor(candidateOcc2);
-  return !edgeLoopIsCandidateParent;
-}
-
 // Graph-based check to determine if adding a sync between occ1 and occ2 would
 // block progress. Uses GraphSolver (Dijkstra) to estimate minimal reachable
 // index.
@@ -689,9 +676,6 @@ bool Solver::checkGraphConflict(
       return;
     }
     if (conflictPair->isInnerBackward) {
-      if (candidateMultiBufferLoopExcludesEdge(occ1, occ2, conflictPair)) {
-        return;
-      }
       int64_t candidateEventIdProduct =
           eventIdInfo.has_value()
               ? eventIdInfo->eventIdNum * eventIdInfo->eventIdRepeatNum
