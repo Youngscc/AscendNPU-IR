@@ -138,6 +138,18 @@ func.func @test_acosh(%arg0: tensor<10x20xf32>) -> tensor<10x20xf32> {
 
 // -----
 
+// CHECK-LABEL: func @test_asinh
+// CHECK-SAME: (%[[ARG:.*]]: tensor<10x20xf32>) -> tensor<10x20xf32>
+func.func @test_asinh(%arg0: tensor<10x20xf32>) -> tensor<10x20xf32> {
+  // CHECK: %[[DEST:.*]] = tensor.empty
+  // CHECK: %[[ASINH:.*]] = hfusion.elemwise_unary {fun = #hfusion.unary_fn<asinh>} ins(%[[ARG]] : tensor<10x20xf32>) outs(%[[DEST]] : tensor<10x20xf32>)
+  // CHECK: return %[[ASINH]]
+  %0 = math.asinh %arg0 : tensor<10x20xf32>
+  return %0 : tensor<10x20xf32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @test_erf
 func.func @test_erf(%arg0 : tensor<6x6xf32>) -> tensor<6x6xf32> {
   // CHECK:       %[[EMPTY:.*]] = tensor.empty()
