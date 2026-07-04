@@ -31,7 +31,7 @@ include "bishengir/Dialect/HIVM/IR/HIVMTraits.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/Interfaces/ViewLikeInterface.td"
-include "mlir/Interfaces/CopyOpInterface.td"
+include "bishengir/Interfaces/CopyOpInterface.td"
 
 //===----------------------------------------------------------------------===//
 // HIVM DMA Operations.
