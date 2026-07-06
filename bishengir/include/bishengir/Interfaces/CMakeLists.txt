@@ -11,3 +11,10 @@ add_dependencies(mlir-headers MLIRBiShengIREnumsIncGen)
 add_dependencies(mlir-headers MLIRBiShengIRAttributesIncGen)
 
 add_mlir_interface(AggregatedOpInterface)
+
+# Vendor CopyOpInterface only on LLVM 22+ (MLIR removed it in PR #157711).
+# On LLVM < 22 MLIR still ships it and the shared include guard in
+# CopyOpInterface.td deduplicates against MLIR's copy.
+if(LLVM_MAJOR_VERSION_22_COMPATIBLE)
+  add_mlir_interface(CopyOpInterface)
+endif()
