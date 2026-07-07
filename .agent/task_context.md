@@ -5,22 +5,21 @@
 当前任务的输入是：
 
 ```text
-初始 IR 代码 + 完整 pass pipeline config
+data/ 下的 .ttadapter/MLIR 输入，或已经 dump 出来的 PlanMemory 前后 IR
 ```
 
 输出是：
 
 ```text
-每个 pass/阶段之后的内存状态，直到 PlanMemory 之后
+local PlanMemory 前后的 IR、memory_info*.json、overflow 日志，以及代码逻辑解释
 ```
 
 核心思路：
 
-- 不做完整影子编译器。
-- 只 1:1 模拟会影响内存的 buffer/memref 行为。
-- 对每个 pass 抽取创建、删除、reshape、copy、scope 推断、layout、lifetime、
-  inplace、multi-buffer 等内存相关 effect。
-- 用真实 PlanMemory 或后续 dry-run oracle 对比模型峰值。
+- 以真实 `bishengir-compile` / `bishengir-opt` 和 PlanMemory dump 为准。
+- 重点观察第二次 PlanMemory，即 local `PlanMemory(LOCAL_MEM_PLAN)`。
+- 解释 IR 时只记录结构和代码路径，不把用户私有 IR 内容写入 `.agent/`。
+- 早前逐 pass estimator / Python 建模主线已暂停，不作为当前默认路线。
 
 ## 当前边界
 
@@ -48,29 +47,31 @@ local peak 混算。
   MLIR IR。
 - 不是每个 pass 后都有 PlanMemory 级精确峰值。早期阶段应输出 symbolic 或
   concrete structural 状态，不能伪装成 exact。
-- local `MarkMultiBuffer` 后最接近真实 local PlanMemory 输入，是第一优先校验点。
-- 第一版 exact 校验以 local `MarkMultiBuffer` 后 IR 作为起点，suffix 基本只有
-  `PlanMemory(local)`。把起点往前推时，后续 suffix pass 不是“无影响尾巴”，而是
-  必须一起建模的内存管理优化逻辑；oracle 峰值表示 checkpoint IR 经同一 suffix
-  到 PlanMemory 后的结果。
-- `memory_modeling/` 已有 Python 框架骨架：核心 dataclass、S8 反向 checkpoint
-  注册表、text scanner、CLI，以及兼容旧用法的 `s0_snapshot` 入口。当前仍是轻量
-  structural scan，不是 MLIR typed parser 或 PlanMemory dry-run。
-- `memory_modeling/s8_local_model.py` 已实现 S8.5 第一版文本模型：输入为
-  `createMarkMultiBufferPass` 后 dump 出来的 IR，解析 local `memref.alloc` 的
-  scope/static size/multi-buffer/lifetime，并给出保守 predicted peak。它不模拟
-  NormalizeLoopIterator、完整 alias/inplace、dmaFirstPipelineOpt、spec-level allocation
-  或 20 seed retry，必须继续用真实 PlanMemory oracle 校验。
-- `memory_modeling/run_adapters.py` 是当前批量验证入口：默认扫描 `data/` 下所有
-  非隐藏普通文件，对每个文件运行 S8.5 Python 模型和 `bishengir-opt` local
-  PlanMemory + MemoryDisplay oracle。主输出是 UB 对比优先的
-  `comparison.json`/`comparison.csv`，每个 case 目录保留 `memory.json`、
-  `model_memory_info.json`、`suffix_input.mlir`、成功时的 `after_plan.mlir`、原始
-  `memory_info*.json` 和必要时的 `oracle.log`。`model_memory_info.json` 是模型侧逐
-  buffer 视图，包含 model offset、extent、end address、lifetime、size/aligned size
-  和 multi-buffer copy index。2026-07-01 smoke：`fake_attn_fwd.ttadapter` oracle UB
-  peak 为 512 bits，当前模型预测 768 bits；overflow fake adapter oracle UB
-  required/peak 为 2097152 bits，当前模型预测 3145728 bits。
+- local `MarkMultiBuffer` 后最接近真实 local PlanMemory 输入。
+- `createDumpIRBeforePlanMemoryPass` 位于 `MarkMultiBuffer` 和 local PlanMemory 之间。
+  现在必须同时满足 `--enable-dump-ir-before-plan-memory` 和
+  `BISHENGIR_DUMP_BEFORE_PLAN_MEMORY=<path>`，才会写出 before dump。普通编译默认不再
+  插入该 debug pass。
+- `--enable-dump-ir-before-plan-memory` 是最近新增的 compile option；修改后未在本轮
+  完整 build，使用新脚本前需要用户重新 build `bishengir-compile`，让 TableGen 生成的
+  option/config 代码和二进制同步。
+- `tools/dump_planmemory_ir.sh` 是当前批量 dump 入口，默认扫描 `data/`，为每个 case
+  保留 before local PlanMemory IR、`.raw.mlir`、`memory_info*.json`、stdout/stderr
+  和顶层 `summary.tsv`；默认不再创建完整 `ir_tree/`。after local PlanMemory IR 和
+  `plan_memory_after_dumps/` 依赖 `--dump-full-ir-tree` 或 `--drop-full-tree`。
+- `tools/run_ub_peak_pass_ablation.sh` 是第一阶段 UB peak pass-group 消融入口，默认对
+  `data/attn_fwd.ttadapter` 跑现有编译开关矩阵，并汇总 `summary.tsv` /
+  `memory_metrics.tsv`；默认不创建 full `ir_tree/`，加 `--keep-full-tree` 才保留 full
+  pass IR tree。
+- `memory_info*.json` 中 `offset` 是 byte offset，`extent` 是 bit；PlanMemory
+  内部以 bit 规划，rewrite 到 IR 时 offset 会转成 byte。
+- 2026-07-07 的第一阶段 `attn_fwd` 实验输出位于
+  `Output/ub_peak_pass_ablation/20260707_102925`；该轮里只有
+  `--disable-auto-cv-work-space-manage=true` 让 AIV UB memory display 从 overflow 变为
+  success，其余现有开关配置仍保持 `1716224 bits required / 1572864 bits available`。
+- `Output/planmemory_ir_dumps/data_attn_fwd.ttadapter/planmemory_code_walkthrough_report.md`
+  是当前示例报告，解释了 `data/attn_fwd.ttadapter` 的 local PlanMemory before/after。
+  `.agent/` 中不要复制该报告里的用户 IR 片段。
 
 ## 不要再分心的问题
 
@@ -78,6 +79,8 @@ local peak 混算。
 - CANN 没安装。
 - 没有昇腾卡。
 - macOS full compile/full test 不通过。
-- 旧的 fake ttadapter、run.sh、IR tree dump 细节。
+- 旧实验 smoke 对比。
+- 旧的 Python estimator 偏差调试，除非用户明确恢复该主线。
+- 旧辅助脚本的 IR tree dump 细节。
 
-这些可能影响完整编译或旧实验，但不是当前逐 pass 内存建模的 blocker。
+这些可能影响完整编译或旧实验，但不是当前 PlanMemory dump/解释任务的 blocker。

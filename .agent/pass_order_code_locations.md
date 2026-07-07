@@ -416,7 +416,7 @@ createTritonGlobalKernelArgsToHIVMOpPass          line 40
 228 memref::createDeadStoreEliminationPass        line 87
 229 createInlineLoadCopyPass                      line 403
 230 createMarkMultiBufferPass                     line 414
-231 createDumpIRBeforePlanMemoryPass              line 415
+231 createDumpIRBeforePlanMemoryPass              line 415, conditional on enableDumpIRBeforePlanMemory
 232 createPlanMemoryPass(LOCAL_MEM_PLAN)          line 419
 ```
 

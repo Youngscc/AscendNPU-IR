@@ -312,9 +312,9 @@ createPlanMemoryPass(LOCAL_MEM_PLAN)
 ```
 
 上面的 `createPlanMemoryPass(LOCAL_MEM_PLAN)` 是第二次 PlanMemory，也是 local
-UB/L1/L0C 精确规划点。`createDumpIRBeforePlanMemoryPass` 受环境变量
-`BISHENGIR_DUMP_BEFORE_PLAN_MEMORY` 控制，位于 `MarkMultiBuffer` 和 local
-`PlanMemory` 之间。
+UB/L1/L0C 精确规划点。`createDumpIRBeforePlanMemoryPass` 位于 `MarkMultiBuffer` 和
+local `PlanMemory` 之间；现在需要 `--enable-dump-ir-before-plan-memory` 才会插入该
+debug pass，并通过环境变量 `BISHENGIR_DUMP_BEFORE_PLAN_MEMORY` 指定输出路径。
 
 ## 条件 pass 摘要
 
