@@ -118,6 +118,7 @@ bufferizationPipeline(OpPassManager &pm,
     pm.nest<func::FuncOp>().addPass(createCloneTensorEmptyPass());
   }
   if (hivmPipelineOptions.enableUbufSaving) {
+    pm.nest<func::FuncOp>().addPass(createCloneTensorEmptyPass());
     pm.nest<func::FuncOp>().addPass(createSinkOpToConsumerInLoopPass());
   }
   bufferization::OneShotBufferizationOptions oneShotOptions;
@@ -226,6 +227,7 @@ static void hivmPreBufferizationOptimizationPipeline(
   // Call canonicalize before inline OTF broadcast to optimize redundant 1-to-1
   // broadcasts.
   pm.addPass(bishengir::createExtendedCanonicalizerPass());
+  canonicalizationHIVMPipeline(pm);
   pm.nest<func::FuncOp>().addPass(createInlineOTFBroadcastPass());
   if (!hivmPipelineOptions.disableAutoCVWorkSpaceManage) {
     // Software pipelining Cube and Vector operations
@@ -233,6 +235,11 @@ static void hivmPreBufferizationOptimizationPipeline(
     pipelineOptions.enableSkewMode =
         hivmPipelineOptions.enablePreload;
     pm.nest<func::FuncOp>().addPass(createCVPipeliningPass(pipelineOptions));
+  }
+
+  if (hivmPipelineOptions.enableUbufSaving) {
+    pm.nest<func::FuncOp>().addPass(createCloneTensorEmptyPass());
+    pm.nest<func::FuncOp>().addPass(createSinkOpToConsumerInLoopPass());
   }
 
   if (hivmPipelineOptions.tileMixCubeLoop != 1 ||

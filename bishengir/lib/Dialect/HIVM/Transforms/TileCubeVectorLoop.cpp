@@ -384,48 +384,6 @@ LogicalResult shrinkAlloc(ModuleOp module) {
   return applyPatternsGreedily(module, std::move(patterns));
 }
 
-/// Pattern to remove the dummy store.
-class RemoveDummyStore : public OpRewritePattern<hivm::StoreOp> {
-public:
-  using OpRewritePattern<hivm::StoreOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(hivm::StoreOp storeOp,
-                                PatternRewriter &rewriter) const override {
-    if (!storeOp->hasAttr(kDummyStore))
-      return failure();
-
-    Value source = storeOp.getSource();
-    auto hivmSource =
-        dyn_cast_if_present<HIVMStructuredOp>(source.getDefiningOp());
-    if (!hivmSource)
-      return storeOp->emitError("Dummy store's source is not a HIVM op");
-
-    // Clone the source op right before the store op because we want to
-    // replace its init with the dummy store's init. But the defining op of
-    // the init operand might come after the source op.
-    //
-    // We can do this easily because it's guaranteed that there is no other
-    // users of the stored op because we already replaced all of its users by
-    // the dummy store. So the IR looks like:
-    // ```mlir
-    //   %a = hivm.hir.op
-    //   ..                                 // there is no other users of %a
-    //   %store = hivm.hir.store ins(%a)
-    //   ...
-    //   other_users(%store)
-    // ```
-    rewriter.setInsertionPoint(storeOp);
-    IRMapping mapping;
-    mapping.map(hivmSource.getDpsInitOperand(0)->get(),
-                storeOp.getDpsInitOperand(0)->get());
-    Operation *newOp = rewriter.clone(*hivmSource.getOperation(), mapping);
-    rewriter.replaceOp(hivmSource, newOp);
-    rewriter.replaceAllUsesWith(storeOp.getResult(0), storeOp.getSrc());
-    rewriter.eraseOp(storeOp);
-    return success();
-  }
-};
-
 //===----------------------------------------------------------------------===//
 // OpToTile
 //===----------------------------------------------------------------------===//
@@ -586,6 +544,17 @@ public:
     });
   }
 
+  /// Record & rollback while failed with vector loop info collecting.
+  void recordUndoAction(std::function<void()> action) {
+    undoActions.push_back(std::move(action));
+  }
+
+  void rollback() {
+    for (auto &action : llvm::reverse(undoActions))
+      action();
+    undoActions.clear();
+  }
+
   /// Commit all recorded lazy actions at once.
   ///
   /// During info collection, it's possible that we're uncertain whether we
@@ -678,6 +647,9 @@ private:
 
   /// A collection of lazy actions to be applied.
   std::vector<std::function<void()>> lazyActions;
+
+  /// A collection of undo actions for rollback.
+  std::vector<std::function<void()>> undoActions;
 };
 
 //===----------------------------------------------------------------------===//
@@ -796,6 +768,61 @@ private:
 // Vector Loop Information.
 //===----------------------------------------------------------------------===//
 
+/// Pattern to remove the dummy store.
+class RemoveDummyStore : public OpRewritePattern<hivm::StoreOp> {
+public:
+  using OpRewritePattern<hivm::StoreOp>::OpRewritePattern;
+
+  RemoveDummyStore(MLIRContext *ctx, ArrayRef<OpToTile> maybeDummyStore)
+      : OpRewritePattern<hivm::StoreOp>(ctx), maybeDummyStore(maybeDummyStore) {}
+
+  LogicalResult matchAndRewrite(hivm::StoreOp storeOp,
+                                PatternRewriter &rewriter) const override {
+    if (!storeOp->hasAttr(kDummyStore))
+      return failure();
+
+    // This is a module-level rewrite pattern, but we only want to erase the 
+    // dummy store in the current vector loop.
+    if (llvm::none_of(maybeDummyStore, [&storeOp](const OpToTile &opInfo) {
+          return storeOp->hasAttr(opInfo.tag);
+        }))
+      return failure();
+
+    Value source = storeOp.getSource();
+    auto hivmSource =
+        dyn_cast_if_present<HIVMStructuredOp>(source.getDefiningOp());
+    if (!hivmSource)
+      return storeOp->emitError("Dummy store's source is not a HIVM op");
+
+    // Clone the source op right before the store op because we want to
+    // replace its init with the dummy store's init. But the defining op of
+    // the init operand might come after the source op.
+    //
+    // We can do this easily because it's guaranteed that there is no other
+    // users of the stored op because we already replaced all of its users by
+    // the dummy store. So the IR looks like:
+    // ```mlir
+    //   %a = hivm.hir.op
+    //   ..                                 // there is no other users of %a
+    //   %store = hivm.hir.store ins(%a)
+    //   ...
+    //   other_users(%store)
+    // ```
+    rewriter.setInsertionPoint(storeOp);
+    IRMapping mapping;
+    mapping.map(hivmSource.getDpsInitOperand(0)->get(),
+                storeOp.getDpsInitOperand(0)->get());
+    Operation *newOp = rewriter.clone(*hivmSource.getOperation(), mapping);
+    rewriter.replaceOp(hivmSource, newOp);
+    rewriter.replaceAllUsesWith(storeOp.getResult(0), storeOp.getSrc());
+    rewriter.eraseOp(storeOp);
+    return success();
+  }
+
+private:
+  ArrayRef<OpToTile> maybeDummyStore;
+};
+
 class VectorLoopInfo : public LoopInfo {
 public:
   VectorLoopInfo(size_t idx, int64_t targetTripCount)
@@ -809,7 +836,7 @@ public:
   performPostTransformationAction(ModuleOp module) const override {
     MLIRContext *ctx = module.getContext();
     RewritePatternSet patterns(ctx);
-    patterns.add<RemoveDummyStore>(ctx);
+    patterns.add<RemoveDummyStore>(ctx, this->getOpTileInfo());
     return applyPatternsGreedily(module, std::move(patterns));
   }
 
@@ -1001,12 +1028,33 @@ tryCollectTilingInfoForTerminate(TerminateType terminateOp, Value yieldedVal,
   // user1(%val)
   // scf.yield %val                     (only replace this!)
   // ```
+  Value storeResult = dummyStore.getResult(0);
   SetVector<Operation *> chainOfUsersToYield = {trace.begin(), trace.end()};
   singleResult.replaceUsesWithIf(
-      dummyStore.getResult(0),
-      /*shouldReplace=*/[&chainOfUsersToYield](OpOperand &operand) -> bool {
+      storeResult,
+      /*shouldReplace=*/[chainOfUsersToYield](OpOperand &operand) -> bool {
         return chainOfUsersToYield.contains(operand.getOwner());
       });
+
+  // Record undo: erase the new init op.
+  Operation *newInitOp = newInit.getDefiningOp();
+  info.recordUndoAction([newInitOp]() { newInitOp->erase(); });
+  // Record undo: erase the dummy store node.
+  Operation *dummyStoreOp = dummyStore.getOperation();
+  info.recordUndoAction([dummyStoreOp]() { dummyStoreOp->erase(); });
+  // Record undo: restore the original init operand.
+  Operation *hivmOpOp = hivmOp.getOperation();
+  info.recordUndoAction([hivmOpOp, originalInit]() {
+    cast<HIVMStructuredOp>(hivmOpOp).setDpsInitOperand(0, originalInit);
+  });
+  // Record undo: restore the replaced uses.
+  info.recordUndoAction([storeResult, singleResult, chainOfUsersToYield]() {
+    const_cast<Value &>(storeResult).replaceUsesWithIf(
+        singleResult,
+        /*shouldReplace=*/[chainOfUsersToYield](OpOperand &operand) -> bool {
+          return chainOfUsersToYield.contains(operand.getOwner());
+    });
+  });
 
   ShapedType dstType = dummyStore.getDstOperandType();
   info.recordOpToTile(dummyStore, getVectorTiling(dstType, maybeTilingDim,
@@ -1147,6 +1195,7 @@ LogicalResult TileCubeVectorLoopPass::collectVectorLoopInfo(OpType vectorLoop) {
     return vectorLoop.emitOpError("Failed to collect vector loop tiling info");
 
   // Visit yield op next because it will generate dummy store op
+  VectorLoopInfo tempInfo(info);
   if (!isa<scf::ForOp>(vectorLoop) && !isa<scope::ScopeOp>(vectorLoop)) {
     return vectorLoop.emitOpError(
         "Collect vector loop tiling info only support ForOp and ScopeOp.");
@@ -1154,16 +1203,21 @@ LogicalResult TileCubeVectorLoopPass::collectVectorLoopInfo(OpType vectorLoop) {
     auto terminateOp = vectorLoop.getBody()->getTerminator();
     for (auto terminateOpVal : terminateOp->getOperands()) {
       if (failed(tryCollectTilingInfoForTerminate(terminateOp, terminateOpVal,
-                                                  info, analyzer)))
+                                                  tempInfo, analyzer))) {
+        tempInfo.rollback();
         return vectorLoop.emitOpError(
             "Failed to collect vector loop tiling info");
+      }
     }
   }
 
-  if (info.getOpTileInfo().empty())
+  if (tempInfo.getOpTileInfo().empty()) {
+    tempInfo.rollback();
     return failure();
+  }
 
   // Finish collecting all info
+  info = std::move(tempInfo);
   info.commitLazyActions();
   loopsToTile.emplace_back(std::make_unique<VectorLoopInfo>(info));
   return success();
