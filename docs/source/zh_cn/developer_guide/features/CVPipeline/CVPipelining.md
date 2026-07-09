@@ -59,6 +59,13 @@ scf.for 0 to N step 3*S {
 | 选项 | 默认值 | 含义 |
 |------|--------|------|
 | `set-workspace-multibuffer` | 2 | 软件流水的阶段数，同时也是Multi-Buffering的数量 |
+| `--enable-lazy-loading` | false | 开启CV Pipelining中的Lazy Load功能，允许将Load op克隆到多个`Work Item`中，以减少中间buffer扩展 |
+
+也可以在算子侧通过`cv_pipeline_lazy_load`编译提示为指定tensor开启Lazy Load功能：
+
+```python
+extension.compile_hint(t, "cv_pipeline_lazy_load", True)
+```
 
 ## 约束能力
 
