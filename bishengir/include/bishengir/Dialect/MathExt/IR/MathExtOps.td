@@ -122,4 +122,16 @@ def MathExt_LdexpOp : MathExt_FloatBinaryOp<"ldexp"> {
   let hasFolder = 1;
 }
 
+//===----------------------------------------------------------------------===//
+// DivFHPOp
+//===----------------------------------------------------------------------===//
+
+def MathExt_DivFHPOp : MathExt_FloatBinaryOp<"divfhp"> {
+  let summary = "a a high precision division";
+  let description = [{
+    Computes division recovering last ULPs
+  }];
+  let hasFolder = 1;
+}
+
 #endif // MATHEXT_OPS
