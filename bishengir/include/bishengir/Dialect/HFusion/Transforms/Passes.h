@@ -251,6 +251,9 @@ std::unique_ptr<Pass> createPullSliceIntoVectorFunctionPass();
 /// Create a pass to remove mask from unaligned reduction loop.
 std::unique_ptr<Pass> createRemoveMaskFromUnalignedReductionLoopPass();
 
+// Create a pass to remove redundant transfer_write and transfer_read pair
+std::unique_ptr<Pass> createRemoveRedundantWriteAndReadPairPass();
+
 //===----------------------------------------------------------------------===//
 // Registration
 //===----------------------------------------------------------------------===//

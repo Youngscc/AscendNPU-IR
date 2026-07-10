@@ -601,4 +601,11 @@ def RemoveMaskFromUnalignedReductionLoop
   let dependentDialects = ["linalg::LinalgDialect", "hfusion::HFusionDialect"];
 }
 
+def RemoveRedundantWriteAndReadPair
+    : Pass<"remove-redundant-write-and-read-pair", "func::FuncOp"> {
+  let summary = "Remove remove redundant write and read pair";
+  let constructor = "::mlir::hfusion::createRemoveRedundantWriteAndReadPairPass()";
+  let dependentDialects = ["vector::VectorDialect"];
+}
+
 #endif // BISHENGIR_DIALECT_HFUSION_TRANSFORMS_PASSES
