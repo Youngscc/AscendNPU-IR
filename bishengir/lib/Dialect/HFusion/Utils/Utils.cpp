@@ -1429,3 +1429,27 @@ bool hfusion::isFillOp(Operation *op) {
   }
   return false;
 }
+
+bool hfusion::shouldUseTileReductionUsingForV2(Operation *op) {
+  if (!isa<linalg::LinalgOp>(op))
+    return false;
+
+  auto linalgOp = cast<linalg::LinalgOp>(op);
+  if (linalgOp.getNumParallelLoops() == 0)
+    return false;
+  if (linalgOp.getNumReductionLoops() != 1)
+    return false;
+
+  // Tile-reduction-using-for may fail when multiple outputs depend on each
+  // other; keep those cases on the older tiling path.
+  if (linalgOp.getRegionOutputArgs().size() > 1)
+    return false;
+
+  SmallVector<unsigned> reductionDims;
+  linalgOp.getReductionDims(reductionDims);
+  for (auto dim : reductionDims) {
+    if (dim < linalgOp.getNumLoops() - 1)
+      return false;
+  }
+  return true;
+}

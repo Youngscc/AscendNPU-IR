@@ -305,6 +305,8 @@ Value divWithRoundModeAndCastType(OpBuilder &builder, Location loc, Type resType
 
 bool isFillOp(Operation *op);
 
+bool shouldUseTileReductionUsingForV2(Operation *op);
+
 namespace util {
 constexpr static unsigned int VL = 256;
 constexpr static unsigned int BL = VL / 8;
