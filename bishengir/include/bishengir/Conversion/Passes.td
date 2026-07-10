@@ -149,6 +149,24 @@ def LowerMemRefExt : Pass<"lower-memref-ext", "ModuleOp"> {
   ];
 }
 
+//===----------------------------------------------------------------------===//
+// HFusionToVector
+//===----------------------------------------------------------------------===//
+
+def ConvertHFusionToVector : Pass<"convert-hfusion-to-vector", "func::FuncOp"> {
+  let summary = "Convert hfusion operations to vector regbased ops and add vector::transfer_read/write";
+  let description = [{
+    This pass converts hfusion operations to vector regbased ops and add
+    vector::transfer_read/write to load data into registers as these ops cant be vectorize in normal ways.
+  }];
+  let constructor = "mlir::createHFusionToVectorConversionPass()";
+  let dependentDialects = [
+    "vector::VectorDialect",
+    "hivm::HIVMDialect",
+    "hfusion::HFusionDialect",
+  ];
+}
+
 #ifdef BISHENGIR_ENABLE_TORCH_CONVERSIONS
 //===----------------------------------------------------------------------===//
 // Torch conversions
