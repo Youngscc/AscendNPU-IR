@@ -94,6 +94,7 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   NormalizeLoopIterator.cpp
   NormalizeMatmul.cpp
   OptMemPlanForPipeline.cpp
+  OutlineAllocInVF.cpp
   OutlineCopyInVF.cpp
   PlanMemory.cpp
   RecognizeDeinterleaveOp.cpp
