@@ -102,4 +102,34 @@ def FuseReductionIntoLoop : Pass<"fuse-reduction-into-loop",
   ];
 }
 
+def EliminateSingleIterationScfFor
+    : Pass<"eliminate-single-iteration-scf-for", "mlir::func::FuncOp"> {
+  let summary = "Eliminate scf.for loops that iterate exactly once";
+  let description = [{
+    Removes each `scf.for` that is proven to run exactly one iteration.
+
+    Proof strategies (see `AffineMinMaxValueBoundsCollector`):
+    - Trip count from constant or ValueBounds-collapsed lower/upper/step, or
+      a constant induction variable (same as the former standalone pass).
+    - Header bounds refined using intervals recorded for `affine.min` /
+      `affine.max` results (including discrete enumeration over a constant
+      `scf.for` IV when needed).
+
+    The loop body is cloned once with the induction variable and `iter_args`
+    mapped to header values; the `scf.for` is replaced by the body's yield.
+  }];
+  let constructor = "bishengir::createEliminateSingleIterationScfForPass()";
+  let dependentDialects = [
+    "affine::AffineDialect",
+    "arith::ArithDialect",
+    "scf::SCFDialect",
+  ];
+  let options = [
+    Option<"dumpAffineMinmaxBounds",
+           "dump-affine-minmax-bounds", "bool", "false",
+           "If true, dump AffineMinMaxValueBoundsCollector value2bounds to "
+           "stderr in a stable format (for lit/FileCheck).">
+  ];
+}
+
 #endif //BISHENGIR_TRANSFORMS_PASSES_H
