@@ -580,6 +580,12 @@ def PrepareI1Nx1ForVectorization
   let dependentDialects = ["linalg::LinalgDialect", "tensor::TensorDialect"];
 }
 
+def SimplifyVFArgs : Pass<"hfusion-simplify-vf-arg", "ModuleOp"> {
+  let summary = "simplify vf function arguments";
+  let constructor = "mlir::hfusion::createSimplifyVFArgsPass()";
+  let dependentDialects = ["func::FuncDialect"];
+}
+
 def PullSliceIntoVectorFunction
     : Pass<"hfusion-pull-slice-into-vector-function", "ModuleOp"> {
   let summary = "Pull tensor slice ops into VF callees to reduce buffer copies";

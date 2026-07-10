@@ -45,6 +45,7 @@ add_bishengir_dialect_library(BiShengIRHFusionTransforms
   RemoveCacheIO.cpp
   RemoveMaskFromUnalignedReductionLoop.cpp
   ReorderOpsByBFS.cpp
+  SimplifyVFArgs.cpp
   SimplifyOps.cpp
   TensorResToOutParams.cpp
   TilingInterfaceImpl.cpp
@@ -70,6 +71,7 @@ add_bishengir_dialect_library(BiShengIRHFusionTransforms
   BiShengIRTransform
   BiShengIRHACCDialect
   BiShengIRHACCUtils
+  BiShengIRHIVMDialect
   BiShengIRHFusionAnalysis
   BiShengIRMathExtDialect
   BiShengIRAnnotationDialect
