@@ -626,6 +626,15 @@ bool isUnstructuredMemAccLoop(Operation *op);
 
 int64_t getNumPerRepeat(Type t);
 
+/// Rewrite loop iter_arg to drop unit dims or to fixed hardware types
+template <bool DropUnitDimOnly>
+struct ForOpLegalization : public OpRewritePattern<scf::ForOp> {
+  using OpRewritePattern<scf::ForOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(scf::ForOp op,
+                                PatternRewriter &rewriter) const override;
+  virtual ~ForOpLegalization() = default;
+};
+
 ModuleOp getTopLevelModuleOp(Operation *op);
 
 bool isValidHIVMTileElementType(Type type);

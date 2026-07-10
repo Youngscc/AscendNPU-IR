@@ -11,6 +11,25 @@
 
 include "mlir/Pass/PassBase.td"
 
+def NormalizeVector
+    : Pass<"normalize-vector", "func::FuncOp"> {
+  let summary = "Normalize vector ops to fit HIVM.";
+  let description = [{
+    This pass normalizes vector ops to meet HIVM requirements:
+    1. drop unit dims for elementwise and TransferRead/Write ops
+    2. convert vector.multi_reduction to vector.reduction
+  }];
+  let constructor = "mlir::vector::createNormalizeVectorPass()";
+  let dependentDialects = [
+    "memref::MemRefDialect",
+    "vector::VectorDialect",
+  ];
+  let options = [
+    Option<"enableDotScaledCompile", "enable-dot-scaled-compile", "bool",
+           /*default=*/"false", "Enable dot scaled compile.">,
+  ];
+}
+
 def PeelLoopsContainingTranspose
     : Pass<"peel-loops-containing-transpose", "func::FuncOp"> {
   let summary = "Peel loops which contains vector.transfer_read which "

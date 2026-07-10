@@ -29,6 +29,7 @@
 #include "mlir/Dialect/Linalg/IR/LinalgExtensions.h"
 #endif // BISHENGIR_BUILD_STANDALONE_IR_ONLY
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 #include <algorithm>
@@ -668,6 +669,84 @@ int64_t getNumPerRepeat(Type t) {
   unsigned tBytes = llvm::divideCeil(tBits, INTR_BITS_PER_BYTE);
   return INTR_BYTES_PER_REPEAT / tBytes;
 }
+
+template <bool DropUnitDimOnly>
+static VectorType getLegalizedVectorType(VectorType source) {
+  Type elemTy = source.getElementType();
+  if constexpr (DropUnitDimOnly)
+    return hivm::util::trimNonScalableUnitDims(source);
+  return VectorType::get(
+      SmallVector<int64_t>{utils::getVectorSizeByElementType(elemTy)}, elemTy);
+}
+
+template <bool DropUnitDimOnly>
+static Value adjustVectorType(PatternRewriter &rewriter, VectorType resultTy,
+                              Value src) {
+  if constexpr (DropUnitDimOnly)
+    return rewriter.create<vector::ShapeCastOp>(src.getLoc(), resultTy, src);
+  return rewriter
+      .create<UnrealizedConversionCastOp>(src.getLoc(), resultTy, src)
+      .getResult(0);
+}
+
+template <bool DropUnitDimOnly>
+LogicalResult ForOpLegalization<DropUnitDimOnly>::matchAndRewrite(
+    scf::ForOp op, PatternRewriter &rewriter) const {
+  OperandRange iterArgs = op.getInitArgs();
+  SmallVector<Value> newIterArgs, newYields;
+  SmallVector<unsigned> modified;
+  for (unsigned i = 0; i < iterArgs.size(); i++) {
+    if (op.getRegionIterArg(i).use_empty())
+      continue;
+    if (auto vecTy = dyn_cast<VectorType>(iterArgs[i].getType())) {
+      VectorType adjustedType = getLegalizedVectorType<DropUnitDimOnly>(vecTy);
+      if (vecTy.getShape().size() > 1 ||
+          adjustedType.getNumElements() != vecTy.getNumElements()) {
+        modified.push_back(i);
+        rewriter.setInsertionPoint(op);
+        newIterArgs.push_back(adjustVectorType<DropUnitDimOnly>(
+            rewriter, adjustedType, iterArgs[i]));
+        rewriter.setInsertionPoint(op.getBody()->getTerminator());
+        newYields.push_back(adjustVectorType<DropUnitDimOnly>(
+            rewriter, adjustedType, op.getYieldedValues()[i]));
+      }
+    }
+  }
+
+  if (newIterArgs.empty())
+    return failure();
+
+  rewriter.setInsertionPointAfter(op);
+  NewYieldValuesFn fn =
+      [&](OpBuilder &innerBuilder, Location loc,
+          ArrayRef<BlockArgument> innerNewBBArgs) -> SmallVector<Value> {
+    return newYields;
+  };
+  scf::ForOp newForOp = cast<scf::ForOp>(
+      *op.replaceWithAdditionalYields(rewriter, newIterArgs, false, fn));
+
+  int idx = 0;
+  for (unsigned i = 0; i < iterArgs.size(); i++) {
+    if (std::find(modified.begin(), modified.end(), i) != modified.end()) {
+      rewriter.setInsertionPointAfter(newForOp);
+      Value adjustedResult = adjustVectorType<DropUnitDimOnly>(
+          rewriter, cast<VectorType>(newForOp.getResult(i).getType()),
+          newForOp.getResult(iterArgs.size() + idx));
+      rewriter.replaceAllUsesWith(newForOp.getResult(i), adjustedResult);
+      rewriter.setInsertionPointToStart(newForOp.getBody());
+      Value adjustedArg = adjustVectorType<DropUnitDimOnly>(
+          rewriter, cast<VectorType>(newForOp.getRegionIterArg(i).getType()),
+          newForOp.getRegionIterArg(iterArgs.size() + idx));
+      rewriter.replaceAllUsesWith(newForOp.getRegionIterArg(i), adjustedArg);
+      idx++;
+    }
+  }
+
+  return success();
+}
+
+template struct utils::ForOpLegalization<true>;
+template struct utils::ForOpLegalization<false>;
 
 hivm::AxisKind getAxisKind(int dim, int rank) {
   if (dim == rank - 1)
