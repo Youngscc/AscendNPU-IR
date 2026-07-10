@@ -8,6 +8,7 @@ file(GLOB HIVM_LAYOUT ${CMAKE_CURRENT_SOURCE_DIR}/OpLayoutInterface/*.cpp)
 file(GLOB HIVM_LIBRARY_FUNCTION ${CMAKE_CURRENT_SOURCE_DIR}/LibraryFunctionOpInterface/*.cpp)
 file(GLOB HIVM_PIPE ${CMAKE_CURRENT_SOURCE_DIR}/OpPipeInterface/*.cpp)
 file(GLOB HIVM_VECTOR_BASE ${CMAKE_CURRENT_SOURCE_DIR}/VectorOpBase/*.cpp)
+file(GLOB HIVM_VECTORIZE ${CMAKE_CURRENT_SOURCE_DIR}/Vectorize/*.cpp)
 file(GLOB HIVM_CANONICALIZATIONS ${CMAKE_CURRENT_SOURCE_DIR}/Canonicalizations/*.cpp)
 file(GLOB HIVM_CUSTOM_OP ${CMAKE_CURRENT_SOURCE_DIR}/CustomOp/*.cpp)
 file(GLOB HIVM_VECTORIZE ${CMAKE_CURRENT_SOURCE_DIR}/Vectorize/*.cpp)
@@ -23,6 +24,7 @@ add_bishengir_dialect_library(BiShengIRHIVMDialect
   ${HIVM_LIBRARY_FUNCTION}
   ${HIVM_PIPE}
   ${HIVM_VECTOR_BASE}
+  ${HIVM_VECTORIZE}
   ${HIVM_CANONICALIZATIONS}
   ${HIVM_CUSTOM_OP}
   ${HIVM_VECTORIZE}
@@ -75,6 +77,7 @@ add_bishengir_dialect_library(BiShengIRHIVMDialect
   MLIRTensorDialect
   MLIRVectorDialect
   MLIRViewLikeInterface
+  MLIRVectorDialect
   BiShengIRDialectUtils
   BiShengIRHACCDialect
   BiShengIRHACCUtils

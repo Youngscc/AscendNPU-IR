@@ -22,6 +22,7 @@
 #include "bishengir/Dialect/HIVM/Utils/RegbaseUtils.h"
 #include "bishengir/Dialect/HIVM/Utils/Utils.h"
 #include "bishengir/Dialect/Utils/Util.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 
 namespace mlir::hivm {
 enum class VectorArithKind {

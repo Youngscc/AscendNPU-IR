@@ -268,6 +268,9 @@ createTileAndBindSubBlockPass(const TileAndBindSubBlockOptions &options = {});
 std::unique_ptr<Pass> createHIVMBubbleUpExtractSlicePass(
     const HIVMBubbleUpExtractSliceOptions &options = {});
 
+/// Create a pass to vectorize hivm ops.
+std::unique_ptr<Pass> createHIVMVectorizeOpsPass();
+
 // Create a pass to insert init and finish for debug.
 std::unique_ptr<Pass> createInsertInitAndFinishForDebugPass();
 
