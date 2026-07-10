@@ -1,5 +1,6 @@
 add_bishengir_dialect_library(BiShengIRVectorTransforms
   MaterializeVectorWriteToDestination.cpp
+  PeelLoopsContainingTranspose.cpp
   VectorTransferLowering.cpp
 
   ADDITIONAL_HEADER_DIRS

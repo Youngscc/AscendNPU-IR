@@ -20,6 +20,10 @@ namespace mlir {
 
 namespace vector {
 
+/// Creates a pass to peel loops containing vector.transfer_read with
+/// transpose permutation.
+std::unique_ptr<Pass> createPeelLoopsContainingTransposePass();
+
 /// Creates an operation pass to convert `transfer.read` and `transfer.write`
 /// to vector.load and vector.write.
 std::unique_ptr<Pass> createVectorTransferLoweringPass();

@@ -11,6 +11,18 @@
 
 include "mlir/Pass/PassBase.td"
 
+def PeelLoopsContainingTranspose
+    : Pass<"peel-loops-containing-transpose", "func::FuncOp"> {
+  let summary = "Peel loops which contains vector.transfer_read which "
+                "is transpose load.";
+  let constructor =
+    "mlir::vector::createPeelLoopsContainingTransposePass()";
+  let dependentDialects = [
+    "memref::MemRefDialect",
+    "vector::VectorDialect",
+  ];
+}
+
 def VectorTransferLowering
     : Pass<"vector-transfer-lowering", "func::FuncOp"> {
   let summary = "Pass to lower transfer ops to simpler ops like `vector.load` "
