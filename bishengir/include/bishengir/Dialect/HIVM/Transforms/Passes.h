@@ -204,7 +204,8 @@ std::unique_ptr<Pass> createInsertLoadStoreForScalarPass();
 std::unique_ptr<Pass> createInsertInferWorkSpaceSizeFuncPass();
 
 // Create a pass to bind func augument with hacc.workspace to AllocWorkspaceOp
-std::unique_ptr<Pass> createBindWorkSpaceArgPass();
+std::unique_ptr<Pass>
+createBindWorkSpaceArgPass(const BindWorkSpaceArgOptions &options = {});
 
 // Create a pass to bind func augument with hacc.syncblocklock to
 // CreateSyncBlockLockOp.
