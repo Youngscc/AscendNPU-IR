@@ -224,6 +224,9 @@ std::unique_ptr<Pass> createUpliftWhileToForPass();
 /// Create a pass to generalize named ops to generic ops.
 std::unique_ptr<Pass> createHFusionGeneralizePass();
 
+// Create a pass to prepare i1 Nx1 linalg.generic before vectorization.
+std::unique_ptr<Pass> createPrepareI1Nx1ForVectorizationPass();
+
 //===----------------------------------------------------------------------===//
 // Registration
 //===----------------------------------------------------------------------===//

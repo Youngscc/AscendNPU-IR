@@ -32,6 +32,7 @@ add_bishengir_dialect_library(BiShengIRHFusionTransforms
   OpFusion.cpp
   OutlineSingleOp.cpp
   PackTilingData.cpp
+  PrepareI1Nx1ForVectorization.cpp
   ReCacheIO.cpp
   RemoveCacheIO.cpp
   ReorderOpsByBFS.cpp

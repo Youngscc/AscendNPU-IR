@@ -536,4 +536,11 @@ def FoldExtractInsertPair : Pass<"hfusion-fold-extract-insert-pair", "func::Func
   let constructor = "mlir::hfusion::createFoldExtractInsertPairPass()";
 }
 
+def PrepareI1Nx1ForVectorization
+    : Pass<"hfusion-prepare-i1-nx1-for-vectorization", "func::FuncOp"> {
+  let summary = "Collapse Nx1 linalg.generic with expanded i1 input before vectorization";
+  let constructor = "mlir::hfusion::createPrepareI1Nx1ForVectorizationPass()";
+  let dependentDialects = ["linalg::LinalgDialect", "tensor::TensorDialect"];
+}
+
 #endif // BISHENGIR_DIALECT_HFUSION_TRANSFORMS_PASSES
