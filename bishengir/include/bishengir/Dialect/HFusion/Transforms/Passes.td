@@ -364,6 +364,12 @@ def LegalizeBF16Pass : Pass<"hfusion-legalize-bf16", "func::FuncOp"> {
   let dependentDialects = ["linalg::LinalgDialect", "hfusion::HFusionDialect"];
 }
 
+def LegalizeFP8Pass : Pass<"hfusion-legalize-fp8", "func::FuncOp"> {
+  let summary = "normalize FP8 to FP32.";
+  let constructor = "mlir::hfusion::createLegalizeFP8Pass()";
+  let dependentDialects = ["linalg::LinalgDialect", "hfusion::HFusionDialect"];
+}
+
 def LegalizeBoolPass : Pass<"hfusion-legalize-bool", "ModuleOp"> {
   let summary = "cast int8 to int1 for input and int1 to int8 for output.";
   let constructor = "mlir::hfusion::createLegalizeBoolPass()";

@@ -165,6 +165,9 @@ std::unique_ptr<Pass> createInferOutShapesPass();
 /// Create a pass to legalize bf16 type
 std::unique_ptr<Pass> createLegalizeBF16Pass();
 
+/// Create a pass to legalize fp8 type
+std::unique_ptr<Pass> createLegalizeFP8Pass();
+
 /// Create a pass to legalize bool
 std::unique_ptr<Pass> createLegalizeBoolPass();
 

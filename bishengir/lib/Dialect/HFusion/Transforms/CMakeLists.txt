@@ -41,6 +41,7 @@ add_bishengir_dialect_library(BiShengIRHFusionTransforms
   UnfoldSymbolicDim.cpp
   UpliftWhileToFor.cpp
   LegalizeBF16.cpp
+  LegalizeFP8.cpp
   LegalizeBool.cpp
   DowngradeFP64CstOp.cpp
   WrapHostFunc.cpp
