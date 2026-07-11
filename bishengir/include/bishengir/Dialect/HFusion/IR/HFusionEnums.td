@@ -76,7 +76,8 @@ def BinaryFn : I32EnumAttr<"BinaryFn", "", [
   I32EnumAttrCase<"powi", 15>,
   I32EnumAttrCase<"minnumf", 16>,
   I32EnumAttrCase<"maxnumf", 17>,
-  I32EnumAttrCase<"atan2", 18>
+  I32EnumAttrCase<"atan2", 18>,
+  I32EnumAttrCase<"divfhp", 19>
 ]> {
   let genSpecializedAttr = 0;
   let cppNamespace = "::mlir::hfusion";
@@ -99,7 +100,8 @@ def CompareFn : I32EnumAttr<"CompareFn", "", [
 }
 
 def TernaryFn : I32EnumAttr<"TernaryFn", "", [
-  I32EnumAttrCase<"select", 0>
+  I32EnumAttrCase<"select", 0>,
+  I32EnumAttrCase<"fma", 1>
 ]> {
   let genSpecializedAttr = 0;
   let cppNamespace = "::mlir::hfusion";
@@ -132,6 +134,19 @@ def RoundMode : I32EnumAttr<"RoundMode", "", [
     - CEIL: round to positive infinity (c language ceil)
     - TRUNC: round to zero (c language trunc)
     - ODD: round to odd (Von Neumann rounding)
+  }];
+}
+
+def UnsignedMode : I32EnumAttr<"UnsignedMode", "", [
+  I32EnumAttrCase<"SI2SI", 0, "si2si">,
+  I32EnumAttrCase<"SI2UI", 1, "si2ui">,
+  I32EnumAttrCase<"UI2SI", 2, "ui2si">,
+  I32EnumAttrCase<"UI2UI", 3, "ui2ui">
+]> {
+  let genSpecializedAttr = 0;
+  let cppNamespace = "::mlir::hfusion";
+  let description = [{
+    represent info for casting (u)int -> (u)int
   }];
 }
 
@@ -297,6 +312,8 @@ def Hfusion_CumOpTypeEnum :
   I32EnumAttrCase<"UNDEFINED", 0, "undefined">,
   I32EnumAttrCase<"CUMSUM", 1, "cumsum">,
   I32EnumAttrCase<"CUMPROD", 2, "cumprod">,
+  I32EnumAttrCase<"CUMMAX", 3, "cummax">,
+  I32EnumAttrCase<"CUMMIN", 4, "cummin">,
 ]> {
   let genSpecializedAttr = 0;
   let cppNamespace = "::mlir::hfusion";
