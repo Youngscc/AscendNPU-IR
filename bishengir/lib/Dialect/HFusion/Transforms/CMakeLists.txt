@@ -20,6 +20,7 @@ add_bishengir_dialect_library(BiShengIRHFusionTransforms
   DropSymbols.cpp
   EliminateDuplicateFuncs.cpp
   FlattenOps.cpp
+  FoldExtractInsertPair.cpp
   FoldSymbolicDim.cpp
   HFusionGeneralize.cpp
   HoistTensorEmpty.cpp
