@@ -40,6 +40,7 @@ add_bishengir_dialect_library(BiShengIRHFusionTransforms
   TilingInterfaceImpl.cpp
   UnfoldSymbolicDim.cpp
   UpliftWhileToFor.cpp
+  LegalizeScalar.cpp
   LegalizeBF16.cpp
   LegalizeFP8.cpp
   LegalizeBool.cpp

@@ -162,6 +162,9 @@ std::unique_ptr<Pass> createInferFuncFusionKind();
 // Create a pass to generate out tensor's shape function
 std::unique_ptr<Pass> createInferOutShapesPass();
 
+/// Create a pass to legalize scalar op
+std::unique_ptr<Pass> createLegalizeScalarPass();
+
 /// Create a pass to legalize bf16 type
 std::unique_ptr<Pass> createLegalizeBF16Pass();
 

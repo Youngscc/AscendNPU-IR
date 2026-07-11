@@ -358,6 +358,12 @@ def AdaptTritonKernel : Pass<"adapt-triton-kernel", "ModuleOp"> {
   ];
 }
 
+def LegalizeScalarPass : Pass<"hfusion-legalize-scalar", "func::FuncOp"> {
+  let summary = "normalize scalar op to tensor.";
+  let constructor = "mlir::hfusion::createLegalizeScalarPass()";
+  let dependentDialects = ["arith::ArithDialect", "linalg::LinalgDialect", "hfusion::HFusionDialect"];
+}
+
 def LegalizeBF16Pass : Pass<"hfusion-legalize-bf16", "func::FuncOp"> {
   let summary = "normalize BF16 to FP32.";
   let constructor = "mlir::hfusion::createLegalizeBF16Pass()";
