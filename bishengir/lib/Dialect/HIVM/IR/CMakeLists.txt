@@ -37,6 +37,7 @@ add_bishengir_dialect_library(BiShengIRHIVMDialect
   HIVMVectorOps.cpp
   StoreLikeOpInterface.cpp
   ../Utils/Utils.cpp
+  ../Utils/RegbaseUtils.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/bishengir/Dialect/HIVM
