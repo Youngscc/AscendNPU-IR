@@ -89,6 +89,7 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   RecognizeDeinterleaveOp.cpp
   ReduceRankSubview.cpp
   RemoveHIVMDataLayoutAnnotation.cpp
+  RemoveCopyOps.cpp
   SetBufferSize.cpp
   SinkOpToConsumerInLoop.cpp
   SplitMixKernel.cpp

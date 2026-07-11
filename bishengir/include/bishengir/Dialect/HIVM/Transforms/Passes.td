@@ -873,4 +873,10 @@ def RemoveHIVMDataLayoutAnnotation : Pass<"hivm-remove-layout-annotation", "func
   let dependentDialects = ["annotation::AnnotationDialect"];
 }
 
+def RemoveCopyOps : Pass<"hivm-remove-copy-ops", "func::FuncOp"> {
+  let summary = "Remove redundant copy operations in VF functions";
+  let constructor = "mlir::hivm::createRemoveCopyOpsPass()";
+  let dependentDialects = ["hivm::HIVMDialect", "memref::MemRefDialect"];
+}
+
 #endif // BISHENGIR_DIALECT_HIVM_TRANSFORMS_PASSES_TD
