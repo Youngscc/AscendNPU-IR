@@ -188,6 +188,20 @@ def ConvertHFusionToVector : Pass<"convert-hfusion-to-vector", "func::FuncOp"> {
   ];
 }
 
+//===----------------------------------------------------------------------===//
+// HACCToLLVM
+//===----------------------------------------------------------------------===//
+
+def ConvertHACCToLLVM : Pass<"convert-hacc-to-llvm", "ModuleOp"> {
+  let summary = "Convert HACC dialect to LLVM dialect";
+  let constructor = "mlir::createConvertHACCToLLVMPass()";
+  let dependentDialects = ["LLVM::LLVMDialect", "scf::SCFDialect"];
+  let options = [
+      Option<"tempDeviceLLVMFilePath", "device-llvm-file-path", "std::string",
+             /*default=*/[{""}], "Pass in the path to device.so">
+  ];
+}
+
 #ifdef BISHENGIR_ENABLE_TORCH_CONVERSIONS
 //===----------------------------------------------------------------------===//
 // Torch conversions
