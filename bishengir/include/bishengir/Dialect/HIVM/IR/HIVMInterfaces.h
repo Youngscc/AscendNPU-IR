@@ -24,6 +24,7 @@
 #include "bishengir/Dialect/HIVM/Interfaces/LibraryFunctionOpInterface.h"
 #include "bishengir/Dialect/HIVM/Interfaces/OpLayoutInterface.h"
 #include "bishengir/Dialect/HIVM/Interfaces/OpPipeInterface.h"
+#include "bishengir/Dialect/HIVM/Interfaces/VectorizableOpInterface.h"
 #include "bishengir/Interfaces/AggregatedOpInterface.h"
 
 #include "mlir/IR/Operation.h"
