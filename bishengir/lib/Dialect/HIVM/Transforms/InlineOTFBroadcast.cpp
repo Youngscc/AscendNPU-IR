@@ -14,6 +14,7 @@
 // limitations under the License.
 //
 //===----------------------------------------------------------------------===//
+#include "bishengir/Dialect/HACC/Utils/Utils.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Dialect/HIVM/IR/HIVMImpl.h"
 #include "bishengir/Dialect/HIVM/Transforms/Passes.h"
@@ -48,6 +49,11 @@ bool isValidUser(Operation *user, AxisKind axisKind) {
       llvm::isa<VAddOp, VMulOp, VMaxOp, VMinOp, VSubOp, VDivOp, VAndOp, VOrOp,
                 VNotOp, VAbsOp, VLnOp, VReluOp, VExpOp,
                 VRsqrtOp, VSqrtOp>(user);
+  // TODO: check if VShLOp and VShROp only supported on Ascend950
+  if (llvm::isa<VShLOp, VShROp>(user)) {
+    auto moduleOp = user->getParentOfType<mlir::ModuleOp>();
+    isInLastAxisWhitelist = moduleOp && hacc::utils::isAscend950(moduleOp);
+  }
   if (llvm::isa<VAbsOp>(user)) {
     auto vabsOp = dyn_cast<VAbsOp>(user);
     Value src = vabsOp.getSrc()[0];

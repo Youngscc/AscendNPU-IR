@@ -295,6 +295,9 @@ std::unique_ptr<Pass> createCreatePreloadPass();
 /// Create a pass to remove HIVM data layout annotation.
 std::unique_ptr<Pass> createRemoveHIVMDataLayoutAnnotationPass();
 
+/// Create a pass to remove redundant copy ops in VF functions.
+std::unique_ptr<Pass> createRemoveCopyOpsPass();
+
 //===----------------------------------------------------------------------===//
 // Registration
 //===----------------------------------------------------------------------===//

@@ -13,6 +13,7 @@ add_subdirectory(Scope)
 add_subdirectory(Symbol)
 add_subdirectory(Tensor)
 add_subdirectory(Utils)
+add_subdirectory(Vector)
 
 if(BISHENGIR_ENABLE_TORCH_CONVERSIONS)
   add_subdirectory(Torch)
