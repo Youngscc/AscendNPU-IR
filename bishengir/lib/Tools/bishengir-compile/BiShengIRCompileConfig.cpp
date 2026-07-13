@@ -16,6 +16,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "bishengir/Config/bishengir-config.h"
+#include "bishengir/Dialect/HACC/Utils/Utils.h"
 #include "bishengir/Tools/bishengir-compile/Config.h"
 #include "mlir/Support/LLVM.h"
 #include "llvm/ADT/StringRef.h"
@@ -163,6 +164,15 @@ handleOpt(const cl::opt<mlir::hacc::TargetDevice, ExternalStorage> &opt) {
 void BiShengIRCompileMainConfig::collectHIVMCArgs() {
   std::vector<std::string> collectedArgs;
   auto &opts = cl::getRegisteredOptions();
+
+  bool isRegBase =
+      mlir::hacc::utils::isRegBasedArch(clOptionsConfig->getTarget());
+  bool collectA3OnlyOptions = !isRegBase;
+  bool collectA5OnlyOptions = isRegBase;
+  // Referenced from generated code, disable unused variable warning.
+  (void)collectA3OnlyOptions;
+  (void)collectA5OnlyOptions;
+
   // Warning: please do not modify this part unless you know what you're doing.
   for (auto &[optStr, opt] : opts) {
     std::string optValue = "";

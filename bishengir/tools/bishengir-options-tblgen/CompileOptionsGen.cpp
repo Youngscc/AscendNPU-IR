@@ -118,15 +118,23 @@ bool emitCollectConfigs(const RecordKeeper &records, raw_ostream &OS) {
     if (cfgOpt.isListOption())
       continue;
 
+    // Build the scope guard expression.
+    std::string scopeGuard;
+    if (cfgOpt.isA3OnlyOption()) {
+      scopeGuard = "collectA3OnlyOptions && ";
+    } else if (cfgOpt.isA5OnlyOption()) {
+      scopeGuard = "collectA5OnlyOptions && ";
+    }
+
     OS << ""
        << formatv(
               R"(
-if (optStr.str() == "{0}") {
+if ({2}optStr.str() == "{0}") {
   const auto &optPtr = static_cast<{1}*>(opt);
   optValue = option_handler::handleOpt(*optPtr);
 }
 )",
-              cfgOpt.getArgument(), getCLOptionClass(cfgOpt));
+              cfgOpt.getArgument(), getCLOptionClass(cfgOpt), scopeGuard);
   }
   OS << "#undef GEN_OPTION_COLLECTION\n";
   OS << "#endif // GEN_OPTION_COLLECTION\n";
