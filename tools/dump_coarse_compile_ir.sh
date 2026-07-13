@@ -139,9 +139,12 @@ compile_cmd=(
   --enable-hivm-compile
     --enable-triton-kernel-compile
     --enable-memory-display
-    --enable-dump-ir-before-plan-memory
     --mlir-disable-threading
   )
+
+if build/bin/bishengir-compile --help 2>&1 | grep -q -- "--enable-dump-ir-before-plan-memory"; then
+  compile_cmd+=(--enable-dump-ir-before-plan-memory)
+fi
 
 if [[ "$PRINT_INTERMEDIATE_DUMPS" == "1" ]]; then
   DUMP_DIR=${DUMP_DIR:-./Output/mlir_ir_dump_$(date +%Y%m%d_%H%M%S)}

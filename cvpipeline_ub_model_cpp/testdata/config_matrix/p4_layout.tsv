@@ -1,0 +1,17 @@
+config_id	batch	origin	plan_memory_seeds	restrict_modes	config_digest	disable_cv_pipelining	enable_preload	cv_pipeline_depth	enable_cv_lazy_loading	enable_auto_multi_buffer	local_multi_buffer_strategy	mix_multi_buffer_strategy	enable_code_motion	enable_ubuf_saving	tile_mix_cube_loop	tile_mix_vector_loop	disable_align_alloc_size	enable_hivm_auto_storage_align	disable_enable_stride_align	disable_infer_hivm_data_layout
+p4_layout_000_fe4cc15e237edfb1	p4_layout	exhaustive	0-19	0,1	fe4cc15e237edfb1	0	0	-1	0	0	no-l0c	only-cube	1	0	1	1	0	0	0	0
+p4_layout_001_f41585ed47682e1a	p4_layout	exhaustive	0-19	0,1	f41585ed47682e1a	0	0	-1	0	0	no-l0c	only-cube	1	0	1	1	0	0	0	1
+p4_layout_002_422d6be554efccd3	p4_layout	exhaustive	0-19	0,1	422d6be554efccd3	0	0	-1	0	0	no-l0c	only-cube	1	0	1	1	0	0	1	0
+p4_layout_003_c8366034f33b0aaa	p4_layout	exhaustive	0-19	0,1	c8366034f33b0aaa	0	0	-1	0	0	no-l0c	only-cube	1	0	1	1	0	0	1	1
+p4_layout_004_c8029b307c13cdd1	p4_layout	exhaustive	0-19	0,1	c8029b307c13cdd1	0	0	-1	0	0	no-l0c	only-cube	1	0	1	1	0	1	0	0
+p4_layout_005_5d472280ed7980eb	p4_layout	exhaustive	0-19	0,1	5d472280ed7980eb	0	0	-1	0	0	no-l0c	only-cube	1	0	1	1	0	1	0	1
+p4_layout_006_8b8bb1dffdcb83a7	p4_layout	exhaustive	0-19	0,1	8b8bb1dffdcb83a7	0	0	-1	0	0	no-l0c	only-cube	1	0	1	1	0	1	1	0
+p4_layout_007_d6163cd4edcc3226	p4_layout	exhaustive	0-19	0,1	d6163cd4edcc3226	0	0	-1	0	0	no-l0c	only-cube	1	0	1	1	0	1	1	1
+p4_layout_008_01ed6a7d82cb85a0	p4_layout	exhaustive	0-19	0,1	01ed6a7d82cb85a0	0	0	-1	0	0	no-l0c	only-cube	1	0	1	1	1	0	0	0
+p4_layout_009_113a953f11f618a3	p4_layout	exhaustive	0-19	0,1	113a953f11f618a3	0	0	-1	0	0	no-l0c	only-cube	1	0	1	1	1	0	0	1
+p4_layout_010_991fd99880524274	p4_layout	exhaustive	0-19	0,1	991fd99880524274	0	0	-1	0	0	no-l0c	only-cube	1	0	1	1	1	0	1	0
+p4_layout_011_c51870521d370a43	p4_layout	exhaustive	0-19	0,1	c51870521d370a43	0	0	-1	0	0	no-l0c	only-cube	1	0	1	1	1	0	1	1
+p4_layout_012_702465ee73fb5dd1	p4_layout	exhaustive	0-19	0,1	702465ee73fb5dd1	0	0	-1	0	0	no-l0c	only-cube	1	0	1	1	1	1	0	0
+p4_layout_013_7b126173afd7b802	p4_layout	exhaustive	0-19	0,1	7b126173afd7b802	0	0	-1	0	0	no-l0c	only-cube	1	0	1	1	1	1	0	1
+p4_layout_014_6f09b3a03f95368f	p4_layout	exhaustive	0-19	0,1	6f09b3a03f95368f	0	0	-1	0	0	no-l0c	only-cube	1	0	1	1	1	1	1	0
+p4_layout_015_294a9806d47c8fac	p4_layout	exhaustive	0-19	0,1	294a9806d47c8fac	0	0	-1	0	0	no-l0c	only-cube	1	0	1	1	1	1	1	1

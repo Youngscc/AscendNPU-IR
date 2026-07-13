@@ -33,6 +33,9 @@ dist/
 .DS_Store
 Thumbs.db
 Output/
+cvpipeline_ub_model_cpp/output/
+memory_info*.json
+data/source_archives/*.zip
 
 # --- Optional: Cursor agent / logs (uncomment if you want to ignore)
 # .cursor/agent-transcripts/

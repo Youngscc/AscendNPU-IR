@@ -1,0 +1,112 @@
+#ifndef CVPIPELINE_UB_MODEL_CPP_INFER_HIVM_MEM_SCOPE_HPP
+#define CVPIPELINE_UB_MODEL_CPP_INFER_HIVM_MEM_SCOPE_HPP
+
+#include "c3_semantic_ir.hpp"
+
+namespace cvub {
+
+inline const C1OperationRecord *C4EnclosingFunction(
+    const C1SemanticModule &module, const C1OperationRecord &operation) {
+  const C1OperationRecord *current = &operation;
+  while (current && current->name != "func.func") {
+    if (current->parentId < 0)
+      return nullptr;
+    current = &module.operations.at(static_cast<size_t>(current->parentId));
+  }
+  return current;
+}
+
+inline AddressSpace C4FunctionDefaultAddressSpace(
+    const C1OperationRecord &function) {
+  const std::string core = DecomposeEnumValue(
+      FindDictionaryValue(function.attributes, "hivm.func_core_type"));
+  return core == "AIC" ? AddressSpace::L1 : AddressSpace::UB;
+}
+
+inline std::string C4AddressSpaceName(AddressSpace space) {
+  switch (space) {
+  case AddressSpace::GM:
+    return "gm";
+  case AddressSpace::L1:
+    return "cbuf";
+  case AddressSpace::L0A:
+    return "ca";
+  case AddressSpace::L0B:
+    return "cb";
+  case AddressSpace::L0C:
+    return "cc";
+  case AddressSpace::UB:
+    return "ub";
+  case AddressSpace::Zero:
+    return "zero";
+  case AddressSpace::Unknown:
+    return "unknown";
+  }
+  return "unknown";
+}
+
+inline int C4AllocationSourceOperation(const std::string &source) {
+  const size_t first = source.find(':');
+  if (first == std::string::npos)
+    return -1;
+  const size_t second = source.find(':', first + 1);
+  if (second == std::string::npos)
+    return -1;
+  return std::stoi(source.substr(first + 1, second - first - 1));
+}
+
+inline std::map<std::string, AddressSpace>
+InferHIVMMemScope(const C3SemanticIR &module) {
+  std::map<std::string, AddressSpace> result;
+  const C1SemanticModule &logical = module.bufferized.logicalModule;
+  for (size_t index = 0; index < module.singlePoint.allocations.size(); ++index) {
+    const BufferAllocation &allocation = module.singlePoint.allocations[index];
+    const int operationId = C4AllocationSourceOperation(allocation.source);
+    if (operationId < 0)
+      throw std::runtime_error("InferHIVMMemScope: malformed allocation source");
+    const C1OperationRecord &operation =
+        logical.operations.at(static_cast<size_t>(operationId));
+    const C1OperationRecord *function = C4EnclosingFunction(logical, operation);
+    if (!function)
+      throw std::runtime_error("InferHIVMMemScope: allocation outside function");
+    const std::optional<MemRefTypeModel> type = ParseMemRefType(allocation.type);
+    result["base:" + std::to_string(index)] =
+        type && type->addressSpace != AddressSpace::Unknown
+            ? type->addressSpace
+            : C4FunctionDefaultAddressSpace(*function);
+  }
+
+  std::map<int, size_t> decomposeOrdinals;
+  for (const DecomposeBufferAllocation &allocation :
+       module.decomposeAllocations) {
+    const C1OperationRecord &operation = logical.operations.at(
+        static_cast<size_t>(allocation.ownerOperation));
+    const C1OperationRecord *function = C4EnclosingFunction(logical, operation);
+    if (!function)
+      throw std::runtime_error("InferHIVMMemScope: temp outside function");
+    const size_t ordinal = decomposeOrdinals[allocation.ownerOperation]++;
+    result["decompose:" + std::to_string(allocation.ownerOperation) + ":" +
+           std::to_string(ordinal)] = C4FunctionDefaultAddressSpace(*function);
+  }
+
+  for (const C1OperationRecord &operation : logical.operations) {
+    if (operation.name != "hivm.hir.mmadL1")
+      continue;
+    const std::vector<std::string> buffers = C3OperationBuffers(
+        module.bufferized, operation.id, &module.singlePoint.bufferMapping);
+    if (buffers.size() < 3)
+      continue;
+    for (size_t index = 0; index < 3; ++index) {
+      const AddressSpace space =
+          index < 2 ? AddressSpace::L1 : AddressSpace::L0C;
+      for (const std::string &alternative : BufferAlternatives(buffers[index]))
+        if (startsWith(alternative, "local:"))
+          result["base:" + alternative.substr(6)] = space;
+    }
+  }
+  return result;
+}
+
+} // namespace cvub
+
+#endif

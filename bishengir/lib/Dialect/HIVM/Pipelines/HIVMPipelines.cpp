@@ -457,7 +457,7 @@ void buildOptimizeHIVMPipeline(OpPassManager &pm,
 // Pipeline registration.
 //===----------------------------------------------------------------------===//
 
-void registerLowerHIVMPipelines() {
+void n n() {
   PassPipelineRegistration<HIVMPipelineOptions>(
       "optimize-hivm-pipeline", "optimize hivm pipeline",
       [](OpPassManager &pm, const HIVMPipelineOptions &options) {

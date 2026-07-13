@@ -31,6 +31,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SmallSet.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include <list>
 #include <random>
@@ -111,6 +112,12 @@ struct GenKillEntry {
   /// record the kill operands, namely the operand buffer that is last read by
   /// operation.
   SmallVector<Value> kill;
+};
+
+struct LiveShuffleInfo {
+  int index{0};
+  SmallVector<Value> before;
+  SmallVector<Value> after;
 };
 
 /// Record buffer life interval information.
@@ -272,6 +279,10 @@ public:
 
   void build();
 
+  /// Development-only state dump used to validate the lightweight UB model.
+  /// This does not participate in memory planning.
+  void DumpDebugState(llvm::raw_ostream &os, uint32_t attempt);
+
   /// linear operation info.
   SmallVector<std::unique_ptr<OpInfo>> linearOperation;
 
@@ -283,6 +294,9 @@ public:
 
   /// map from operation to its gen and kill buffer.
   DenseMap<OpInfo *, GenKillEntry> genKillMap;
+
+  /// Development-only record of OpKillHandle input/output order.
+  SmallVector<LiveShuffleInfo> liveShuffleTrace;
 
   /// record the map from the buffer to its number of buffer if it does
   /// multibuffer optimization.
@@ -509,6 +523,11 @@ public:
         restrictInplaceAsISA(restrictInplaceAsISA) {}
 
   LogicalResult plan(bool emitErrors = true);
+
+  /// Development-only post-plan dump used to validate allocator semantics.
+  /// This does not participate in memory planning.
+  void DumpDebugState(llvm::raw_ostream &os, uint32_t attempt,
+                      bool success);
 
   /// Get buffer2Offsets
   inline DenseMap<Value, SmallVector<uint64_t>> GetBuffer2Offsets() {

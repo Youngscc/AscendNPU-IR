@@ -4,6 +4,7 @@ set -u
 
 DATA_DIR="data"
 OUTPUT_ROOT=""
+RUN_ID="compiler_default"
 COMPILER="build/bin/bishengir-compile"
 STOP_ON_FAIL=0
 ALLOW_FAILURES=0
@@ -12,6 +13,7 @@ DUMP_FULL_IR_TREE=0
 KEEP_FULL_TREE=1
 INCLUDE_HIDDEN=0
 PRETTY_FORMAT=1
+CASE_TIMEOUT=300
 INPUTS=()
 
 usage() {
@@ -24,7 +26,9 @@ Options:
   -d, --data-dir DIR
         Directory to scan. Defaults to ./data.
   -o, --output-root DIR
-        Output directory. Defaults to ./Output/planmemory_ir_dumps_<timestamp>.
+        Unified output directory. Defaults to ./Output.
+  --run-id NAME
+        Stage run name under each adapter. Defaults to compiler_default.
   -c, --compiler FILE
         bishengir-compile binary. Defaults to ./build/bin/bishengir-compile.
   -i, --input FILE
@@ -47,6 +51,9 @@ Options:
   --raw
         Keep snapshots exactly as printed. By default snapshots are lightly
         reformatted for reading and the original is kept as *.raw.mlir.
+  --case-timeout SEC
+        Kill one compile case after SEC seconds. Defaults to 300.
+        Use 0 to disable the timeout.
   -h, --help
         Show this help.
 
@@ -237,6 +244,11 @@ while [[ $# -gt 0 ]]; do
       [[ $# -gt 0 ]] || die "Missing value for --output-root"
       OUTPUT_ROOT="$1"
       ;;
+    --run-id)
+      shift
+      [[ $# -gt 0 ]] || die "Missing value for --run-id"
+      RUN_ID="$1"
+      ;;
     -c|--compiler)
       shift
       [[ $# -gt 0 ]] || die "Missing value for --compiler"
@@ -272,6 +284,12 @@ while [[ $# -gt 0 ]]; do
     --raw)
       PRETTY_FORMAT=0
       ;;
+    --case-timeout)
+      shift
+      [[ $# -gt 0 ]] || die "Missing value for --case-timeout"
+      [[ "$1" =~ ^[0-9]+$ ]] || die "--case-timeout must be a non-negative integer"
+      CASE_TIMEOUT="$1"
+      ;;
     -h|--help)
       usage
       exit 0
@@ -303,7 +321,7 @@ if [[ ${#INPUTS[@]} -eq 0 ]]; then
       continue
     fi
     INPUTS+=("$file")
-  done < <(find "$DATA_DIR" -maxdepth 1 -type f | sort)
+  done < <(find "$DATA_DIR" -maxdepth 1 -type f -name '*.ttadapter' | sort)
 fi
 
 [[ ${#INPUTS[@]} -gt 0 ]] || die "No input files found"
@@ -313,16 +331,29 @@ if [[ "$MAX_FILES" -gt 0 && ${#INPUTS[@]} -gt "$MAX_FILES" ]]; then
 fi
 
 if [[ -z "$OUTPUT_ROOT" ]]; then
-  OUTPUT_ROOT="./Output/planmemory_ir_dumps_$(date +%Y%m%d_%H%M%S)"
+  OUTPUT_ROOT="./Output"
 fi
 
 mkdir -p "$OUTPUT_ROOT" || die "Failed to create output root: $OUTPUT_ROOT"
 OUTPUT_ROOT=$(abs_path "$OUTPUT_ROOT")
-SUMMARY="$OUTPUT_ROOT/summary.tsv"
+ADAPTER_ROOT="$OUTPUT_ROOT/adapters"
+INDEX_ROOT="$OUTPUT_ROOT/index/planmemory_${RUN_ID}"
+mkdir -p "$ADAPTER_ROOT" "$INDEX_ROOT"
+SUMMARY="$INDEX_ROOT/summary.tsv"
 printf 'input\tstatus\tcase_dir\tbefore_snapshot\tafter_snapshot\tafter_source\tmemory_info_files\n' > "$SUMMARY"
 
 echo "[INFO] Inputs: ${#INPUTS[@]}"
 echo "[INFO] Output root: $OUTPUT_ROOT"
+if [[ "$CASE_TIMEOUT" -gt 0 ]]; then
+  echo "[INFO] Per-case timeout: ${CASE_TIMEOUT}s"
+else
+  echo "[INFO] Per-case timeout: disabled"
+fi
+
+ENABLE_DUMP_BEFORE_OPTION=0
+if "$COMPILER" --help 2>&1 | grep -q -- "--enable-dump-ir-before-plan-memory"; then
+  ENABLE_DUMP_BEFORE_OPTION=1
+fi
 
 success_count=0
 fail_count=0
@@ -334,8 +365,8 @@ for input in "${INPUTS[@]}"; do
   fi
 
   input_abs=$(abs_path "$input")
-  slug=$(slugify "$input")
-  case_dir="$OUTPUT_ROOT/$slug"
+  adapter=$(basename "$input")
+  case_dir="$ADAPTER_ROOT/$adapter/03_planmemory/$RUN_ID"
   tree_dir="$case_dir/ir_tree"
   all_after_dir="$case_dir/plan_memory_after_dumps"
   before_snapshot="$case_dir/before_local_plan_memory.mlir"
@@ -357,10 +388,13 @@ for input in "${INPUTS[@]}"; do
     --enable-hivm-compile
     --enable-triton-kernel-compile
     --enable-memory-display
-    --enable-dump-ir-before-plan-memory
     --mlir-disable-threading
     "${EXTRA_COMPILER_ARGS[@]}"
   )
+
+  if [[ "$ENABLE_DUMP_BEFORE_OPTION" == "1" ]]; then
+    compile_cmd+=(--enable-dump-ir-before-plan-memory)
+  fi
 
   if [[ "$DUMP_FULL_IR_TREE" == "1" ]]; then
     compile_cmd+=(
@@ -371,12 +405,47 @@ for input in "${INPUTS[@]}"; do
   fi
 
   set +e
-  (
-    cd "$case_dir" &&
-      BISHENGIR_DUMP_BEFORE_PLAN_MEMORY="$before_snapshot" \
-        "${compile_cmd[@]}"
-  ) >"$stdout_log" 2>"$stderr_log"
-  status=$?
+  timeout_marker="$case_dir/.compile_timeout"
+  rm -f "$timeout_marker"
+  if [[ "$CASE_TIMEOUT" -gt 0 ]]; then
+    (
+      cd "$case_dir" &&
+        BISHENGIR_DUMP_BEFORE_PLAN_MEMORY="$before_snapshot" \
+          "${compile_cmd[@]}"
+    ) >"$stdout_log" 2>"$stderr_log" &
+    compile_pid=$!
+    (
+      sleep "$CASE_TIMEOUT"
+      if kill -0 "$compile_pid" 2>/dev/null; then
+        {
+          echo "[TIMEOUT] Compile exceeded ${CASE_TIMEOUT}s."
+          echo "[TIMEOUT] Killing process tree rooted at pid ${compile_pid}."
+        } >>"$stderr_log"
+        : >"$timeout_marker"
+        pkill -TERM -P "$compile_pid" 2>/dev/null
+        kill -TERM "$compile_pid" 2>/dev/null
+        sleep 5
+        pkill -KILL -P "$compile_pid" 2>/dev/null
+        kill -KILL "$compile_pid" 2>/dev/null
+      fi
+    ) &
+    watchdog_pid=$!
+    wait "$compile_pid"
+    status=$?
+    kill "$watchdog_pid" 2>/dev/null
+    wait "$watchdog_pid" 2>/dev/null
+    if [[ -f "$timeout_marker" ]]; then
+      status=124
+    fi
+  else
+    (
+      cd "$case_dir" &&
+        BISHENGIR_DUMP_BEFORE_PLAN_MEMORY="$before_snapshot" \
+          "${compile_cmd[@]}"
+    ) >"$stdout_log" 2>"$stderr_log"
+    status=$?
+  fi
+  rm -f "$timeout_marker"
   set -e
 
   if [[ -f "$before_snapshot" ]]; then

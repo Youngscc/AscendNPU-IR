@@ -1,77 +1,96 @@
-# Agent Memory Index
+# CVPipeline UB Model Memory
 
-这个目录只保存当前任务的 agent 记忆，不放入 `docs/`，避免影响正式文档构建。
+只保存当前可执行事实，不记录开发流水账。接手任务先读本文件；定位源码再读
+`code_map.md`。不要保存未授权的私有 IR。
 
-## 当前焦点
+## 目标与约束
 
-当前短期任务是围绕第二次 PlanMemory，也就是 local `PlanMemory(LOCAL_MEM_PLAN)`：
-
-- dump `data/` 下 IR 在 local PlanMemory 前的快照，必要时额外抽取 local PlanMemory
-  后的快照。
-- 保留 `memory_info*.json`、stdout/stderr，方便观察 overflow。
-- 阅读 PlanMemory 代码，解释 before IR 如何经过 local PlanMemory 变成 after IR。
-- 做第一阶段 UB peak pass-group 消融实验，先用现有 `bishengir-compile` 开关观察
-  pass group 对 local UB 峰值的影响。
-
-早前“逐 pass 内存建模 / Python estimator”的主线已暂停，相关文件只作为背景资料保留；
-不要把它当成当前默认工作入口。
-
-## 核心文件
-
-- [task_context.md](task_context.md): 当前目标、边界、已确认事实。
-- [code_map.md](code_map.md): 当前需要看的代码入口、pipeline 位置和调试命令。
-- [pass_sequence_to_second_planmemory.md](pass_sequence_to_second_planmemory.md): 从输入到第二次
-  PlanMemory 的 pass 顺序，含常见完整 config 下的 helper pipeline 展开。
-- [pass_order_code_locations.md](pass_order_code_locations.md): 到第二次 PlanMemory 的细粒度
-  pass 顺序及其在 pipeline 中的 addPass 代码位置。
-- [pass_memory_modeling_guide.md](pass_memory_modeling_guide.md): 已暂停的逐阶段建模方案；
-  只有恢复 estimator 工作时才需要读。
-- [decisions_and_risks.md](decisions_and_risks.md): 已做判断、风险、开放问题。
-- [update_protocol.md](update_protocol.md): 后续维护规则。
-
-已删除旧的长版快照、PlanMemory 调研长报告、代码流程长文和过时复现笔记；需要的信息已浓缩到上述文件。
-
-## 推荐阅读顺序
-
-1. 读本文件。
-2. 读 [task_context.md](task_context.md)。
-3. 需要定位实现或命令时读 [code_map.md](code_map.md)。
-4. 需要完整 pass 顺序时读 [pass_sequence_to_second_planmemory.md](pass_sequence_to_second_planmemory.md)
-   或 [pass_order_code_locations.md](pass_order_code_locations.md)。
-5. 只有恢复 estimator/逐 pass 建模时，才读 [pass_memory_modeling_guide.md](pass_memory_modeling_guide.md)。
-6. 工作结束前，按 [update_protocol.md](update_protocol.md) 更新记忆。
-
-## 当前常用入口
-
-```bash
-# 只 dump local PlanMemory before、memory_info 和日志；默认不创建 full ir_tree。
-bash tools/dump_planmemory_ir.sh \
-  --input data/attn_fwd.ttadapter \
-  --output-root Output/planmemory_ir_dumps \
-  --allow-failures
-
-# 额外抽取 local PlanMemory after；full ir_tree 用完即删。
-bash tools/dump_planmemory_ir.sh \
-  --input data/attn_fwd.ttadapter \
-  --output-root Output/planmemory_ir_dumps \
-  --drop-full-tree \
-  --allow-failures
-
-# 保留每个 pass 后的 full IR tree。
-bash tools/dump_planmemory_ir.sh \
-  --input data/attn_fwd.ttadapter \
-  --output-root Output/planmemory_ir_dumps \
-  --dump-full-ir-tree \
-  --allow-failures
-
-# 第一阶段 UB peak pass-group 消融，默认不创建 full ir_tree。
-bash tools/run_ub_peak_pass_ablation.sh \
-  --input data/attn_fwd.ttadapter \
-  --output-root Output/ub_peak_pass_ablation
+```text
+CVPipeline-before IR + relevant config
+  -> lightweight C++ model
+  -> exact absolute local UB peak / exact overflow required_bits
 ```
 
-## 原则
+- Oracle：`build/bin/bishengir-cvpipeline-suffix-compile` 的 minimal suffix。
+- 核心实现使用独立 C++；Python 仅用于生成数据和比较。
+- 只保留 UB 相关语义，但必须与真实 pass 一致；禁止按 oracle 数值拟合规则。
+- 真实 suffix pass 逻辑不可为测试修改；compiler 改动只允许只读 dump。
+- 无法证明 exact 时返回 blocker，不能输出估计值冒充 exact。
 
-- 不记录用户未公开的私有 IR 内容。
-- 不把 CANN、hivmc、真实昇腾卡环境当作当前任务前置条件。
-- 当前任务关注编译期 pass 内存行为和 PlanMemory 静态规划，不是 NPU runtime 行为。
+## 当前状态
+
+- B 完成：PlanMemory-before IR -> lifetime -> plan/offset/peak。8240 tuples 的
+  lifetime 与 plan canonical TSV 全部 byte exact；比较器 mutation test 有效。
+- C0-C6 完成：171 个可达 adapter、15 configs、2565 tuples、166 unique IR。
+- C7 完成：1162 strategy tuples，17836 AIV/UB buffers、23303 accesses byte exact。
+- C8 初版完成：结构化 bridge 直接生成 B 的 PlanMemory 输入，不经过临时 MLIR
+  文本。166 unique IR 中 165 byte exact；唯一动态 stride-aligned allocation
+  在生产入口显式 blocker，因此不会输出错误 peak。
+- C9 初版完成：`config/initial_suffix_manifest.tsv` 冻结当前可执行 pass 顺序；
+  正式逐 pass 编译器消融证据延后到 exact 版，不阻塞初版交付。
+- D 已端到端打通：输入 before-CVPipeline generic IR 与 config，生产入口可直接
+  输出接入 C+B 后的 UB plan/peak；D1 复刻 `createCVPipeliningPass` 的 UB
+  可见语义，D2 复用当前 C suffix，D3 比较最终 plan/peak。
+
+## C8 已补齐
+
+- tensor/memref bufferization alias、DPS/SCF control、single-point load/store。
+- FlattenOps、ReduceRankSubview、LiftLowestStride 的主要 PlanMemory 可见结构。
+- VRec/VSub 常量与 fold、same-block pure CSE、loop normalization。
+- AtomicXchg、AtomicRMW(and/or/xor)、AtomicCas 的软件锁、临时
+  allocation/view、RAUW。
+- VCmp/VCast 递归分解的浮点零常量、def-use 和事件顺序。
+- 已删除真实 FlattenOps 不存在的“动态 subview 禁止 collapse”模型特判。
+- 已补 `collapse(expand(x))`、`collapse(collapse(x))` 组合，以及 insert_slice
+  原 rank subview 后再 flatten 的顺序。
+- 已补 extended multiply 分解，以及 OneShotBufferize 将 load 目标 RAUW 到
+  in-place `tensor.insert_slice` destination subview 的 allocation/order/alias。
+- 已按真实 pass 顺序补 vconcat decomposition、静/动态 expand compose、copy 的
+  LiftLowestStride；已补 scalar VSub 常量折叠顺序及 scalarize 后 bitcast buffer root。
+- 已补 FlattenOps 生成 collapse 的组合追踪，以及仍有用户时不删除旧 collapse 的
+  greedy rewrite/DCE 语义；已排除不具备 LiftLowestStride pattern 的 varange。
+- 已按 BitcastOpInterface 补齐 bitcast bufferization 保持源 shape/layout/address space、
+  仅替换 element type 的规则。
+
+## C 精确版剩余
+
+- 补齐动态 stride-aligned allocation 的最终 rank-reduced subview 物化。
+- 对冻结的 suffix 做正式逐 pass 编译器消融并保存证据。
+
+## D 初版划分
+
+- D0：固定 before-CVPipeline 输入/config、after-CVPipeline oracle 和规范化比较。
+- D1：完整复刻 `createCVPipeliningPass` 的全部 UB 相关语义；同输入/config 下
+  after-CVPipeline 隐藏表示必须信息等价，不能以覆盖率目标删减 D1 逻辑。
+- D2：复刻 after-CVPipeline 到 before-OneShotBufferize 之间下游必需且影响 UB
+  的真实 pass，输出当前 C 入口。
+- D3：连接 D+C+B，比较最终 lifetime、offset、peak/required_bits；不支持的
+  整体输入可以 blocker，但不得输出估计值。
+
+当前证据：D0 已有 160 unique before generic objects、171 snapshots × 15 configs
+= 2565 after/C1 oracle tuples；provenance 完整。D1 已按
+`CVPipelining.cpp` 补齐普通路径和 preload 路径的 workspace expansion、work item
+拆分、local tensor/memref output、workspace subview/collapse/to_tensor、preload
+scope/extract_slice、DPS init remap、workspace yield 用户和 atomic set/none/trailing
+语义；官方 `cv-pipelining.mlir` 与 `cv-pipelining-preload.mlir` 的 UB 关键 op
+name/type multiset 与 oracle 一致，adapter corpus 2565/2565 byte exact。
+D1 已接入生产 CLI：`--action=plan-before-cvpipeline --before-cvpipeline-ir=<generic.mlir>`。
+D3 端到端已通过：生产 `D1+C+B` 与保存的 after-CVPipeline `C+B` oracle 在
+2565 tuples（seed=0、restrict=false）上 JSON 摘要和文本 plan buffer 表完全
+一致；额外 20 cases × 20 seeds × 2 restrict modes = 800 tuples 的 JSON 摘要
+和文本 plan buffer 表也一致。raw SemanticIR diff 仍含 effects/properties 和
+SSA 编号顺序差异，验收应使用规范化信息等价比较。
+
+## 验收
+
+- C8 直接比较 model 与真实 PlanMemory-before canonical input，信息完全一致；不含 seed。
+- C+B 再比较 lifetime 与 plan canonical TSV；固定 input/config/seed 必须逐字节一致。
+- 必须持续通过 C7 1162 tuples 和 C++ unit tests。
+- 最终输出含 `ub_peak_bits`、`capacity_bits`、`overflow`、overflow 时的
+  `required_bits`；存在 blocker 时 precision 不得为 `exact_plan`。
+
+## 维护
+
+- 本文件只更新当前数字、剩余问题和决策；历史过程不写入。
+- `code_map.md` 只放入口与命令。两文件总量尽量低于 150 行。
+- 测试默认报告总量；仅失败时分类。
