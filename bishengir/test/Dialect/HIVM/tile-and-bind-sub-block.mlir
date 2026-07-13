@@ -1102,20 +1102,27 @@ module {
 }
 
 // -----
+// CHECK: #[[$ATTR_0:.+]] = affine_map<()[s0] -> (s0 * 32)>
 // CHECK-LABEL:   func.func @simple_testcase_store_with_result(
-// CHECK:           %[[VAL_5:.*]] = tensor.empty() : tensor<64xf32>
-// CHECK:           %[[VAL_6:.*]] = scf.for %[[VAL_7:.*]] = %[[VAL_3:.*]] to %[[VAL_2:.*]] step %[[VAL_4:.*]] iter_args(%[[VAL_8:.*]] = %[[VAL_0:.*]]) -> (tensor<64xf32>) {
-// CHECK:             %[[VAL_9:.*]] = hivm.hir.vln ins(%[[VAL_0]] : tensor<64xf32>) outs(%[[VAL_5]] : tensor<64xf32>) -> tensor<64xf32>
-// CHECK:             %[[VAL_10:.*]] = hivm.hir.get_sub_block_idx -> i64
-// CHECK:             %[[VAL_11:.*]] = arith.index_cast %[[VAL_10]] : i64 to index
-// CHECK:             %[[VAL_12:.*]] = arith.cmpi eq, %[[VAL_11]], %[[VAL_3]] : index
-// CHECK:             %[[VAL_13:.*]] = scf.if %[[VAL_12]] -> (tensor<64xf32>) {
-// CHECK:               %[[VAL_14:.*]] = hivm.hir.store ins(%[[VAL_9]] : tensor<64xf32>) outs(%[[VAL_8]] : tensor<64xf32>) -> tensor<64xf32>
-// CHECK:               scf.yield %[[VAL_14]] : tensor<64xf32>
-// CHECK:             } else {
-// CHECK:               scf.yield %[[VAL_8]] : tensor<64xf32>
-// CHECK:             } {limit_sub_block_id0}
-// CHECK:             scf.yield %[[VAL_13]] : tensor<64xf32>
+// CHECK-SAME:                                                 %[[VAL_0:.*]]: tensor<64xf32>,
+// CHECK-SAME:                                                 %[[VAL_1:.*]]: tensor<64xf32>)
+// CHECK:           %[[VAL_2:.*]] = arith.constant 0 : index
+// CHECK:           %[[VAL_3:.*]] = arith.constant 1 : index
+// CHECK:           %[[VAL_4:.*]] = arith.constant 2 : index
+// CHECK:           scf.for %[[VAL_5:.*]] = %[[VAL_2]] to %[[VAL_4]] step %[[VAL_3]] {
+// CHECK:             %[[VAL_6:.*]] = affine.apply #[[$ATTR_0]](){{\[}}%[[VAL_5]]]
+// CHECK:             %[[VAL_7:.*]] = tensor.extract_slice %[[VAL_0]]{{\[}}%[[VAL_6]]] [32] [1] {to_be_bubbled_slice} : tensor<64xf32> to tensor<32xf32>
+// CHECK:             %[[VAL_8:.*]] = scf.for %[[VAL_9:.*]] = %[[VAL_2]] to %[[VAL_4]] step %[[VAL_3]] iter_args(%[[VAL_10:.*]] = %[[VAL_7]]) -> (tensor<32xf32>) {
+// CHECK:               %[[VAL_11:.*]] = tensor.empty() : tensor<32xf32>
+// CHECK:               %[[VAL_12:.*]] = hivm.hir.vln ins(%[[VAL_7]] : tensor<32xf32>) outs(%[[VAL_11]] : tensor<32xf32>) -> tensor<32xf32>
+// CHECK:               %[[VAL_13:.*]] = hivm.hir.store ins(%[[VAL_12]] : tensor<32xf32>) outs(%[[VAL_10]] : tensor<32xf32>) {tiled_op} -> tensor<32xf32>
+// CHECK:               annotation.mark %[[VAL_13]] : tensor<32xf32>
+// CHECK:               %[[VAL_14:.*]] = tensor.extract_slice %[[VAL_13]]{{\[}}%[[VAL_6]]] [32] [1] {to_be_bubbled_slice} : tensor<32xf32> to tensor<32xf32>
+// CHECK:               scf.yield %[[VAL_14]] : tensor<32xf32>
+// CHECK:             }
+// CHECK:           } {map_for_to_forall, mapping = [#hivm.sub_block<x>]}
+// CHECK:           return
+// CHECK:         }
 #map1 = affine_map<()[s0] -> (s0 * 32)>
 module {
   func.func @simple_testcase_store_with_result(%arg0: tensor<64xf32>, %arg1: tensor<64xf32>) attributes {hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<AIV>, hivm.part_of_mix, mix_mode = "mix"} {
