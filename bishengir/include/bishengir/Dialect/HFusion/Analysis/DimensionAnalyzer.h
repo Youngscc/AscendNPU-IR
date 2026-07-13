@@ -46,11 +46,11 @@ using ::mlir::detail::kUndefinedShaped;
 
 /// AnchorElement struct
 struct AnchorElement {
-  /// index of solverCollapserElem_ element of corresponding index
+  /// index of structuralDsu_ element of corresponding index
   int64_t axisIndex;
-  /// maximum static shape of related solverShapeElem_ element
+  /// maximum static shape of related equivalentDsu_ element
   int64_t maxStaticShape = 1;
-  /// all dynamic shape of related solverShapeElem_ element
+  /// all dynamic shape of related equivalentDsu_ element
   SmallVector<int64_t> dynamicShapeIndices;
 };
 
@@ -60,9 +60,10 @@ struct AnchorElement {
 class DimensionAnalyzer : public ::mlir::detail::DimensionAnalyzerBase {
 public:
   using AnchorDimension = Dimension;
-
   /// Constructor that takes the operation to flatten.
-  explicit DimensionAnalyzer(Operation *op) : DimensionAnalyzerBase(op) {};
+  explicit DimensionAnalyzer(
+      Operation *op, mlir::detail::DimensionAnalyzerOptions options = {})
+      : DimensionAnalyzerBase(op, options) {};
   ~DimensionAnalyzer() override = default;
 
   /// @description: Find and set the anchor value based on current arguments.
@@ -129,7 +130,7 @@ public:
                                 bool isStrict = false);
 
 protected:
-  /// Consists of (parent index of solverCollapserElem_, number of previous
+  /// Consists of (parent index of structuralDsu_, number of previous
   /// occurrence in one value) pairs to ensure two same indices are
   /// distinguished.
   /// For example: %arg0 = <AxBx30x20xf32>
@@ -166,14 +167,31 @@ protected:
   void processTransposeOp(linalg::TransposeOp op);
 
   // Processes cumulative operations.
-  template <class T> void processCumOp(T cumOp);
+  template <class T>
+  void processCumOp(T cumOp);
 
   /// Processes gather operations.
   void processGatherOp(hfusion::GatherOp op);
+  void processScatterStoreOp(hfusion::ScatterStoreOp op);
 
   // Process interleave and deinterleave op
   void processInterleaveOp(hfusion::InterleaveOp op);
   void processDeinterleaveOp(hfusion::DeinterleaveOp op);
+  void processForOp(scf::ForOp op);
+  void processYieldOp(scf::YieldOp op);
+
+  void processToTensorOp(bufferization::ToTensorOp op);
+  void processToMemrefOp(bufferization::ToMemrefOp op);
+  void processSubviewOp(memref::SubViewOp op);
+
+  void processFlipOp(hfusion::FlipOp op);
+  void processSortOp(hfusion::SortOp op);
+  // TODO: Support operations
+  // void processEmbeddingGatherOp(hfusion::EmbeddingGatherOp op);
+  // void processIndirectLoadOp(hfusion::IndirectLoadOp op);
+  // void processStrideLoadOp(hfusion::StrideLoadOp op);
+  // void processIndirectStoreOp(hfusion::IndirectStoreOp op);
+  // void processStrideStoreOp(hfusion::StrideStoreOp op);
 
   //===--------------------------------------------------------------------===//
   // Helper function
@@ -192,7 +210,7 @@ protected:
 
   /// @description: Compute the anchor element for a given anchor candidate.
   ///
-  /// @param indexAncherElemMap Map of parent index of solverCollapserElem_ to
+  /// @param indexAncherElemMap Map of parent index of structuralDsu_ to
   /// anchor element.
   /// @param anchorCandidate Anchor candidate value.
   ///

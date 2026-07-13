@@ -307,10 +307,6 @@ LogicalResult getUnAlignSizeInfo(
 uint32_t getHWAlignBytes(Attribute spaceAttr);
 std::optional<uint32_t> getHWAlignBytes(Type t);
 
-// New helper function to get the updated BaseMemRefType
-BaseMemRefType getBaseMemRefTypeWithNewScope(BaseMemRefType type,
-                                             AddressSpaceAttr targetMemScope);
-
 } // namespace util
 bool isCopytoL1(Operation *op);
 } // namespace hivm

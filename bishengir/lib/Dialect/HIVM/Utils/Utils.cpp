@@ -280,6 +280,35 @@ SmallVector<Value> getMemRefAllocs(Value operand) {
   return {Value(*alloc)};                          // wrap in vector
 }
 
+// New helper function to get the updated BaseMemRefType
+BaseMemRefType getBaseMemRefTypeWithNewScope(BaseMemRefType type,
+                                             AddressSpaceAttr targetMemScope) {
+  if (auto memRefType = dyn_cast<MemRefType>(type)) {
+    return MemRefType::Builder(memRefType).setMemorySpace(targetMemScope);
+  } else if (auto unrankedMemRefType = dyn_cast<UnrankedMemRefType>(type)) {
+    return UnrankedMemRefType::get(unrankedMemRefType.getElementType(),
+                                   targetMemScope);
+  }
+  llvm_unreachable("Unexpected BaseMemRefType");
+  return type;
+}
+
+// New helper function to get the updated BaseMemRefType
+BaseMemRefType getBaseMemRefTypeWithNewScope(BaseMemRefType type,
+                                             unsigned targetMemScope) {
+  if (auto memRefType = dyn_cast<MemRefType>(type)) {
+    auto targetMemScopeAttr = IntegerAttr::get(
+        IntegerType::get(type.getContext(), 64), targetMemScope);
+    return MemRefType::Builder(memRefType).setMemorySpace(targetMemScopeAttr);
+  }
+  if (auto unrankedMemRefType = dyn_cast<UnrankedMemRefType>(type)) {
+    return UnrankedMemRefType::get(unrankedMemRefType.getElementType(),
+                                   targetMemScope);
+  }
+  llvm_unreachable("Unexpected BaseMemRefType");
+  return type;
+}
+
 void setBaseMemRefTypeScope(Value val, AddressSpaceAttr targetMemScope) {
   Type type = val.getType();
   if (!isa<BaseMemRefType>(type)) {
@@ -294,7 +323,20 @@ void setBaseMemRefTypeScope(Value val, AddressSpaceAttr targetMemScope) {
 
   auto memRefType = cast<BaseMemRefType>(type);
   auto newMemRefType =
-      util::getBaseMemRefTypeWithNewScope(memRefType, targetMemScope);
+      getBaseMemRefTypeWithNewScope(memRefType, targetMemScope);
+  val.setType(newMemRefType);
+}
+
+void modifyBaseMemRefTypeScope(Value val, AddressSpaceAttr targetMemScope) {
+  Type type = val.getType();
+  if (!isa<BaseMemRefType>(type)) {
+    LDBG("type = " << type << " is not BaseMemRefType\n");
+    return;
+  }
+
+  auto memRefType = cast<BaseMemRefType>(type);
+  auto newMemRefType =
+      getBaseMemRefTypeWithNewScope(memRefType, targetMemScope);
   val.setType(newMemRefType);
 }
 
