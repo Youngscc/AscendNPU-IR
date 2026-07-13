@@ -1,149 +1,98 @@
-# CVPipeline UB Model C++ Core
+# CVPipeline UB 使用量模型
 
-Lightweight C++ model for the UB-visible path from before-CVPipeline generic IR
-to PlanMemory local UB peak. The core code is organized by compiler pass or
-semantic boundary, not by temporary planning-stage names.
+这是一个独立的轻量 C++ 工具，用于从 `before-CVPipeline` generic IR 建模到
+PlanMemory 的 UB buffer、lifetime、offset 和 UB peak。Python 只负责命令封装、
+JSON 转换和结果比较，不参与核心计算。
 
-## Layout
-
-```text
-src/
-  common/                 # checked arithmetic and small utilities
-  semantic_ir/            # generic MLIR-like parser, SSA/CFG, rewriter
-  cvpipeline/             # CVPipelining analysis and rewrites
-  suffix/                 # modeled suffix pass modules before PlanMemory
-  planmemory/             # PlanMemory-local liveness, storage, planner
-  validation/             # development-only oracle extraction helpers
-  cli/
-    cvpipeline_ub_model.cpp      # production CLI
-    dev_validate.cpp             # development validator, historical actions
-  model_core.hpp          # compatibility facade for PlanMemory-local model
-tests/
-  model_core_tests.cpp
-  semantic_ir_tests.cpp
-  inline_load_copy_tests.cpp
-  mark_multi_buffer_tests.cpp
-scripts/
-  build.sh
-  build_dev_tools.sh
-  run_unit_tests.sh
-  plan_precvpipeline_ub.py
-  generate_ub_demo_json.py
-  validate_all.sh
-demo/
-  ub_plan_visualizer.html
-  sample_ub_plan.json
-```
-
-The suffix modules intentionally mirror compiler pass names, for example
-`one_shot_analysis.hpp`, `hivm_decompose_op.hpp`, `alloc_extra_buffer.hpp`,
-`inline_load_copy.hpp`, `mark_multi_buffer.hpp`, and
-`planmemory_input_semantic_ir.hpp`.
-
-## Production Entry
-
-The user-facing wrapper starts from the before-CVPipeline generic IR boundary
-and keeps CVPipeline options separate from suffix/PlanMemory options:
-
-```bash
-python3 cvpipeline_ub_model_cpp/scripts/plan_precvpipeline_ub.py \
-  --pre-cvpipeline-ir=cvpipeline_ub_model_cpp/examples/inputs/demo_randn_before_cvpipeline.mlir \
-  --cv-pipeline-depth=-1 \
-  --cv-enable-preload=false \
-  --suffix-enable-auto-multi-buffer=false \
-  --random-seed=0 \
-  --format=text
-```
-
-The production binary exposes the same path directly:
-
-```bash
-cvpipeline_ub_model_cpp/output/bin/cvpipeline_ub_model \
-  --action=plan-before-cvpipeline \
-  --before-cvpipeline-ir=cvpipeline_ub_model_cpp/examples/inputs/demo_randn_before_cvpipeline.mlir \
-  --cv-pipeline-depth=-1 \
-  --cv-enable-preload=false \
-  --enable-auto-multi-buffer=false \
-  --random-seed=0 \
-  --format=json
-```
-
-It also exposes narrower exact boundaries:
-
-```bash
-# PlanMemory-before IR -> lifetime.
-cvpipeline_ub_model_cpp/output/bin/cvpipeline_ub_model \
-  --action=analyze-lifetimes \
-  --before-planmemory-ir=...
-
-# PlanMemory-before IR -> local memory plan/peak.
-cvpipeline_ub_model_cpp/output/bin/cvpipeline_ub_model \
-  --action=plan-local-memory \
-  --before-planmemory-ir=... \
-  --random-seed=7 \
-  --format=json
-
-# before-OneShotBufferize generic IR -> modeled suffix -> PlanMemory.
-cvpipeline_ub_model_cpp/output/bin/cvpipeline_ub_model \
-  --action=plan-before-one-shot-bufferize \
-  --before-one-shot-bufferize-ir=... \
-  --enable-auto-multi-buffer \
-  --limit-auto-multi-buffer-of-local-buffer=no-limit \
-  --limit-auto-multi-buffer-buffer=no-limit \
-  --random-seed=0 \
-  --format=json
-```
-
-Text output prints `peak_bits`, `required_bits`, `capacity_bits`, and the
-buffer plan table. JSON output includes the same summary plus a parsed `plan`
-array. Unsupported exactness blockers return blocker precision instead of an
-estimated peak.
-
-## Example Inputs
-
-The product branch includes two self-contained before-CVPipeline generic IR
-examples:
+默认示例输入：
 
 ```text
 cvpipeline_ub_model_cpp/examples/inputs/demo_vector_add_before_cvpipeline.mlir
 cvpipeline_ub_model_cpp/examples/inputs/demo_randn_before_cvpipeline.mlir
 ```
 
-Use `demo_vector_add_before_cvpipeline.mlir` for a small smoke test and
-`demo_randn_before_cvpipeline.mlir` for a more representative UB workspace
-example. The one-command demo uses the randn example by default; select
-another input with `--pre-cvpipeline-ir`.
+## 1. 增量构建并比较
 
-## Visual Demo
+一键脚本会依次完成以下工作：
 
-Run the terminal-friendly demo:
+1. 增量构建轻量模型。
+2. 增量构建 `bishengir-cvpipeline-suffix-compile`。
+3. 分别运行轻量模型和 suffix 编译器。
+4. 比较 UB peak，以及 `(extent_bits, offset_bytes)` buffer placement。
 
 ```bash
 bash cvpipeline_ub_model_cpp/run_demo_ub_plan.sh
 ```
 
-By default it builds the lightweight model, runs the model, runs
-`build/bin/bishengir-cvpipeline-suffix-compile` as the oracle, then compares
-UB peak and `(extent_bits, offset_bytes)` buffer placement. Use `--help` to edit
-CVPipeline, suffix, and PlanMemory options:
+脚本默认不传 PlanMemory seed。这样 PlanMemory 会保持与原本编译器相同的
+retry/attempt 行为。只有需要固定某个 attempt 做定位时，才显式追加
+`--random-seed N`。
+
+脚本中的参数分为两组：
+
+```text
+CVPipeline 参数：
+  --cv-disable-pipelining true|false
+  --cv-pipeline-depth N
+  --cv-enable-preload true|false
+  --cv-enable-lazy-loading true|false
+
+suffix / PlanMemory 参数：
+  --suffix-enable-auto-multi-buffer true|false
+  --suffix-local-multi-buffer-strategy no-limit|only-cube|only-vector|no-l0c
+  --suffix-mix-multi-buffer-strategy no-limit|only-cube|only-vector|no-l0c
+  --restrict-inplace-as-isa true|false
+```
+
+例如，只调整 CVPipeline 的 pipeline 深度：
+
+```bash
+bash cvpipeline_ub_model_cpp/run_demo_ub_plan.sh \
+  --pre-cvpipeline-ir=cvpipeline_ub_model_cpp/examples/inputs/demo_randn_before_cvpipeline.mlir \
+  --cv-pipeline-depth=4
+```
+
+例如，只调整 suffix/PlanMemory 的 multi-buffer 策略：
+
+```bash
+bash cvpipeline_ub_model_cpp/run_demo_ub_plan.sh \
+  --pre-cvpipeline-ir=cvpipeline_ub_model_cpp/examples/inputs/demo_vector_add_before_cvpipeline.mlir \
+  --suffix-enable-auto-multi-buffer=true \
+  --suffix-local-multi-buffer-strategy=no-limit \
+  --suffix-mix-multi-buffer-strategy=only-cube
+```
+
+如果本地已经有可用的 suffix 编译器，但不希望脚本再次调用 CMake，可以使用：
+
+```bash
+bash cvpipeline_ub_model_cpp/run_demo_ub_plan.sh --skip-suffix-build
+```
+
+完整参数说明：
 
 ```bash
 bash cvpipeline_ub_model_cpp/run_demo_ub_plan.sh --help
 ```
 
-The demo script also writes a fresh HTML snapshot with the latest JSON embedded:
+脚本中可以编辑的关键变量位于文件开头，包括默认输入、CVPipeline 参数、
+suffix/PlanMemory 参数、suffix 编译器路径和输出目录。
+
+## 2. 可视化 demo
+
+运行一键 demo 后，HTML 和 JSON 位于：
 
 ```text
 cvpipeline_ub_model_cpp/output/demo/ub_plan_visualizer.html
+cvpipeline_ub_model_cpp/output/demo/ub_plan.json
 ```
 
-The source template is:
+直接运行：
 
-```text
-cvpipeline_ub_model_cpp/demo/ub_plan_visualizer.html
+```bash
+bash cvpipeline_ub_model_cpp/run_demo_ub_plan.sh
 ```
 
-Generate a JSON file for it from any before-CVPipeline generic IR:
+也可以只生成 JSON，再替换可视化页面中的数据：
 
 ```bash
 python3 cvpipeline_ub_model_cpp/scripts/generate_ub_demo_json.py \
@@ -151,80 +100,108 @@ python3 cvpipeline_ub_model_cpp/scripts/generate_ub_demo_json.py \
   --output=cvpipeline_ub_model_cpp/output/demo/ub_plan.json
 ```
 
-Then load the JSON with the page's `Open JSON` button. The page also accepts
-the text output from `plan_precvpipeline_ub.py --format=text`.
+页面模板是：
 
-## Validation
+```text
+cvpipeline_ub_model_cpp/demo/ub_plan_visualizer.html
+```
 
-Production builds and unit tests:
+打开页面后使用 `Open JSON` 载入新的 JSON。也可以把任意输入路径传给
+`run_demo_ub_plan.sh --pre-cvpipeline-ir PATH`，脚本会重新生成 JSON 和 HTML。
+
+## 3. 单独运行轻量模型
+
+先增量构建模型：
 
 ```bash
 bash cvpipeline_ub_model_cpp/build.sh
-bash cvpipeline_ub_model_cpp/scripts/run_unit_tests.sh
 ```
 
-`build.sh` and `build_dev_tools.sh` are timestamp-incremental. They return the
-existing binary when no file under `src/` is newer than the output. Force a
-rebuild with:
+直接运行 before-CVPipeline 到 UB plan：
 
 ```bash
-FORCE_REBUILD=1 bash cvpipeline_ub_model_cpp/build.sh
+cvpipeline_ub_model_cpp/output/bin/cvpipeline_ub_model \
+  --action=plan-before-cvpipeline \
+  --before-cvpipeline-ir=cvpipeline_ub_model_cpp/examples/inputs/demo_randn_before_cvpipeline.mlir \
+  --cv-pipeline-depth=-1 \
+  --disable-cv-pipelining=false \
+  --enable-preload=false \
+  --enable-cv-lazy-loading=false \
+  --enable-auto-multi-buffer=false \
+  --limit-auto-multi-buffer-of-local-buffer no-l0c \
+  --limit-auto-multi-buffer-buffer only-cube \
+  --format=json
 ```
 
-Development validation uses a separate binary:
+上面的命令故意没有设置 seed，保持 PlanMemory 的默认 retry 行为。
 
-```bash
-bash cvpipeline_ub_model_cpp/scripts/build_dev_tools.sh
-cvpipeline_ub_model_cpp/output/bin/cvpipeline_ub_model_dev_validate --help
-```
-
-Some validation script filenames and `dev_validate` actions still contain
-historical `c1/c2/...` labels because local oracle directories and replay
-scripts depend on them. They are compatibility labels only; core source types,
-functions, and production actions use pass/boundary names.
-
-Common validation gates:
-
-```bash
-bash cvpipeline_ub_model_cpp/scripts/validate_comparator_sensitivity.sh
-bash cvpipeline_ub_model_cpp/scripts/validate_memory_info_replay.sh
-bash cvpipeline_ub_model_cpp/scripts/validate_local_ub_allocations.sh
-bash cvpipeline_ub_model_cpp/scripts/validate_lifetimes.sh
-bash cvpipeline_ub_model_cpp/scripts/validate_memory_plan.sh
-bash cvpipeline_ub_model_cpp/scripts/validate_fixed_seed_exact.sh
-bash cvpipeline_ub_model_cpp/scripts/validate_config_matrix.sh
-python3 cvpipeline_ub_model_cpp/scripts/validate_planmemory_bridge_input.py \
-  --one-config-per-ir --max-failures=100
-python3 cvpipeline_ub_model_cpp/scripts/validate_d1_cvpipelining.py
-python3 cvpipeline_ub_model_cpp/scripts/validate_d3_end_to_end.py \
-  --seeds 0 --restrict-modes 0 --compare-text-plan
-```
-
-The final acceptance protocol fixes the real PlanMemory seed and compares two
-layers independently:
-
-1. PlanMemory-input bridge: canonical PlanMemory-before input equality.
-2. PlanMemory-local model: lifetime and plan canonical TSV equality.
-
-Normalization may reorder storage paths, but it must not discard semantic
-information such as buffer identity, operation order, offsets, or peak bits.
-
-## External Input
-
-The default validation input is the minimal suffix oracle view:
+主要参数对应关系如下：
 
 ```text
-cvpipeline_ub_model_cpp/input/suffix_compile/
-cvpipeline_ub_model_cpp/input/suffix_compile/ub_peak_summary.tsv
+输入：
+  --before-cvpipeline-ir PATH
+
+CVPipeline：
+  --cv-pipeline-depth N
+  --disable-cv-pipelining true|false
+  --enable-preload true|false
+  --enable-cv-lazy-loading true|false
+
+suffix / PlanMemory：
+  --enable-auto-multi-buffer true|false
+  --limit-auto-multi-buffer-of-local-buffer STRATEGY
+  --limit-auto-multi-buffer-buffer STRATEGY
+  --restrict-inplace-as-isa
+
+输出：
+  --format=text|json
+  --output PATH
 ```
 
-The view contains symlinks only; real dumps live under
-`Output/adapters/<adapter>/02_suffix/compiler_default`. Set
-`CVPIPELINE_SUFFIX_ROOT` to point validation at another suffix dataset.
-
-Reports are written under:
+只有在复现固定 PlanMemory attempt 时才使用：
 
 ```text
-cvpipeline_ub_model_cpp/output/reports/
-cvpipeline_ub_model_cpp/output/snapshots/
+--random-seed N
+```
+
+## 4. 单独构建和运行 suffix 编译器
+
+suffix 编译器属于原编译器工程，不是轻量模型的核心实现。使用原编译器的
+构建目录进行增量构建：
+
+```bash
+cmake --build build --target bishengir-cvpipeline-suffix-compile -j8
+```
+
+运行 suffix 编译器时同样不设置 seed：
+
+```bash
+build/bin/bishengir-cvpipeline-suffix-compile \
+  cvpipeline_ub_model_cpp/examples/inputs/demo_randn_before_cvpipeline.mlir \
+  --mlir-disable-threading \
+  --cv-pipeline-depth=-1 \
+  --disable-cv-pipelining=false \
+  --enable-preload=false \
+  --enable-cv-lazy-loading=false \
+  --enable-auto-multi-buffer=false \
+  --limit-auto-multi-buffer-of-local-buffer no-l0c \
+  --limit-auto-multi-buffer-buffer only-cube \
+  -o cvpipeline_ub_model_cpp/output/demo/suffix_after_planmemory.mlir
+```
+
+suffix 编译器的 PlanMemory dump 会写入终端重定向指定的日志文件。完整比较
+通常直接使用第 1 节的一键脚本，因为它会同时保存 model JSON、suffix oracle
+和比较结果。
+
+## 目录说明
+
+```text
+src/semantic_ir/       generic IR 解析和语义表示
+src/cvpipeline/        CVPipelining 相关 UB 语义
+src/suffix/             suffix pass 的 UB 相关模拟
+src/planmemory/         PlanMemory lifetime、storage 和 planner
+src/cli/                生产入口
+scripts/                构建封装、JSON 处理和 oracle 比较
+demo/                   HTML 可视化模板
+examples/inputs/        产品自带示例 IR
 ```

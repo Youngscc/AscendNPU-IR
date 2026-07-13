@@ -10,15 +10,20 @@ DEMO_HTML="cvpipeline_ub_model_cpp/output/demo/ub_plan_visualizer.html"
 ORACLE_DIR="cvpipeline_ub_model_cpp/output/demo/suffix_oracle"
 SUFFIX_TOOL="build/bin/bishengir-cvpipeline-suffix-compile"
 RUN_ORACLE=true
+BUILD_SUFFIX_ORACLE=true
 
+# CVPipeline 参数：只影响 createCVPipeliningPass 的建模路径。
 CV_DISABLE_PIPELINING=false
 CV_PIPELINE_DEPTH=-1
 CV_ENABLE_PRELOAD=false
 CV_ENABLE_LAZY_LOADING=false
+
+# suffix / PlanMemory 参数：只影响 CVPipeline 之后的 UB buffer 和规划。
 SUFFIX_ENABLE_AUTO_MULTI_BUFFER=false
 SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY=no-l0c
 SUFFIX_MIX_MULTI_BUFFER_STRATEGY=only-cube
 RESTRICT_INPLACE_AS_ISA=false
+# 默认留空，保持 PlanMemory retry/attempt 行为；只在定位固定 attempt 时设置。
 RANDOM_SEED=""
 
 usage() {
@@ -33,6 +38,7 @@ Input/output:
   --oracle-dir DIR
   --suffix-tool PATH
   --skip-oracle
+  --skip-suffix-build
 
 CVPipeline options:
   --cv-disable-pipelining true|false
@@ -57,6 +63,7 @@ while [[ $# -gt 0 ]]; do
     --oracle-dir) ORACLE_DIR="$2"; shift 2 ;;
     --suffix-tool) SUFFIX_TOOL="$2"; shift 2 ;;
     --skip-oracle) RUN_ORACLE=false; shift ;;
+    --skip-suffix-build) BUILD_SUFFIX_ORACLE=false; shift ;;
     --cv-disable-pipelining) CV_DISABLE_PIPELINING="$2"; shift 2 ;;
     --cv-pipeline-depth) CV_PIPELINE_DEPTH="$2"; shift 2 ;;
     --cv-enable-preload) CV_ENABLE_PRELOAD="$2"; shift 2 ;;
@@ -71,10 +78,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-echo "[1/4] Building cvpipeline_ub_model..."
+echo "[1/5] Building cvpipeline_ub_model incrementally..."
 bash cvpipeline_ub_model_cpp/build.sh >/dev/null
 
-echo "[2/4] Running lightweight model and writing JSON..."
+if [[ "${RUN_ORACLE}" == "true" && "${BUILD_SUFFIX_ORACLE}" == "true" ]]; then
+  echo "[2/5] Building suffix compiler incrementally..."
+  cmake --build build --target bishengir-cvpipeline-suffix-compile -j8 >/dev/null
+fi
+
+echo "[3/5] Running lightweight model and writing JSON..."
 mkdir -p "$(dirname "${DEMO_JSON}")"
 model_args=(
   python3 cvpipeline_ub_model_cpp/scripts/plan_precvpipeline_ub.py
@@ -104,7 +116,7 @@ if [[ "${RUN_ORACLE}" == "true" ]]; then
     exit 1
   fi
 
-  echo "[3/4] Running suffix-compile oracle..."
+  echo "[4/5] Running suffix-compile oracle..."
   mkdir -p "${ORACLE_DIR}"
   oracle_tsv="${ORACLE_DIR}/oracle.tsv"
   oracle_ir="${ORACLE_DIR}/after_local_plan_memory.mlir"
@@ -133,7 +145,7 @@ else
 fi
 
 echo
-echo "[4/4] Summary"
+echo "[5/5] Summary"
 python3 cvpipeline_ub_model_cpp/scripts/render_ub_demo_html.py \
   --template cvpipeline_ub_model_cpp/demo/ub_plan_visualizer.html \
   --json "${DEMO_JSON}" \
