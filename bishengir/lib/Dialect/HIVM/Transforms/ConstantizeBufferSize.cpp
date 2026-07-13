@@ -36,6 +36,101 @@ using namespace mlir;
 using namespace mlir::hivm;
 
 namespace {
+Value getOperandForDimOrSymbol(AffineExpr expr, AffineMap map,
+                               ValueRange operands) {
+  if (auto dimExpr = dyn_cast<AffineDimExpr>(expr))
+    return operands[dimExpr.getPosition()];
+  if (auto symbolExpr = dyn_cast<AffineSymbolExpr>(expr))
+    return operands[map.getNumDims() + symbolExpr.getPosition()];
+  return {};
+}
+
+/// This pattern is useful for sinking affine.max ops.
+/// Rewrite max(C, min(A, B)) into min(max(C, A), max(C, B)).
+/// If C & B are constant, fold max(C, min(A, B)) into max(C, K).
+/// Helping constantize compute the upper bound of dynamic dimension values.
+struct DistributeAffineMaxOverMin
+    : public OpRewritePattern<affine::AffineMaxOp> {
+  using OpRewritePattern<affine::AffineMaxOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(affine::AffineMaxOp maxOp,
+                                PatternRewriter &rewriter) const override {
+    AffineMap maxMap = maxOp.getAffineMap();
+    ValueRange maxOperands = maxOp.getMapOperands();
+
+    // Judge if the maxOp is max(C, min(A, B)).
+    std::optional<int64_t> constantLowerBound;
+    affine::AffineMinOp minOp;
+    for (AffineExpr expr : maxMap.getResults()) {
+      // If the expr include several constant expr, then we compute
+      // the max value of all constant expr or get the only constant expr.
+      // max(C, D, min(A, B)) -> max(max(C, D), min(A, B))
+      if (auto constExpr = dyn_cast<AffineConstantExpr>(expr)) {
+        constantLowerBound =
+            constantLowerBound.has_value()
+                ? std::max(*constantLowerBound, constExpr.getValue())
+                : constExpr.getValue();
+        continue;
+      }
+
+      // If the expr is not constant expr, then it must be min(A, B).
+      // Besides, only one min(A, B) is allowed.
+      Value operand = getOperandForDimOrSymbol(expr, maxMap, maxOperands);
+      if (!operand)
+        return failure();
+      auto operandMinOp = operand.getDefiningOp<affine::AffineMinOp>();
+      if (!operandMinOp)
+        return failure();
+      if (minOp && minOp != operandMinOp)
+        return failure();
+      minOp = operandMinOp;
+    }
+    
+    // Only if the maxOp is max(C, min(A, B)), we can rewrite it.
+    if (!constantLowerBound.has_value() || !minOp)
+      return failure();
+
+    Location loc = maxOp.getLoc();
+    MLIRContext *ctx = rewriter.getContext();
+    AffineMap minMap = minOp.getAffineMap();
+    ValueRange minOperands = minOp.getMapOperands();
+
+    // Rewrite max(C, min(A, B)) into min(max(C, A), max(C, B)).
+    SmallVector<Value> newMinOperands;
+    SmallVector<AffineExpr> newMinExprs;
+    for (AffineExpr minExpr : minMap.getResults()) {
+      // If the minExpr is constant expr, for example A, then we compute
+      // max(C, A) as constant expr and add it to newMinExprs.
+      if (auto constExpr = dyn_cast<AffineConstantExpr>(minExpr)) {
+        newMinExprs.push_back(rewriter.getAffineConstantExpr(
+            std::max(*constantLowerBound, constExpr.getValue())));
+        continue;
+      }
+
+      // If the minExpr is not constant expr, for example B, then we compute
+      // max(C, B) as a new map and add it to newMinOperands and add affine
+      // expr max(C, B) to newMinExprs.
+      auto innerMaxMap = AffineMap::get(
+          minMap.getNumDims(), minMap.getNumSymbols(),
+          {rewriter.getAffineConstantExpr(*constantLowerBound), minExpr}, ctx);
+      Value innerMax =
+          rewriter.create<affine::AffineMaxOp>(loc, innerMaxMap, minOperands);
+      newMinOperands.push_back(innerMax);
+      newMinExprs.push_back(
+          rewriter.getAffineSymbolExpr(newMinOperands.size() - 1));
+    }
+
+    if (newMinExprs.empty())
+      return failure();
+
+    auto newMinMap =
+        AffineMap::get(/*dimCount=*/0, newMinOperands.size(), newMinExprs, ctx);
+    rewriter.replaceOpWithNewOp<affine::AffineMinOp>(maxOp, newMinMap,
+                                                     newMinOperands);
+    return success();
+  }
+};
+
 /// Result of resolving a dynamic dimension — either an exact constant or
 /// a conservative upper bound (worst-case size).
 struct ResolvedDim {
@@ -315,8 +410,9 @@ void ConstantizeBufferPass::runOnOperation() {
     return;
 
   RewritePatternSet patterns(&getContext());
-  patterns.add<ConstantizeAllocLikeOp<memref::AllocOp>,
-               ConstantizeAllocLikeOp<memref::AllocaOp>>(patterns.getContext());
+  patterns
+      .add<DistributeAffineMaxOverMin, ConstantizeAllocLikeOp<memref::AllocOp>,
+           ConstantizeAllocLikeOp<memref::AllocaOp>>(patterns.getContext());
   (void)applyPatternsGreedily(funcOp, std::move(patterns));
 }
 
