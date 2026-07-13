@@ -665,6 +665,37 @@ void removeMarkOpAttr(annotation::MarkOp markOp, ::llvm::StringLiteral attrName,
   }
 }
 
+void removeMarkOpDynamicAttr(annotation::MarkOp markOp, StringRef attrName,
+                             PatternRewriter &rewriter) {
+  assert(markOp && "markOp shouldn't be null.");
+  auto keys = markOp.getKeys();
+  auto values = markOp.getValues();
+
+  SmallVector<Attribute> newKeys;
+  SmallVector<Value> newValues;
+
+  auto keysArray = keys.value();
+
+  for (auto [key, value] : llvm::zip_equal(keysArray, values)) {
+    StringRef currentKey = mlir::cast<StringAttr>(key).getValue();
+    if (currentKey == attrName) {
+      LDBG("Removing dynamic annotation: " << attrName);
+    } else {
+      newKeys.push_back(key);
+      newValues.push_back(value);
+      LDBG("Keeping dynamic annotation: " << currentKey);
+    }
+  }
+
+  rewriter.modifyOpInPlace(markOp, [&]() {
+    markOp.setKeysAttr(rewriter.getArrayAttr(newKeys));
+    markOp.getValuesMutable().assign(newValues);
+  });
+  if (newKeys.empty()) {
+    removeMarkOpAttr(markOp, "keys", rewriter);
+  }
+}
+
 void removeMarkOpAttr(annotation::MarkOp markOp, StringRef attrName,
                       RewriterBase &rewriter, bool removeOp) {
   if (markOp == nullptr) {

@@ -1,4 +1,5 @@
 add_bishengir_library(BiShengIRMemRefTransforms
+  BindBuffer.cpp
   FoldAllocReshape.cpp
   DeadStoreElimination.cpp
   RemoveRedundantCopy.cpp
@@ -17,4 +18,7 @@ add_bishengir_library(BiShengIRMemRefTransforms
   MLIRIR
   MLIRDialect
   MLIRPass
+  BiShengIRAnnotationDialect
+  BiShengIRDialectUtils
+  BiShengIRHIVMDialect
 )
