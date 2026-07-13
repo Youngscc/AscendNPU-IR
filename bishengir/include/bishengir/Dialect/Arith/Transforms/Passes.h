@@ -35,6 +35,9 @@ std::unique_ptr<Pass> createNormalizeArithPass();
 /// Pass to lift arith.index_cast to simplify vector instr lowering
 std::unique_ptr<Pass> createLiftArithIndexCastPass();
 
+/// Move up arith op to prevent fusable operations from being blocked by arith op.
+std::unique_ptr<Pass> createMoveUpArithPass();
+
 //===----------------------------------------------------------------------===//
 // Registration
 //===----------------------------------------------------------------------===//

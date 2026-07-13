@@ -34,4 +34,10 @@ def LiftArithIndexCast : Pass<"lift-arith-indexcast",
   let dependentDialects = ["arith::ArithDialect", "vector::VectorDialect"];
 }
 
+def MoveUpArith : Pass<"move-up-arith"> {
+  let summary = "Move up arith op";
+  let constructor = "mlir::arith::createMoveUpArithPass()";
+  let dependentDialects = ["vector::VectorDialect"];
+}
+
 #endif // BISHENGIR_DIALECT_ARITH_TRANSFORMS_PASSES_TD
