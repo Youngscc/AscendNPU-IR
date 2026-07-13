@@ -19,7 +19,7 @@ struct BufferizedOperandAccess {
 };
 
 struct BufferizedSemanticIR {
-  C1SemanticModule logicalModule;
+  GenericModule logicalModule;
   std::vector<BufferAllocation> allocations;
   std::vector<BufferizedValueBinding> values;
   std::vector<BufferizedOperandAccess> accesses;
@@ -32,10 +32,10 @@ inline std::string LocalBufferId(size_t ordinal) {
 class BufferizedSemanticIRBuilder {
 public:
   BufferizedSemanticIRBuilder(
-      const C1SemanticModule &module, std::vector<BufferAllocation> allocations)
+      const GenericModule &module, std::vector<BufferAllocation> allocations)
       : module(module), allocations(std::move(allocations)),
-        valueTypes(C1ValueTypes(module)),
-        definitions(C1DefiningOperations(module)) {
+        valueTypes(ValueTypes(module)),
+        definitions(DefiningOperations(module)) {
     indexBlockArguments();
     indexAllocationOwners();
   }
@@ -65,7 +65,7 @@ public:
 
 private:
   void indexBlockArguments() {
-    for (const C1BlockRecord &block : module.blocks)
+    for (const GenericBlock &block : module.blocks)
       for (size_t index = 0; index < block.arguments.size(); ++index)
         blockArguments[block.arguments[index]] =
             {block.id, static_cast<int>(index)};
@@ -88,13 +88,13 @@ private:
 
   void initializeExternalBuffers() {
     std::map<int, size_t> useCounts;
-    for (const C1OperationRecord &operation : module.operations)
+    for (const GenericOperation &operation : module.operations)
       for (int operand : operation.operands)
         ++useCounts[operand];
-    for (const C1BlockRecord &block : module.blocks) {
-      const C1RegionRecord &region =
+    for (const GenericBlock &block : module.blocks) {
+      const GenericRegion &region =
           module.regions.at(static_cast<size_t>(block.regionId));
-      const C1OperationRecord &owner = module.operations.at(
+      const GenericOperation &owner = module.operations.at(
           static_cast<size_t>(region.parentOperation));
       if (owner.name != "func.func")
         continue;
@@ -106,7 +106,7 @@ private:
               std::to_string(index);
       }
     }
-    for (const C1OperationRecord &operation : module.operations) {
+    for (const GenericOperation &operation : module.operations) {
       if (operation.name == "memref_ext.alloc_workspace")
         for (int result : operation.results)
           buffers[result] = "workspace:" + std::to_string(operation.id);
@@ -121,7 +121,7 @@ private:
   }
 
   void initializeAllocationResults() {
-    for (const C1OperationRecord &operation : module.operations) {
+    for (const GenericOperation &operation : module.operations) {
       for (size_t index = 0; index < operation.results.size(); ++index) {
         auto allocation = allocationBySource.find(
             resultSource(operation.id, static_cast<int>(index)));
@@ -138,7 +138,7 @@ private:
     bool changed = true;
     while (changed) {
       changed = false;
-      for (const C1OperationRecord &operation : module.operations) {
+      for (const GenericOperation &operation : module.operations) {
         if (operation.results.empty() || operation.operands.empty())
           continue;
         static const std::set<std::string> aliases = {
@@ -156,7 +156,7 @@ private:
     }
   }
 
-  std::string effectiveOperandBuffer(const C1OperationRecord &operation,
+  std::string effectiveOperandBuffer(const GenericOperation &operation,
                                      size_t operand) const {
     auto allocation = allocationBySource.find(
         operandSource(operation.id, static_cast<int>(operand)));
@@ -212,7 +212,7 @@ private:
   void propagateTensorBuffers() {
     for (size_t iteration = 0; iteration <= module.operations.size(); ++iteration) {
       bool changed = false;
-      for (const C1OperationRecord &operation : module.operations) {
+      for (const GenericOperation &operation : module.operations) {
         if (operation.name == "bufferization.to_tensor" &&
             !operation.results.empty() && !operation.operands.empty()) {
           changed |= setBuffer(operation.results.front(),
@@ -227,7 +227,7 @@ private:
           changed |= setBuffer(operation.results.front(),
                                effectiveOperandBuffer(operation, 0));
         }
-        const std::vector<size_t> inits = C1DpsInitOperandIndices(
+        const std::vector<size_t> inits = DpsInitOperandIndices(
             operation.name, operation.operands.size(), operation.properties);
         for (size_t result = 0;
              result < inits.size() && result < operation.results.size(); ++result)
@@ -248,14 +248,14 @@ private:
     throw std::runtime_error("OneShotBufferize: buffer propagation did not converge");
   }
 
-  bool propagateForOp(const C1OperationRecord &operation) {
+  bool propagateForOp(const GenericOperation &operation) {
     if (operation.regions.empty())
       return false;
-    const C1RegionRecord &region = module.regions.at(
+    const GenericRegion &region = module.regions.at(
         static_cast<size_t>(operation.regions.front()));
     if (region.blocks.empty())
       return false;
-    const C1BlockRecord &block = module.blocks.at(
+    const GenericBlock &block = module.blocks.at(
         static_cast<size_t>(region.blocks.front()));
     bool changed = false;
     for (size_t result = 0; result < operation.results.size(); ++result) {
@@ -271,19 +271,19 @@ private:
     return changed;
   }
 
-  bool propagateIfOp(const C1OperationRecord &operation) {
+  bool propagateIfOp(const GenericOperation &operation) {
     bool changed = false;
     for (size_t result = 0; result < operation.results.size(); ++result)
       for (int regionId : operation.regions) {
-        const C1RegionRecord &region =
+        const GenericRegion &region =
             module.regions.at(static_cast<size_t>(regionId));
         if (region.blocks.empty())
           continue;
-        const C1BlockRecord &block = module.blocks.at(
+        const GenericBlock &block = module.blocks.at(
             static_cast<size_t>(region.blocks.front()));
         if (block.operations.empty())
           continue;
-        const C1OperationRecord &yield = module.operations.at(
+        const GenericOperation &yield = module.operations.at(
             static_cast<size_t>(block.operations.back()));
         if (yield.name == "scf.yield" && result < yield.operands.size())
           changed |= setBuffer(operation.results[result],
@@ -293,7 +293,7 @@ private:
   }
 
   void collectAccesses(std::vector<BufferizedOperandAccess> &result) const {
-    for (const C1OperationRecord &operation : module.operations)
+    for (const GenericOperation &operation : module.operations)
       for (size_t operand = 0; operand < operation.operandTypes.size(); ++operand) {
         if (!IsTensorType(operation.operandTypes[operand]) &&
             !IsMemRefType(operation.operandTypes[operand]))
@@ -323,10 +323,10 @@ private:
     return "unknown";
   }
 
-  const C1SemanticModule &module;
+  const GenericModule &module;
   std::vector<BufferAllocation> allocations;
   std::map<int, std::string> valueTypes;
-  std::map<int, const C1OperationRecord *> definitions;
+  std::map<int, const GenericOperation *> definitions;
   std::map<int, std::pair<int, int>> blockArguments;
   std::map<std::string, size_t> allocationBySource;
   std::map<int, std::string> buffers;
@@ -334,7 +334,7 @@ private:
 };
 
 inline BufferizedSemanticIR BuildBufferizedSemanticIR(
-    const C1SemanticModule &module,
+    const GenericModule &module,
     const OneShotBufferizationResult &bufferization) {
   return BufferizedSemanticIRBuilder(module, bufferization.allocations)
       .Build();

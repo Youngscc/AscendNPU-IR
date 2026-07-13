@@ -1,13 +1,13 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_INFER_HIVM_MEM_SCOPE_HPP
 #define CVPIPELINE_UB_MODEL_CPP_INFER_HIVM_MEM_SCOPE_HPP
 
-#include "c3_semantic_ir.hpp"
+#include "post_bufferization_rewrites.hpp"
 
 namespace cvub {
 
-inline const C1OperationRecord *C4EnclosingFunction(
-    const C1SemanticModule &module, const C1OperationRecord &operation) {
-  const C1OperationRecord *current = &operation;
+inline const GenericOperation *EnclosingFunction(
+    const GenericModule &module, const GenericOperation &operation) {
+  const GenericOperation *current = &operation;
   while (current && current->name != "func.func") {
     if (current->parentId < 0)
       return nullptr;
@@ -16,14 +16,14 @@ inline const C1OperationRecord *C4EnclosingFunction(
   return current;
 }
 
-inline AddressSpace C4FunctionDefaultAddressSpace(
-    const C1OperationRecord &function) {
+inline AddressSpace FunctionDefaultAddressSpace(
+    const GenericOperation &function) {
   const std::string core = DecomposeEnumValue(
       FindDictionaryValue(function.attributes, "hivm.func_core_type"));
   return core == "AIC" ? AddressSpace::L1 : AddressSpace::UB;
 }
 
-inline std::string C4AddressSpaceName(AddressSpace space) {
+inline std::string AddressSpaceName(AddressSpace space) {
   switch (space) {
   case AddressSpace::GM:
     return "gm";
@@ -45,7 +45,7 @@ inline std::string C4AddressSpaceName(AddressSpace space) {
   return "unknown";
 }
 
-inline int C4AllocationSourceOperation(const std::string &source) {
+inline int AllocationSourceOperation(const std::string &source) {
   const size_t first = source.find(':');
   if (first == std::string::npos)
     return -1;
@@ -56,43 +56,43 @@ inline int C4AllocationSourceOperation(const std::string &source) {
 }
 
 inline std::map<std::string, AddressSpace>
-InferHIVMMemScope(const C3SemanticIR &module) {
+InferHIVMMemScope(const PostBufferizationRewriteState &module) {
   std::map<std::string, AddressSpace> result;
-  const C1SemanticModule &logical = module.bufferized.logicalModule;
+  const GenericModule &logical = module.bufferized.logicalModule;
   for (size_t index = 0; index < module.singlePoint.allocations.size(); ++index) {
     const BufferAllocation &allocation = module.singlePoint.allocations[index];
-    const int operationId = C4AllocationSourceOperation(allocation.source);
+    const int operationId = AllocationSourceOperation(allocation.source);
     if (operationId < 0)
       throw std::runtime_error("InferHIVMMemScope: malformed allocation source");
-    const C1OperationRecord &operation =
+    const GenericOperation &operation =
         logical.operations.at(static_cast<size_t>(operationId));
-    const C1OperationRecord *function = C4EnclosingFunction(logical, operation);
+    const GenericOperation *function = EnclosingFunction(logical, operation);
     if (!function)
       throw std::runtime_error("InferHIVMMemScope: allocation outside function");
     const std::optional<MemRefTypeModel> type = ParseMemRefType(allocation.type);
     result["base:" + std::to_string(index)] =
         type && type->addressSpace != AddressSpace::Unknown
             ? type->addressSpace
-            : C4FunctionDefaultAddressSpace(*function);
+            : FunctionDefaultAddressSpace(*function);
   }
 
   std::map<int, size_t> decomposeOrdinals;
   for (const DecomposeBufferAllocation &allocation :
        module.decomposeAllocations) {
-    const C1OperationRecord &operation = logical.operations.at(
+    const GenericOperation &operation = logical.operations.at(
         static_cast<size_t>(allocation.ownerOperation));
-    const C1OperationRecord *function = C4EnclosingFunction(logical, operation);
+    const GenericOperation *function = EnclosingFunction(logical, operation);
     if (!function)
       throw std::runtime_error("InferHIVMMemScope: temp outside function");
     const size_t ordinal = decomposeOrdinals[allocation.ownerOperation]++;
     result["decompose:" + std::to_string(allocation.ownerOperation) + ":" +
-           std::to_string(ordinal)] = C4FunctionDefaultAddressSpace(*function);
+           std::to_string(ordinal)] = FunctionDefaultAddressSpace(*function);
   }
 
-  for (const C1OperationRecord &operation : logical.operations) {
+  for (const GenericOperation &operation : logical.operations) {
     if (operation.name != "hivm.hir.mmadL1")
       continue;
-    const std::vector<std::string> buffers = C3OperationBuffers(
+    const std::vector<std::string> buffers = OperationBufferOperands(
         module.bufferized, operation.id, &module.singlePoint.bufferMapping);
     if (buffers.size() < 3)
       continue;

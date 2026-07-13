@@ -11,7 +11,7 @@ struct BufferizedSemanticIRValidation {
   std::vector<std::string> errors;
 };
 
-inline bool HasShapedSemantics(const C1OperationRecord &operation) {
+inline bool HasShapedSemantics(const GenericOperation &operation) {
   if (operation.name == "func.func")
     return true;
   return std::any_of(operation.operandTypes.begin(), operation.operandTypes.end(),
@@ -24,7 +24,7 @@ inline bool HasShapedSemantics(const C1OperationRecord &operation) {
                      });
 }
 
-inline std::string BufferizedOperationName(const std::string &name) {
+inline std::string OracleBufferizedOperationName(const std::string &name) {
   if (name == "tensor.extract")
     return "memref.load";
   if (name == "tensor.insert")
@@ -46,8 +46,8 @@ inline bool IsErasedByOneShotBufferize(const std::string &name) {
 
 class BufferizedOperationCorrespondence {
 public:
-  BufferizedOperationCorrespondence(const C1SemanticModule &before,
-                                    const C1SemanticModule &after)
+  BufferizedOperationCorrespondence(const GenericModule &before,
+                                    const GenericModule &after)
       : before(before), after(after) {
     build();
   }
@@ -63,7 +63,7 @@ private:
   void build() {
     std::map<std::string, std::vector<int>> expected;
     std::map<std::string, std::vector<int>> actual;
-    for (const C1OperationRecord &operation : before.operations) {
+    for (const GenericOperation &operation : before.operations) {
       if (operation.name == "tensor.from_elements") {
         for (size_t index = 0; index < operation.operands.size(); ++index)
           expected["memref.store"].push_back(-1);
@@ -72,9 +72,10 @@ private:
       if (!HasShapedSemantics(operation) ||
           IsErasedByOneShotBufferize(operation.name))
         continue;
-      expected[BufferizedOperationName(operation.name)].push_back(operation.id);
+      expected[OracleBufferizedOperationName(operation.name)].push_back(
+          operation.id);
     }
-    for (const C1OperationRecord &operation : after.operations)
+    for (const GenericOperation &operation : after.operations)
       if (HasShapedSemantics(operation))
         actual[operation.name].push_back(operation.id);
 
@@ -92,15 +93,15 @@ private:
     }
   }
 
-  const C1SemanticModule &before;
-  const C1SemanticModule &after;
+  const GenericModule &before;
+  const GenericModule &after;
   std::map<int, int> operationMap;
   std::vector<std::string> errors;
 };
 
 class AfterBufferRootResolver {
 public:
-  explicit AfterBufferRootResolver(const C1SemanticModule &module)
+  explicit AfterBufferRootResolver(const GenericModule &module)
       : module(module) {
     initializeRoots();
     propagate();
@@ -119,7 +120,7 @@ public:
 private:
   void initializeRoots() {
     size_t allocation = 0;
-    for (const C1OperationRecord &operation : module.operations) {
+    for (const GenericOperation &operation : module.operations) {
       if (operation.name == "memref.alloc")
         for (size_t index = 0; index < operation.results.size(); ++index)
           if (index < operation.resultTypes.size() &&
@@ -134,10 +135,10 @@ private:
         for (int result : operation.results)
           roots[result] = "pointer:" + std::to_string(operation.id);
     }
-    for (const C1BlockRecord &block : module.blocks) {
-      const C1RegionRecord &region =
+    for (const GenericBlock &block : module.blocks) {
+      const GenericRegion &region =
           module.regions.at(static_cast<size_t>(block.regionId));
-      const C1OperationRecord &owner = module.operations.at(
+      const GenericOperation &owner = module.operations.at(
           static_cast<size_t>(region.parentOperation));
       if (owner.name != "func.func")
         continue;
@@ -190,7 +191,7 @@ private:
   void propagate() {
     for (size_t iteration = 0; iteration <= module.operations.size(); ++iteration) {
       bool changed = false;
-      for (const C1OperationRecord &operation : module.operations) {
+      for (const GenericOperation &operation : module.operations) {
         static const std::set<std::string> aliases = {
             "arith.select", "hivm.hir.bitcast", "memref.cast",
             "memref.collapse_shape", "memref.expand_shape",
@@ -214,14 +215,14 @@ private:
     throw std::runtime_error("bufferized oracle root propagation did not converge");
   }
 
-  bool propagateFor(const C1OperationRecord &operation) {
+  bool propagateFor(const GenericOperation &operation) {
     if (operation.regions.empty())
       return false;
-    const C1RegionRecord &region = module.regions.at(
+    const GenericRegion &region = module.regions.at(
         static_cast<size_t>(operation.regions.front()));
     if (region.blocks.empty())
       return false;
-    const C1BlockRecord &block = module.blocks.at(
+    const GenericBlock &block = module.blocks.at(
         static_cast<size_t>(region.blocks.front()));
     bool changed = false;
     for (size_t result = 0; result < operation.results.size(); ++result) {
@@ -237,19 +238,19 @@ private:
     return changed;
   }
 
-  bool propagateIf(const C1OperationRecord &operation) {
+  bool propagateIf(const GenericOperation &operation) {
     bool changed = false;
     for (size_t result = 0; result < operation.results.size(); ++result)
       for (int regionId : operation.regions) {
-        const C1RegionRecord &region =
+        const GenericRegion &region =
             module.regions.at(static_cast<size_t>(regionId));
         if (region.blocks.empty())
           continue;
-        const C1BlockRecord &block = module.blocks.at(
+        const GenericBlock &block = module.blocks.at(
             static_cast<size_t>(region.blocks.front()));
         if (block.operations.empty())
           continue;
-        const C1OperationRecord &yield = module.operations.at(
+        const GenericOperation &yield = module.operations.at(
             static_cast<size_t>(block.operations.back()));
         if (yield.name == "scf.yield" && result < yield.operands.size())
           changed |= setRoot(operation.results[result],
@@ -258,15 +259,15 @@ private:
     return changed;
   }
 
-  const C1SemanticModule &module;
+  const GenericModule &module;
   std::map<int, std::string> roots;
   std::vector<int> allocationValues;
 };
 
 class SourceToAfterValues {
 public:
-  SourceToAfterValues(const C1SemanticModule &before,
-                      const C1SemanticModule &after,
+  SourceToAfterValues(const GenericModule &before,
+                      const GenericModule &after,
                       const BufferizedOperationCorrespondence &operations,
                       const AfterBufferRootResolver &roots,
                       const std::vector<BufferAllocation> &allocations)
@@ -294,7 +295,7 @@ private:
       const int result = std::stoi(fields[2]);
       if (operation < 0 || static_cast<size_t>(operation) >= before.operations.size())
         continue;
-      const C1OperationRecord &owner =
+      const GenericOperation &owner =
           before.operations.at(static_cast<size_t>(operation));
       if (result < 0 || static_cast<size_t>(result) >= owner.results.size())
         continue;
@@ -304,23 +305,23 @@ private:
   }
 
   void mapBlockArguments() {
-    for (const C1BlockRecord &sourceBlock : before.blocks) {
-      const C1RegionRecord &sourceRegion =
+    for (const GenericBlock &sourceBlock : before.blocks) {
+      const GenericRegion &sourceRegion =
           before.regions.at(static_cast<size_t>(sourceBlock.regionId));
       const int afterOwner = operations.lookup(sourceRegion.parentOperation);
       if (afterOwner < 0)
         continue;
-      const C1OperationRecord &owner =
+      const GenericOperation &owner =
           after.operations.at(static_cast<size_t>(afterOwner));
       if (sourceRegion.ordinal < 0 ||
           static_cast<size_t>(sourceRegion.ordinal) >= owner.regions.size())
         continue;
-      const C1RegionRecord &afterRegion = after.regions.at(
+      const GenericRegion &afterRegion = after.regions.at(
           static_cast<size_t>(owner.regions[static_cast<size_t>(sourceRegion.ordinal)]));
       if (sourceBlock.ordinal < 0 ||
           static_cast<size_t>(sourceBlock.ordinal) >= afterRegion.blocks.size())
         continue;
-      const C1BlockRecord &afterBlock = after.blocks.at(
+      const GenericBlock &afterBlock = after.blocks.at(
           static_cast<size_t>(afterRegion.blocks[static_cast<size_t>(sourceBlock.ordinal)]));
       for (size_t index = 0; index < sourceBlock.arguments.size() &&
                              index < afterBlock.arguments.size(); ++index)
@@ -341,7 +342,7 @@ private:
   void propagate() {
     for (size_t iteration = 0; iteration <= before.operations.size(); ++iteration) {
       bool changed = false;
-      for (const C1OperationRecord &source : before.operations) {
+      for (const GenericOperation &source : before.operations) {
         if (source.results.empty())
           continue;
         if (source.name == "bufferization.to_tensor" &&
@@ -352,7 +353,7 @@ private:
         const int afterOperation = operations.lookup(source.id);
         if (afterOperation < 0)
           continue;
-        const C1OperationRecord &target =
+        const GenericOperation &target =
             after.operations.at(static_cast<size_t>(afterOperation));
         if (source.name == "tensor.insert" && target.operands.size() > 1) {
           changed |= setValue(source.results.front(), target.operands[1]);
@@ -362,7 +363,7 @@ private:
           changed |= setValue(source.results.front(), target.operands.front());
           continue;
         }
-        const std::vector<size_t> inits = C1DpsInitOperandIndices(
+        const std::vector<size_t> inits = DpsInitOperandIndices(
             source.name, source.operands.size(), source.properties);
         for (size_t result = 0;
              result < source.results.size() && result < inits.size(); ++result)
@@ -380,8 +381,8 @@ private:
     }
   }
 
-  const C1SemanticModule &before;
-  const C1SemanticModule &after;
+  const GenericModule &before;
+  const GenericModule &after;
   const BufferizedOperationCorrespondence &operations;
   const AfterBufferRootResolver &roots;
   std::map<int, int> valueMap;
@@ -391,26 +392,26 @@ inline bool IsLocalOrChoiceBuffer(const std::string &buffer) {
   return startsWith(buffer, "local:") || startsWith(buffer, "choice(");
 }
 
-inline int AfterOperandNumber(const C1OperationRecord &source, int operand) {
+inline int AfterOperandNumber(const GenericOperation &source, int operand) {
   if (source.name == "tensor.insert_slice")
     return operand == 1 ? 0 : -1;
   return operand;
 }
 
-inline const C1OperationRecord *FindInsertSliceCopy(
-    const C1SemanticModule &after, int subviewOperation) {
-  const C1OperationRecord &subview = after.operations.at(
+inline const GenericOperation *FindInsertSliceCopy(
+    const GenericModule &after, int subviewOperation) {
+  const GenericOperation &subview = after.operations.at(
       static_cast<size_t>(subviewOperation));
   if (subview.blockId < 0)
     return nullptr;
-  const C1BlockRecord &block =
+  const GenericBlock &block =
       after.blocks.at(static_cast<size_t>(subview.blockId));
   auto position = std::find(block.operations.begin(), block.operations.end(),
                             subviewOperation);
   if (position == block.operations.end())
     return nullptr;
   for (++position; position != block.operations.end(); ++position) {
-    const C1OperationRecord &candidate =
+    const GenericOperation &candidate =
         after.operations.at(static_cast<size_t>(*position));
     if (candidate.name == "memref.copy")
       return &candidate;
@@ -421,8 +422,8 @@ inline const C1OperationRecord *FindInsertSliceCopy(
 }
 
 inline BufferizedSemanticIRValidation ValidateBufferizedSemanticIR(
-    const C1SemanticModule &before, const BufferizedSemanticIR &model,
-    const C1SemanticModule &after) {
+    const GenericModule &before, const BufferizedSemanticIR &model,
+    const GenericModule &after) {
   BufferizedSemanticIRValidation validation;
   BufferizedOperationCorrespondence operations(before, after);
   validation.errors = operations.getErrors();
@@ -450,7 +451,7 @@ inline BufferizedSemanticIRValidation ValidateBufferizedSemanticIR(
   for (const BufferizedOperandAccess &access : model.accesses) {
     if (!IsLocalOrChoiceBuffer(access.bufferId))
       continue;
-    const C1OperationRecord &source = before.operations.at(
+    const GenericOperation &source = before.operations.at(
         static_cast<size_t>(access.operationId));
     if (source.name == "bufferization.to_tensor") {
       if (source.results.empty())
@@ -472,7 +473,7 @@ inline BufferizedSemanticIRValidation ValidateBufferizedSemanticIR(
     const int afterOperand = AfterOperandNumber(source, access.operandNumber);
     if (source.name == "tensor.insert_slice" && access.operandNumber == 0 &&
         afterOperation >= 0) {
-      const C1OperationRecord *copy =
+      const GenericOperation *copy =
           FindInsertSliceCopy(after, afterOperation);
       if (!copy || copy->operands.empty()) {
         validation.errors.push_back("missing insert_slice copy for " +
@@ -488,7 +489,7 @@ inline BufferizedSemanticIRValidation ValidateBufferizedSemanticIR(
     }
     if (afterOperation < 0 || afterOperand < 0)
       continue;
-    const C1OperationRecord &target = after.operations.at(
+    const GenericOperation &target = after.operations.at(
         static_cast<size_t>(afterOperation));
     if (static_cast<size_t>(afterOperand) >= target.operands.size()) {
       validation.errors.push_back("missing after operand for source operation " +

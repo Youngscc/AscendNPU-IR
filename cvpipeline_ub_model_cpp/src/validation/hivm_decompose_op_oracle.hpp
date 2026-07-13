@@ -5,32 +5,21 @@
 
 namespace cvub {
 
-inline std::string C1FunctionName(const C1OperationRecord &operation) {
+inline std::string FunctionSymName(const GenericOperation &operation) {
   std::string name = FindDictionaryValue(operation.properties, "sym_name");
   if (name.size() >= 2 && name.front() == '"' && name.back() == '"')
     name = name.substr(1, name.size() - 2);
   return name;
 }
 
-inline const C1OperationRecord *C1EnclosingFunction(
-    const C1SemanticModule &module, const C1OperationRecord &operation) {
-  const C1OperationRecord *current = &operation;
-  while (current && current->name != "func.func") {
-    if (current->parentId < 0)
-      return nullptr;
-    current = &module.operations.at(static_cast<size_t>(current->parentId));
-  }
-  return current;
-}
-
 inline std::vector<std::string> FunctionAllocationTypes(
-    const C1SemanticModule &module, const std::string &function) {
+    const GenericModule &module, const std::string &function) {
   std::vector<std::string> result;
-  for (const C1OperationRecord &operation : module.operations) {
+  for (const GenericOperation &operation : module.operations) {
     if (operation.name != "memref.alloc")
       continue;
-    const C1OperationRecord *owner = C1EnclosingFunction(module, operation);
-    if (!owner || C1FunctionName(*owner) != function)
+    const GenericOperation *owner = EnclosingFunction(module, operation);
+    if (!owner || FunctionSymName(*owner) != function)
       continue;
     for (const std::string &type : operation.resultTypes)
       if (IsMemRefType(type))
@@ -40,8 +29,8 @@ inline std::vector<std::string> FunctionAllocationTypes(
 }
 
 inline std::vector<DecomposeBufferAllocation>
-CollectHIVMDecomposeOpOracle(const C1SemanticModule &before,
-                             const C1SemanticModule &after,
+CollectHIVMDecomposeOpOracle(const GenericModule &before,
+                             const GenericModule &after,
                              const std::string &function) {
   const std::vector<std::string> lhs =
       FunctionAllocationTypes(before, function);
@@ -73,7 +62,7 @@ CollectHIVMDecomposeOpOracle(const C1SemanticModule &before,
 }
 
 inline bool IsUBRelevantDecomposeOperation(
-    const C1OperationRecord &operation) {
+    const GenericOperation &operation) {
   if (operation.name == "memref.alloc")
     return false;
   if (!startsWith(operation.name, "hivm.hir."))
@@ -96,11 +85,11 @@ inline bool IsUBRelevantDecomposeOperation(
 }
 
 inline DecomposeOperationDelta FunctionUBOperationCounts(
-    const C1SemanticModule &module, const std::string &function) {
+    const GenericModule &module, const std::string &function) {
   DecomposeOperationDelta result;
-  for (const C1OperationRecord &operation : module.operations) {
-    const C1OperationRecord *owner = C1EnclosingFunction(module, operation);
-    if (owner && C1FunctionName(*owner) == function &&
+  for (const GenericOperation &operation : module.operations) {
+    const GenericOperation *owner = EnclosingFunction(module, operation);
+    if (owner && FunctionSymName(*owner) == function &&
         IsUBRelevantDecomposeOperation(operation))
       ++result[operation.name];
   }
@@ -108,7 +97,7 @@ inline DecomposeOperationDelta FunctionUBOperationCounts(
 }
 
 inline DecomposeOperationDelta CollectHIVMDecomposeOperationDeltaOracle(
-    const C1SemanticModule &before, const C1SemanticModule &after,
+    const GenericModule &before, const GenericModule &after,
     const std::string &function) {
   const DecomposeOperationDelta lhs =
       FunctionUBOperationCounts(before, function);

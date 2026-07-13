@@ -246,7 +246,7 @@ CVPipelineWorkspaceCollapseReassociation(const std::string &expandedType) {
 
 class CVPipelineLoopRewriter {
 public:
-  CVPipelineLoopRewriter(C1SemanticModule &module,
+  CVPipelineLoopRewriter(GenericModule &module,
                          CVPipelineAnalysisResult analysis)
       : module(module), analysis(std::move(analysis)), rewriter(module) {
     index();
@@ -255,7 +255,7 @@ public:
   bool rewrite() {
     if (!analysis.success || analysis.worklist.empty())
       return false;
-    const C1OperationRecord oldLoop =
+    const GenericOperation oldLoop =
         module.operations.at(static_cast<size_t>(analysis.loop));
     if (oldLoop.name != "scf.for" || oldLoop.operands.size() < 3 ||
         oldLoop.regions.size() != 1)
@@ -263,7 +263,7 @@ public:
     const int parentBlock = oldLoop.blockId;
     const int parentRegion = oldLoop.regionId;
     const int parentOperation = oldLoop.parentId;
-    const C1BlockRecord parentSnapshot =
+    const GenericBlock parentSnapshot =
         module.blocks.at(static_cast<size_t>(parentBlock));
     const auto position = std::find(parentSnapshot.operations.begin(),
                                     parentSnapshot.operations.end(), analysis.loop);
@@ -287,7 +287,7 @@ public:
     std::map<int, int> workspaceAllocations;
     std::map<int, std::string> workspaceTypes;
     for (const auto &[allocation, info] : analysis.workspaceAllocs) {
-      const C1OperationRecord &source =
+      const GenericOperation &source =
           module.operations.at(static_cast<size_t>(allocation));
       if (source.resultTypes.empty())
         continue;
@@ -301,7 +301,7 @@ public:
       workspaceTypes[allocation] = expanded;
       if (info.marker >= 0 &&
           static_cast<size_t>(info.marker) < module.operations.size()) {
-        C1OperationRecord &marker =
+        GenericOperation &marker =
             module.operations.at(static_cast<size_t>(info.marker));
         if (!marker.operands.empty())
           marker.operands.front() = workspaceAllocations[allocation];
@@ -320,10 +320,10 @@ public:
         "arith.muli", {stepType},
         {oldLoop.operands[2], result(unroll)}, {stepType, stepType},
         "{overflowFlags = #arith.overflow<none>}");
-    const int c1 = emitParent("arith.constant", {"index"}, {}, {},
-                              "{value = 1 : index}");
-    const int c0 = emitParent("arith.constant", {"index"}, {}, {},
-                              "{value = 0 : index}");
+    const int indexOne = emitParent("arith.constant", {"index"}, {}, {},
+                                    "{value = 1 : index}");
+    const int indexZero = emitParent("arith.constant", {"index"}, {}, {},
+                                     "{value = 0 : index}");
     const int pipelineIters = emitParent(
         "arith.constant", {"index"}, {}, {},
         "{value = " + std::to_string(analysis.multibuffer) + " : index}");
@@ -339,12 +339,12 @@ public:
                               oldLoop.operandTypes.begin() + 3,
                               oldLoop.operandTypes.end());
     const int outerBlock = rewriter.createBlock(outerRegion, outerArgumentTypes);
-    const C1BlockRecord outerBody =
+    const GenericBlock outerBody =
         module.blocks.at(static_cast<size_t>(outerBlock));
     indexBlockArguments(outerBody);
 
     std::map<int, int> globalValues;
-    const C1BlockRecord oldBody = oldLoopBody();
+    const GenericBlock oldBody = oldLoopBody();
     globalValues[oldBody.arguments.front()] = outerBody.arguments.front();
     for (size_t index = 1;
          index < oldBody.arguments.size() && index < outerBody.arguments.size();
@@ -360,7 +360,7 @@ public:
         const int defining = definingOperation(value);
         if (defining < 0)
           throw std::runtime_error("CVPipelining: local output has no def");
-        const C1OperationRecord &source =
+        const GenericOperation &source =
             module.operations.at(static_cast<size_t>(defining));
         if (source.dpsInits.empty())
           throw std::runtime_error("CVPipelining: local output is not DPS");
@@ -381,7 +381,7 @@ public:
         if (allocation < 0)
           throw std::runtime_error(
               "CVPipelining: expected alloc from local output init");
-        const C1OperationRecord &alloc =
+        const GenericOperation &alloc =
             module.operations.at(static_cast<size_t>(allocation));
         const std::string expanded =
             CVPipelineExpandLocalMemRefType(alloc.resultTypes.front(),
@@ -421,8 +421,8 @@ public:
       try {
         if (!rewriteWorkItem(
                 analysis.worklist[itemIndex], oldLoop, oldBody, newLoop,
-                outerRegion, outerBlock, result(c0), result(actualUpper),
-                result(c1), originalStep, outerIV, globalValues,
+                outerRegion, outerBlock, result(indexZero), result(actualUpper),
+                result(indexOne), originalStep, outerIV, globalValues,
                 expandedLocalOutputs, workspaceAllocations, workspaceTypes,
                 expandedProducedValues, outerResultValues))
           return false;
@@ -436,7 +436,7 @@ public:
       createSetAtomic(newLoop, outerRegion, outerBlock,
                       analysis.trailingAtomicEffect);
 
-    const C1OperationRecord &oldYield = module.operations.at(
+    const GenericOperation &oldYield = module.operations.at(
         static_cast<size_t>(oldBody.operations.back()));
     std::vector<int> outerYields;
     for (int operand : oldYield.operands) {
@@ -466,34 +466,34 @@ public:
                   outerYields, oldYield.operandTypes);
 
     std::map<int, int> replacements;
-    const C1OperationRecord &createdLoop =
+    const GenericOperation &createdLoop =
         module.operations.at(static_cast<size_t>(newLoop));
     for (size_t index = 0;
          index < oldLoop.results.size() && index < createdLoop.results.size();
          ++index)
       replacements[oldLoop.results[index]] = createdLoop.results[index];
-    for (C1OperationRecord &operation : module.operations)
+    for (GenericOperation &operation : module.operations)
       if (!CVPipelineIsDescendant(module, operation.id, analysis.loop))
         for (int &operand : operation.operands)
           if (replacements.count(operand))
             operand = replacements.at(operand);
 
-    C1BlockRecord &parent = module.blocks.at(static_cast<size_t>(parentBlock));
+    GenericBlock &parent = module.blocks.at(static_cast<size_t>(parentBlock));
     parent.operations.erase(parent.operations.begin() +
                             static_cast<std::ptrdiff_t>(insertion));
     parent.operations.insert(parent.operations.begin() +
                                  static_cast<std::ptrdiff_t>(insertion),
                              generated.begin(), generated.end());
-    module = CompactC1SemanticModule(std::move(module));
+    module = CompactGenericModule(std::move(module));
     return true;
   }
 
 private:
   void index() {
-    for (const C1BlockRecord &block : module.blocks)
+    for (const GenericBlock &block : module.blocks)
       for (size_t index = 0; index < block.arguments.size(); ++index)
         valueTypes[block.arguments[index]] = block.argumentTypes[index];
-    for (const C1OperationRecord &operation : module.operations) {
+    for (const GenericOperation &operation : module.operations) {
       for (size_t index = 0; index < operation.results.size(); ++index) {
         definitions[operation.results[index]] = operation.id;
         valueTypes[operation.results[index]] = operation.resultTypes[index];
@@ -522,7 +522,7 @@ private:
     const int definition = definingOperation(value);
     if (definition < 0)
       return value;
-    const C1OperationRecord &operation =
+    const GenericOperation &operation =
         module.operations.at(static_cast<size_t>(definition));
     if ((operation.name == "tensor.reshape" ||
          operation.name == "tensor.extract_slice" ||
@@ -550,7 +550,7 @@ private:
     const int definition = definingOperation(root);
     if (definition < 0)
       return -1;
-    const C1OperationRecord &operation =
+    const GenericOperation &operation =
         module.operations.at(static_cast<size_t>(definition));
     return operation.name == "memref.alloc" ? operation.id : -1;
   }
@@ -576,7 +576,7 @@ private:
     return result;
   }
 
-  void indexBlockArguments(const C1BlockRecord &block) {
+  void indexBlockArguments(const GenericBlock &block) {
     for (size_t index = 0;
          index < block.arguments.size() && index < block.argumentTypes.size();
          ++index)
@@ -597,23 +597,23 @@ private:
     return operation;
   }
 
-  const C1BlockRecord &oldLoopBody() const {
-    const C1OperationRecord &loop =
+  const GenericBlock &oldLoopBody() const {
+    const GenericOperation &loop =
         module.operations.at(static_cast<size_t>(analysis.loop));
-    const C1RegionRecord &region =
+    const GenericRegion &region =
         module.regions.at(static_cast<size_t>(loop.regions.front()));
     return module.blocks.at(static_cast<size_t>(region.blocks.front()));
   }
 
   int workspaceAllocation(int output) const {
-    const C1OperationRecord &operation =
+    const GenericOperation &operation =
         module.operations.at(static_cast<size_t>(output));
     if (operation.operands.empty())
       return -1;
     auto toTensor = definitions.find(operation.operands.back());
     if (toTensor == definitions.end())
       return -1;
-    const C1OperationRecord &conversion = module.operations.at(
+    const GenericOperation &conversion = module.operations.at(
         static_cast<size_t>(toTensor->second));
     if (conversion.name != "bufferization.to_tensor" ||
         conversion.operands.empty())
@@ -735,7 +735,7 @@ private:
   std::string ConvertTensorResultToMemRef(int value) const {
     const int definition = definingOperation(value);
     if (definition >= 0) {
-      const C1OperationRecord &operation =
+      const GenericOperation &operation =
           module.operations.at(static_cast<size_t>(definition));
       if (operation.name == "bufferization.to_tensor" &&
           !operation.operandTypes.empty())
@@ -748,8 +748,8 @@ private:
   }
 
   bool rewriteWorkItem(
-      const CVPipelineWorkItem &item, const C1OperationRecord &oldLoop,
-      const C1BlockRecord &oldBody, int outerLoop, int outerRegion,
+      const CVPipelineWorkItem &item, const GenericOperation &oldLoop,
+      const GenericBlock &oldBody, int outerLoop, int outerRegion,
       int outerBlock, int lower, int upper, int step, int originalStep,
       int outerIV, std::map<int, int> &globalValues,
       const std::map<int, int> &expandedLocalOutputs,
@@ -795,7 +795,7 @@ private:
     std::vector<std::string> argumentTypes = {"index"};
     argumentTypes.insert(argumentTypes.end(), initTypes.begin(), initTypes.end());
     const int block = rewriter.createBlock(region, argumentTypes);
-    const C1BlockRecord inner = module.blocks.at(static_cast<size_t>(block));
+    const GenericBlock inner = module.blocks.at(static_cast<size_t>(block));
     indexBlockArguments(inner);
     const int innerIV = inner.arguments.front();
     const int reconstructed = createInBlock(
@@ -826,7 +826,7 @@ private:
     }
     std::map<int, int> memrefOutputWriters;
     for (const auto &[toTensor, writer] : analysis.outputMemrefMap) {
-      const C1OperationRecord &toTensorOp =
+      const GenericOperation &toTensorOp =
           module.operations.at(static_cast<size_t>(toTensor));
       for (int resultValue : toTensorOp.results)
         if (std::find_if(item.localOutputs.begin(), item.localOutputs.end(),
@@ -858,7 +858,7 @@ private:
     for (int operationId : oldBody.operations) {
       if (item.ops.count(operationId) == 0)
         continue;
-      const C1OperationRecord source = module.operations.at(
+      const GenericOperation source = module.operations.at(
           static_cast<size_t>(operationId));
       std::map<int, int> operationValues = values;
       for (int operand : source.operands) {
@@ -947,7 +947,7 @@ private:
       }
       if (atomic != analysis.atomicEffectMap.end())
         createSetAtomic(loop, region, block, atomicNoneEffect(atomic->second));
-      const C1OperationRecord &clonedOperation =
+      const GenericOperation &clonedOperation =
           module.operations.at(static_cast<size_t>(cloned));
       for (size_t index = 0;
            index < source.results.size() && index < clonedOperation.results.size();
@@ -977,7 +977,7 @@ private:
     }
     yields.insert(yields.end(), localYieldValues.begin(), localYieldValues.end());
     createInBlock(loop, region, block, "scf.yield", {}, yields, initTypes);
-    const C1OperationRecord &createdLoop =
+    const GenericOperation &createdLoop =
         module.operations.at(static_cast<size_t>(loop));
     size_t loopResult = 0;
     for (const auto &[value, ordinal] : item.yieldedOutputs) {
@@ -1007,7 +1007,7 @@ private:
       const int toTensor = createInBlock(
           outerLoop, outerRegion, outerBlock, "bufferization.to_tensor",
           {tensorType}, {expanded}, {expandedType}, "{restrict}");
-      const C1OperationRecord &source = module.operations.at(
+      const GenericOperation &source = module.operations.at(
           static_cast<size_t>(output));
       if (!source.results.empty()) {
         const int expandedResult = result(toTensor);
@@ -1020,9 +1020,9 @@ private:
     return true;
   }
 
-  C1SemanticModule &module;
+  GenericModule &module;
   CVPipelineAnalysisResult analysis;
-  C1Rewriter rewriter;
+  GenericRewriter rewriter;
   std::map<int, int> definitions;
   std::map<int, std::string> valueTypes;
 };

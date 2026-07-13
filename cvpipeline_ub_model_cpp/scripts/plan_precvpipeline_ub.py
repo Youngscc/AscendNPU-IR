@@ -51,7 +51,8 @@ def parse_args() -> argparse.Namespace:
     repo = module.parent
     parser = argparse.ArgumentParser(
         description=(
-            "Run lightweight D+C+B model from before-CVPipeline generic IR, "
+            "Run the lightweight CVPipeline/suffix/PlanMemory model from "
+            "before-CVPipeline generic IR, "
             "and print exact UB peak plus the local-memory plan."))
 
     input_group = parser.add_argument_group("input")

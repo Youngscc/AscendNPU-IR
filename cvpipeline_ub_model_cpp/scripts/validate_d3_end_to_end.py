@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare production D1+C+B planning with saved after-CVPipeline C+B oracle."""
+"""Compare production before-CVPipeline planning with saved after-CVPipeline suffix oracle."""
 
 from __future__ import annotations
 
@@ -125,8 +125,8 @@ def main() -> int:
                 ]
                 c_command = [
                     str(tool),
-                    "--action=plan-c1-suffix",
-                    "--c1-generic-ir",
+                    "--action=plan-before-one-shot-bufferize",
+                    "--before-one-shot-bufferize-ir",
                     c1,
                     *common_suffix,
                     *restrict_arg,

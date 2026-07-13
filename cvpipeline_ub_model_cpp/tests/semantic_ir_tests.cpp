@@ -1,5 +1,5 @@
 #include "../src/semantic_ir/semantic_ir.hpp"
-#include "../src/semantic_ir/c1_semantic_ir.hpp"
+#include "../src/semantic_ir/generic_ir.hpp"
 #include "../src/suffix/bufferized_semantic_ir.hpp"
 
 #include <fstream>
@@ -41,9 +41,9 @@ int main() {
     if (cvub::operationOperandNames(*branch).size() != 3)
       throw std::runtime_error("SemanticIR operand identity is incomplete");
 
-    const cvub::fs::path generic =
+    const cvub::fs::path genericPath =
         cvub::fs::temp_directory_path() / "cvub_c1_generic_smoke.mlir";
-    std::ofstream genericOut(generic);
+    std::ofstream genericOut(genericPath);
     genericOut << "\"builtin.module\"() ({\n"
                   "  \"func.func\"() <{function_type = (i1) -> (), "
                   "sym_name = \"test\"}> ({\n"
@@ -59,13 +59,13 @@ int main() {
                   "  }) : () -> ()\n"
                   "}) {tag = \"smoke\"} : () -> ()\n";
     genericOut.close();
-    cvub::C1SemanticModule c1 = cvub::ParseC1GenericIR(generic);
-    if (c1.operations.size() != 7 || c1.regions.size() != 4 ||
-        c1.blocks.size() != 4)
-      throw std::runtime_error("C1 hierarchy parsing is incomplete");
-    if (c1.operations.front().attributes != "{tag = \"smoke\"}" ||
-        c1.operations.at(3).operands != std::vector<int>{0})
-      throw std::runtime_error("C1 attributes or def-use parsing is incomplete");
+    cvub::GenericModule genericModule = cvub::ParseGenericIR(genericPath);
+    if (genericModule.operations.size() != 7 ||
+        genericModule.regions.size() != 4 || genericModule.blocks.size() != 4)
+      throw std::runtime_error("generic IR hierarchy parsing is incomplete");
+    if (genericModule.operations.front().attributes != "{tag = \"smoke\"}" ||
+        genericModule.operations.at(3).operands != std::vector<int>{0})
+      throw std::runtime_error("generic IR attributes or def-use parsing is incomplete");
 
     const cvub::fs::path controlFlow =
         cvub::fs::temp_directory_path() / "cvub_c1_cfg_smoke.mlir";
@@ -80,19 +80,19 @@ int main() {
                       "  }) : () -> ()\n"
                       "}) : () -> ()\n";
     controlFlowOut.close();
-    cvub::C1SemanticModule cfg = cvub::ParseC1GenericIR(controlFlow);
+    cvub::GenericModule cfg = cvub::ParseGenericIR(controlFlow);
     if (cfg.operations.size() != 4 ||
         cfg.operations.at(2).successors != std::vector<int>{2})
-      throw std::runtime_error("C1 successor identity is incomplete");
+      throw std::runtime_error("generic IR successor identity is incomplete");
 
-    cvub::C1SemanticModule source;
-    cvub::C1OperationRecord empty;
+    cvub::GenericModule source;
+    cvub::GenericOperation empty;
     empty.id = 0;
     empty.name = "tensor.empty";
     empty.results = {0};
     empty.resultTypes = {"tensor<4xi32>"};
     source.operations.push_back(empty);
-    cvub::C1OperationRecord cast;
+    cvub::GenericOperation cast;
     cast.id = 1;
     cast.name = "tensor.cast";
     cast.results = {1};

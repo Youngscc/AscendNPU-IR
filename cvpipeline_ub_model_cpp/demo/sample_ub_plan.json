@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "input": {
+    "pre_cvpipeline_ir": "sample/before_cvpipeline_generic.mlir"
+  },
+  "options": {
+    "cvpipeline": {
+      "disable_pipelining": false,
+      "enable_lazy_loading": false,
+      "enable_preload": false,
+      "pipeline_depth": -1
+    },
+    "suffix_planmemory": {
+      "enable_auto_multi_buffer": false,
+      "local_multi_buffer_strategy": "no-limit",
+      "mix_multi_buffer_strategy": "no-limit",
+      "random_seed": 0,
+      "restrict_inplace_as_isa": false
+    }
+  },
+  "result": {
+    "capacity_bits": 1572864,
+    "overflow": false,
+    "peak_bits": 640,
+    "plan": [
+      {
+        "alloc_time": 8,
+        "extent_bits": 256,
+        "free_time": 14,
+        "name": "%base_0",
+        "offset_bytes": 0
+      },
+      {
+        "alloc_time": 11,
+        "extent_bits": 128,
+        "free_time": 16,
+        "name": "%base_1",
+        "offset_bytes": 32
+      },
+      {
+        "alloc_time": 14,
+        "extent_bits": 128,
+        "free_time": 18,
+        "name": "%base_2",
+        "offset_bytes": 64
+      }
+    ],
+    "precision": "before_cvpipeline_model",
+    "required_bits": 768,
+    "restrict_inplace_as_isa": false,
+    "selected_seed": 0,
+    "success": true
+  }
+}

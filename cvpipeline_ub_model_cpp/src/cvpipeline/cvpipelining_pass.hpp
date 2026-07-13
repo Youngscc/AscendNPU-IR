@@ -5,7 +5,7 @@
 
 namespace cvub {
 
-inline bool CVPipelineIsInsideAny(const C1SemanticModule &module, int operation,
+inline bool CVPipelineIsInsideAny(const GenericModule &module, int operation,
                                   const std::set<int> &ancestors) {
   int current = operation;
   while (current >= 0) {
@@ -17,20 +17,20 @@ inline bool CVPipelineIsInsideAny(const C1SemanticModule &module, int operation,
 }
 
 inline bool CVPipelineHasGeneratedPipelineAttr(
-    const C1OperationRecord &operation) {
+    const GenericOperation &operation) {
   const std::string text = operation.properties + operation.attributes;
   return text.find("multibuffer_unroll_factor") != std::string::npos ||
          text.find("hivm.preload_num") != std::string::npos;
 }
 
-inline C1SemanticModule RunCVPipeliningPass(
-    C1SemanticModule module, const CVPipeliningOptions &options) {
+inline GenericModule RunCVPipeliningPass(
+    GenericModule module, const CVPipeliningOptions &options) {
   if (options.disabled || options.setDepthInUnrollMode == 0 ||
       options.setDepthInUnrollMode == 1)
     return module;
 
   for (size_t index = 0; index < module.operations.size(); ++index) {
-    C1OperationRecord &operation = module.operations[index];
+    GenericOperation &operation = module.operations[index];
     if (operation.name == "scf.for")
       CVPipelineMarkRegionCoreTypes(module, operation);
   }
@@ -39,14 +39,14 @@ inline C1SemanticModule RunCVPipeliningPass(
   while (changed) {
     changed = false;
     std::vector<int> loops;
-    for (const C1OperationRecord &operation : module.operations)
+    for (const GenericOperation &operation : module.operations)
       if (operation.name == "scf.for")
         loops.push_back(operation.id);
 
     for (int loop : loops) {
       if (loop < 0 || static_cast<size_t>(loop) >= module.operations.size())
         continue;
-      const C1OperationRecord &operation =
+      const GenericOperation &operation =
           module.operations.at(static_cast<size_t>(loop));
       if (operation.name != "scf.for" ||
           CVPipelineHasGeneratedPipelineAttr(operation))

@@ -1,34 +1,34 @@
-#ifndef CVPIPELINE_UB_MODEL_CPP_C3_SEMANTIC_IR_HPP
-#define CVPIPELINE_UB_MODEL_CPP_C3_SEMANTIC_IR_HPP
+#ifndef CVPIPELINE_UB_MODEL_CPP_POST_BUFFERIZATION_REWRITES_HPP
+#define CVPIPELINE_UB_MODEL_CPP_POST_BUFFERIZATION_REWRITES_HPP
 
 #include "convert_non_contiguous_reshape_to_copy.hpp"
 #include "hivm_opt_single_point.hpp"
 
 namespace cvub {
 
-struct C3GeneratedOperation {
+struct GeneratedOperationRewrite {
   std::string name;
   std::vector<std::string> buffers;
   bool preserveSourceProperties = false;
   bool decomposedScalarVSub = false;
 };
 
-struct C3OperationRewrite {
+struct OperationRewriteDelta {
   int sourceOperation = -1;
   std::string sourceName;
-  std::vector<C3GeneratedOperation> replacement;
+  std::vector<GeneratedOperationRewrite> replacement;
 };
 
-struct C3SemanticIR {
+struct PostBufferizationRewriteState {
   BufferizedSemanticIR bufferized;
   HIVMOptSinglePointResult singlePoint;
   std::vector<DecomposeBufferAllocation> decomposeAllocations;
   DecomposeOperationDelta decomposeOperationDelta;
   std::vector<NonContiguousReshapeCopy> nonContiguousReshapeCopies;
-  std::vector<C3OperationRewrite> operationRewrites;
+  std::vector<OperationRewriteDelta> operationRewrites;
 };
 
-inline std::vector<std::string> C3OperationBuffers(
+inline std::vector<std::string> OperationBufferOperands(
     const BufferizedSemanticIR &module, int operation,
     const std::map<std::string, std::string> *mapping = nullptr) {
   std::vector<std::pair<int, std::string>> ordered;
@@ -52,7 +52,7 @@ inline std::vector<std::string> C3OperationBuffers(
   return result;
 }
 
-inline std::vector<C3OperationRewrite> BuildC3OperationRewrites(
+inline std::vector<OperationRewriteDelta> BuildOperationRewriteDeltas(
     const BufferizedSemanticIR &module,
     const std::vector<DecomposeBufferAllocation> &allocations,
     const std::map<std::string, std::string> &mapping) {
@@ -65,12 +65,12 @@ inline std::vector<C3OperationRewrite> BuildC3OperationRewrites(
                       std::to_string(buffers.size()));
   }
 
-  std::vector<C3OperationRewrite> result;
-  for (const C1OperationRecord &operation : module.logicalModule.operations) {
+  std::vector<OperationRewriteDelta> result;
+  for (const GenericOperation &operation : module.logicalModule.operations) {
     const std::vector<std::string> buffers =
-        C3OperationBuffers(module, operation.id, &mapping);
+        OperationBufferOperands(module, operation.id, &mapping);
     const std::vector<std::string> temporary = generatedBuffers[operation.id];
-    C3OperationRewrite rewrite{operation.id, operation.name, {}};
+    OperationRewriteDelta rewrite{operation.id, operation.name, {}};
     if (operation.name == "hivm.hir.vcast" && !temporary.empty() &&
         buffers.size() >= 2) {
       if (temporary.size() == 1) {
@@ -136,8 +136,8 @@ inline std::vector<C3OperationRewrite> BuildC3OperationRewrites(
   return result;
 }
 
-inline C3SemanticIR BuildC3SemanticIR(BufferizedSemanticIR bufferized) {
-  C3SemanticIR result;
+inline PostBufferizationRewriteState BuildPostBufferizationRewriteState(BufferizedSemanticIR bufferized) {
+  PostBufferizationRewriteState result;
   result.singlePoint = ModelHIVMOptSinglePoint(bufferized);
   result.decomposeAllocations =
       ModelHIVMDecomposeOp(bufferized.logicalModule);
@@ -146,15 +146,15 @@ inline C3SemanticIR BuildC3SemanticIR(BufferizedSemanticIR bufferized) {
   result.nonContiguousReshapeCopies =
       ModelConvertNonContiguousReshapeToCopy(bufferized.logicalModule);
   result.operationRewrites =
-      BuildC3OperationRewrites(bufferized, result.decomposeAllocations,
+      BuildOperationRewriteDeltas(bufferized, result.decomposeAllocations,
                                result.singlePoint.bufferMapping);
   result.bufferized = std::move(bufferized);
   return result;
 }
 
-inline std::string SerializeC3SemanticIR(const C3SemanticIR &module) {
+inline std::string SerializePostBufferizationRewriteState(const PostBufferizationRewriteState &module) {
   std::ostringstream output;
-  output << "C3_SEMANTIC_IR\t1\n";
+  output << "POST_BUFFERIZATION_REWRITE_STATE\t1\n";
   output << SerializeBufferizedSemanticIR(module.bufferized);
   output << "POST_SINGLE_POINT_ALLOCATIONS\t1\n";
   for (size_t index = 0; index < module.singlePoint.allocations.size(); ++index)
@@ -179,10 +179,10 @@ inline std::string SerializeC3SemanticIR(const C3SemanticIR &module) {
        module.nonContiguousReshapeCopies)
     output << "NON_CONTIGUOUS_RESHAPE_COPY\t" << copy.collapseOperation
            << '\t' << HexEncode(copy.type) << '\n';
-  for (const C3OperationRewrite &rewrite : module.operationRewrites) {
+  for (const OperationRewriteDelta &rewrite : module.operationRewrites) {
     output << "REWRITE\t" << rewrite.sourceOperation << '\t'
            << HexEncode(rewrite.sourceName) << '\n';
-    for (const C3GeneratedOperation &operation : rewrite.replacement) {
+    for (const GeneratedOperationRewrite &operation : rewrite.replacement) {
       output << "GENERATED_OP\t" << HexEncode(operation.name);
       for (const std::string &buffer : operation.buffers)
         output << '\t' << HexEncode(buffer);

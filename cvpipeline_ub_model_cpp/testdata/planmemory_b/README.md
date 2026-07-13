@@ -1,4 +1,4 @@
-# PlanMemory B-Stage Fixtures
+# PlanMemory Fixtures
 
 This directory contains named PlanMemory-before MLIR fixtures for focused
 lifetime and local UB planning validation. Every exact fixture must be checked
@@ -28,7 +28,7 @@ for a boundary. Source-derived fixtures retain their source function name.
 All fixtures satisfy the real PlanMemory-before input contract. Dynamic local
 extent is excluded because the upstream suffix guarantees static local-buffer
 shapes before PlanMemory; defensive rejection of malformed input is tested at
-the C++ unit level instead of being counted as B-stage coverage.
+the C++ unit level instead of being counted as focused PlanMemory coverage.
 
 ## Commands
 

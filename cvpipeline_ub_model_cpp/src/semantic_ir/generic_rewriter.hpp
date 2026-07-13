@@ -1,17 +1,17 @@
-#ifndef CVPIPELINE_UB_MODEL_CPP_C1_REWRITER_HPP
-#define CVPIPELINE_UB_MODEL_CPP_C1_REWRITER_HPP
+#ifndef CVPIPELINE_UB_MODEL_CPP_GENERIC_REWRITER_HPP
+#define CVPIPELINE_UB_MODEL_CPP_GENERIC_REWRITER_HPP
 
-#include "c1_semantic_ir.hpp"
+#include "generic_ir.hpp"
 
 namespace cvub {
 
-class C1Rewriter {
+class GenericRewriter {
 public:
-  explicit C1Rewriter(C1SemanticModule &module) : module(module) {
-    for (const C1BlockRecord &block : module.blocks)
+  explicit GenericRewriter(GenericModule &module) : module(module) {
+    for (const GenericBlock &block : module.blocks)
       for (int argument : block.arguments)
         nextValue = std::max(nextValue, argument + 1);
-    for (const C1OperationRecord &operation : module.operations)
+    for (const GenericOperation &operation : module.operations)
       for (int result : operation.results)
         nextValue = std::max(nextValue, result + 1);
   }
@@ -23,7 +23,7 @@ public:
                       const std::vector<std::string> &operandTypes = {},
                       const std::string &properties = "",
                       const std::string &attributes = "{}") {
-    C1OperationRecord operation;
+    GenericOperation operation;
     operation.id = static_cast<int>(module.operations.size());
     operation.parentId = parent;
     operation.regionId = region;
@@ -41,7 +41,7 @@ public:
   }
 
   int createRegion(int parentOperation) {
-    C1RegionRecord region;
+    GenericRegion region;
     region.id = static_cast<int>(module.regions.size());
     region.parentOperation = parentOperation;
     module.regions.push_back(std::move(region));
@@ -51,7 +51,7 @@ public:
   }
 
   int createBlock(int region, const std::vector<std::string> &argumentTypes) {
-    C1BlockRecord block;
+    GenericBlock block;
     block.id = static_cast<int>(module.blocks.size());
     block.regionId = region;
     block.argumentTypes = argumentTypes;
@@ -64,18 +64,18 @@ public:
   }
 
   void appendToBlock(int block, int operation) {
-    C1BlockRecord &record = module.blocks.at(static_cast<size_t>(block));
-    C1OperationRecord &op =
+    GenericBlock &record = module.blocks.at(static_cast<size_t>(block));
+    GenericOperation &op =
         module.operations.at(static_cast<size_t>(operation));
     op.ordinal = static_cast<int>(record.operations.size());
     record.operations.push_back(operation);
   }
 
   void insertToBlock(int block, size_t position, int operation) {
-    C1BlockRecord &record = module.blocks.at(static_cast<size_t>(block));
+    GenericBlock &record = module.blocks.at(static_cast<size_t>(block));
     if (position > record.operations.size())
       position = record.operations.size();
-    C1OperationRecord &op =
+    GenericOperation &op =
         module.operations.at(static_cast<size_t>(operation));
     op.blockId = block;
     op.regionId = record.regionId;
@@ -90,7 +90,7 @@ public:
   }
 
   void removeFromBlock(int block, int operation) {
-    C1BlockRecord &record = module.blocks.at(static_cast<size_t>(block));
+    GenericBlock &record = module.blocks.at(static_cast<size_t>(block));
     record.operations.erase(
         std::remove(record.operations.begin(), record.operations.end(),
                     operation),
@@ -102,7 +102,7 @@ public:
 
   int cloneOperation(int sourceId, int parent, int region, int block,
                      const std::map<int, int> &values) {
-    const C1OperationRecord source =
+    const GenericOperation source =
         module.operations.at(static_cast<size_t>(sourceId));
     std::vector<int> operands = source.operands;
     for (int &operand : operands) {
@@ -113,7 +113,7 @@ public:
     const int clone = createOperation(
         parent, region, block, source.name, source.resultTypes, operands,
         source.operandTypes, source.properties, source.attributes);
-    C1OperationRecord &result = module.operations.at(static_cast<size_t>(clone));
+    GenericOperation &result = module.operations.at(static_cast<size_t>(clone));
     result.effects = source.effects;
     result.dpsInputs = source.dpsInputs;
     result.dpsInits = source.dpsInits;
@@ -133,24 +133,24 @@ public:
 
   int cloneOperationTree(int sourceId, int parent, int region, int block,
                          std::map<int, int> &values) {
-    const C1OperationRecord source =
+    const GenericOperation source =
         module.operations.at(static_cast<size_t>(sourceId));
     const int clone = cloneOperation(sourceId, parent, region, block, values);
-    C1OperationRecord &cloned =
+    GenericOperation &cloned =
         module.operations.at(static_cast<size_t>(clone));
     for (size_t index = 0;
          index < source.results.size() && index < cloned.results.size(); ++index)
       values[source.results[index]] = cloned.results[index];
     for (int sourceRegionId : source.regions) {
-      const C1RegionRecord sourceRegion =
+      const GenericRegion sourceRegion =
           module.regions.at(static_cast<size_t>(sourceRegionId));
       const int clonedRegion = createRegion(clone);
       for (int sourceBlockId : sourceRegion.blocks) {
-        const C1BlockRecord sourceBlock =
+        const GenericBlock sourceBlock =
             module.blocks.at(static_cast<size_t>(sourceBlockId));
         const int clonedBlock = createBlock(clonedRegion,
                                             sourceBlock.argumentTypes);
-        const C1BlockRecord &newBlock =
+        const GenericBlock &newBlock =
             module.blocks.at(static_cast<size_t>(clonedBlock));
         for (size_t index = 0; index < sourceBlock.arguments.size(); ++index)
           values[sourceBlock.arguments[index]] = newBlock.arguments[index];
@@ -167,11 +167,11 @@ public:
   int newValue() { return nextValue++; }
 
 private:
-  C1SemanticModule &module;
+  GenericModule &module;
   int nextValue = 0;
 };
 
-inline C1SemanticModule CompactC1SemanticModule(C1SemanticModule module) {
+inline GenericModule CompactGenericModule(GenericModule module) {
   if (module.operations.empty())
     return module;
   std::set<int> reachableOperations;
@@ -203,22 +203,22 @@ inline C1SemanticModule CompactC1SemanticModule(C1SemanticModule module) {
   std::map<int, int> regionIds;
   std::map<int, int> blockIds;
   std::map<int, int> valueIds;
-  C1SemanticModule compact;
+  GenericModule compact;
   std::function<int(int, int)> copyOperation;
   std::function<int(int, int)> copyRegion;
   copyRegion = [&](int oldRegion, int parent) {
-    const C1RegionRecord &source =
+    const GenericRegion &source =
         module.regions.at(static_cast<size_t>(oldRegion));
-    C1RegionRecord region;
+    GenericRegion region;
     region.id = static_cast<int>(compact.regions.size());
     region.parentOperation = parent;
     region.ordinal = source.ordinal;
     regionIds[oldRegion] = region.id;
     compact.regions.push_back(region);
     for (int oldBlock : source.blocks) {
-      const C1BlockRecord &sourceBlock =
+      const GenericBlock &sourceBlock =
           module.blocks.at(static_cast<size_t>(oldBlock));
-      C1BlockRecord block;
+      GenericBlock block;
       block.id = static_cast<int>(compact.blocks.size());
       block.regionId = region.id;
       block.ordinal = sourceBlock.ordinal;
@@ -239,7 +239,7 @@ inline C1SemanticModule CompactC1SemanticModule(C1SemanticModule module) {
     return region.id;
   };
   copyOperation = [&](int oldOperation, int block) {
-    C1OperationRecord operation =
+    GenericOperation operation =
         module.operations.at(static_cast<size_t>(oldOperation));
     operation.id = static_cast<int>(compact.operations.size());
     operationIds[oldOperation] = operation.id;
@@ -267,7 +267,7 @@ inline C1SemanticModule CompactC1SemanticModule(C1SemanticModule module) {
     return operation.id;
   };
 
-  C1OperationRecord root = module.operations.front();
+  GenericOperation root = module.operations.front();
   root.id = 0;
   root.parentId = -1;
   root.regionId = -1;
@@ -285,7 +285,7 @@ inline C1SemanticModule CompactC1SemanticModule(C1SemanticModule module) {
     compact.operations.front().regions.push_back(mapped);
   }
 
-  for (C1OperationRecord &operation : compact.operations) {
+  for (GenericOperation &operation : compact.operations) {
     for (int &operand : operation.operands)
       if (valueIds.count(operand))
         operand = valueIds.at(operand);
@@ -293,7 +293,7 @@ inline C1SemanticModule CompactC1SemanticModule(C1SemanticModule module) {
       if (blockIds.count(successor))
         successor = blockIds.at(successor);
   }
-  for (C1BlockRecord &block : compact.blocks)
+  for (GenericBlock &block : compact.blocks)
     for (size_t index = 0; index < block.operations.size(); ++index)
       compact.operations.at(static_cast<size_t>(block.operations[index])).ordinal =
           static_cast<int>(index);

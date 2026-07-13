@@ -1,15 +1,15 @@
-#ifndef CVPIPELINE_UB_MODEL_CPP_C1_SEMANTIC_IR_HPP
-#define CVPIPELINE_UB_MODEL_CPP_C1_SEMANTIC_IR_HPP
+#ifndef CVPIPELINE_UB_MODEL_CPP_GENERIC_IR_HPP
+#define CVPIPELINE_UB_MODEL_CPP_GENERIC_IR_HPP
 
 #include "semantic_ir.hpp"
-#include "c1_op_semantics.hpp"
+#include "generic_op_semantics.hpp"
 
 #include <iomanip>
 #include <unordered_map>
 
 namespace cvub {
 
-struct C1OperationRecord {
+struct GenericOperation {
   int id = -1;
   int parentId = -1;
   int regionId = -1;
@@ -29,14 +29,14 @@ struct C1OperationRecord {
   std::vector<int> regions;
 };
 
-struct C1RegionRecord {
+struct GenericRegion {
   int id = -1;
   int parentOperation = -1;
   int ordinal = 0;
   std::vector<int> blocks;
 };
 
-struct C1BlockRecord {
+struct GenericBlock {
   int id = -1;
   int regionId = -1;
   int ordinal = 0;
@@ -45,10 +45,10 @@ struct C1BlockRecord {
   std::vector<int> operations;
 };
 
-struct C1SemanticModule {
-  std::vector<C1OperationRecord> operations;
-  std::vector<C1RegionRecord> regions;
-  std::vector<C1BlockRecord> blocks;
+struct GenericModule {
+  std::vector<GenericOperation> operations;
+  std::vector<GenericRegion> regions;
+  std::vector<GenericBlock> blocks;
 };
 
 inline std::string HexEncode(const std::string &value) {
@@ -177,7 +177,7 @@ inline std::string dictionaryBody(const std::string &text, bool properties) {
   }
   size_t close = findBalancedClose(text, open);
   if (close == std::string::npos)
-    throw std::runtime_error("C1 generic parser: unbalanced dictionary");
+    throw std::runtime_error("generic IR parser: unbalanced dictionary");
   return text.substr(open + 1, close - open - 1);
 }
 
@@ -266,7 +266,7 @@ inline std::vector<int> parseIdList(const std::vector<std::string> &names,
   for (const std::string &name : names) {
     auto found = ids.find(name);
     if (found == ids.end())
-      throw std::runtime_error("C1 generic parser: undefined SSA value " + name);
+      throw std::runtime_error("generic IR parser: undefined SSA value " + name);
     result.push_back(found->second);
   }
   return result;
@@ -292,34 +292,34 @@ inline std::string joinHexTypes(const std::vector<std::string> &values) {
   return result.str();
 }
 
-class C1GenericParser {
+class GenericIRParser {
 public:
-  explicit C1GenericParser(bool applyOperationSemantics = true)
+  explicit GenericIRParser(bool applyOperationSemantics = true)
       : applyOperationSemantics(applyOperationSemantics) {}
 
-  C1SemanticModule Parse(const fs::path &path) {
+  GenericModule Parse(const fs::path &path) {
     std::ifstream input(path);
     if (!input)
-      throw std::runtime_error("C1 generic parser: cannot open " + path.string());
+      throw std::runtime_error("generic IR parser: cannot open " + path.string());
     std::string line;
     while (std::getline(input, line))
       parseLine(trim(line));
     if (!openRegions.empty())
-      throw std::runtime_error("C1 generic parser: unterminated region");
+      throw std::runtime_error("generic IR parser: unterminated region");
     for (const auto &[operationId, successorNames] : pendingSuccessors) {
-      C1OperationRecord &operation =
+      GenericOperation &operation =
           module.operations.at(static_cast<size_t>(operationId));
       for (const std::string &name : successorNames) {
         auto found = blockLabels.find({operation.regionId, name});
         if (found == blockLabels.end())
-          throw std::runtime_error("C1 generic parser: undefined successor " +
+          throw std::runtime_error("generic IR parser: undefined successor " +
                                    name);
         operation.successors.push_back(found->second);
       }
     }
     if (applyOperationSemantics)
-      for (C1OperationRecord &operation : module.operations)
-        ApplyC1OpSemantics(operation);
+      for (GenericOperation &operation : module.operations)
+        ApplyOperationSemantics(operation);
     return std::move(module);
   }
 
@@ -331,10 +331,10 @@ private:
   };
 
   int addRegion(int owner) {
-    C1OperationRecord &operation =
+    GenericOperation &operation =
         module.operations.at(static_cast<size_t>(owner));
     int id = static_cast<int>(module.regions.size());
-    C1RegionRecord region;
+    GenericRegion region;
     region.id = id;
     region.parentOperation = owner;
     region.ordinal = static_cast<int>(operation.regions.size());
@@ -348,16 +348,16 @@ private:
                const std::vector<std::string> &types,
                const std::string &label = "") {
     if (openRegions.empty())
-      throw std::runtime_error("C1 generic parser: block outside region");
+      throw std::runtime_error("generic IR parser: block outside region");
     RegionState &state = openRegions.back();
-    C1RegionRecord &region =
+    GenericRegion &region =
         module.regions.at(static_cast<size_t>(state.regionId));
-    C1BlockRecord block;
+    GenericBlock block;
     block.id = static_cast<int>(module.blocks.size());
     block.regionId = region.id;
     block.ordinal = static_cast<int>(region.blocks.size());
     if (names.size() != types.size())
-      throw std::runtime_error("C1 generic parser: block argument/type mismatch");
+      throw std::runtime_error("generic IR parser: block argument/type mismatch");
     for (size_t index = 0; index < names.size(); ++index) {
       int valueId = nextValue++;
       values[names[index]] = valueId;
@@ -415,14 +415,14 @@ private:
     }
     size_t close = findBalancedClose(line, open);
     if (close == std::string::npos)
-      throw std::runtime_error("C1 generic parser: malformed block header");
+      throw std::runtime_error("generic IR parser: malformed block header");
     std::vector<std::string> names;
     std::vector<std::string> types;
     for (const std::string &argument :
          splitTopLevel(line.substr(open + 1, close - open - 1))) {
       size_t colon = argument.find(':');
       if (colon == std::string::npos)
-        throw std::runtime_error("C1 generic parser: untyped block argument");
+        throw std::runtime_error("generic IR parser: untyped block argument");
       names.push_back(trim(argument.substr(0, colon)));
       types.push_back(trim(argument.substr(colon + 1)));
     }
@@ -430,7 +430,7 @@ private:
   }
 
   void updateOperationSuffix(int operationId, const std::string &suffix) {
-    C1OperationRecord &operation =
+    GenericOperation &operation =
         module.operations.at(static_cast<size_t>(operationId));
     std::string attributeBody = expandAliases(dictionaryBody(suffix, false));
     operation.attributes = dictionaryFromBodies(
@@ -448,19 +448,19 @@ private:
                           ? std::string::npos
                           : line.find('"', quote + 1);
     if (quoteEnd == std::string::npos)
-      throw std::runtime_error("C1 generic parser: malformed operation name");
+      throw std::runtime_error("generic IR parser: malformed operation name");
     size_t equal = line.rfind('=', quote);
     std::vector<std::string> resultNames = genericResultNames(
         equal == std::string::npos ? "" : line.substr(0, equal));
     size_t operandOpen = line.find('(', quoteEnd + 1);
     size_t operandClose = findBalancedClose(line, operandOpen);
     if (operandClose == std::string::npos)
-      throw std::runtime_error("C1 generic parser: malformed operand list");
+      throw std::runtime_error("generic IR parser: malformed operand list");
     std::vector<std::string> operandNames =
         extractSSAs(line.substr(operandOpen + 1,
                                 operandClose - operandOpen - 1));
 
-    C1OperationRecord operation;
+    GenericOperation operation;
     operation.id = static_cast<int>(module.operations.size());
     operation.name = line.substr(quote + 1, quoteEnd - quote - 1);
     operation.parentId = openRegions.empty()
@@ -469,7 +469,7 @@ private:
     operation.regionId = openRegions.empty() ? -1 : openRegions.back().regionId;
     operation.blockId = ensureBlock();
     if (operation.blockId >= 0) {
-      C1BlockRecord &block =
+      GenericBlock &block =
           module.blocks.at(static_cast<size_t>(operation.blockId));
       operation.ordinal = static_cast<int>(block.operations.size());
       block.operations.push_back(operation.id);
@@ -487,7 +487,7 @@ private:
     if (successorOpen < line.size() && line[successorOpen] == '[') {
       size_t successorClose = findBalancedClose(line, successorOpen);
       if (successorClose == std::string::npos)
-        throw std::runtime_error("C1 generic parser: malformed successor list");
+        throw std::runtime_error("generic IR parser: malformed successor list");
       std::vector<std::string> names;
       for (const std::string &item : splitTopLevel(
                line.substr(successorOpen + 1,
@@ -522,7 +522,7 @@ private:
     }
     if (startsWith(line, "}, {")) {
       if (openRegions.empty())
-        throw std::runtime_error("C1 generic parser: region transition without owner");
+        throw std::runtime_error("generic IR parser: region transition without owner");
       int owner = openRegions.back().ownerOperation;
       openRegions.pop_back();
       addRegion(owner);
@@ -530,7 +530,7 @@ private:
     }
     if (startsWith(line, "})")) {
       if (openRegions.empty())
-        throw std::runtime_error("C1 generic parser: unmatched region close");
+        throw std::runtime_error("generic IR parser: unmatched region close");
       int owner = openRegions.back().ownerOperation;
       openRegions.pop_back();
       updateOperationSuffix(owner, line.substr(2));
@@ -540,7 +540,7 @@ private:
       parseOperation(line);
   }
 
-  C1SemanticModule module;
+  GenericModule module;
   std::vector<RegionState> openRegions;
   std::map<std::string, int> values;
   std::map<std::string, std::string> aliases;
@@ -550,16 +550,16 @@ private:
   bool applyOperationSemantics = true;
 };
 
-inline C1SemanticModule ParseC1GenericIR(const fs::path &path,
+inline GenericModule ParseGenericIR(const fs::path &path,
                                          bool applyOperationSemantics = true) {
-  return C1GenericParser(applyOperationSemantics).Parse(path);
+  return GenericIRParser(applyOperationSemantics).Parse(path);
 }
 
-inline std::string SerializeC1SemanticIR(const C1SemanticModule &module) {
+inline std::string SerializeGenericModule(const GenericModule &module) {
   std::ostringstream output;
-  output << "C1_SCHEMA\t1\n";
+  output << "GENERIC_IR_SCHEMA\t1\n";
   std::function<void(int)> emit = [&](int operationId) {
-    const C1OperationRecord &operation =
+    const GenericOperation &operation =
         module.operations.at(static_cast<size_t>(operationId));
     output << "OP\t" << operation.id << '\t' << operation.parentId << '\t'
            << operation.regionId << '\t' << operation.blockId << '\t'
@@ -574,12 +574,12 @@ inline std::string SerializeC1SemanticIR(const C1SemanticModule &module) {
            << joinIds(operation.dpsInputs) << '\t'
            << joinIds(operation.dpsInits) << '\n';
     for (int regionId : operation.regions) {
-      const C1RegionRecord &region =
+      const GenericRegion &region =
           module.regions.at(static_cast<size_t>(regionId));
       output << "REGION\t" << region.id << '\t' << region.parentOperation
              << '\t' << region.ordinal << '\n';
       for (int blockId : region.blocks) {
-        const C1BlockRecord &block =
+        const GenericBlock &block =
             module.blocks.at(static_cast<size_t>(blockId));
         output << "BLOCK\t" << block.id << '\t' << block.regionId << '\t'
                << block.ordinal << '\t' << joinIds(block.arguments) << '\t'

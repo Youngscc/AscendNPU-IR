@@ -1,4 +1,4 @@
-# C-Stage Suffix Modules
+# Modeled Suffix Modules
 
 Each modeled suffix pass gets its own similarly named `.hpp`/`.cpp` pair in
 this directory. `suffix_pipeline` only owns pass ordering and configuration;
@@ -18,36 +18,36 @@ logic:
   singleton vector-to-scalar rewrites and dead local-buffer elimination.
 - `convert_non_contiguous_reshape_to_copy.hpp`: conditional contiguous temp
   buffer/copy insertion for annotated collapse-shape operations.
-- `c3_semantic_ir.hpp`: connected C2-to-C3 state passed forward to C4.
+- `post_bufferization_rewrites.hpp`: post-OneShotBufferize canonicalization,
+  decomposition and reshape-copy state before memory-scope inference.
 - `infer_hivm_mem_scope.hpp`: function/core-derived allocation memory scope.
 - `align_storage.hpp`: `AlignAllocSize`, `MarkStrideAlign` and
   `EnableStrideAlign` UB projection.
 - `alloc_extra_buffer.hpp`: source-forward HIVM `AllocExtraBuffer` formulas.
-- `c4_semantic_ir.hpp`: connected C3-to-C4 alignment, post-flatten trace size,
-  extra-buffer ownership and final physical buffer projection.
+- `after_alloc_extra_buffer.hpp`: alignment, post-flatten trace size,
+  extra-buffer ownership and physical buffer projection.
 - `inline_load_copy.hpp`: source-forward `InlineLoadCopy` ordering, alias and
   intervening-memory-effect checks.
-- `c5_semantic_ir.hpp`: connected C4-to-C5 direct-load rewrites and dead middle
-  buffer projection.
+- `after_inline_load_copy.hpp`: direct-load rewrites and dead middle buffer
+  projection after `InlineLoadCopy`.
 - `mark_multi_buffer.hpp`: source-forward `MarkMultiBuffer` strategy, loop,
   existing-mark and preload semantics.
-- `c6_semantic_ir.hpp`: connected C5-to-C6 multi-buffer projection.
+- `after_mark_multi_buffer.hpp`: multi-buffer projection after `MarkMultiBuffer`.
 - `planmemory_input_semantic_ir.hpp`: canonical PlanMemory-before AIV/UB
-  physical buffer records and the explicit C8-precheck access projection.
+  physical buffer records and access projection.
 
-The connected C3 path ends immediately before the first
-`InferHIVMMemScope`: C2 `BufferizedSemanticIR` -> post-bufferization
+The post-bufferization rewrite path ends immediately before the first
+`InferHIVMMemScope`: `BufferizedSemanticIR` -> post-bufferization
 canonicalization -> first `HIVMDecomposeOp` ->
-`ConvertNonContiguousReshapeToCopy` -> `C3SemanticIR`.
+`ConvertNonContiguousReshapeToCopy` -> `PostBufferizationRewriteState`.
 
-The connected C4 projection is validated byte-for-byte on buffer identity,
-owner, memory scope, physical bits and extra-buffer status.
-The connected C5 projection additionally validates all 388 function pass pairs
-and the final survivor set after `InlineLoadCopy`.
-The C6 projection validates 166 objects across seven native strategy classes.
-The C7 projection validates 1162 tuples and 17836 final AIV/UB buffers. The
-optional `validate_c7_planmemory_input.py --with-accesses` mode is a C8
-precheck and remains exact-or-blocker rather than part of C7 acceptance.
+The AllocExtraBuffer projection is validated byte-for-byte on buffer identity,
+owner, memory scope, physical bits and extra-buffer status. The InlineLoadCopy
+projection additionally validates all 388 function pass pairs and the final
+survivor set after `InlineLoadCopy`. The MarkMultiBuffer projection validates
+166 objects across seven native strategy classes. The PlanMemory-input bridge
+validates 1162 tuples and 17836 final AIV/UB buffers; optional access checking
+remains exact-or-blocker.
 
 Oracle extraction and byte-for-byte comparison remain in `scripts/` and the
 development CLI; they are not part of the model API.

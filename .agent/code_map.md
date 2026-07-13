@@ -39,7 +39,7 @@ cvpipeline_ub_model_cpp/src/cvpipeline/cvpipelining_analysis.hpp
 cvpipeline_ub_model_cpp/src/cvpipeline/cvpipelining_rewrite.hpp
 cvpipeline_ub_model_cpp/src/cvpipeline/cvpipelining_preload_rewrite.hpp
 cvpipeline_ub_model_cpp/src/cvpipeline/cvpipelining_pass.hpp
-cvpipeline_ub_model_cpp/src/semantic_ir/c1_rewriter.hpp
+cvpipeline_ub_model_cpp/src/semantic_ir/generic_rewriter.hpp
 cvpipeline_ub_model_cpp/src/suffix/planmemory_bridge.hpp
 cvpipeline_ub_model_cpp/src/planmemory/{mem_liveness_analysis,storage_entry,mem_plan}.hpp
 cvpipeline_ub_model_cpp/src/planmemory/planmemory_model.hpp
@@ -55,7 +55,7 @@ cvpipeline_ub_model_cpp/tests/
 ```text
 Output/adapters/<adapter>/<stage>/
 Output/index/
-Output/experiments/c2_c3_pass_oracles/
+Output/experiments/post_bufferization_pass_oracles/
 Output/index/c6_pass_oracles/summary.tsv
 ```
 
@@ -71,7 +71,7 @@ python3 scripts/validate_d1_cvpipelining.py
 python3 scripts/validate_d3_end_to_end.py --seeds 0 --restrict-modes 0 --compare-text-plan
 ```
 
-指定 C8 case：追加 `--only-hash=<full-sha256>`。构建真实 suffix：
+指定 PlanMemory-input bridge case：追加 `--only-hash=<full-sha256>`。构建真实 suffix：
 
 ```bash
 cmake --build build --target bishengir-cvpipeline-suffix-compile -j8

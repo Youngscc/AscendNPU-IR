@@ -55,14 +55,14 @@ inline std::string MemRefWithElementType(const std::string &type,
 
 class HIVMDecomposeOpModel {
 public:
-  explicit HIVMDecomposeOpModel(const C1SemanticModule &module,
+  explicit HIVMDecomposeOpModel(const GenericModule &module,
                                 std::string function = "")
       : module(module), function(std::move(function)) {}
 
   std::vector<DecomposeBufferAllocation> Run() const {
     std::vector<DecomposeBufferAllocation> result;
-    for (const C1OperationRecord &operation : module.operations) {
-      const C1OperationRecord *owner = enclosingFunction(operation);
+    for (const GenericOperation &operation : module.operations) {
+      const GenericOperation *owner = enclosingFunction(operation);
       if (!owner || (!function.empty() && functionName(*owner) != function) ||
           isHost(*owner))
         continue;
@@ -73,8 +73,8 @@ public:
 
   DecomposeOperationDelta OperationDelta() const {
     DecomposeOperationDelta result;
-    for (const C1OperationRecord &operation : module.operations) {
-      const C1OperationRecord *owner = enclosingFunction(operation);
+    for (const GenericOperation &operation : module.operations) {
+      const GenericOperation *owner = enclosingFunction(operation);
       if (!owner || (!function.empty() && functionName(*owner) != function) ||
           isHost(*owner))
         continue;
@@ -84,9 +84,9 @@ public:
   }
 
 private:
-  const C1OperationRecord *
-  enclosingFunction(const C1OperationRecord &operation) const {
-    const C1OperationRecord *current = &operation;
+  const GenericOperation *
+  enclosingFunction(const GenericOperation &operation) const {
+    const GenericOperation *current = &operation;
     while (current && current->name != "func.func") {
       if (current->parentId < 0)
         return nullptr;
@@ -95,20 +95,20 @@ private:
     return current;
   }
 
-  std::string functionName(const C1OperationRecord &operation) const {
+  std::string functionName(const GenericOperation &operation) const {
     std::string name = FindDictionaryValue(operation.properties, "sym_name");
     if (name.size() >= 2 && name.front() == '"' && name.back() == '"')
       name = name.substr(1, name.size() - 2);
     return name;
   }
 
-  bool isHost(const C1OperationRecord &operation) const {
+  bool isHost(const GenericOperation &operation) const {
     return DecomposeEnumValue(FindDictionaryValue(operation.attributes,
                                                    "hacc.function_kind")) ==
            "HOST";
   }
 
-  std::string operandType(const C1OperationRecord &operation,
+  std::string operandType(const GenericOperation &operation,
                           size_t index) const {
     if (index >= operation.operandTypes.size())
       throw std::runtime_error("HIVMDecomposeOp: missing operand type for " +
@@ -116,8 +116,8 @@ private:
     return operation.operandTypes[index];
   }
 
-  size_t destinationIndex(const C1OperationRecord &operation) const {
-    const std::vector<size_t> destinations = C1DpsInitOperandIndices(
+  size_t destinationIndex(const GenericOperation &operation) const {
+    const std::vector<size_t> destinations = DpsInitOperandIndices(
         operation.name, operation.operands.size(), operation.properties);
     if (destinations.empty())
       throw std::runtime_error("HIVMDecomposeOp: missing destination for " +
@@ -125,12 +125,12 @@ private:
     return destinations.front();
   }
 
-  void add(const C1OperationRecord &operation, const std::string &type,
+  void add(const GenericOperation &operation, const std::string &type,
            std::vector<DecomposeBufferAllocation> &result) const {
     result.push_back({operation.id, operation.name, type});
   }
 
-  void appendVCast(const C1OperationRecord &operation,
+  void appendVCast(const GenericOperation &operation,
                    std::vector<DecomposeBufferAllocation> &result) const {
     const std::string source = operandType(operation, 0);
     const std::string destination =
@@ -155,7 +155,7 @@ private:
     }
   }
 
-  void appendVCmp(const C1OperationRecord &operation,
+  void appendVCmp(const GenericOperation &operation,
                   std::vector<DecomposeBufferAllocation> &result) const {
     const std::string source = operandType(operation, 0);
     const std::string destination =
@@ -174,7 +174,7 @@ private:
     add(operation, MemRefWithElementType(source, "f16"), result);
   }
 
-  void appendVBrc(const C1OperationRecord &operation,
+  void appendVBrc(const GenericOperation &operation,
                   std::vector<DecomposeBufferAllocation> &result) const {
     const std::vector<int64_t> dimensions = DecomposeI64Array(
         FindDictionaryValue(operation.properties, "broadcast_dims"));
@@ -204,7 +204,7 @@ private:
     }
   }
 
-  void appendAtomic(const C1OperationRecord &operation,
+  void appendAtomic(const GenericOperation &operation,
                     std::vector<DecomposeBufferAllocation> &result) const {
     const std::string source = operandType(operation, 0);
     if (operation.name == "hivm.hir.atomic_cas") {
@@ -219,7 +219,7 @@ private:
       add(operation, MemRefWithElementType(source, ShapedElementType(source)),
           result);
       const std::vector<size_t> segments =
-          C1OperandSegmentSizes(operation.properties);
+          OperandSegmentSizes(operation.properties);
       if (segments.size() >= 3 && segments[2] != 0)
         add(operation,
             MemRefWithElementType(source, ShapedElementType(source)), result);
@@ -239,7 +239,7 @@ private:
   }
 
   void appendAllocations(
-      const C1OperationRecord &operation,
+      const GenericOperation &operation,
       std::vector<DecomposeBufferAllocation> &result) const {
     if (operation.name == "hivm.hir.vcast")
       appendVCast(operation, result);
@@ -260,7 +260,7 @@ private:
       result.erase(name);
   }
 
-  bool lowersVCast(const C1OperationRecord &operation) const {
+  bool lowersVCast(const GenericOperation &operation) const {
     const std::string sourceElement =
         ShapedElementType(operandType(operation, 0));
     const std::string destinationElement = ShapedElementType(
@@ -273,7 +273,7 @@ private:
             destinationElement == "i1");
   }
 
-  bool lowersVCmp(const C1OperationRecord &operation) const {
+  bool lowersVCmp(const GenericOperation &operation) const {
     const std::string sourceElement =
         ShapedElementType(operandType(operation, 0));
     const std::string destinationElement = ShapedElementType(
@@ -287,7 +287,7 @@ private:
            (compareMode != "eq" && compareMode != "ne");
   }
 
-  void appendOperationDelta(const C1OperationRecord &operation,
+  void appendOperationDelta(const GenericOperation &operation,
                             DecomposeOperationDelta &result) const {
     if (operation.name == "hivm.hir.vcast" && lowersVCast(operation)) {
       const std::string sourceElement =
@@ -337,7 +337,7 @@ private:
       change(result, "hivm.hir.load", 1);
       change(result, "hivm.hir.store", 1);
       const std::vector<size_t> segments =
-          C1OperandSegmentSizes(operation.properties);
+          OperandSegmentSizes(operation.properties);
       change(result, segments.size() >= 3 && segments[2] != 0
                          ? "hivm.hir.vsel"
                          : "hivm.hir.copy",
@@ -357,18 +357,18 @@ private:
     }
   }
 
-  const C1SemanticModule &module;
+  const GenericModule &module;
   std::string function;
 };
 
 inline std::vector<DecomposeBufferAllocation>
-ModelHIVMDecomposeOp(const C1SemanticModule &module,
+ModelHIVMDecomposeOp(const GenericModule &module,
                      const std::string &function = "") {
   return HIVMDecomposeOpModel(module, function).Run();
 }
 
 inline DecomposeOperationDelta
-ModelHIVMDecomposeOperationDelta(const C1SemanticModule &module,
+ModelHIVMDecomposeOperationDelta(const GenericModule &module,
                                  const std::string &function = "") {
   return HIVMDecomposeOpModel(module, function).OperationDelta();
 }

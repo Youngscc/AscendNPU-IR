@@ -14,11 +14,11 @@ struct SuffixPipelineOptions {
 };
 
 inline PlanMemoryInput BuildSuffixPlanMemoryInput(
-    C1SemanticModule module,
+    GenericModule module,
     const SuffixPipelineOptions &options = {}) {
-  for (C1OperationRecord &operation : module.operations)
-    if (C1IsReviewedOperation(operation.name))
-      ApplyC1OpSemantics(operation);
+  for (GenericOperation &operation : module.operations)
+    if (HasModeledOperationSemantics(operation.name))
+      ApplyOperationSemantics(operation);
 
   const OneShotBufferizationResult bufferization =
       RunOneShotBufferize(module);
@@ -29,21 +29,21 @@ inline PlanMemoryInput BuildSuffixPlanMemoryInput(
   multiBufferOptions.limitMixAutoMultiBufferBuffer =
       options.limitMixAutoMultiBufferBuffer;
   PlanMemoryInputSemanticIR semantic = BuildPlanMemoryInputSemanticIR(
-      BuildC6SemanticIR(
-          BuildC5SemanticIR(BuildC4SemanticIR(BuildC3SemanticIR(
+      BuildAfterMarkMultiBufferState(
+          BuildAfterInlineLoadCopyState(BuildAfterAllocExtraBufferState(BuildPostBufferizationRewriteState(
               BuildBufferizedSemanticIR(module, bufferization)))),
           multiBufferOptions));
 
-  for (const C4BufferRecord &buffer : semantic.c6.c5.c4.buffers) {
+  for (const LocalBufferRecord &buffer : semantic.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.buffers) {
     const std::optional<MemRefTypeModel> type = ParseMemRefType(buffer.type);
     const bool dynamic = type && std::any_of(
         type->shape.begin(), type->shape.end(),
         [](const std::optional<int64_t> &extent) { return !extent; });
     const auto alignment =
-        semantic.c6.c5.c4.alignStorage.strideAlignments.find(
+        semantic.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.alignStorage.strideAlignments.find(
             buffer.sourceIdentity);
     if (dynamic &&
-        alignment != semantic.c6.c5.c4.alignStorage.strideAlignments.end() &&
+        alignment != semantic.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.alignStorage.strideAlignments.end() &&
         !alignment->second.empty())
       throw std::runtime_error(
           "C suffix: dynamic stride-aligned allocation is not supported by "
@@ -55,7 +55,7 @@ inline PlanMemoryInput BuildSuffixPlanMemoryInput(
 inline PlanMemoryInput BuildSuffixPlanMemoryInput(
     const fs::path &c1GenericIR,
     const SuffixPipelineOptions &options = {}) {
-  return BuildSuffixPlanMemoryInput(ParseC1GenericIR(c1GenericIR, false),
+  return BuildSuffixPlanMemoryInput(ParseGenericIR(c1GenericIR, false),
                                     options);
 }
 

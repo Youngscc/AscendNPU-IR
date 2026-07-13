@@ -34,7 +34,7 @@ struct CVPipelineAnalysisResult {
 
 class CVPipelineImplAnalysis {
 public:
-  CVPipelineImplAnalysis(C1SemanticModule &module, int loop, int multibuffer,
+  CVPipelineImplAnalysis(GenericModule &module, int loop, int multibuffer,
                          bool enableLazyLoading)
       : module(module), pipelineLoop(loop), numMultibuffer(multibuffer),
         enableLazyLoading(enableLazyLoading) {
@@ -61,13 +61,13 @@ public:
 
 private:
   void index() {
-    for (const C1BlockRecord &block : module.blocks)
+    for (const GenericBlock &block : module.blocks)
       for (size_t index = 0; index < block.arguments.size(); ++index) {
         valueTypes[block.arguments[index]] = block.argumentTypes[index];
         blockArguments[block.arguments[index]] =
             {block.id, static_cast<int>(index)};
       }
-    for (const C1OperationRecord &operation : module.operations) {
+    for (const GenericOperation &operation : module.operations) {
       for (size_t index = 0; index < operation.results.size(); ++index) {
         definitions[operation.results[index]] = operation.id;
         if (index < operation.resultTypes.size())
@@ -76,11 +76,11 @@ private:
       for (int operand : operation.operands)
         users[operand].push_back(operation.id);
     }
-    const C1OperationRecord &loop = module.operations.at(
+    const GenericOperation &loop = module.operations.at(
         static_cast<size_t>(pipelineLoop));
     if (loop.regions.empty())
       return;
-    const C1RegionRecord &region = module.regions.at(
+    const GenericRegion &region = module.regions.at(
         static_cast<size_t>(loop.regions.front()));
     if (!region.blocks.empty())
       body = region.blocks.front();
@@ -122,7 +122,7 @@ private:
   int traceValueDef(int value) const {
     auto definition = definitions.find(value);
     if (definition != definitions.end()) {
-      const C1OperationRecord &operation = module.operations.at(
+      const GenericOperation &operation = module.operations.at(
           static_cast<size_t>(definition->second));
       if (operation.name == "tensor.reshape" ||
           operation.name == "tensor.extract_slice" ||
@@ -144,7 +144,7 @@ private:
       if (operation.name == "tensor.insert_slice" && operation.operands.size() > 1)
         return traceValueDef(operation.operands[1]);
       if (operation.name == "scf.for") {
-        const C1OperationRecord *parentYield = loopTerminator(operation.id);
+        const GenericOperation *parentYield = loopTerminator(operation.id);
         if (parentYield) {
           auto resultIt = std::find(operation.results.begin(),
                                     operation.results.end(), value);
@@ -162,7 +162,7 @@ private:
     auto argument = blockArguments.find(value);
     if (argument == blockArguments.end())
       return value;
-    const C1BlockRecord &block =
+    const GenericBlock &block =
         module.blocks.at(static_cast<size_t>(argument->second.first));
     const int region = block.regionId;
     if (region < 0)
@@ -171,7 +171,7 @@ private:
         module.regions.at(static_cast<size_t>(region)).parentOperation;
     if (parent < 0)
       return value;
-    const C1OperationRecord &parentOp =
+    const GenericOperation &parentOp =
         module.operations.at(static_cast<size_t>(parent));
     if (parentOp.name != "scf.for" || argument->second.second == 0)
       return value;
@@ -186,46 +186,46 @@ private:
     auto definition = definitions.find(root);
     if (definition == definitions.end())
       return -1;
-    const C1OperationRecord &operation = module.operations.at(
+    const GenericOperation &operation = module.operations.at(
         static_cast<size_t>(definition->second));
     return operation.name == "memref.alloc" ? operation.id : -1;
   }
 
-  bool isCrossCoreCopy(const C1OperationRecord &operation) const {
+  bool isCrossCoreCopy(const GenericOperation &operation) const {
     if (operation.name != "hivm.hir.copy" || operation.operands.size() < 2)
       return false;
     const int allocation = traceAlloc(operation.operands[1]);
     if (allocation < 0)
       return false;
-    const C1OperationRecord &alloc =
+    const GenericOperation &alloc =
         module.operations.at(static_cast<size_t>(allocation));
     return !alloc.resultTypes.empty() &&
            alloc.resultTypes.front().find("#hivm.address_space<cbuf>") !=
                std::string::npos;
   }
 
-  bool isCoreOp(const C1OperationRecord &operation) const {
+  bool isCoreOp(const GenericOperation &operation) const {
     return CVPipelineHasAttribute(operation, "pipeline.cubeonly") ||
            CVPipelineHasAttribute(operation, "pipeline.veconly") ||
            (startsWith(operation.name, "hivm.hir.") &&
             IsDestinationStyleOp(operation.name));
   }
 
-  bool isSeparator(const C1OperationRecord &operation) const {
+  bool isSeparator(const GenericOperation &operation) const {
     return operation.name == "hivm.hir.fixpipe" ||
            operation.name == "hivm.hir.store" || isCrossCoreCopy(operation);
   }
 
-  const C1OperationRecord *loopTerminator(int loopId) const {
-    const C1OperationRecord &loop =
+  const GenericOperation *loopTerminator(int loopId) const {
+    const GenericOperation &loop =
         module.operations.at(static_cast<size_t>(loopId));
     if (loop.regions.empty())
       return nullptr;
-    const C1RegionRecord &region =
+    const GenericRegion &region =
         module.regions.at(static_cast<size_t>(loop.regions.front()));
     if (region.blocks.empty())
       return nullptr;
-    const C1BlockRecord &block =
+    const GenericBlock &block =
         module.blocks.at(static_cast<size_t>(region.blocks.front()));
     if (block.operations.empty())
       return nullptr;
@@ -246,7 +246,7 @@ private:
       if (!visited.insert(operationId).second ||
           !CVPipelineIsDescendant(module, operationId, pipelineLoop))
         continue;
-      const C1OperationRecord &operation = module.operations.at(
+      const GenericOperation &operation = module.operations.at(
           static_cast<size_t>(operationId));
       for (int result : operation.results) {
         if (!isShaped(result))
@@ -269,11 +269,11 @@ private:
   void populateLoopCarriedDependencies() {
     if (body < 0)
       return;
-    const C1BlockRecord &block =
+    const GenericBlock &block =
         module.blocks.at(static_cast<size_t>(body));
     if (block.operations.empty())
       return;
-    const C1OperationRecord &yield = module.operations.at(
+    const GenericOperation &yield = module.operations.at(
         static_cast<size_t>(block.operations.back()));
     for (size_t index = 0;
          index < yield.operands.size() && index + 1 < block.arguments.size();
@@ -292,7 +292,7 @@ private:
         if (operation < 0 || operation == defining ||
             !visited.insert(operation).second)
           continue;
-        const C1OperationRecord &record = module.operations.at(
+        const GenericOperation &record = module.operations.at(
             static_cast<size_t>(operation));
         if (IsDestinationStyleOp(record.name)) {
           loopCarriedDependenceMap[operation].insert(defining);
@@ -328,8 +328,8 @@ private:
       }
       if (startsWith(valueTypes[operand], "tensor<"))
         return true;
-      const C1BlockRecord &block = module.blocks.at(static_cast<size_t>(body));
-      const C1OperationRecord &yield = module.operations.at(
+      const GenericBlock &block = module.blocks.at(static_cast<size_t>(body));
+      const GenericOperation &yield = module.operations.at(
           static_cast<size_t>(block.operations.back()));
       const size_t yielded = static_cast<size_t>(argument->second.second - 1);
       if (yielded < yield.operands.size())
@@ -355,7 +355,7 @@ private:
       if (!visited.insert(operationId).second)
         continue;
       stack.push_back(operationId);
-      const C1OperationRecord &operation =
+      const GenericOperation &operation =
           module.operations.at(static_cast<size_t>(operationId));
       if (operation.results.size() == 1 && !isMemRef(operation.results.front()))
         continue;
@@ -369,7 +369,7 @@ private:
   }
 
   bool traceMemrefSubnet(int start, std::vector<int> &stack) {
-    const C1OperationRecord &initial =
+    const GenericOperation &initial =
         module.operations.at(static_cast<size_t>(start));
     if (std::all_of(initial.operands.begin(), initial.operands.end(),
                     [&](int value) { return isTensor(value); }))
@@ -395,7 +395,7 @@ private:
           name == "memref.expand_shape" || name == "memref.subview" ||
           name == "memref.view" || name == "bufferization.to_tensor" ||
           name == "tensor.extract_slice") {
-        const C1OperationRecord &operation =
+        const GenericOperation &operation =
             module.operations.at(static_cast<size_t>(definingOp));
         if (operation.operands.empty())
           break;
@@ -416,7 +416,7 @@ private:
       stack.push_back(definition);
       for (int result : module.operations.at(static_cast<size_t>(definition)).results) {
         for (int user : users[result]) {
-          const C1OperationRecord &use =
+          const GenericOperation &use =
               module.operations.at(static_cast<size_t>(user));
           if (IsDestinationStyleOp(use.name)) {
             if (writer >= 0)
@@ -452,7 +452,7 @@ private:
     while (!stack.empty()) {
       const int operationId = stack.back();
       stack.pop_back();
-      C1OperationRecord &operation = module.operations.at(
+      GenericOperation &operation = module.operations.at(
           static_cast<size_t>(operationId));
       if (isCoreOp(operation)) {
         auto mapped = opToWorkItemMap.find(operationId);
@@ -480,7 +480,7 @@ private:
       toBePipelined.erase(operationId);
       for (int result : operation.results)
         for (int user : users[result]) {
-          const C1OperationRecord &use =
+          const GenericOperation &use =
               module.operations.at(static_cast<size_t>(user));
           if (use.name == "annotation.mark" || use.name == "hivm.hir.debug")
             mapOpToItem(getContainedParent(user), item);
@@ -500,7 +500,7 @@ private:
           const int contained = getContainedParent(user);
           if (contained < 0 || contained == operationId)
             continue;
-          const C1OperationRecord &writer = module.operations.at(
+          const GenericOperation &writer = module.operations.at(
               static_cast<size_t>(contained));
           if (IsDestinationStyleOp(writer.name))
             stack.push_back(contained);
@@ -509,7 +509,7 @@ private:
       for (int operand : operation.operands)
         if (!traceOperands(operand, item, stack))
           return false;
-      for (const C1OperationRecord &nested : module.operations)
+      for (const GenericOperation &nested : module.operations)
         if (nested.id != operationId &&
             CVPipelineIsDescendant(module, nested.id, operationId))
           for (int operand : nested.operands)
@@ -521,9 +521,9 @@ private:
 
   std::vector<int> extractAvailableOps(CVPipelineCoreType &core) {
     std::vector<int> available;
-    const C1BlockRecord &block = module.blocks.at(static_cast<size_t>(body));
+    const GenericBlock &block = module.blocks.at(static_cast<size_t>(body));
     for (int operationId : block.operations) {
-      const C1OperationRecord &operation = module.operations.at(
+      const GenericOperation &operation = module.operations.at(
           static_cast<size_t>(operationId));
       if (opToWorkItemMap.count(operationId))
         continue;
@@ -589,10 +589,10 @@ private:
     if (body < 0)
       return fail("missing loop body");
     int multibuffer = numMultibuffer > 1 ? numMultibuffer : 2;
-    const C1BlockRecord &block = module.blocks.at(static_cast<size_t>(body));
+    const GenericBlock &block = module.blocks.at(static_cast<size_t>(body));
     collectAtomicEffects(block);
     for (int operationId : block.operations) {
-      C1OperationRecord &operation = module.operations.at(
+      GenericOperation &operation = module.operations.at(
           static_cast<size_t>(operationId));
       if (isCoreOp(operation))
         toBePipelined.insert(operationId);
@@ -674,13 +674,13 @@ private:
   }
 
   void markOutputs() {
-    const C1BlockRecord &block = module.blocks.at(static_cast<size_t>(body));
-    const C1OperationRecord &yield = module.operations.at(
+    const GenericBlock &block = module.blocks.at(static_cast<size_t>(body));
+    const GenericOperation &yield = module.operations.at(
         static_cast<size_t>(block.operations.back()));
     for (size_t itemIndex = 0; itemIndex < worklist.size(); ++itemIndex) {
       CVPipelineWorkItem &item = worklist[itemIndex];
       for (int operationId : item.ops) {
-        const C1OperationRecord &operation = module.operations.at(
+        const GenericOperation &operation = module.operations.at(
             static_cast<size_t>(operationId));
         bool workspaceOutput = false;
         if ((operation.name == "hivm.hir.store" ||
@@ -729,7 +729,7 @@ private:
     }
   }
 
-  int getMultibufferCount(const C1OperationRecord &marker) const {
+  int getMultibufferCount(const GenericOperation &marker) const {
     const std::string dict = marker.properties + marker.attributes;
     const size_t key = dict.find("hivm.multi_buffer");
     if (key == std::string::npos)
@@ -755,7 +755,7 @@ private:
     auto definition = definitions.find(value);
     if (definition == definitions.end())
       return -1;
-    const C1OperationRecord &operation =
+    const GenericOperation &operation =
         module.operations.at(static_cast<size_t>(definition->second));
     if (operation.name == "memref_ext.alloc_workspace")
       return operation.id;
@@ -769,7 +769,7 @@ private:
   }
 
   bool markWorkspaceOps(int operationId, unsigned multibuffer) {
-    const C1OperationRecord &operation =
+    const GenericOperation &operation =
         module.operations.at(static_cast<size_t>(operationId));
     if (operation.name == "annotation.mark") {
       if (operation.operands.empty())
@@ -801,10 +801,10 @@ private:
     return true;
   }
 
-  void collectAtomicEffects(const C1BlockRecord &block) {
+  void collectAtomicEffects(const GenericBlock &block) {
     std::string current;
     for (int operationId : block.operations) {
-      const C1OperationRecord &operation =
+      const GenericOperation &operation =
           module.operations.at(static_cast<size_t>(operationId));
       if (operation.name == "hivm.hir.set_atomic") {
         if ((operation.properties + operation.attributes).find("NONE") ==
@@ -823,10 +823,10 @@ private:
   }
 
   bool absorbMergerOpsIntoWorkItems() {
-    const C1BlockRecord &block = module.blocks.at(static_cast<size_t>(body));
+    const GenericBlock &block = module.blocks.at(static_cast<size_t>(body));
     if (block.operations.empty())
       return true;
-    const C1OperationRecord &terminator =
+    const GenericOperation &terminator =
         module.operations.at(static_cast<size_t>(block.operations.back()));
     for (int yieldOperand : terminator.operands) {
       auto rootDefinition = definitions.find(yieldOperand);
@@ -843,7 +843,7 @@ private:
         stack.pop_back();
         if (!chain.insert(current).second)
           continue;
-        const C1OperationRecord &operation =
+        const GenericOperation &operation =
             module.operations.at(static_cast<size_t>(current));
         for (int operand : operation.operands) {
           auto definition = definitions.find(operand);
@@ -870,7 +870,7 @@ private:
     for (size_t itemIndex = 0; itemIndex < worklist.size(); ++itemIndex) {
       std::set<int> loadedCounters;
       for (int operationId : worklist[itemIndex].ops) {
-        const C1OperationRecord &operation =
+        const GenericOperation &operation =
             module.operations.at(static_cast<size_t>(operationId));
         if (operation.name != "memref.load" && operation.name != "hivm.hir.load")
           continue;
@@ -879,7 +879,7 @@ private:
         auto definition = definitions.find(traceValueDef(operation.operands.front()));
         if (definition == definitions.end())
           continue;
-        const C1OperationRecord &alloc =
+        const GenericOperation &alloc =
             module.operations.at(static_cast<size_t>(definition->second));
         if (alloc.name == "memref.alloca" &&
             (alloc.properties + alloc.attributes)
@@ -887,7 +887,7 @@ private:
           loadedCounters.insert(operation.operands.front());
       }
       for (int operationId : block.operations) {
-        C1OperationRecord &operation =
+        GenericOperation &operation =
             module.operations.at(static_cast<size_t>(operationId));
         if (operation.name != "memref.store" || operation.operands.size() < 2 ||
             loadedCounters.count(operation.operands[1]) == 0 ||
@@ -905,7 +905,7 @@ private:
     return true;
   }
 
-  C1SemanticModule &module;
+  GenericModule &module;
   int pipelineLoop = -1;
   int numMultibuffer = -1;
   bool enableLazyLoading = false;

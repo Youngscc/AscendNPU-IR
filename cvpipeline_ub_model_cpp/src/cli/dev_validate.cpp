@@ -3,7 +3,7 @@
 // This binary is for implementation workflow checks. It is not the final model
 // interface.
 
-#include "../semantic_ir/c1_semantic_ir.hpp"
+#include "../semantic_ir/generic_ir.hpp"
 #include "../cvpipeline/cvpipelining.hpp"
 #include "../cvpipeline/cvpipelining_analysis.hpp"
 #include "../cvpipeline/cvpipelining_pass.hpp"
@@ -15,19 +15,19 @@
 #include "../suffix/one_shot_analysis.hpp"
 #include "../suffix/alloc_extra_buffer.hpp"
 #include "../suffix/hivm_decompose_op.hpp"
-#include "../suffix/c3_semantic_ir.hpp"
-#include "../suffix/c4_semantic_ir.hpp"
-#include "../suffix/c5_semantic_ir.hpp"
-#include "../suffix/c6_semantic_ir.hpp"
+#include "../suffix/post_bufferization_rewrites.hpp"
+#include "../suffix/after_alloc_extra_buffer.hpp"
+#include "../suffix/after_inline_load_copy.hpp"
+#include "../suffix/after_mark_multi_buffer.hpp"
 #include "../suffix/planmemory_input_semantic_ir.hpp"
 #include "../suffix/planmemory_bridge.hpp"
 #include "../validation/memory_info_replay.hpp"
 #include "../validation/bufferized_semantic_ir_oracle.hpp"
 #include "../validation/hivm_decompose_op_oracle.hpp"
-#include "../validation/c3_semantic_ir_oracle.hpp"
-#include "../validation/c4_semantic_ir_oracle.hpp"
-#include "../validation/c5_semantic_ir_oracle.hpp"
-#include "../validation/c6_semantic_ir_oracle.hpp"
+#include "../validation/post_bufferization_rewrite_oracle.hpp"
+#include "../validation/alloc_extra_buffer_oracle.hpp"
+#include "../validation/inline_load_copy_oracle.hpp"
+#include "../validation/mark_multi_buffer_oracle.hpp"
 #include "../validation/planmemory_input_semantic_ir_oracle.hpp"
 
 #include <cctype>
@@ -1438,8 +1438,8 @@ int main(int argc, char **argv) {
         return 1;
       }
       writeTextFile(opts.output,
-                    cvub::SerializeC1SemanticIR(
-                        cvub::ParseC1GenericIR(opts.root)));
+                    cvub::SerializeGenericModule(
+                        cvub::ParseGenericIR(opts.root)));
       return 0;
     }
     if (opts.action == "dump-generic-semantic-ir") {
@@ -1447,8 +1447,8 @@ int main(int argc, char **argv) {
         std::cerr << "[ERROR] --root and --output are required\n";
         return 1;
       }
-      writeTextFile(opts.output, cvub::SerializeC1SemanticIR(
-                                     cvub::ParseC1GenericIR(opts.root, false)));
+      writeTextFile(opts.output, cvub::SerializeGenericModule(
+                                     cvub::ParseGenericIR(opts.root, false)));
       return 0;
     }
     if (opts.action == "model-cvpipelining-semantic-ir") {
@@ -1461,14 +1461,14 @@ int main(int argc, char **argv) {
       options.setDepthInUnrollMode = opts.cvPipelineDepth;
       options.enableSkewMode = opts.enablePreload;
       options.enableLazyLoading = opts.enableCVLazyLoading;
-      cvub::C1SemanticModule module =
-          cvub::ParseC1GenericIR(opts.root, false);
-      for (cvub::C1OperationRecord &operation : module.operations)
-        if (cvub::C1IsReviewedOperation(operation.name))
-          cvub::ApplyC1OpSemantics(operation);
+      cvub::GenericModule module =
+          cvub::ParseGenericIR(opts.root, false);
+      for (cvub::GenericOperation &operation : module.operations)
+        if (cvub::HasModeledOperationSemantics(operation.name))
+          cvub::ApplyOperationSemantics(operation);
       writeTextFile(
           opts.output,
-          cvub::SerializeC1SemanticIR(cvub::RunCVPipeliningPass(
+          cvub::SerializeGenericModule(cvub::RunCVPipeliningPass(
               std::move(module), options)));
       return 0;
     }
@@ -1477,13 +1477,13 @@ int main(int argc, char **argv) {
         std::cerr << "[ERROR] --root and --output are required\n";
         return 1;
       }
-      cvub::C1SemanticModule module =
-          cvub::ParseC1GenericIR(opts.root, false);
-      for (cvub::C1OperationRecord &operation : module.operations)
-        if (cvub::C1IsReviewedOperation(operation.name))
-          cvub::ApplyC1OpSemantics(operation);
+      cvub::GenericModule module =
+          cvub::ParseGenericIR(opts.root, false);
+      for (cvub::GenericOperation &operation : module.operations)
+        if (cvub::HasModeledOperationSemantics(operation.name))
+          cvub::ApplyOperationSemantics(operation);
       std::optional<cvub::CVPipelineAnalysisResult> selected;
-      for (const cvub::C1OperationRecord &operation : module.operations) {
+      for (const cvub::GenericOperation &operation : module.operations) {
         if (operation.name != "scf.for")
           continue;
         cvub::CVPipelineImplAnalysis candidate(
@@ -1507,13 +1507,13 @@ int main(int argc, char **argv) {
         std::cerr << "[ERROR] --root and --output are required\n";
         return 1;
       }
-      cvub::C1SemanticModule module =
-          cvub::ParseC1GenericIR(opts.root, false);
-      for (cvub::C1OperationRecord &operation : module.operations)
-        if (cvub::C1IsReviewedOperation(operation.name))
-          cvub::ApplyC1OpSemantics(operation);
+      cvub::GenericModule module =
+          cvub::ParseGenericIR(opts.root, false);
+      for (cvub::GenericOperation &operation : module.operations)
+        if (cvub::HasModeledOperationSemantics(operation.name))
+          cvub::ApplyOperationSemantics(operation);
       std::optional<cvub::CVPipelineAnalysisResult> selected;
-      for (const cvub::C1OperationRecord &operation : module.operations) {
+      for (const cvub::GenericOperation &operation : module.operations) {
         if (operation.name != "scf.for")
           continue;
         cvub::CVPipelineImplAnalysis candidate(
@@ -1530,7 +1530,7 @@ int main(int argc, char **argv) {
       cvub::CVPipelineLoopRewriter rewriter(module, std::move(*selected));
       if (!rewriter.rewrite())
         throw std::runtime_error("CVPipelining rewrite failed");
-      writeTextFile(opts.output, cvub::SerializeC1SemanticIR(module));
+      writeTextFile(opts.output, cvub::SerializeGenericModule(module));
       return 0;
     }
     if (opts.action == "model-cvpipelining-preload-rewrite") {
@@ -1538,13 +1538,13 @@ int main(int argc, char **argv) {
         std::cerr << "[ERROR] --root and --output are required\n";
         return 1;
       }
-      cvub::C1SemanticModule module =
-          cvub::ParseC1GenericIR(opts.root, false);
-      for (cvub::C1OperationRecord &operation : module.operations)
-        if (cvub::C1IsReviewedOperation(operation.name))
-          cvub::ApplyC1OpSemantics(operation);
+      cvub::GenericModule module =
+          cvub::ParseGenericIR(opts.root, false);
+      for (cvub::GenericOperation &operation : module.operations)
+        if (cvub::HasModeledOperationSemantics(operation.name))
+          cvub::ApplyOperationSemantics(operation);
       std::optional<cvub::CVPipelineAnalysisResult> selected;
-      for (const cvub::C1OperationRecord &operation : module.operations) {
+      for (const cvub::GenericOperation &operation : module.operations) {
         if (operation.name != "scf.for")
           continue;
         cvub::CVPipelineImplAnalysis candidate(
@@ -1561,7 +1561,7 @@ int main(int argc, char **argv) {
       cvub::CVPipelinePreloadRewriter rewriter(module, std::move(*selected));
       if (!rewriter.rewrite())
         throw std::runtime_error("CVPipelining preload rewrite failed");
-      writeTextFile(opts.output, cvub::SerializeC1SemanticIR(module));
+      writeTextFile(opts.output, cvub::SerializeGenericModule(module));
       return 0;
     }
     if (opts.action == "dump-inline-load-copy-candidates") {
@@ -1570,7 +1570,7 @@ int main(int argc, char **argv) {
         return 1;
       }
       writeTextFile(opts.output, cvub::CollectInlineLoadCopyCandidates(
-                                     cvub::ParseC1GenericIR(opts.root, false)));
+                                     cvub::ParseGenericIR(opts.root, false)));
       return 0;
     }
     if (opts.action == "dump-mark-multi-buffer-oracle") {
@@ -1579,7 +1579,7 @@ int main(int argc, char **argv) {
         return 1;
       }
       writeTextFile(opts.output, cvub::CollectMarkMultiBufferOracle(
-                                     cvub::ParseC1GenericIR(opts.root, false)));
+                                     cvub::ParseGenericIR(opts.root, false)));
       return 0;
     }
     if (opts.action == "dump-planmemory-input-buffer-oracle") {
@@ -1588,7 +1588,7 @@ int main(int argc, char **argv) {
         return 1;
       }
       writeTextFile(opts.output, cvub::CollectPlanMemoryInputBufferOracle(
-                                     cvub::ParseC1GenericIR(opts.root, false)));
+                                     cvub::ParseGenericIR(opts.root, false)));
       return 0;
     }
     if (opts.action == "dump-planmemory-input-access-oracle") {
@@ -1597,7 +1597,7 @@ int main(int argc, char **argv) {
         return 1;
       }
       writeTextFile(opts.output, cvub::CollectPlanMemoryInputAccessOracle(
-                                     cvub::ParseC1GenericIR(opts.root, false)));
+                                     cvub::ParseGenericIR(opts.root, false)));
       return 0;
     }
     if (opts.action == "dump-planmemory-operation-sequence-oracle") {
@@ -1606,7 +1606,7 @@ int main(int argc, char **argv) {
         return 1;
       }
       writeTextFile(opts.output, cvub::CollectPlanMemoryOperationSequenceOracle(
-                                     cvub::ParseC1GenericIR(opts.root, false)));
+                                     cvub::ParseGenericIR(opts.root, false)));
       return 0;
     }
     if (opts.action == "dump-planmemory-structured-input-oracle") {
@@ -1636,8 +1636,8 @@ int main(int argc, char **argv) {
         std::cerr << "[ERROR] --root and --output are required\n";
         return 1;
       }
-      const cvub::C1SemanticModule module =
-          cvub::ParseC1GenericIR(opts.root, false);
+      const cvub::GenericModule module =
+          cvub::ParseGenericIR(opts.root, false);
       writeTextFile(opts.output, cvub::SerializeSuffixBufferTopology(
                                       cvub::BuildSuffixBufferTopology(module)));
       return 0;
@@ -1648,8 +1648,8 @@ int main(int argc, char **argv) {
         std::cerr << "[ERROR] --root and --output are required\n";
         return 1;
       }
-      const cvub::C1SemanticModule module =
-          cvub::ParseC1GenericIR(opts.root, false);
+      const cvub::GenericModule module =
+          cvub::ParseGenericIR(opts.root, false);
       const std::vector<cvub::BufferAllocation> allocations =
           opts.action == "dump-c2-allocation-oracle"
               ? cvub::CollectBufferAllocationOracle(module)
@@ -1663,11 +1663,11 @@ int main(int argc, char **argv) {
         std::cerr << "[ERROR] --root and --output are required\n";
         return 1;
       }
-      cvub::C1SemanticModule module =
-          cvub::ParseC1GenericIR(opts.root, false);
-      for (cvub::C1OperationRecord &operation : module.operations)
-        if (cvub::C1IsReviewedOperation(operation.name))
-          cvub::ApplyC1OpSemantics(operation);
+      cvub::GenericModule module =
+          cvub::ParseGenericIR(opts.root, false);
+      for (cvub::GenericOperation &operation : module.operations)
+        if (cvub::HasModeledOperationSemantics(operation.name))
+          cvub::ApplyOperationSemantics(operation);
       const cvub::OneShotBufferizationResult bufferization =
           cvub::RunOneShotBufferize(module);
       writeTextFile(opts.output,
@@ -1681,18 +1681,18 @@ int main(int argc, char **argv) {
         std::cerr << "[ERROR] --root and --output are required\n";
         return 1;
       }
-      cvub::C1SemanticModule module =
-          cvub::ParseC1GenericIR(opts.root, false);
-      for (cvub::C1OperationRecord &operation : module.operations)
-        if (cvub::C1IsReviewedOperation(operation.name))
-          cvub::ApplyC1OpSemantics(operation);
+      cvub::GenericModule module =
+          cvub::ParseGenericIR(opts.root, false);
+      for (cvub::GenericOperation &operation : module.operations)
+        if (cvub::HasModeledOperationSemantics(operation.name))
+          cvub::ApplyOperationSemantics(operation);
       const cvub::OneShotBufferizationResult bufferization =
           cvub::RunOneShotBufferize(module);
       const cvub::BufferizedSemanticIR bufferized =
           cvub::BuildBufferizedSemanticIR(module, bufferization);
       writeTextFile(opts.output,
-                    cvub::SerializeC3SemanticIR(
-                        cvub::BuildC3SemanticIR(bufferized)));
+                    cvub::SerializePostBufferizationRewriteState(
+                        cvub::BuildPostBufferizationRewriteState(bufferized)));
       return 0;
     }
     if (opts.action == "model-c4-semantic-ir" ||
@@ -1701,20 +1701,23 @@ int main(int argc, char **argv) {
         std::cerr << "[ERROR] --root and --output are required\n";
         return 1;
       }
-      cvub::C1SemanticModule module =
-          cvub::ParseC1GenericIR(opts.root, false);
-      for (cvub::C1OperationRecord &operation : module.operations)
-        if (cvub::C1IsReviewedOperation(operation.name))
-          cvub::ApplyC1OpSemantics(operation);
+      cvub::GenericModule module =
+          cvub::ParseGenericIR(opts.root, false);
+      for (cvub::GenericOperation &operation : module.operations)
+        if (cvub::HasModeledOperationSemantics(operation.name))
+          cvub::ApplyOperationSemantics(operation);
       const cvub::OneShotBufferizationResult bufferization =
           cvub::RunOneShotBufferize(module);
-      cvub::C4SemanticIR c4 = cvub::BuildC4SemanticIR(
-          cvub::BuildC3SemanticIR(
+      cvub::AfterAllocExtraBufferState afterAllocExtraBuffer =
+          cvub::BuildAfterAllocExtraBufferState(
+          cvub::BuildPostBufferizationRewriteState(
               cvub::BuildBufferizedSemanticIR(module, bufferization)));
       writeTextFile(opts.output,
                     opts.action == "model-c4-buffers"
-                        ? cvub::SerializeC4Buffers(c4.buffers)
-                        : cvub::SerializeC4SemanticIR(c4));
+                        ? cvub::SerializeLocalBufferRecords(
+                              afterAllocExtraBuffer.buffers)
+                        : cvub::SerializeAfterAllocExtraBufferState(
+                              afterAllocExtraBuffer));
       return 0;
     }
     if (opts.action == "model-c4-buffer-projection" ||
@@ -1724,24 +1727,24 @@ int main(int argc, char **argv) {
           (opts.action != "model-c4-buffer-projection" &&
            (opts.attemptRoot.empty() || opts.afterIr.empty() ||
             opts.expectedSummary.empty()))) {
-        std::cerr << "[ERROR] C4 projection requires --root, --output and "
+        std::cerr << "[ERROR] AllocExtraBuffer projection requires --root, --output and "
                      "oracle --attempt-root/--after-ir/--expected-summary\n";
         return 1;
       }
-      std::vector<cvub::C4BufferRecord> buffers;
+      std::vector<cvub::LocalBufferRecord> buffers;
       if (opts.action == "model-c4-buffer-projection") {
-        cvub::C1SemanticModule module =
-            cvub::ParseC1GenericIR(opts.root, false);
-        for (cvub::C1OperationRecord &operation : module.operations)
-          if (cvub::C1IsReviewedOperation(operation.name))
-            cvub::ApplyC1OpSemantics(operation);
+        cvub::GenericModule module =
+            cvub::ParseGenericIR(opts.root, false);
+        for (cvub::GenericOperation &operation : module.operations)
+          if (cvub::HasModeledOperationSemantics(operation.name))
+            cvub::ApplyOperationSemantics(operation);
         const cvub::OneShotBufferizationResult bufferization =
             cvub::RunOneShotBufferize(module);
-        buffers = cvub::BuildC4SemanticIR(cvub::BuildC3SemanticIR(
+        buffers = cvub::BuildAfterAllocExtraBufferState(cvub::BuildPostBufferizationRewriteState(
             cvub::BuildBufferizedSemanticIR(module, bufferization))).buffers;
       } else {
-        std::vector<std::pair<cvub::C1SemanticModule,
-                              cvub::C1SemanticModule>> extraPairs;
+        std::vector<std::pair<cvub::GenericModule,
+                              cvub::GenericModule>> extraPairs;
         for (const auto &entry :
              cvub::fs::recursive_directory_iterator(opts.expectedSummary)) {
           if (!entry.is_regular_file() ||
@@ -1750,20 +1753,20 @@ int main(int argc, char **argv) {
           const cvub::fs::path after = entry.path().parent_path() /
               "7_19_hivm-alloc-extra-buffer.mlir";
           if (!cvub::fs::is_regular_file(after))
-            throw std::runtime_error("C4 oracle: missing AllocExtraBuffer after");
+            throw std::runtime_error("AllocExtraBuffer oracle: missing AllocExtraBuffer after");
           extraPairs.push_back({
-              cvub::ParseC1GenericIR(entry.path(), false),
-              cvub::ParseC1GenericIR(after, false)});
+              cvub::ParseGenericIR(entry.path(), false),
+              cvub::ParseGenericIR(after, false)});
         }
-        buffers = cvub::CollectC4BufferOracle(
-            cvub::ParseC1GenericIR(opts.attemptRoot, false),
-            cvub::ParseC1GenericIR(opts.afterIr, false),
-            cvub::CollectC4ExtraBufferKeys(extraPairs));
+        buffers = cvub::CollectAllocExtraBufferProjectionOracle(
+            cvub::ParseGenericIR(opts.attemptRoot, false),
+            cvub::ParseGenericIR(opts.afterIr, false),
+            cvub::CollectAllocExtraBufferKeys(extraPairs));
       }
       writeTextFile(opts.output,
                     opts.action == "dump-c4-buffers-oracle"
-                        ? cvub::SerializeC4Buffers(buffers)
-                        : cvub::SerializeC4BufferProjection(buffers));
+                        ? cvub::SerializeLocalBufferRecords(buffers)
+                        : cvub::SerializeAllocExtraBufferProjection(buffers));
       return 0;
     }
     if (opts.action == "model-c5-semantic-ir" ||
@@ -1772,33 +1775,36 @@ int main(int argc, char **argv) {
         std::cerr << "[ERROR] --root and --output are required\n";
         return 1;
       }
-      cvub::C1SemanticModule module =
-          cvub::ParseC1GenericIR(opts.root, false);
-      for (cvub::C1OperationRecord &operation : module.operations)
-        if (cvub::C1IsReviewedOperation(operation.name))
-          cvub::ApplyC1OpSemantics(operation);
+      cvub::GenericModule module =
+          cvub::ParseGenericIR(opts.root, false);
+      for (cvub::GenericOperation &operation : module.operations)
+        if (cvub::HasModeledOperationSemantics(operation.name))
+          cvub::ApplyOperationSemantics(operation);
       const cvub::OneShotBufferizationResult bufferization =
           cvub::RunOneShotBufferize(module);
-      const cvub::C5SemanticIR c5 = cvub::BuildC5SemanticIR(
-          cvub::BuildC4SemanticIR(cvub::BuildC3SemanticIR(
+      const cvub::AfterInlineLoadCopyState afterInlineLoadCopy =
+          cvub::BuildAfterInlineLoadCopyState(
+          cvub::BuildAfterAllocExtraBufferState(cvub::BuildPostBufferizationRewriteState(
               cvub::BuildBufferizedSemanticIR(module, bufferization))));
       writeTextFile(opts.output,
                     opts.action == "model-c5-buffer-projection"
-                        ? cvub::SerializeC5BufferProjection(c5.buffers)
-                        : cvub::SerializeC5SemanticIR(c5));
+                        ? cvub::SerializeInlineLoadCopyBufferProjection(
+                              afterInlineLoadCopy.buffers)
+                        : cvub::SerializeAfterInlineLoadCopyState(
+                              afterInlineLoadCopy));
       return 0;
     }
-    if (opts.action == "model-c6-semantic-ir" ||
-        opts.action == "model-c6-multi-buffer-projection") {
+    if (opts.action == "model-afterMarkMultiBuffer-semantic-ir" ||
+        opts.action == "model-afterMarkMultiBuffer-multi-buffer-projection") {
       if (opts.root.empty() || opts.output.empty()) {
         std::cerr << "[ERROR] --root and --output are required\n";
         return 1;
       }
-      cvub::C1SemanticModule module =
-          cvub::ParseC1GenericIR(opts.root, false);
-      for (cvub::C1OperationRecord &operation : module.operations)
-        if (cvub::C1IsReviewedOperation(operation.name))
-          cvub::ApplyC1OpSemantics(operation);
+      cvub::GenericModule module =
+          cvub::ParseGenericIR(opts.root, false);
+      for (cvub::GenericOperation &operation : module.operations)
+        if (cvub::HasModeledOperationSemantics(operation.name))
+          cvub::ApplyOperationSemantics(operation);
       const cvub::OneShotBufferizationResult bufferization =
           cvub::RunOneShotBufferize(module);
       cvub::MarkMultiBufferOptions options;
@@ -1807,15 +1813,15 @@ int main(int argc, char **argv) {
           cvub::ParseMultiBufferStrategy(opts.localMultiBufferStrategy);
       options.limitMixAutoMultiBufferBuffer =
           cvub::ParseMultiBufferStrategy(opts.mixMultiBufferStrategy);
-      const cvub::C6SemanticIR c6 = cvub::BuildC6SemanticIR(
-          cvub::BuildC5SemanticIR(cvub::BuildC4SemanticIR(
-              cvub::BuildC3SemanticIR(cvub::BuildBufferizedSemanticIR(
+      const cvub::AfterMarkMultiBufferState afterMarkMultiBuffer = cvub::BuildAfterMarkMultiBufferState(
+          cvub::BuildAfterInlineLoadCopyState(cvub::BuildAfterAllocExtraBufferState(
+              cvub::BuildPostBufferizationRewriteState(cvub::BuildBufferizedSemanticIR(
                   module, bufferization)))),
           options);
       writeTextFile(opts.output,
-                    opts.action == "model-c6-multi-buffer-projection"
-                        ? cvub::SerializeC6MultiBufferProjection(c6)
-                        : cvub::SerializeC6SemanticIR(c6));
+                    opts.action == "model-afterMarkMultiBuffer-multi-buffer-projection"
+                        ? cvub::SerializeMarkMultiBufferProjection(afterMarkMultiBuffer)
+                        : cvub::SerializeAfterMarkMultiBufferState(afterMarkMultiBuffer));
       return 0;
     }
     if (opts.action == "model-planmemory-input-semantic-ir" ||
@@ -1832,11 +1838,11 @@ int main(int argc, char **argv) {
         std::cerr << "[ERROR] --root and --output are required\n";
         return 1;
       }
-      cvub::C1SemanticModule module =
-          cvub::ParseC1GenericIR(opts.root, false);
-      for (cvub::C1OperationRecord &operation : module.operations)
-        if (cvub::C1IsReviewedOperation(operation.name))
-          cvub::ApplyC1OpSemantics(operation);
+      cvub::GenericModule module =
+          cvub::ParseGenericIR(opts.root, false);
+      for (cvub::GenericOperation &operation : module.operations)
+        if (cvub::HasModeledOperationSemantics(operation.name))
+          cvub::ApplyOperationSemantics(operation);
       const cvub::OneShotBufferizationResult bufferization =
           cvub::RunOneShotBufferize(module);
       cvub::MarkMultiBufferOptions options;
@@ -1845,10 +1851,10 @@ int main(int argc, char **argv) {
           cvub::ParseMultiBufferStrategy(opts.localMultiBufferStrategy);
       options.limitMixAutoMultiBufferBuffer =
           cvub::ParseMultiBufferStrategy(opts.mixMultiBufferStrategy);
-      const cvub::PlanMemoryInputSemanticIR c7 =
-          cvub::BuildPlanMemoryInputSemanticIR(cvub::BuildC6SemanticIR(
-              cvub::BuildC5SemanticIR(cvub::BuildC4SemanticIR(
-                  cvub::BuildC3SemanticIR(cvub::BuildBufferizedSemanticIR(
+      const cvub::PlanMemoryInputSemanticIR planMemoryInputIR =
+          cvub::BuildPlanMemoryInputSemanticIR(cvub::BuildAfterMarkMultiBufferState(
+              cvub::BuildAfterInlineLoadCopyState(cvub::BuildAfterAllocExtraBufferState(
+                  cvub::BuildPostBufferizationRewriteState(cvub::BuildBufferizedSemanticIR(
                       module, bufferization)))),
               options));
       if (opts.action == "model-planmemory-structured-input" ||
@@ -1857,7 +1863,8 @@ int main(int argc, char **argv) {
           opts.action == "model-planmemory-structured-lifetime" ||
           opts.action == "model-planmemory-live-shuffle" ||
           opts.action == "model-planmemory-structured-plan") {
-        const cvub::PlanMemoryInput input = cvub::BuildPlanMemoryInput(c7);
+        const cvub::PlanMemoryInput input =
+            cvub::BuildPlanMemoryInput(planMemoryInputIR);
         if (opts.action == "model-planmemory-structured-input") {
           writeTextFile(opts.output, cvub::SerializePlanMemoryInput(input));
           return 0;
@@ -1963,12 +1970,14 @@ int main(int argc, char **argv) {
       writeTextFile(
           opts.output,
           opts.action == "model-planmemory-input-buffers"
-              ? cvub::SerializePlanMemoryInputBuffers(c7)
+              ? cvub::SerializePlanMemoryInputBuffers(planMemoryInputIR)
               : opts.action == "model-planmemory-input-accesses"
-                    ? cvub::SerializePlanMemoryInputAccesses(c7)
+                    ? cvub::SerializePlanMemoryInputAccesses(planMemoryInputIR)
                     : opts.action == "model-planmemory-input-access-debug"
-                          ? cvub::SerializePlanMemoryInputAccessDebug(c7)
-                    : cvub::SerializePlanMemoryInputSemanticIR(c7));
+                          ? cvub::SerializePlanMemoryInputAccessDebug(
+                                planMemoryInputIR)
+                    : cvub::SerializePlanMemoryInputSemanticIR(
+                          planMemoryInputIR));
       return 0;
     }
     if (opts.action == "model-post-bufferization-allocations") {
@@ -1976,11 +1985,11 @@ int main(int argc, char **argv) {
         std::cerr << "[ERROR] --root and --output are required\n";
         return 1;
       }
-      cvub::C1SemanticModule module =
-          cvub::ParseC1GenericIR(opts.root, false);
-      for (cvub::C1OperationRecord &operation : module.operations)
-        if (cvub::C1IsReviewedOperation(operation.name))
-          cvub::ApplyC1OpSemantics(operation);
+      cvub::GenericModule module =
+          cvub::ParseGenericIR(opts.root, false);
+      for (cvub::GenericOperation &operation : module.operations)
+        if (cvub::HasModeledOperationSemantics(operation.name))
+          cvub::ApplyOperationSemantics(operation);
       const cvub::OneShotBufferizationResult bufferization =
           cvub::RunOneShotBufferize(module);
       const cvub::HIVMOptSinglePointResult normalized =
@@ -1999,13 +2008,13 @@ int main(int argc, char **argv) {
                      "--output and oracle --after-ir\n";
         return 1;
       }
-      const cvub::C1SemanticModule before =
-          cvub::ParseC1GenericIR(opts.root, false);
+      const cvub::GenericModule before =
+          cvub::ParseGenericIR(opts.root, false);
       const std::vector<cvub::NonContiguousReshapeCopy> copies =
           opts.action == "model-non-contiguous-reshape-to-copy"
               ? cvub::ModelConvertNonContiguousReshapeToCopy(before)
               : cvub::CollectNonContiguousReshapeToCopyOracle(
-                    before, cvub::ParseC1GenericIR(opts.afterIr, false));
+                    before, cvub::ParseGenericIR(opts.afterIr, false));
       writeTextFile(opts.output,
                     cvub::SerializeNonContiguousReshapeCopies(copies));
       return 0;
@@ -2020,11 +2029,11 @@ int main(int argc, char **argv) {
         return 1;
       }
       if (opts.action == "model-canonicalized-iter-arg-results") {
-        cvub::C1SemanticModule module =
-            cvub::ParseC1GenericIR(opts.root, false);
-        for (cvub::C1OperationRecord &operation : module.operations)
-          if (cvub::C1IsReviewedOperation(operation.name))
-            cvub::ApplyC1OpSemantics(operation);
+        cvub::GenericModule module =
+            cvub::ParseGenericIR(opts.root, false);
+        for (cvub::GenericOperation &operation : module.operations)
+          if (cvub::HasModeledOperationSemantics(operation.name))
+            cvub::ApplyOperationSemantics(operation);
         const cvub::OneShotBufferizationResult bufferization =
             cvub::RunOneShotBufferize(module);
         const cvub::HIVMOptSinglePointResult normalized =
@@ -2038,8 +2047,8 @@ int main(int argc, char **argv) {
             opts.output,
             cvub::SerializeCanonicalizedIterArgResults(
                 cvub::CollectCanonicalizedIterArgResultsOracle(
-                    cvub::ParseC1GenericIR(opts.root, false),
-                    cvub::ParseC1GenericIR(opts.afterIr, false))));
+                    cvub::ParseGenericIR(opts.root, false),
+                    cvub::ParseGenericIR(opts.afterIr, false))));
       }
       return 0;
     }
@@ -2052,21 +2061,21 @@ int main(int argc, char **argv) {
                      "--output\n";
         return 1;
       }
-      cvub::C1SemanticModule source =
-          cvub::ParseC1GenericIR(opts.root, false);
-      for (cvub::C1OperationRecord &operation : source.operations)
-        if (cvub::C1IsReviewedOperation(operation.name))
-          cvub::ApplyC1OpSemantics(operation);
+      cvub::GenericModule source =
+          cvub::ParseGenericIR(opts.root, false);
+      for (cvub::GenericOperation &operation : source.operations)
+        if (cvub::HasModeledOperationSemantics(operation.name))
+          cvub::ApplyOperationSemantics(operation);
       const cvub::OneShotBufferizationResult bufferization =
           cvub::RunOneShotBufferize(source);
-      const cvub::C3SemanticIR model = cvub::BuildC3SemanticIR(
+      const cvub::PostBufferizationRewriteState model = cvub::BuildPostBufferizationRewriteState(
           cvub::BuildBufferizedSemanticIR(source, bufferization));
-      const cvub::C1SemanticModule before = cvub::ParseC1GenericIR(
+      const cvub::GenericModule before = cvub::ParseGenericIR(
           opts.attemptRoot, false);
-      const cvub::C1SemanticModule after = cvub::ParseC1GenericIR(
+      const cvub::GenericModule after = cvub::ParseGenericIR(
           opts.afterIr, false);
-      const cvub::C3RewriteValidation validation =
-          cvub::ValidateC3OperationRewrites(model, before, after,
+      const cvub::PostBufferizationRewriteValidation validation =
+          cvub::ValidatePostBufferizationOperationRewrites(model, before, after,
                                             opts.function);
       std::ostringstream report;
       report << "C3_OPERATION_REWRITE_VALIDATION\t1\nSUMMARY\t"
@@ -2082,11 +2091,11 @@ int main(int argc, char **argv) {
         std::cerr << "[ERROR] --root, --after-ir and --output are required\n";
         return 1;
       }
-      cvub::C1SemanticModule before =
-          cvub::ParseC1GenericIR(opts.root, false);
-      for (cvub::C1OperationRecord &operation : before.operations)
-        if (cvub::C1IsReviewedOperation(operation.name))
-          cvub::ApplyC1OpSemantics(operation);
+      cvub::GenericModule before =
+          cvub::ParseGenericIR(opts.root, false);
+      for (cvub::GenericOperation &operation : before.operations)
+        if (cvub::HasModeledOperationSemantics(operation.name))
+          cvub::ApplyOperationSemantics(operation);
       const cvub::OneShotBufferizationResult bufferization =
           cvub::RunOneShotBufferize(before);
       const cvub::BufferizedSemanticIR model =
@@ -2094,7 +2103,7 @@ int main(int argc, char **argv) {
       const cvub::BufferizedSemanticIRValidation validation =
           cvub::ValidateBufferizedSemanticIR(
               before, model,
-              cvub::ParseC1GenericIR(opts.afterIr, false));
+              cvub::ParseGenericIR(opts.afterIr, false));
       std::ostringstream report;
       report << "BUFFERIZED_SEMANTIC_IR_VALIDATION\t1\n"
              << "SUMMARY\t" << validation.checkedValues << '\t'
@@ -2114,16 +2123,16 @@ int main(int argc, char **argv) {
                      "required\n";
         return 1;
       }
-      cvub::C1SemanticModule before = cvub::ParseC1GenericIR(opts.root, false);
-      for (cvub::C1OperationRecord &operation : before.operations)
+      cvub::GenericModule before = cvub::ParseGenericIR(opts.root, false);
+      for (cvub::GenericOperation &operation : before.operations)
         if (cvub::HasAllocExtraBufferInterface(operation.name) &&
             operation.name != "hivm.hir.vxor")
-          cvub::ApplyC1OpSemantics(operation);
+          cvub::ApplyOperationSemantics(operation);
       const std::vector<cvub::ExtraBufferAllocation> allocations =
           opts.action == "model-alloc-extra-buffer"
               ? cvub::ModelAllocExtraBuffer(before, opts.function)
               : cvub::CollectAllocExtraBufferOracle(
-                    before, cvub::ParseC1GenericIR(opts.afterIr, false));
+                    before, cvub::ParseGenericIR(opts.afterIr, false));
       writeTextFile(opts.output,
                     cvub::SerializeExtraBufferAllocations(allocations));
       return 0;
@@ -2137,13 +2146,13 @@ int main(int argc, char **argv) {
                      "--after-ir are required\n";
         return 1;
       }
-      const cvub::C1SemanticModule before =
-          cvub::ParseC1GenericIR(opts.root, false);
+      const cvub::GenericModule before =
+          cvub::ParseGenericIR(opts.root, false);
       const std::vector<cvub::DecomposeBufferAllocation> allocations =
           opts.action == "model-hivm-decompose-op"
               ? cvub::ModelHIVMDecomposeOp(before, opts.function)
               : cvub::CollectHIVMDecomposeOpOracle(
-                    before, cvub::ParseC1GenericIR(opts.afterIr, false),
+                    before, cvub::ParseGenericIR(opts.afterIr, false),
                     opts.function);
       writeTextFile(opts.output,
                     cvub::SerializeDecomposeBufferAllocations(allocations));
@@ -2158,13 +2167,13 @@ int main(int argc, char **argv) {
                      "--output and oracle --after-ir\n";
         return 1;
       }
-      const cvub::C1SemanticModule before =
-          cvub::ParseC1GenericIR(opts.root, false);
+      const cvub::GenericModule before =
+          cvub::ParseGenericIR(opts.root, false);
       const cvub::DecomposeOperationDelta delta =
           opts.action == "model-hivm-decompose-operation-delta"
               ? cvub::ModelHIVMDecomposeOperationDelta(before, opts.function)
               : cvub::CollectHIVMDecomposeOperationDeltaOracle(
-                    before, cvub::ParseC1GenericIR(opts.afterIr, false),
+                    before, cvub::ParseGenericIR(opts.afterIr, false),
                     opts.function);
       writeTextFile(opts.output,
                     cvub::SerializeDecomposeOperationDelta(delta));
@@ -2176,11 +2185,11 @@ int main(int argc, char **argv) {
         std::cerr << "[ERROR] --root and --output are required\n";
         return 1;
       }
-      cvub::C1SemanticModule module = cvub::ParseC1GenericIR(opts.root, false);
+      cvub::GenericModule module = cvub::ParseGenericIR(opts.root, false);
       if (opts.action == "model-one-shot-analysis")
-        for (cvub::C1OperationRecord &operation : module.operations)
-          if (cvub::C1IsReviewedOperation(operation.name))
-            cvub::ApplyC1OpSemantics(operation);
+        for (cvub::GenericOperation &operation : module.operations)
+          if (cvub::HasModeledOperationSemantics(operation.name))
+            cvub::ApplyOperationSemantics(operation);
       const std::vector<cvub::OneShotOpOperandDecision> decisions =
           opts.action == "dump-one-shot-analysis-oracle"
               ? cvub::CollectOneShotAnalysisOracle(module)

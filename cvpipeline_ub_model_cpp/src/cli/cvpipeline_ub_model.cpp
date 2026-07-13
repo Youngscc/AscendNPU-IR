@@ -18,7 +18,7 @@ namespace {
 struct Options {
   std::string action;
   std::string beforePlanMemoryIR;
-  std::string c1GenericIR;
+  std::string beforeOneShotBufferizeIR;
   std::string beforeCVPipelineIR;
   std::optional<uint32_t> randomSeed;
   bool restrictInplaceAsISA = false;
@@ -70,18 +70,18 @@ cvub::SuffixPipelineOptions suffixPipelineOptions(const Options &opts) {
 }
 
 std::string actionOracle(const std::string &action) {
-  if (action == "plan-c1-suffix")
-    return "c8_bridge_plus_planmemory";
+  if (action == "plan-before-one-shot-bufferize")
+    return "suffix_pipeline_plus_planmemory";
   if (action == "plan-before-cvpipeline")
-    return "d1_cvpipelining_plus_c_suffix_plus_planmemory";
+    return "cvpipelining_plus_suffix_pipeline_plus_planmemory";
   return "minimal_suffix";
 }
 
 std::string actionPrecision(const std::string &action) {
-  if (action == "plan-c1-suffix")
-    return "initial_c_model";
+  if (action == "plan-before-one-shot-bufferize")
+    return "before_one_shot_bufferize_model";
   if (action == "plan-before-cvpipeline")
-    return "initial_d_model";
+    return "before_cvpipeline_model";
   return "exact_plan";
 }
 
@@ -100,8 +100,9 @@ Options parseOptions(int argc, char **argv) {
       opts.action = *actionValue;
     else if (auto beforeIRValue = readValue("--before-planmemory-ir"))
       opts.beforePlanMemoryIR = *beforeIRValue;
-    else if (auto c1IRValue = readValue("--c1-generic-ir"))
-      opts.c1GenericIR = *c1IRValue;
+    else if (auto beforeOneShotValue =
+                 readValue("--before-one-shot-bufferize-ir"))
+      opts.beforeOneShotBufferizeIR = *beforeOneShotValue;
     else if (auto beforeCVValue = readValue("--before-cvpipeline-ir"))
       opts.beforeCVPipelineIR = *beforeCVValue;
     else if (auto seedValue = readValue("--random-seed"))
@@ -140,7 +141,8 @@ Options parseOptions(int argc, char **argv) {
       std::cout
           << "Usage: cvpipeline_ub_model "
              "--action=<analyze-lifetimes|dump-liveness-state|"
-             "plan-local-memory|plan-c1-suffix|plan-before-cvpipeline> "
+             "plan-local-memory|plan-before-one-shot-bufferize|"
+             "plan-before-cvpipeline> "
              "[options]\n";
       std::exit(0);
     } else {
@@ -273,15 +275,15 @@ int dumpLivenessState(const Options &opts) {
 }
 
 int planLocalMemory(const Options &opts) {
-  const bool fromSuffix = opts.action == "plan-c1-suffix";
+  const bool fromSuffix = opts.action == "plan-before-one-shot-bufferize";
   const bool fromBeforeCVPipeline = opts.action == "plan-before-cvpipeline";
   if ((!fromSuffix && !fromBeforeCVPipeline && opts.beforePlanMemoryIR.empty()) ||
-      (fromSuffix && opts.c1GenericIR.empty()) ||
+      (fromSuffix && opts.beforeOneShotBufferizeIR.empty()) ||
       (fromBeforeCVPipeline && opts.beforeCVPipelineIR.empty())) {
     std::cerr << "[ERROR] "
               << (fromBeforeCVPipeline
                       ? "--before-cvpipeline-ir"
-                      : (fromSuffix ? "--c1-generic-ir"
+                      : (fromSuffix ? "--before-one-shot-bufferize-ir"
                                     : "--before-planmemory-ir"))
               << " is required\n";
     return 1;
@@ -290,11 +292,11 @@ int planLocalMemory(const Options &opts) {
     throw std::runtime_error("--format must be text or json");
   cvub::PlanMemoryModelResult result;
   if (fromBeforeCVPipeline) {
-    cvub::C1SemanticModule module =
-        cvub::ParseC1GenericIR(opts.beforeCVPipelineIR, false);
-    for (cvub::C1OperationRecord &operation : module.operations)
-      if (cvub::C1IsReviewedOperation(operation.name))
-        cvub::ApplyC1OpSemantics(operation);
+    cvub::GenericModule module =
+        cvub::ParseGenericIR(opts.beforeCVPipelineIR, false);
+    for (cvub::GenericOperation &operation : module.operations)
+      if (cvub::HasModeledOperationSemantics(operation.name))
+        cvub::ApplyOperationSemantics(operation);
     module = cvub::RunCVPipeliningPass(std::move(module),
                                        cvPipeliningOptions(opts));
     const cvub::PlanMemoryInput input =
@@ -306,7 +308,7 @@ int planLocalMemory(const Options &opts) {
                  : cvub::PlanLocalMemory(input, opts.restrictInplaceAsISA);
   } else if (fromSuffix) {
     const cvub::PlanMemoryInput input =
-        cvub::BuildSuffixPlanMemoryInput(opts.c1GenericIR,
+        cvub::BuildSuffixPlanMemoryInput(opts.beforeOneShotBufferizeIR,
                                          suffixPipelineOptions(opts));
     result = opts.randomSeed
                  ? cvub::PlanLocalMemoryForSeed(
@@ -380,7 +382,7 @@ int main(int argc, char **argv) {
       return dumpLivenessState(opts);
     if (opts.action == "plan-local-memory")
       return planLocalMemory(opts);
-    if (opts.action == "plan-c1-suffix")
+    if (opts.action == "plan-before-one-shot-bufferize")
       return planLocalMemory(opts);
     if (opts.action == "plan-before-cvpipeline")
       return planLocalMemory(opts);

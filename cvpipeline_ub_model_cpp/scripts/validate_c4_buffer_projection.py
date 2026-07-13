@@ -62,11 +62,11 @@ def main() -> int:
                     f"  oracle={oracle_value}\n  model={model_value}")
 
     if failures:
-        print(f"C4_BUFFER_PROJECTION=FAIL objects={checked} "
+        print(f"ALLOC_EXTRA_BUFFER_PROJECTION=FAIL objects={checked} "
               f"failures={len(failures)}")
         print("\n".join(failures[:30]))
         return 1
-    print(f"C4_BUFFER_PROJECTION=PASS objects={checked} buffers={buffers}")
+    print(f"ALLOC_EXTRA_BUFFER_PROJECTION=PASS objects={checked} buffers={buffers}")
     return 0
 
 

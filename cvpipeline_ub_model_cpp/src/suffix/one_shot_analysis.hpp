@@ -39,9 +39,9 @@ inline bool IsTensorType(const std::string &type) {
 }
 
 inline std::vector<OneShotOpOperandDecision>
-CollectOneShotAnalysisOracle(const C1SemanticModule &module) {
+CollectOneShotAnalysisOracle(const GenericModule &module) {
   std::vector<OneShotOpOperandDecision> result;
-  for (const C1OperationRecord &operation : module.operations) {
+  for (const GenericOperation &operation : module.operations) {
     const std::vector<std::string> decisions = ParseStringArray(
         FindDictionaryValue(operation.attributes, "__inplace_operands_attr__"));
     for (size_t index = 0; index < operation.operandTypes.size(); ++index) {
@@ -63,8 +63,8 @@ CollectOneShotAnalysisOracle(const C1SemanticModule &module) {
 
 class OneShotAnalysisModel {
 public:
-  explicit OneShotAnalysisModel(const C1SemanticModule &module)
-      : module(module), definitions(C1DefiningOperations(module)) {
+  explicit OneShotAnalysisModel(const GenericModule &module)
+      : module(module), definitions(DefiningOperations(module)) {
     indexBlockArguments();
     indexUses();
   }
@@ -72,7 +72,7 @@ public:
   std::vector<OneShotOpOperandDecision> Analyze() {
     initializeAliasSets();
     std::map<std::pair<int, int>, OneShotBufferizationDecision> decisions;
-    for (const C1OperationRecord &operation : module.operations)
+    for (const GenericOperation &operation : module.operations)
       if (operation.name == "scf.yield" || operation.name == "scf.condition")
         for (size_t index = 0; index < operation.operandTypes.size(); ++index)
           if (IsTensorType(operation.operandTypes[index])) {
@@ -87,7 +87,7 @@ public:
 
     for (auto iterator = module.operations.rbegin();
          iterator != module.operations.rend(); ++iterator) {
-      const C1OperationRecord &operation = *iterator;
+      const GenericOperation &operation = *iterator;
       for (size_t index = 0; index < operation.operandTypes.size(); ++index) {
         if (!IsTensorType(operation.operandTypes[index]))
           continue;
@@ -106,7 +106,7 @@ public:
       }
     }
     std::vector<OneShotOpOperandDecision> result;
-    for (const C1OperationRecord &operation : module.operations)
+    for (const GenericOperation &operation : module.operations)
       for (size_t index = 0; index < operation.operandTypes.size(); ++index) {
         if (!IsTensorType(operation.operandTypes[index]))
           continue;
@@ -145,10 +145,10 @@ private:
       aliasParents[rhsRoot] = lhsRoot;
   }
 
-  std::vector<int> getAliasingValues(const C1OperationRecord &operation,
+  std::vector<int> getAliasingValues(const GenericOperation &operation,
                                      size_t operand) const {
     std::vector<int> result;
-    const std::vector<size_t> inits = C1DpsInitOperandIndices(
+    const std::vector<size_t> inits = DpsInitOperandIndices(
         operation.name, operation.operands.size(), operation.properties);
     auto init = std::find(inits.begin(), inits.end(), operand);
     if (init != inits.end()) {
@@ -170,7 +170,7 @@ private:
         operand - 3 < operation.results.size())
       result.push_back(operation.results[operand - 3]);
     if (operation.name == "scf.yield" && operation.parentId >= 0) {
-      const C1OperationRecord &parent =
+      const GenericOperation &parent =
           module.operations.at(static_cast<size_t>(operation.parentId));
       if (parent.name == "scf.if" && operand < parent.results.size())
         result.push_back(parent.results[operand]);
@@ -178,7 +178,7 @@ private:
     return result;
   }
 
-  void bufferizeInPlace(const C1OperationRecord &operation, size_t operand) {
+  void bufferizeInPlace(const GenericOperation &operation, size_t operand) {
     if (operand >= operation.operands.size())
       return;
     for (int alias : getAliasingValues(operation, operand))
@@ -186,23 +186,23 @@ private:
   }
 
   void indexBlockArguments() {
-    for (const C1BlockRecord &block : module.blocks)
+    for (const GenericBlock &block : module.blocks)
       for (int argument : block.arguments)
         blockArgumentOwners[argument] = block.id;
   }
 
   void indexUses() {
-    for (const C1OperationRecord &operation : module.operations)
+    for (const GenericOperation &operation : module.operations)
       for (size_t index = 0; index < operation.operands.size(); ++index)
         uses[operation.operands[index]].insert(
             {operation.id, static_cast<int>(index)});
   }
 
-  const C1OperationRecord *enclosingRepetitiveOp(
-      const C1OperationRecord &operation) const {
+  const GenericOperation *enclosingRepetitiveOp(
+      const GenericOperation &operation) const {
     int parent = operation.parentId;
     while (parent >= 0) {
-      const C1OperationRecord &owner =
+      const GenericOperation &owner =
           module.operations.at(static_cast<size_t>(parent));
       if (owner.name == "scf.for" || owner.name == "scf.while")
         return &owner;
@@ -211,8 +211,8 @@ private:
     return nullptr;
   }
 
-  bool isProperAncestor(const C1OperationRecord &ancestor,
-                        const C1OperationRecord &operation) const {
+  bool isProperAncestor(const GenericOperation &ancestor,
+                        const GenericOperation &operation) const {
     int parent = operation.parentId;
     while (parent >= 0) {
       if (parent == ancestor.id)
@@ -222,9 +222,9 @@ private:
     return false;
   }
 
-  bool bufferizesToMemoryWrite(const C1OperationRecord &operation,
+  bool bufferizesToMemoryWrite(const GenericOperation &operation,
                                size_t operand) const {
-    const std::vector<size_t> initIndices = C1DpsInitOperandIndices(
+    const std::vector<size_t> initIndices = DpsInitOperandIndices(
         operation.name, operation.operands.size(), operation.properties);
     if (std::find(initIndices.begin(), initIndices.end(), operand) !=
         initIndices.end())
@@ -236,7 +236,7 @@ private:
     return false;
   }
 
-  bool bufferizesToMemoryRead(const C1OperationRecord &operation,
+  bool bufferizesToMemoryRead(const GenericOperation &operation,
                               size_t operand) {
     if (operation.name == "scf.yield" ||
         operation.name == "scf.condition")
@@ -251,17 +251,17 @@ private:
     if (operation.name == "scf.for" && operand >= 3) {
       if (operation.regions.empty())
         return true;
-      const C1RegionRecord &region =
+      const GenericRegion &region =
           module.regions.at(static_cast<size_t>(operation.regions.front()));
       if (region.blocks.empty())
         return true;
-      const C1BlockRecord &block =
+      const GenericBlock &block =
           module.blocks.at(static_cast<size_t>(region.blocks.front()));
       const size_t argument = operand - 2;
       return argument >= block.arguments.size() ||
              isValueRead(block.arguments[argument]);
     }
-    const std::vector<size_t> inits = C1DpsInitOperandIndices(
+    const std::vector<size_t> inits = DpsInitOperandIndices(
         operation.name, operation.operands.size(), operation.properties);
     const bool isInit =
         std::find(inits.begin(), inits.end(), operand) != inits.end();
@@ -274,18 +274,18 @@ private:
     return true;
   }
 
-  bool bufferizesToAliasOnly(const C1OperationRecord &operation,
+  bool bufferizesToAliasOnly(const GenericOperation &operation,
                               size_t operand) {
     return !bufferizesToMemoryRead(operation, operand) &&
            !bufferizesToMemoryWrite(operation, operand) &&
            !getAliasingValues(operation, operand).empty();
   }
 
-  bool hasDuplicateTiedInit(const C1OperationRecord &operation,
+  bool hasDuplicateTiedInit(const GenericOperation &operation,
                             size_t operand) const {
     if (!bufferizesToMemoryWrite(operation, operand))
       return false;
-    for (size_t init : C1DpsInitOperandIndices(
+    for (size_t init : DpsInitOperandIndices(
              operation.name, operation.operands.size(), operation.properties)) {
       if (init >= operation.operands.size() || init == operand)
         continue;
@@ -303,7 +303,7 @@ private:
     auto definition = definitions.find(value);
     if (definition == definitions.end())
       return result;
-    const C1OperationRecord &operation = *definition->second;
+    const GenericOperation &operation = *definition->second;
     if (operation.name == "scf.if") {
       const auto resultIt =
           std::find(operation.results.begin(), operation.results.end(), value);
@@ -312,14 +312,14 @@ private:
       const size_t resultNumber =
           static_cast<size_t>(resultIt - operation.results.begin());
       for (int regionId : operation.regions) {
-        const C1RegionRecord &region =
+        const GenericRegion &region =
             module.regions.at(static_cast<size_t>(regionId));
         for (int blockId : region.blocks) {
-          const C1BlockRecord &block =
+          const GenericBlock &block =
               module.blocks.at(static_cast<size_t>(blockId));
           if (block.operations.empty())
             continue;
-          const C1OperationRecord &terminator = module.operations.at(
+          const GenericOperation &terminator = module.operations.at(
               static_cast<size_t>(block.operations.back()));
           if (terminator.name == "scf.yield" &&
               resultNumber < terminator.operands.size())
@@ -341,7 +341,7 @@ private:
     auto definition = definitions.find(value);
     if (definition == definitions.end())
       return true;
-    const C1OperationRecord &operation = *definition->second;
+    const GenericOperation &operation = *definition->second;
     if (operation.name == "tensor.empty" ||
         operation.name == "bufferization.alloc_tensor")
       return false;
@@ -353,7 +353,7 @@ private:
       return true;
     }
     for (const OpOperand &alias : aliases) {
-      const C1OperationRecord &owner =
+      const GenericOperation &owner =
           module.operations.at(static_cast<size_t>(alias.first));
       if (bufferizesToMemoryWrite(owner, static_cast<size_t>(alias.second))) {
         active.erase(value);
@@ -434,7 +434,7 @@ private:
       worklist.pop_back();
       if (!visited.insert(use).second)
         continue;
-      const C1OperationRecord &operation =
+      const GenericOperation &operation =
           module.operations.at(static_cast<size_t>(use.first));
       const size_t operand = static_cast<size_t>(use.second);
       if (bufferizesToAliasOnly(operation, operand))
@@ -461,7 +461,7 @@ private:
         continue;
       for (const OpOperand &use : aliasUses->second) {
         auto decision = inplaceDecisions.find(use);
-        const C1OperationRecord &operation =
+        const GenericOperation &operation =
             module.operations.at(static_cast<size_t>(use.first));
         if (decision != inplaceDecisions.end() && decision->second &&
             bufferizesToMemoryWrite(operation,
@@ -481,7 +481,7 @@ private:
       if (aliasUses == uses.end())
         continue;
       for (const OpOperand &use : aliasUses->second) {
-        const C1OperationRecord &operation =
+        const GenericOperation &operation =
             module.operations.at(static_cast<size_t>(use.first));
         const size_t operand = static_cast<size_t>(use.second);
         if (bufferizesToMemoryRead(operation, operand)) {
@@ -498,23 +498,23 @@ private:
     }
   }
 
-  bool happensBefore(const C1OperationRecord &lhs,
-                     const C1OperationRecord &rhs) const {
+  bool happensBefore(const GenericOperation &lhs,
+                     const GenericOperation &rhs) const {
     if (isProperAncestor(lhs, rhs))
       return false;
     return lhs.id < rhs.id;
   }
 
   std::map<int, int>
-  enclosingIfRegions(const C1OperationRecord &operation) const {
+  enclosingIfRegions(const GenericOperation &operation) const {
     std::map<int, int> result;
-    const C1OperationRecord *current = &operation;
+    const GenericOperation *current = &operation;
     while (current->regionId >= 0) {
-      const C1RegionRecord &region =
+      const GenericRegion &region =
           module.regions.at(static_cast<size_t>(current->regionId));
       if (region.parentOperation < 0)
         break;
-      const C1OperationRecord &owner = module.operations.at(
+      const GenericOperation &owner = module.operations.at(
           static_cast<size_t>(region.parentOperation));
       if (owner.name == "scf.if")
         result[owner.id] = region.id;
@@ -524,8 +524,8 @@ private:
   }
 
   bool insideMutuallyExclusiveRegions(
-      const C1OperationRecord &lhs,
-      const C1OperationRecord &rhs) const {
+      const GenericOperation &lhs,
+      const GenericOperation &rhs) const {
     const std::map<int, int> lhsRegions = enclosingIfRegions(lhs);
     const std::map<int, int> rhsRegions = enclosingIfRegions(rhs);
     for (const auto &[owner, region] : lhsRegions) {
@@ -536,14 +536,14 @@ private:
     return false;
   }
 
-  std::string subsetSignature(const C1OperationRecord &operation) const {
+  std::string subsetSignature(const GenericOperation &operation) const {
     std::ostringstream signature;
     for (const char *key : {"static_offsets", "static_sizes",
                             "static_strides"})
       signature << key << '='
                 << FindDictionaryValue(operation.properties, key) << ';';
     const std::vector<size_t> segments =
-        C1OperandSegmentSizes(operation.properties);
+        OperandSegmentSizes(operation.properties);
     if (!segments.empty()) {
       const size_t firstSubsetSegment =
           operation.name == "tensor.insert_slice" ? 2 : 1;
@@ -558,7 +558,7 @@ private:
   }
 
   bool matchesInsertDestination(int value,
-                                const C1OperationRecord &insertSlice) {
+                                const GenericOperation &insertSlice) {
     const std::string signature = subsetSignature(insertSlice);
     const int destination = insertSlice.operands.at(1);
     return !findValueInReverseUseDefChain(
@@ -578,10 +578,10 @@ private:
 
   bool areNonConflictingSubsets(const OpOperand &read,
                                 const OpOperand &write) {
-    const C1OperationRecord &readingOperation =
+    const GenericOperation &readingOperation =
         module.operations.at(static_cast<size_t>(read.first));
     if (readingOperation.name == "tensor.insert_slice" && read.second == 1) {
-      const C1OperationRecord &writingOperation =
+      const GenericOperation &writingOperation =
           module.operations.at(static_cast<size_t>(write.first));
       return matchesInsertDestination(
           writingOperation.operands.at(static_cast<size_t>(write.second)),
@@ -590,32 +590,32 @@ private:
     return false;
   }
 
-  const C1OperationRecord *getEnclosingRepetitiveRegion(
-      const C1OperationRecord &operation) const {
+  const GenericOperation *getEnclosingRepetitiveRegion(
+      const GenericOperation &operation) const {
     return enclosingRepetitiveOp(operation);
   }
 
   bool canUseOpDominance(const OpOperand &read, const OpOperand &write,
                          const std::vector<int> &valueDefinitions) const {
-    const C1OperationRecord &readOperation =
+    const GenericOperation &readOperation =
         module.operations.at(static_cast<size_t>(read.first));
-    const C1OperationRecord &writeOperation =
+    const GenericOperation &writeOperation =
         module.operations.at(static_cast<size_t>(write.first));
     for (int value : valueDefinitions) {
-      const C1OperationRecord *readRegion =
+      const GenericOperation *readRegion =
           getEnclosingRepetitiveRegion(readOperation);
-      const C1OperationRecord *definitionRegion = nullptr;
+      const GenericOperation *definitionRegion = nullptr;
       auto definition = definitions.find(value);
       if (definition != definitions.end())
         definitionRegion = getEnclosingRepetitiveRegion(*definition->second);
       else {
         auto blockOwner = blockArgumentOwners.find(value);
         if (blockOwner != blockArgumentOwners.end()) {
-          const C1BlockRecord &block =
+          const GenericBlock &block =
               module.blocks.at(static_cast<size_t>(blockOwner->second));
-          const C1RegionRecord &region =
+          const GenericRegion &region =
               module.regions.at(static_cast<size_t>(block.regionId));
-          const C1OperationRecord &owner = module.operations.at(
+          const GenericOperation &owner = module.operations.at(
               static_cast<size_t>(region.parentOperation));
           if (owner.name == "scf.for" || owner.name == "scf.while")
             definitionRegion = &owner;
@@ -625,9 +625,9 @@ private:
       }
       if (readRegion == definitionRegion)
         continue;
-      const C1OperationRecord *candidate = readRegion;
+      const GenericOperation *candidate = readRegion;
       while (candidate && candidate != definitionRegion) {
-        const C1OperationRecord *next = getEnclosingRepetitiveRegion(*candidate);
+        const GenericOperation *next = getEnclosingRepetitiveRegion(*candidate);
         if (next == definitionRegion)
           break;
         candidate = next;
@@ -641,7 +641,7 @@ private:
   bool hasReadAfterWriteInterference(const std::set<OpOperand> &reads,
                                      const std::set<OpOperand> &writes) {
     for (const OpOperand &read : reads) {
-      const C1OperationRecord &readingOperation =
+      const GenericOperation &readingOperation =
           module.operations.at(static_cast<size_t>(read.first));
       const int readValue = readingOperation.operands.at(
           static_cast<size_t>(read.second));
@@ -649,7 +649,7 @@ private:
       if (valueDefinitions.empty())
         continue;
       for (const OpOperand &write : writes) {
-        const C1OperationRecord &writingOperation =
+        const GenericOperation &writingOperation =
             module.operations.at(static_cast<size_t>(write.first));
         const bool useDominance =
             canUseOpDominance(read, write, valueDefinitions);
@@ -677,7 +677,7 @@ private:
           } else {
             auto owner = blockArgumentOwners.find(definitionValue);
             if (owner != blockArgumentOwners.end()) {
-              const C1BlockRecord &block =
+              const GenericBlock &block =
                   module.blocks.at(static_cast<size_t>(owner->second));
               bool writeInsideBlock = writingOperation.blockId == block.id;
               for (int operationId : block.operations)
@@ -702,7 +702,7 @@ private:
   }
 
   bool wouldCreateReadAfterWriteInterference(
-      const C1OperationRecord &operation, size_t operand) {
+      const GenericOperation &operation, size_t operand) {
     if (hasDuplicateTiedInit(operation, operand))
       return true;
     std::set<OpOperand> reads;
@@ -718,8 +718,8 @@ private:
     return hasReadAfterWriteInterference(reads, writes);
   }
 
-  const C1SemanticModule &module;
-  std::map<int, const C1OperationRecord *> definitions;
+  const GenericModule &module;
+  std::map<int, const GenericOperation *> definitions;
   std::map<int, int> blockArgumentOwners;
   std::map<int, int> aliasParents;
   std::map<int, std::set<OpOperand>> uses;
@@ -727,7 +727,7 @@ private:
 };
 
 inline std::vector<OneShotOpOperandDecision>
-ModelOneShotAnalysis(const C1SemanticModule &module) {
+ModelOneShotAnalysis(const GenericModule &module) {
   return OneShotAnalysisModel(module).Analyze();
 }
 
@@ -741,12 +741,12 @@ inline size_t CountDynamicTensorExtents(const std::string &type) {
 
 inline std::vector<BufferAllocation>
 ModelOneShotBufferizeAllocationsExact(
-    const C1SemanticModule &module,
+    const GenericModule &module,
     const std::vector<OneShotOpOperandDecision> &decisions) {
-  const std::map<int, const C1OperationRecord *> definitions =
-      C1DefiningOperations(module);
+  const std::map<int, const GenericOperation *> definitions =
+      DefiningOperations(module);
   std::map<int, size_t> useCounts;
-  for (const C1OperationRecord &operation : module.operations)
+  for (const GenericOperation &operation : module.operations)
     for (int value : operation.operands)
       ++useCounts[value];
   std::map<std::pair<int, int>, OneShotBufferizationDecision>
@@ -756,7 +756,7 @@ ModelOneShotBufferizeAllocationsExact(
         decision.decision;
 
   std::vector<BufferAllocation> result;
-  for (const C1OperationRecord &operation : module.operations) {
+  for (const GenericOperation &operation : module.operations) {
     for (size_t operand = 0; operand < operation.operandTypes.size(); ++operand) {
       auto decision = decisionByOperand.find(
           {operation.id, static_cast<int>(operand)});
@@ -813,13 +813,13 @@ ModelOneShotBufferizeAllocationsExact(
 }
 
 inline std::vector<BufferAllocation>
-ModelOneShotBufferizeAllocationsExact(const C1SemanticModule &module) {
+ModelOneShotBufferizeAllocationsExact(const GenericModule &module) {
   return ModelOneShotBufferizeAllocationsExact(module,
                                                 ModelOneShotAnalysis(module));
 }
 
 inline OneShotBufferizationResult
-RunOneShotBufferize(const C1SemanticModule &module) {
+RunOneShotBufferize(const GenericModule &module) {
   OneShotBufferizationResult result;
   result.decisions = ModelOneShotAnalysis(module);
   result.allocations =

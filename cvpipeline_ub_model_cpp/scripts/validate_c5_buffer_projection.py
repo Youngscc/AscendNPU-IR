@@ -132,7 +132,7 @@ def main() -> int:
             except RuntimeError as error:
                 failures.append(f"{directory.name}: {error}")
                 continue
-            oracle = "C5_BUFFER_PROJECTION\t1\n" + "".join(
+            oracle = "INLINE_LOAD_COPY_BUFFER_PROJECTION\t1\n" + "".join(
                 line + "\n" for index, line in enumerate(c4_lines)
                 if index in survivors)
             model_text = model.read_text()
@@ -200,11 +200,11 @@ def main() -> int:
             buffers += len(after)
 
     if failures:
-        print(f"C5_BUFFER_PROJECTION=FAIL objects={checked} "
+        print(f"INLINE_LOAD_COPY_BUFFER_PROJECTION=FAIL objects={checked} "
               f"failures={len(failures)}")
         print("\n".join(failures[:30]))
         return 1
-    print(f"C5_BUFFER_PROJECTION=PASS objects={checked} "
+    print(f"INLINE_LOAD_COPY_BUFFER_PROJECTION=PASS objects={checked} "
           f"function_pairs={function_pairs} changed_pairs={changed_pairs} "
           f"rewrites={rewrites} buffers={buffers}")
     return 0

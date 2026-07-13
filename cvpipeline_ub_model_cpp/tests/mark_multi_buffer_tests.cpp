@@ -5,13 +5,13 @@
 
 namespace {
 
-cvub::C5SemanticIR makeCopyCase(const std::string &name,
+cvub::AfterInlineLoadCopyState makeCopyCase(const std::string &name,
                                 cvub::AddressSpace space, bool mix,
                                 const std::string &loopName = "scf.for",
                                 bool mappedLoop = false,
                                 bool existingMark = false) {
-  cvub::C5SemanticIR c5;
-  auto &module = c5.c4.c3.bufferized.logicalModule;
+  cvub::AfterInlineLoadCopyState afterInlineLoadCopy;
+  auto &module = afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized.logicalModule;
   module.operations.resize(existingMark ? 6 : 5);
   module.operations[0].id = 0;
   module.operations[0].name = "builtin.module";
@@ -38,23 +38,23 @@ cvub::C5SemanticIR makeCopyCase(const std::string &name,
   module.operations[4].operands = {40, 30};
   module.operations[4].operandTypes = {"memref<8xf32>", "memref<8xf32>"};
   module.operations[4].properties = "{operandSegmentSizes = array<i32: 1, 1>}";
-  cvub::ApplyC1OpSemantics(module.operations[4]);
-  c5.c4.c3.bufferized.accesses = {{4, 0, "arg:1:0"}, {4, 1, "local:0"}};
-  c5.c4.c3.singlePoint.allocations.push_back(
+  cvub::ApplyOperationSemantics(module.operations[4]);
+  afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized.accesses = {{4, 0, "arg:1:0"}, {4, 1, "local:0"}};
+  afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.allocations.push_back(
       {"memref<8xf32>", "", 0, "result:3:0", {}});
-  c5.c4.c3.singlePoint.bufferMapping["local:0"] = "local:0";
-  c5.c4.buffers = {{"base:0", "base:0", "result:3:0", "memref<8xf32>",
+  afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.bufferMapping["local:0"] = "local:0";
+  afterInlineLoadCopy.afterAllocExtraBuffer.buffers = {{"base:0", "base:0", "result:3:0", "memref<8xf32>",
                     space, 256, false, {8}}};
-  c5.buffers = c5.c4.buffers;
+  afterInlineLoadCopy.buffers = afterInlineLoadCopy.afterAllocExtraBuffer.buffers;
   if (existingMark) {
     module.operations[5].id = 5;
     module.operations[5].name = "annotation.mark";
     module.operations[5].parentId = 2;
     module.operations[5].operands = {30};
     module.operations[5].attributes = "{hivm.multi_buffer = 4 : i32}";
-    c5.c4.c3.bufferized.accesses.push_back({5, 0, "local:0"});
+    afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized.accesses.push_back({5, 0, "local:0"});
   }
-  return c5;
+  return afterInlineLoadCopy;
 }
 
 cvub::MarkMultiBufferOptions options(bool enabled,
@@ -67,11 +67,11 @@ cvub::MarkMultiBufferOptions options(bool enabled,
   return result;
 }
 
-void requireCount(const cvub::C5SemanticIR &c5,
+void requireCount(const cvub::AfterInlineLoadCopyState &afterInlineLoadCopy,
                   const cvub::MarkMultiBufferOptions &opts, unsigned expected,
                   const std::string &label) {
   const cvub::MarkMultiBufferResult result =
-      cvub::ModelMarkMultiBuffer(c5, opts);
+      cvub::ModelMarkMultiBuffer(afterInlineLoadCopy, opts);
   const auto found = result.buffer2MultiNum.find("base:0");
   const unsigned actual =
       found == result.buffer2MultiNum.end() ? 1 : found->second;
@@ -81,9 +81,9 @@ void requireCount(const cvub::C5SemanticIR &c5,
                              std::to_string(actual));
 }
 
-cvub::C5SemanticIR makePreloadCase() {
-  cvub::C5SemanticIR c5;
-  auto &module = c5.c4.c3.bufferized.logicalModule;
+cvub::AfterInlineLoadCopyState makePreloadCase() {
+  cvub::AfterInlineLoadCopyState afterInlineLoadCopy;
+  auto &module = afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized.logicalModule;
   module.operations.resize(7);
   module.operations[0].id = 0;
   module.operations[0].name = "builtin.module";
@@ -117,15 +117,15 @@ cvub::C5SemanticIR makePreloadCase() {
   module.operations[6].parentId = 1;
   module.regions = {{0, 2, 0, {0}}};
   module.blocks = {{0, 0, 0, {}, {}, {3, 4}}};
-  c5.c4.c3.bufferized.values.push_back(
+  afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized.values.push_back(
       {30, "local:0", "memref<8xf32>", "result:3:0"});
-  c5.c4.c3.singlePoint.allocations.push_back(
+  afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.allocations.push_back(
       {"memref<8xf32>", "", 0, "result:3:0", {}});
-  c5.c4.c3.singlePoint.bufferMapping["local:0"] = "local:0";
-  c5.c4.buffers = {{"base:0", "base:0", "result:3:0", "memref<8xf32>",
+  afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.bufferMapping["local:0"] = "local:0";
+  afterInlineLoadCopy.afterAllocExtraBuffer.buffers = {{"base:0", "base:0", "result:3:0", "memref<8xf32>",
                     cvub::AddressSpace::UB, 256, false, {8}}};
-  c5.buffers = c5.c4.buffers;
-  return c5;
+  afterInlineLoadCopy.buffers = afterInlineLoadCopy.afterAllocExtraBuffer.buffers;
+  return afterInlineLoadCopy;
 }
 
 } // namespace

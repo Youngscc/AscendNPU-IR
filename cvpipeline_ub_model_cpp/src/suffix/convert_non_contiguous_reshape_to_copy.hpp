@@ -10,9 +10,9 @@ struct NonContiguousReshapeCopy {
   std::string type;
 };
 
-inline const C1OperationRecord *C1EnclosingFunctionForNonContiguous(
-    const C1SemanticModule &module, const C1OperationRecord &operation) {
-  const C1OperationRecord *current = &operation;
+inline const GenericOperation *EnclosingFunctionForNonContiguousReshape(
+    const GenericModule &module, const GenericOperation &operation) {
+  const GenericOperation *current = &operation;
   while (current && current->name != "func.func") {
     if (current->parentId < 0)
       return nullptr;
@@ -35,11 +35,11 @@ inline bool HasDictionaryEntry(const std::string &dictionary,
 }
 
 inline std::vector<NonContiguousReshapeCopy>
-ModelConvertNonContiguousReshapeToCopy(const C1SemanticModule &module) {
-  const std::map<int, const C1OperationRecord *> definitions =
-      C1DefiningOperations(module);
+ModelConvertNonContiguousReshapeToCopy(const GenericModule &module) {
+  const std::map<int, const GenericOperation *> definitions =
+      DefiningOperations(module);
   std::vector<NonContiguousReshapeCopy> result;
-  for (const C1OperationRecord &mark : module.operations) {
+  for (const GenericOperation &mark : module.operations) {
     if (mark.name != "annotation.mark" || mark.operands.empty() ||
         !HasDictionaryEntry(mark.attributes, "maybeUnCollapsibleReshape"))
       continue;
@@ -48,12 +48,12 @@ ModelConvertNonContiguousReshapeToCopy(const C1SemanticModule &module) {
         definition->second->name != "memref.collapse_shape")
       throw std::runtime_error(
           "ConvertNonContiguousReshapeToCopy: marker is not on collapse_shape");
-    const C1OperationRecord &collapse = *definition->second;
+    const GenericOperation &collapse = *definition->second;
     if (collapse.operandTypes.empty())
       throw std::runtime_error(
           "ConvertNonContiguousReshapeToCopy: collapse source is missing");
-    const C1OperationRecord *function =
-        C1EnclosingFunctionForNonContiguous(module, collapse);
+    const GenericOperation *function =
+        EnclosingFunctionForNonContiguousReshape(module, collapse);
     if (!function)
       continue;
     const std::string coreType = DecomposeEnumValue(

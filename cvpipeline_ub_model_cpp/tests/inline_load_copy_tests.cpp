@@ -5,10 +5,10 @@
 
 namespace {
 
-cvub::C1OperationRecord operation(int id, int parent, int block, int ordinal,
+cvub::GenericOperation operation(int id, int parent, int block, int ordinal,
                                   const std::string &name,
                                   std::vector<int> operands = {}) {
-  cvub::C1OperationRecord result;
+  cvub::GenericOperation result;
   result.id = id;
   result.parentId = parent;
   result.blockId = block;
@@ -18,71 +18,71 @@ cvub::C1OperationRecord operation(int id, int parent, int block, int ordinal,
   return result;
 }
 
-void addAccess(cvub::C3SemanticIR &c3, int operationId, int operand,
+void addAccess(cvub::PostBufferizationRewriteState &postBufferization, int operationId, int operand,
                const std::string &buffer) {
-  c3.bufferized.accesses.push_back({operationId, operand, buffer});
+  postBufferization.bufferized.accesses.push_back({operationId, operand, buffer});
 }
 
-cvub::C4SemanticIR makeCase(bool copyBeforeLoad, bool middleRead,
+cvub::AfterAllocExtraBufferState makeCase(bool copyBeforeLoad, bool middleRead,
                             bool sourceWrite, bool differentBlock) {
-  cvub::C4SemanticIR c4;
-  cvub::C3SemanticIR &c3 = c4.c3;
-  c3.bufferized.logicalModule.operations.push_back(
+  cvub::AfterAllocExtraBufferState afterAllocExtraBuffer;
+  cvub::PostBufferizationRewriteState &postBufferization = afterAllocExtraBuffer.postBufferization;
+  postBufferization.bufferized.logicalModule.operations.push_back(
       operation(0, -1, -1, 0, "builtin.module"));
-  cvub::C1OperationRecord function = operation(1, 0, 0, 0, "func.func");
+  cvub::GenericOperation function = operation(1, 0, 0, 0, "func.func");
   function.properties = "{sym_name = \"kernel\"}";
-  c3.bufferized.logicalModule.operations.push_back(function);
+  postBufferization.bufferized.logicalModule.operations.push_back(function);
 
   const int loadOrdinal = copyBeforeLoad ? 4 : 1;
-  cvub::C1OperationRecord load =
+  cvub::GenericOperation load =
       operation(2, 1, 0, loadOrdinal, "hivm.hir.load", {10, 20});
   load.operandTypes = {"memref<8xf32>", "memref<8xf32>"};
-  c3.bufferized.logicalModule.operations.push_back(load);
-  cvub::C1OperationRecord toTensor =
+  postBufferization.bufferized.logicalModule.operations.push_back(load);
+  cvub::GenericOperation toTensor =
       operation(3, 1, 0, 2, "bufferization.to_tensor", {20});
   toTensor.results = {21};
   toTensor.operandTypes = {"memref<8xf32>"};
   toTensor.resultTypes = {"tensor<8xf32>"};
-  c3.bufferized.logicalModule.operations.push_back(toTensor);
+  postBufferization.bufferized.logicalModule.operations.push_back(toTensor);
 
   int copyId = 4;
   if (middleRead) {
-    c3.bufferized.logicalModule.operations.push_back(
+    postBufferization.bufferized.logicalModule.operations.push_back(
         operation(copyId++, 1, 0, 3, "memref.load", {20}));
   }
   if (sourceWrite) {
-    c3.bufferized.logicalModule.operations.push_back(
+    postBufferization.bufferized.logicalModule.operations.push_back(
         operation(copyId++, 1, 0, 3, "memref.store", {30, 10}));
   }
-  cvub::C1OperationRecord copy = operation(
+  cvub::GenericOperation copy = operation(
       copyId, 1, differentBlock ? 1 : 0, copyBeforeLoad ? 1 : 5,
       "tensor.insert_slice", {21, 40});
   copy.operandTypes = {"tensor<8xf32>", "tensor<8xf32>"};
-  c3.bufferized.logicalModule.operations.push_back(copy);
+  postBufferization.bufferized.logicalModule.operations.push_back(copy);
 
-  addAccess(c3, load.id, 0, "arg:1:0");
-  addAccess(c3, load.id, 1, "local:0");
-  addAccess(c3, toTensor.id, 0, "local:0");
+  addAccess(postBufferization, load.id, 0, "arg:1:0");
+  addAccess(postBufferization, load.id, 1, "local:0");
+  addAccess(postBufferization, toTensor.id, 0, "local:0");
   if (middleRead)
-    addAccess(c3, 4, 0, "local:0");
+    addAccess(postBufferization, 4, 0, "local:0");
   if (sourceWrite)
-    addAccess(c3, middleRead ? 5 : 4, 1, "arg:1:0");
-  addAccess(c3, copy.id, 0, "local:0");
-  addAccess(c3, copy.id, 1, "local:1");
-  c3.singlePoint.bufferMapping = {
+    addAccess(postBufferization, middleRead ? 5 : 4, 1, "arg:1:0");
+  addAccess(postBufferization, copy.id, 0, "local:0");
+  addAccess(postBufferization, copy.id, 1, "local:1");
+  postBufferization.singlePoint.bufferMapping = {
       {"local:0", "local:0"}, {"local:1", "local:1"}};
-  c4.buffers = {
+  afterAllocExtraBuffer.buffers = {
       {"base:0", "base:0", "", "memref<8xf32>",
        cvub::AddressSpace::UB, 256, false, {}},
       {"base:1", "base:1", "", "memref<8xf32>",
        cvub::AddressSpace::UB, 256, false, {}},
   };
-  return c4;
+  return afterAllocExtraBuffer;
 }
 
-void expectRewrites(const cvub::C4SemanticIR &c4, size_t expected,
+void expectRewrites(const cvub::AfterAllocExtraBufferState &afterAllocExtraBuffer, size_t expected,
                     const std::string &label) {
-  const cvub::InlineLoadCopyResult result = cvub::ModelInlineLoadCopy(c4);
+  const cvub::InlineLoadCopyResult result = cvub::ModelInlineLoadCopy(afterAllocExtraBuffer);
   if (result.rewrites.size() != expected ||
       result.erasedBuffers.size() != expected)
     throw std::runtime_error(label + " rewrite mismatch");

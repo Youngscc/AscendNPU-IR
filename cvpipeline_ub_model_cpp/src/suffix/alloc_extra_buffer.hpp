@@ -66,15 +66,15 @@ inline std::string ParseEnumValue(const std::string &text) {
 
 class AllocExtraBufferModel {
 public:
-  explicit AllocExtraBufferModel(const C1SemanticModule &module,
+  explicit AllocExtraBufferModel(const GenericModule &module,
                                  std::string function = "")
-      : module(module), valueTypes(C1ValueTypes(module)),
-        definitions(C1DefiningOperations(module)), function(std::move(function)) {}
+      : module(module), valueTypes(ValueTypes(module)),
+        definitions(DefiningOperations(module)), function(std::move(function)) {}
 
   std::vector<ExtraBufferAllocation> Run() const {
     std::vector<ExtraBufferAllocation> result;
-    for (const C1OperationRecord &operation : module.operations) {
-      const C1OperationRecord *owner = enclosingFunction(operation);
+    for (const GenericOperation &operation : module.operations) {
+      const GenericOperation *owner = enclosingFunction(operation);
       if (!owner || (!function.empty() && functionName(*owner) != function) ||
           ParseEnumValue(FindDictionaryValue(owner->attributes,
                                              "hacc.function_kind")) == "HOST")
@@ -91,9 +91,9 @@ public:
   }
 
 private:
-  const C1OperationRecord *
-  enclosingFunction(const C1OperationRecord &operation) const {
-    const C1OperationRecord *current = &operation;
+  const GenericOperation *
+  enclosingFunction(const GenericOperation &operation) const {
+    const GenericOperation *current = &operation;
     while (current && current->name != "func.func") {
       if (current->parentId < 0)
         return nullptr;
@@ -102,14 +102,14 @@ private:
     return current;
   }
 
-  std::string functionName(const C1OperationRecord &operation) const {
+  std::string functionName(const GenericOperation &operation) const {
     std::string name = FindDictionaryValue(operation.properties, "sym_name");
     if (name.size() >= 2 && name.front() == '"' && name.back() == '"')
       name = name.substr(1, name.size() - 2);
     return name;
   }
 
-  const MemRefTypeModel &memrefOperand(const C1OperationRecord &operation,
+  const MemRefTypeModel &memrefOperand(const GenericOperation &operation,
                                       size_t index,
                                       MemRefTypeModel &storage) const {
     if (index >= operation.operandTypes.size())
@@ -124,13 +124,13 @@ private:
     return storage;
   }
 
-  bool hasTempBuffer(const C1OperationRecord &operation) const {
+  bool hasTempBuffer(const GenericOperation &operation) const {
     const std::vector<int64_t> segments = ParseI64Array(
         FindDictionaryValue(operation.attributes, "operandSegmentSizes"));
     return segments.size() >= 3 && segments.back() != 0;
   }
 
-  int64_t traceToAllocMaxSize(const C1OperationRecord &operation,
+  int64_t traceToAllocMaxSize(const GenericOperation &operation,
                               size_t operand) const {
     if (operand >= operation.operands.size())
       throw std::runtime_error("AllocExtraBuffer: missing traced operand");
@@ -140,7 +140,7 @@ private:
       auto found = definitions.find(value);
       if (found == definitions.end())
         break;
-      const C1OperationRecord &definition = *found->second;
+      const GenericOperation &definition = *found->second;
       if (definition.name == "memref.alloc") {
         auto type = valueTypes.find(value);
         if (type == valueTypes.end())
@@ -165,7 +165,7 @@ private:
   }
 
   std::optional<std::pair<int64_t, std::string>>
-  getExtraBuffer(const C1OperationRecord &operation) const {
+  getExtraBuffer(const GenericOperation &operation) const {
     if (hasTempBuffer(operation))
       return std::nullopt;
     if (operation.name == "hivm.hir.vcast")
@@ -194,7 +194,7 @@ private:
   }
 
   std::optional<std::pair<int64_t, std::string>>
-  getVCastExtraBuffer(const C1OperationRecord &operation) const {
+  getVCastExtraBuffer(const GenericOperation &operation) const {
     MemRefTypeModel source, destination;
     memrefOperand(operation, 0, source);
     memrefOperand(operation, 1, destination);
@@ -220,7 +220,7 @@ private:
   }
 
   std::optional<std::pair<int64_t, std::string>>
-  getVInterleaveExtraBuffer(const C1OperationRecord &operation) const {
+  getVInterleaveExtraBuffer(const GenericOperation &operation) const {
     MemRefTypeModel source;
     memrefOperand(operation, 0, source);
     if (source.shape.empty() || !source.shape.back())
@@ -235,7 +235,7 @@ private:
   }
 
   std::optional<std::pair<int64_t, std::string>>
-  getVPowExtraBuffer(const C1OperationRecord &operation) const {
+  getVPowExtraBuffer(const GenericOperation &operation) const {
     MemRefTypeModel source;
     memrefOperand(operation, 0, source);
     if (source.elementType != "i32")
@@ -251,7 +251,7 @@ private:
   }
 
   std::optional<std::pair<int64_t, std::string>>
-  getVSelExtraBuffer(const C1OperationRecord &operation) const {
+  getVSelExtraBuffer(const GenericOperation &operation) const {
     MemRefTypeModel destination;
     memrefOperand(operation, operation.operandTypes.size() - 1, destination);
     const bool src0Scalar = !IsMemRefType(operation.operandTypes.at(1));
@@ -283,7 +283,7 @@ private:
   }
 
   std::optional<std::pair<int64_t, std::string>>
-  getVSortExtraBuffer(const C1OperationRecord &operation) const {
+  getVSortExtraBuffer(const GenericOperation &operation) const {
     MemRefTypeModel source;
     memrefOperand(operation, 0, source);
     if (source.shape.empty() || !source.shape.back())
@@ -303,7 +303,7 @@ private:
   }
 
   std::optional<std::pair<int64_t, std::string>>
-  getVDivExtraBuffer(const C1OperationRecord &operation) const {
+  getVDivExtraBuffer(const GenericOperation &operation) const {
     if (operation.operandTypes.size() < 3)
       throw std::runtime_error("AllocExtraBuffer: malformed vdiv");
     const bool src0Scalar = !IsMemRefType(operation.operandTypes[0]);
@@ -318,7 +318,7 @@ private:
   }
 
   std::optional<std::pair<int64_t, std::string>>
-  getVBrcExtraBuffer(const C1OperationRecord &operation) const {
+  getVBrcExtraBuffer(const GenericOperation &operation) const {
     std::vector<int64_t> dimensions = ParseI64Array(
         FindDictionaryValue(operation.attributes, "broadcast_dims"));
     if (dimensions.empty())
@@ -387,11 +387,11 @@ private:
     return std::pair<int64_t, std::string>{size, destination.elementType};
   }
 
-  bool functionHasAttribute(const C1OperationRecord &operation,
+  bool functionHasAttribute(const GenericOperation &operation,
                             const std::string &name) const {
     int parent = operation.parentId;
     while (parent >= 0) {
-      const C1OperationRecord &owner =
+      const GenericOperation &owner =
           module.operations.at(static_cast<size_t>(parent));
       if (!FindDictionaryValue(owner.attributes, name).empty())
         return true;
@@ -401,7 +401,7 @@ private:
   }
 
   std::optional<std::pair<int64_t, std::string>>
-  getVReduceExtraBuffer(const C1OperationRecord &operation) const {
+  getVReduceExtraBuffer(const GenericOperation &operation) const {
     MemRefTypeModel source, destination;
     memrefOperand(operation, 0, source);
     memrefOperand(operation, 1, destination);
@@ -547,25 +547,25 @@ private:
     return std::pair<int64_t, std::string>{*maximum, source.elementType};
   }
 
-  const C1SemanticModule &module;
+  const GenericModule &module;
   std::map<int, std::string> valueTypes;
-  std::map<int, const C1OperationRecord *> definitions;
+  std::map<int, const GenericOperation *> definitions;
   std::string function;
 };
 
 inline std::vector<ExtraBufferAllocation>
-ModelAllocExtraBuffer(const C1SemanticModule &module,
+ModelAllocExtraBuffer(const GenericModule &module,
                       const std::string &function = "") {
   return AllocExtraBufferModel(module, function).Run();
 }
 
 inline std::vector<ExtraBufferAllocation>
-CollectAllocExtraBufferOracle(const C1SemanticModule &before,
-                              const C1SemanticModule &after) {
+CollectAllocExtraBufferOracle(const GenericModule &before,
+                              const GenericModule &after) {
   std::vector<ExtraBufferAllocation> result;
   size_t beforeIndex = 0;
   for (size_t afterIndex = 0; afterIndex < after.operations.size(); ++afterIndex) {
-    const C1OperationRecord &operation = after.operations[afterIndex];
+    const GenericOperation &operation = after.operations[afterIndex];
     if (beforeIndex < before.operations.size() &&
         operation.name == before.operations[beforeIndex].name) {
       ++beforeIndex;
@@ -573,7 +573,7 @@ CollectAllocExtraBufferOracle(const C1SemanticModule &before,
     }
     if (operation.name != "memref.alloc" || afterIndex + 1 >= after.operations.size())
       throw std::runtime_error("AllocExtraBuffer oracle: unexpected pass delta");
-    const C1OperationRecord &owner = after.operations[afterIndex + 1];
+    const GenericOperation &owner = after.operations[afterIndex + 1];
     if (operation.resultTypes.size() != 1)
       throw std::runtime_error("AllocExtraBuffer oracle: malformed allocation");
     result.push_back({owner.id, owner.name, operation.resultTypes.front()});

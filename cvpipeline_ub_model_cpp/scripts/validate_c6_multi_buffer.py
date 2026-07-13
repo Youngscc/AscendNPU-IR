@@ -86,7 +86,7 @@ def main() -> int:
                 failures.append(f"{input_hash}/{row['config_id']}: {error}")
                 continue
             model_lines = model.read_text().splitlines()
-            oracle_lines = ["C6_MULTI_BUFFER_PROJECTION\t1"]
+            oracle_lines = ["MARK_MULTI_BUFFER_PROJECTION\t1"]
             buffer_lines = [line for line in model_lines
                             if line.startswith("BUFFER\t")]
             for ordinal, line in enumerate(buffer_lines):

@@ -84,7 +84,7 @@ inline std::string PlanMemoryFormatMemRefType(const MemRefTypeModel &type) {
 
 inline std::string PlanMemoryFormatMemRefTypeWithAddressSpace(
     const MemRefTypeModel &type) {
-  const std::string scope = C4AddressSpaceName(type.addressSpace);
+  const std::string scope = AddressSpaceName(type.addressSpace);
   if (scope == "unknown")
     return PlanMemoryFormatMemRefType(type);
   return PlanMemoryPreserveAddressSpace(
@@ -95,7 +95,7 @@ inline std::string PlanMemoryFormatMemRefTypeWithAddressSpace(
 class PlanMemoryBridge {
 public:
   explicit PlanMemoryBridge(const PlanMemoryInputSemanticIR &module)
-      : module(module), logical(module.c6.c5.c4.c3.bufferized.logicalModule) {
+      : module(module), logical(module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized.logicalModule) {
     indexBuffers();
     indexValues();
     indexEvents();
@@ -105,9 +105,9 @@ public:
   PlanMemoryInput Build() {
     if (!module.accessBlockers.empty())
       throw std::runtime_error("PlanMemory bridge: unresolved access blocker");
-    const C1OperationRecord *function = nullptr;
-    for (const C1OperationRecord &operation : logical.operations) {
-      if (operation.name != "func.func" || !C7IsAIVFunction(operation))
+    const GenericOperation *function = nullptr;
+    for (const GenericOperation &operation : logical.operations) {
+      if (operation.name != "func.func" || !IsAIVFunction(operation))
         continue;
       if (function)
         throw std::runtime_error(
@@ -118,7 +118,7 @@ public:
       return {};
     if (function->regions.size() != 1)
       throw std::runtime_error("PlanMemory bridge: malformed AIV function");
-    const C1RegionRecord &region =
+    const GenericRegion &region =
         logical.regions.at(static_cast<size_t>(function->regions.front()));
     emitGeneratedFunctionConstants(*function, region);
     for (int block : region.blocks)
@@ -138,13 +138,13 @@ public:
   }
 
 private:
-  void emitGeneratedFunctionConstants(const C1OperationRecord &function,
-                                      const C1RegionRecord &functionRegion) {
+  void emitGeneratedFunctionConstants(const GenericOperation &function,
+                                      const GenericRegion &functionRegion) {
     if (functionRegion.blocks.empty())
       return;
-    const C1BlockRecord *entry = nullptr;
+    const GenericBlock *entry = nullptr;
     for (int blockId : functionRegion.blocks) {
-      const C1BlockRecord &candidate =
+      const GenericBlock &candidate =
           logical.blocks.at(static_cast<size_t>(blockId));
       if (!candidate.operations.empty()) {
         entry = &candidate;
@@ -153,7 +153,7 @@ private:
     }
     if (!entry)
       return;
-    const C1OperationRecord *placement = nullptr;
+    const GenericOperation *placement = nullptr;
     if (!entry->operations.empty())
       placement = &logical.operations.at(
           static_cast<size_t>(entry->operations.front()));
@@ -184,7 +184,7 @@ private:
     };
     std::vector<ExtendedConstant> extendedConstants;
     std::set<std::pair<bool, int>> seenExtendedConstants;
-    for (const C1OperationRecord &operation : logical.operations) {
+    for (const GenericOperation &operation : logical.operations) {
       auto events = eventsBySource.find(operation.id);
       const bool decomposedScalarVSub =
           events != eventsBySource.end() &&
@@ -195,8 +195,8 @@ private:
       if (!decomposedScalarVSub || operation.operands.size() < 2 ||
           operation.operandTypes.size() < 2)
         continue;
-      const C1OperationRecord *definition =
-          C7DefiningOperation(logical, operation.operands[1]);
+      const GenericOperation *definition =
+          DefiningOperation(logical, operation.operands[1]);
       if (!definition || definition->name != "arith.constant")
         continue;
       std::string literal =
@@ -241,9 +241,9 @@ private:
       } catch (const std::exception &) {
       }
     }
-    for (const C1OperationRecord &operation : logical.operations) {
-      const C1OperationRecord *owner =
-          C4EnclosingFunction(logical, operation);
+    for (const GenericOperation &operation : logical.operations) {
+      const GenericOperation *owner =
+          EnclosingFunction(logical, operation);
       if (!owner || owner->id != function.id ||
           (operation.name != "arith.mului_extended" &&
            operation.name != "arith.mulsi_extended") ||
@@ -252,8 +252,8 @@ private:
         continue;
       const bool isUnsigned = operation.name == "arith.mului_extended";
       for (int operand : operation.operands) {
-        const C1OperationRecord *definition =
-            C7DefiningOperation(logical, operand);
+        const GenericOperation *definition =
+            DefiningOperation(logical, operand);
         if (!definition || definition->name != "arith.constant" ||
             !seenExtendedConstants.insert({isUnsigned, operand}).second)
           continue;
@@ -284,9 +284,9 @@ private:
         emitExtendedConstant(extendedConstants[index - 1]);
     }
 
-    for (const C1OperationRecord &operation : logical.operations) {
-      const C1OperationRecord *owner =
-          C4EnclosingFunction(logical, operation);
+    for (const GenericOperation &operation : logical.operations) {
+      const GenericOperation *owner =
+          EnclosingFunction(logical, operation);
       if (!owner || owner->id != function.id)
         continue;
       if (operation.name == "hivm.hir.vrec" &&
@@ -327,8 +327,8 @@ private:
           IsMemRefType(operation.operandTypes[1]))
         continue;
       const int scalar = operation.operands.at(1);
-      const C1OperationRecord *definition =
-          C7DefiningOperation(logical, scalar);
+      const GenericOperation *definition =
+          DefiningOperation(logical, scalar);
       if (definition && definition->name == "arith.constant")
         continue;
       const std::string &type = operation.operandTypes[1];
@@ -348,23 +348,23 @@ private:
       bufferNames[buffer.identity] = name;
       bufferTypes[buffer.identity] = PlanMemoryMemRefType(buffer.physicalType);
       namedValueTypes[name] = bufferTypes[buffer.identity];
-      if (const C4BufferRecord *record =
-              C4FindSourceBuffer(module.c6.c5.c4.buffers,
+      if (const LocalBufferRecord *record =
+              FindSourceBuffer(module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.buffers,
                                  buffer.sourceIdentity))
         finalBufferRecords[buffer.identity] = record;
-      const C4SemanticIR &c4 = module.c6.c5.c4;
-      auto owner = c4.bufferOwnerOperations.find(buffer.sourceIdentity);
-      if (owner == c4.bufferOwnerOperations.end())
+      const AfterAllocExtraBufferState &afterAllocExtraBuffer = module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer;
+      auto owner = afterAllocExtraBuffer.bufferOwnerOperations.find(buffer.sourceIdentity);
+      if (owner == afterAllocExtraBuffer.bufferOwnerOperations.end())
         throw std::runtime_error("PlanMemory bridge: missing buffer owner");
       buffersByOwner[owner->second].push_back(&buffer);
       bufferByIdentity[buffer.identity] = &buffer;
     }
-    const C4SemanticIR &c4 = module.c6.c5.c4;
-    for (size_t ordinal = 0; ordinal < module.c6.c5.buffers.size(); ++ordinal) {
+    const AfterAllocExtraBufferState &afterAllocExtraBuffer = module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer;
+    for (size_t ordinal = 0; ordinal < module.afterMarkMultiBuffer.afterInlineLoadCopy.buffers.size(); ++ordinal) {
       if (targetOrdinals.count(ordinal))
         continue;
-      const C4BufferRecord &buffer = module.c6.c5.buffers[ordinal];
-      const int owner = C6BufferOwnerOperation(c4, buffer);
+      const LocalBufferRecord &buffer = module.afterMarkMultiBuffer.afterInlineLoadCopy.buffers[ordinal];
+      const int owner = BufferOwnerOperation(afterAllocExtraBuffer, buffer);
       if (owner >= 0)
         nonTargetBuffersByOwner[owner].push_back(ordinal);
     }
@@ -373,20 +373,20 @@ private:
   std::string mappedIdentity(const std::string &buffer) const {
     std::set<std::string> candidates;
     for (const std::string &alternative : BufferAlternatives(buffer)) {
-      const std::string source = C4MappedBufferIdentity(
-          alternative, module.c6.c5.c4.c3.singlePoint.bufferMapping);
+      const std::string source = MappedBufferIdentity(
+          alternative, module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.bufferMapping);
       if (targetSourceIdentities.count(source))
         candidates.insert(finalIdentity.at(source));
     }
     return candidates.size() == 1 ? *candidates.begin() : std::string();
   }
 
-  std::string preAlignmentType(const C4BufferRecord &record) const {
+  std::string preAlignmentType(const LocalBufferRecord &record) const {
     if (startsWith(record.sourceIdentity, "base:")) {
       const size_t ordinal = static_cast<size_t>(
           std::stoull(record.sourceIdentity.substr(5)));
       const auto &allocations =
-          module.c6.c5.c4.c3.singlePoint.allocations;
+          module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.allocations;
       if (ordinal < allocations.size())
         return allocations[ordinal].type;
     }
@@ -399,7 +399,7 @@ private:
             std::stoull(record.sourceIdentity.substr(split + 1)));
         size_t current = 0;
         for (const DecomposeBufferAllocation &allocation :
-             module.c6.c5.c4.c3.decomposeAllocations) {
+             module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.decomposeAllocations) {
           if (allocation.ownerOperation != owner)
             continue;
           if (current++ == ordinal)
@@ -411,11 +411,11 @@ private:
   }
 
   void indexValues() {
-    const std::map<int, std::string> valueTypes = C1ValueTypes(logical);
+    const std::map<int, std::string> valueTypes = ValueTypes(logical);
     for (const auto &[value, type] : valueTypes)
       namedValueTypes[PlanMemoryValueName(value)] =
           IsTensorType(type) ? ConvertTensorToMemRefType(type) : type;
-    for (const C1OperationRecord &operation : logical.operations) {
+    for (const GenericOperation &operation : logical.operations) {
       for (int operand : operation.operands)
         valueUsers[operand].insert(operation.id);
       if (operation.name != "arith.constant" || operation.results.size() != 1)
@@ -433,8 +433,8 @@ private:
         const int64_t integer = std::stoll(value, &consumed, 0);
         if (consumed != value.size())
           throw std::invalid_argument("trailing integer literal text");
-        const C1OperationRecord *function =
-            C4EnclosingFunction(logical, operation);
+        const GenericOperation *function =
+            EnclosingFunction(logical, operation);
         if (function) {
           if (operation.resultTypes.front() == "index")
             integerConstants[function->id].emplace(
@@ -462,8 +462,8 @@ private:
           const long double floating = std::stold(value, &consumed);
           if (consumed != value.size())
             throw std::invalid_argument("trailing float literal text");
-          const C1OperationRecord *function =
-              C4EnclosingFunction(logical, operation);
+          const GenericOperation *function =
+              EnclosingFunction(logical, operation);
           if (function && floating == 0.0L &&
               operation.resultTypes.size() == 1)
             zeroScalarConstants[function->id].emplace(
@@ -473,7 +473,7 @@ private:
       }
     }
     for (const BufferizedValueBinding &binding :
-         module.c6.c5.c4.c3.bufferized.values) {
+         module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized.values) {
       bufferizedBufferIds[binding.valueId] = binding.bufferId;
       bufferizedValueTypes[binding.valueId] = binding.type;
       bufferRepresentativeValues.emplace(binding.bufferId, binding.valueId);
@@ -492,11 +492,11 @@ private:
         conditionalValues.insert(binding.valueId);
     }
     for (const BufferizedOperandAccess &access :
-         module.c6.c5.c4.c3.bufferized.accesses) {
+         module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized.accesses) {
       const std::string identity = mappedIdentity(access.bufferId);
       if (identity.empty() || alignedViewTypes.count(identity) != 0)
         continue;
-      const C1OperationRecord &operation = logical.operations.at(
+      const GenericOperation &operation = logical.operations.at(
           static_cast<size_t>(access.operationId));
       if (access.operandNumber < 0 ||
           static_cast<size_t>(access.operandNumber) >=
@@ -509,29 +509,29 @@ private:
       const std::optional<MemRefTypeModel> logicalType = ParseMemRefType(type);
       auto record = finalBufferRecords.find(identity);
       if (!logicalType || record == finalBufferRecords.end() ||
-          module.c6.c5.c4.alignStorage.strideAlignments.count(
+          module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.alignStorage.strideAlignments.count(
               record->second->sourceIdentity) == 0)
         continue;
       alignedViewTypes[identity] = PlanMemoryPreserveAddressSpace(
-          PlanMemoryFormatMemRefType(C4AlignedOperandType(
+          PlanMemoryFormatMemRefType(AlignedOperandType(
               *record->second, *logicalType,
-              module.c6.c5.c4.alignStorage)),
+              module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.alignStorage)),
           bufferTypes.at(identity));
     }
     for (const auto &[identity, record] : finalBufferRecords) {
       const auto strideAlignment =
-          module.c6.c5.c4.alignStorage.strideAlignments.find(
+          module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.alignStorage.strideAlignments.find(
               record->sourceIdentity);
       const auto allocationAlignment =
-          module.c6.c5.c4.alignStorage.allocAlignments.find(
+          module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.alignStorage.allocAlignments.find(
               record->sourceIdentity);
       const bool hasStrideAlignment =
           strideAlignment !=
-              module.c6.c5.c4.alignStorage.strideAlignments.end() &&
+              module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.alignStorage.strideAlignments.end() &&
           !strideAlignment->second.empty();
       const bool hasAllocationAlignment =
           allocationAlignment !=
-              module.c6.c5.c4.alignStorage.allocAlignments.end() &&
+              module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.alignStorage.allocAlignments.end() &&
           !allocationAlignment->second.empty();
       if (!hasStrideAlignment && !hasAllocationAlignment)
         continue;
@@ -541,8 +541,8 @@ private:
         continue;
       MemRefTypeModel aligned = *logicalType;
       if (hasStrideAlignment)
-        aligned = C4AlignedOperandType(
-            *record, aligned, module.c6.c5.c4.alignStorage);
+        aligned = AlignedOperandType(
+            *record, aligned, module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.alignStorage);
       if (hasAllocationAlignment) {
         const std::optional<MemRefTypeModel> physical =
             ParseMemRefType(bufferTypes.at(identity));
@@ -580,7 +580,7 @@ private:
         "hivm.hir.bitcast",
         "scf.for",              "scf.while",
         "scf.if",               "arith.select"};
-    for (const C1OperationRecord &operation : logical.operations) {
+    for (const GenericOperation &operation : logical.operations) {
       bool preservesSSA = aliases.count(operation.name) != 0;
       if (preservesSSA && operation.name == "tensor.extract_slice" &&
           !operation.operands.empty() && !operation.results.empty()) {
@@ -600,14 +600,14 @@ private:
         preservedSSAValues.insert(operation.results.begin(),
                                   operation.results.end());
     }
-    for (const C1BlockRecord &block : logical.blocks) {
+    for (const GenericBlock &block : logical.blocks) {
       preservedSSAValues.insert(block.arguments.begin(),
                                 block.arguments.end());
-      const C1RegionRecord &region =
+      const GenericRegion &region =
           logical.regions.at(static_cast<size_t>(block.regionId));
-      const C1OperationRecord &parent = logical.operations.at(
+      const GenericOperation &parent = logical.operations.at(
           static_cast<size_t>(region.parentOperation));
-      if (parent.name != "func.func" || !C7IsAIVFunction(parent))
+      if (parent.name != "func.func" || !IsAIVFunction(parent))
         continue;
       for (int argument : block.arguments)
         functionArguments.push_back(PlanMemoryValueName(argument));
@@ -619,7 +619,7 @@ private:
       eventsBySource[event.sourceOperation].push_back(&event);
   }
 
-  bool isMappedFor(const C1OperationRecord &operation) const {
+  bool isMappedFor(const GenericOperation &operation) const {
     return operation.name == "scf.for" &&
            (HasDictionaryEntry(operation.properties,
                                "map_for_to_forall") ||
@@ -679,7 +679,7 @@ private:
   }
 
   std::optional<int64_t>
-  foldMappedAffineMin(const C1OperationRecord &operation,
+  foldMappedAffineMin(const GenericOperation &operation,
                       const std::set<int> &mappedInductionValues) const {
     if (operation.name != "affine.min" || operation.operands.size() != 1 ||
         mappedInductionValues.count(operation.operands.front()) == 0)
@@ -712,24 +712,24 @@ private:
 
   void indexMappedLoops() {
     std::set<int> mappedInductionValues;
-    for (const C1OperationRecord &operation : logical.operations) {
+    for (const GenericOperation &operation : logical.operations) {
       if (!isMappedFor(operation))
         continue;
       erasedMappedLoops.insert(operation.id);
       erasedRegionIds.insert(operation.regions.begin(),
                              operation.regions.end());
       for (int regionId : operation.regions) {
-        const C1RegionRecord &region =
+        const GenericRegion &region =
             logical.regions.at(static_cast<size_t>(regionId));
         for (int blockId : region.blocks) {
-          const C1BlockRecord &block =
+          const GenericBlock &block =
               logical.blocks.at(static_cast<size_t>(blockId));
           if (!block.arguments.empty())
             mappedInductionValues.insert(block.arguments.front());
         }
       }
     }
-    for (const C1OperationRecord &operation : logical.operations) {
+    for (const GenericOperation &operation : logical.operations) {
       const std::optional<int64_t> folded =
           foldMappedAffineMin(operation, mappedInductionValues);
       if (!folded || operation.results.size() != 1)
@@ -739,14 +739,14 @@ private:
     }
   }
 
-  std::vector<int> regionPath(const C1OperationRecord &operation) const {
+  std::vector<int> regionPath(const GenericOperation &operation) const {
     std::vector<int> path;
     int region = operation.regionId;
     while (region >= 0) {
       path.push_back(region);
-      const C1RegionRecord &record =
+      const GenericRegion &record =
           logical.regions.at(static_cast<size_t>(region));
-      const C1OperationRecord &parent = logical.operations.at(
+      const GenericOperation &parent = logical.operations.at(
           static_cast<size_t>(record.parentOperation));
       region = parent.regionId;
     }
@@ -873,7 +873,7 @@ private:
     return groups;
   }
 
-  OperationRecord baseOperation(const C1OperationRecord &source,
+  OperationRecord baseOperation(const GenericOperation &source,
                                 const std::string &name) {
     OperationRecord operation;
     operation.index = static_cast<int>(result.operations.size());
@@ -881,7 +881,7 @@ private:
     operation.indent = static_cast<int>(regionPath(source).size() * 2);
     operation.operationId = nextOperationId++;
     operation.opName = name;
-    const C1OperationRecord *placement = &source;
+    const GenericOperation *placement = &source;
     if (source.parentId >= 0 &&
         erasedMappedLoops.count(source.parentId) != 0)
       placement = &logical.operations.at(static_cast<size_t>(source.parentId));
@@ -889,7 +889,7 @@ private:
     operation.blockId = placement->blockId;
     operation.blockLabel = "^bb" + std::to_string(placement->blockId);
     if (placement->blockId >= 0) {
-      const C1BlockRecord &block =
+      const GenericBlock &block =
           logical.blocks.at(static_cast<size_t>(placement->blockId));
       for (int argument : block.arguments)
         operation.blockArguments.push_back(PlanMemoryValueName(argument));
@@ -923,7 +923,7 @@ private:
     return type;
   }
 
-  std::string bufferizedResultType(const C1OperationRecord &source,
+  std::string bufferizedResultType(const GenericOperation &source,
                                    size_t resultIndex) const {
     std::string resultType = valueType(source.results.at(resultIndex),
                                        source.resultTypes.at(resultIndex));
@@ -1009,7 +1009,7 @@ private:
         std::vector<std::vector<size_t>> reassociation =
             parseReassociation(reassociationValue);
         if (reassociation.empty())
-          reassociation = C4ContinuousReassociation({*sourceMemref});
+          reassociation = ContinuousReassociation({*sourceMemref});
         if (reassociation.size() == resultMemref->shape.size())
           return PlanMemoryPreserveAddressSpace(
               PlanMemoryFormatMemRefType(
@@ -1053,7 +1053,7 @@ private:
     std::vector<int64_t> staticSizes = DecomposeI64Array(
         FindDictionaryValue(source.properties, "static_sizes"));
     const std::vector<size_t> segments =
-        C1OperandSegmentSizes(source.properties);
+        OperandSegmentSizes(source.properties);
     if (segments.size() >= 3) {
       size_t dynamicSizeOperand = 1 + segments[1];
       for (int64_t &size : staticSizes) {
@@ -1126,12 +1126,12 @@ private:
   }
 
   std::vector<int> dynamicAllocationExtents(
-      const C4BufferRecord &record) const {
+      const LocalBufferRecord &record) const {
     if (!startsWith(record.sourceIdentity, "base:"))
       return {};
     const size_t ordinal = static_cast<size_t>(
         std::stoull(record.sourceIdentity.substr(5)));
-    const auto &allocations = module.c6.c5.c4.c3.singlePoint.allocations;
+    const auto &allocations = module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.allocations;
     if (ordinal >= allocations.size())
       return {};
     const BufferAllocation &allocation = allocations[ordinal];
@@ -1139,15 +1139,15 @@ private:
         allocation.dynamicExtentValues.empty())
       return {};
 
-    const C1OperationRecord *slice =
-        C7DefiningOperation(logical, allocation.dynamicExtentValues.front());
+    const GenericOperation *slice =
+        DefiningOperation(logical, allocation.dynamicExtentValues.front());
     if (!slice || (slice->name != "tensor.extract_slice" &&
                    slice->name != "memref.subview"))
       return allocation.dynamicExtentValues;
     const std::vector<int64_t> staticSizes = DecomposeI64Array(
         FindDictionaryValue(slice->properties, "static_sizes"));
     const std::vector<size_t> segments =
-        C1OperandSegmentSizes(slice->properties);
+        OperandSegmentSizes(slice->properties);
     if (segments.size() < 3)
       return allocation.dynamicExtentValues;
     size_t dynamicSizeOperand = 1 + segments[1];
@@ -1163,10 +1163,10 @@ private:
     return extents;
   }
 
-  std::string emitAlignedDynamicExtent(const C1OperationRecord &source,
+  std::string emitAlignedDynamicExtent(const GenericOperation &source,
                                        int extent, uint64_t alignUnit) {
-    const C1OperationRecord *definition =
-        C7DefiningOperation(logical, extent);
+    const GenericOperation *definition =
+        DefiningOperation(logical, extent);
     std::vector<int> operands = {extent};
     if (definition && definition->name == "affine.apply")
       operands = definition->operands;
@@ -1182,9 +1182,9 @@ private:
     return resultName;
   }
 
-  void emitAllocation(const C1OperationRecord &source,
+  void emitAllocation(const GenericOperation &source,
                       const PlanMemoryInputBufferRecord &buffer) {
-    const C4BufferRecord *sourceBuffer = nullptr;
+    const LocalBufferRecord *sourceBuffer = nullptr;
     auto record = finalBufferRecords.find(buffer.identity);
     if (record != finalBufferRecords.end())
       sourceBuffer = record->second;
@@ -1194,12 +1194,12 @@ private:
       dynamicExtents = dynamicAllocationExtents(*sourceBuffer);
     if (sourceBuffer && dynamicExtents.size() == 1) {
       const auto strideAlignment =
-          module.c6.c5.c4.alignStorage.strideAlignments.find(
+          module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.alignStorage.strideAlignments.find(
               sourceBuffer->sourceIdentity);
       const std::optional<MemRefTypeModel> logicalType =
           ParseMemRefType(preAlignmentType(*sourceBuffer));
       if (strideAlignment !=
-              module.c6.c5.c4.alignStorage.strideAlignments.end() &&
+              module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.alignStorage.strideAlignments.end() &&
           !strideAlignment->second.empty() && logicalType) {
         const uint64_t bitWidth = GetElementBitWidth(*logicalType);
         if (bitWidth == 0 || 256 % bitWidth != 0)
@@ -1235,23 +1235,23 @@ private:
     if (!sourceBuffer)
       return;
     const auto strideAlignment =
-        module.c6.c5.c4.alignStorage.strideAlignments.find(
+        module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.alignStorage.strideAlignments.find(
             sourceBuffer->sourceIdentity);
     const auto allocationAlignment =
-        module.c6.c5.c4.alignStorage.allocAlignments.find(
+        module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.alignStorage.allocAlignments.find(
             sourceBuffer->sourceIdentity);
     if ((strideAlignment ==
-             module.c6.c5.c4.alignStorage.strideAlignments.end() ||
+             module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.alignStorage.strideAlignments.end() ||
          strideAlignment->second.empty()) &&
         (allocationAlignment ==
-             module.c6.c5.c4.alignStorage.allocAlignments.end() ||
+             module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.alignStorage.allocAlignments.end() ||
          allocationAlignment->second.empty()))
       return;
     auto alignedView = alignedViewTypes.find(buffer.identity);
     if (alignedView == alignedViewTypes.end())
       return;
     const std::string &viewType = alignedView->second;
-    if (C7PhysicalTypeSignature(viewType) == C7PhysicalTypeSignature(type))
+    if (PhysicalTypeSignature(viewType) == PhysicalTypeSignature(type))
       return;
     const bool sizedDynamicAllocation = !alignedDynamicExtent.empty();
     OperationRecord view = baseOperation(
@@ -1263,7 +1263,7 @@ private:
                                         : " = memref.subview ") +
                 name;
     if (sizedDynamicAllocation) {
-      const C1OperationRecord *function = C4EnclosingFunction(logical, source);
+      const GenericOperation *function = EnclosingFunction(logical, source);
       auto constants = function ? integerConstants.find(function->id)
                                 : integerConstants.end();
       if (constants == integerConstants.end() ||
@@ -1281,14 +1281,14 @@ private:
   }
 
   void emitVConcatDestinationSubview(
-      const C1OperationRecord &source,
+      const GenericOperation &source,
       const PlanMemoryInputAccessRecord &event) {
     if (source.name != "hivm.hir.vconcat" ||
         event.operationName != "hivm.hir.copy" ||
         event.accesses.size() < 2 ||
         event.generatedOrdinal >= source.operands.size())
       return;
-    const std::vector<size_t> destinations = C1DpsInitOperandIndices(
+    const std::vector<size_t> destinations = DpsInitOperandIndices(
         source.name, source.operands.size(), source.properties);
     if (destinations.size() != 1 || event.generatedOrdinal >= destinations[0])
       return;
@@ -1336,7 +1336,7 @@ private:
       if (sourceMemref->shape[dim]) {
         sizes[input] = std::to_string(*sourceMemref->shape[dim]);
       } else {
-        const C1OperationRecord *function = C4EnclosingFunction(logical, source);
+        const GenericOperation *function = EnclosingFunction(logical, source);
         auto constants = function ? integerConstants.find(function->id)
                                   : integerConstants.end();
         if (constants == integerConstants.end() ||
@@ -1409,7 +1409,7 @@ private:
     stableBufferAliases[destinationIdentity] = resultName;
   }
 
-  void emitNonTargetAllocation(const C1OperationRecord &source,
+  void emitNonTargetAllocation(const GenericOperation &source,
                                size_t ordinal) {
     OperationRecord operation = baseOperation(source, "memref.alloc");
     operation.text = "%nonlocal_" + std::to_string(ordinal) +
@@ -1418,7 +1418,7 @@ private:
   }
 
   std::vector<std::string> conditionalOperands(
-      const C1OperationRecord &source) const {
+      const GenericOperation &source) const {
     std::vector<std::string> values;
     for (int operand : source.operands)
       if (conditionalValues.count(operand))
@@ -1426,11 +1426,11 @@ private:
     return values;
   }
 
-  std::string blockArgumentAlias(const C1OperationRecord &source,
+  std::string blockArgumentAlias(const GenericOperation &source,
                                  const std::string &identity) const {
     if (source.blockId < 0)
       return {};
-    const C1BlockRecord &block =
+    const GenericBlock &block =
         logical.blocks.at(static_cast<size_t>(source.blockId));
     for (int argument : block.arguments) {
       auto buffer = valueBuffers.find(argument);
@@ -1486,18 +1486,18 @@ private:
   }
 
   bool emitSourceDestinationStyleAccess(
-      OperationRecord &operation, const C1OperationRecord &source,
+      OperationRecord &operation, const GenericOperation &source,
       const PlanMemoryInputAccessRecord &event,
       const std::map<std::string, std::string> *operandAliases) {
     if (event.generatedOperation || event.operationName != source.name ||
         !IsDestinationStyleOp(event.operationName))
       return false;
-    const std::vector<size_t> destinations = C1DpsInitOperandIndices(
+    const std::vector<size_t> destinations = DpsInitOperandIndices(
         source.name, source.operands.size(), source.properties);
     std::set<size_t> destinationSet(destinations.begin(), destinations.end());
     std::set<size_t> inputSet;
     const std::vector<size_t> segments =
-        C1OperandSegmentSizes(source.properties);
+        OperandSegmentSizes(source.properties);
     const size_t inputCount =
         !segments.empty() ? segments.front()
                           : (source.operands.empty() ? 0U : 1U);
@@ -1568,7 +1568,7 @@ private:
     return true;
   }
 
-  void emitAccess(const C1OperationRecord &source,
+  void emitAccess(const GenericOperation &source,
                   const PlanMemoryInputAccessRecord &event,
                   const std::vector<int> *regionOverride = nullptr,
                   const std::map<std::string, std::string> *operandAliases =
@@ -1636,7 +1636,7 @@ private:
     }
     if (source.name == "hivm.hir.vrec" &&
         event.operationName == "hivm.hir.vbrc") {
-      const C1OperationRecord *function = C4EnclosingFunction(logical, source);
+      const GenericOperation *function = EnclosingFunction(logical, source);
       if (!function || source.operandTypes.empty())
         throw std::runtime_error("HIVMDecomposeOp: malformed vrec");
       const std::string type = ShapedElementType(source.operandTypes.front());
@@ -1649,7 +1649,7 @@ private:
     if ((source.name == "hivm.hir.vcast" ||
          source.name == "hivm.hir.vcmp") &&
         event.generatedOperation && event.operationName == "hivm.hir.vbrc") {
-      const C1OperationRecord *function = C4EnclosingFunction(logical, source);
+      const GenericOperation *function = EnclosingFunction(logical, source);
       if (!function || source.operandTypes.size() < 2)
         throw std::runtime_error("HIVMDecomposeOp: malformed vcast");
       const std::string sourceType = ShapedElementType(
@@ -1669,8 +1669,8 @@ private:
         throw std::runtime_error(
             "HIVMDecomposeOp: malformed scalar vsub");
       const std::string &type = source.operandTypes[1];
-      const C1OperationRecord *scalarDefinition =
-          C7DefiningOperation(logical, source.operands[1]);
+      const GenericOperation *scalarDefinition =
+          DefiningOperation(logical, source.operands[1]);
       auto generatedNegated = generatedVSubNegatedConstants.find(source.id);
       if (generatedNegated != generatedVSubNegatedConstants.end()) {
         reads.push_back(generatedNegated->second);
@@ -1694,8 +1694,8 @@ private:
           reads.push_back(scalarValueName(source.operands[1]));
         } else {
           std::optional<int> existingNegated;
-          const C1OperationRecord *function =
-              C4EnclosingFunction(logical, source);
+          const GenericOperation *function =
+              EnclosingFunction(logical, source);
           if (function && type.size() > 1 && type.front() == 'i') {
             try {
               const unsigned width =
@@ -1737,7 +1737,7 @@ private:
         }
       } else {
         std::string zero;
-        const C1OperationRecord *function = C4EnclosingFunction(logical, source);
+        const GenericOperation *function = EnclosingFunction(logical, source);
         if (function) {
           auto functionZeros = zeroScalarConstants.find(function->id);
           if (functionZeros != zeroScalarConstants.end()) {
@@ -1775,12 +1775,12 @@ private:
     }
     if (event.operationName == "hivm.hir.copy" && writes.empty() &&
         source.name == "scf.yield" && source.parentId >= 0) {
-      const C1OperationRecord &parent = logical.operations.at(
+      const GenericOperation &parent = logical.operations.at(
           static_cast<size_t>(source.parentId));
       if (parent.name == "scf.for" && !parent.regions.empty()) {
-        const C1RegionRecord &region = logical.regions.at(
+        const GenericRegion &region = logical.regions.at(
             static_cast<size_t>(parent.regions.front()));
-        const C1BlockRecord &block = logical.blocks.at(
+        const GenericBlock &block = logical.blocks.at(
             static_cast<size_t>(region.blocks.front()));
         for (size_t index = 0; index < source.operands.size() &&
                                index + 1 < block.arguments.size();
@@ -1816,7 +1816,7 @@ private:
               : "%scalar";
       operation.text = "memref.store " + scalar + ", " + memory;
       if (source.name == "tensor.from_elements") {
-        const C1OperationRecord *function = C4EnclosingFunction(logical, source);
+        const GenericOperation *function = EnclosingFunction(logical, source);
         auto functionConstants =
             function ? integerConstants.find(function->id)
                      : integerConstants.end();
@@ -1927,7 +1927,7 @@ private:
           }
         }
         value += ">";
-        dictionary = C4SetDictionaryValue(dictionary, name, value);
+        dictionary = SetDictionaryValue(dictionary, name, value);
       }
       return dictionary;
     };
@@ -2006,7 +2006,7 @@ private:
   }
 
   std::map<std::string, std::string>
-  emitFlattenAliases(const C1OperationRecord &source,
+  emitFlattenAliases(const GenericOperation &source,
                      const PlanMemoryInputAccessRecord &event,
                      const std::vector<int> *regionOverride = nullptr,
                      const std::map<std::string, std::string> *initialAliases =
@@ -2031,11 +2031,11 @@ private:
         return false;
       if (source.operands.size() < 2)
         return false;
-      const C1OperationRecord *destination =
-          C7DefiningOperation(logical, source.operands[1]);
+      const GenericOperation *destination =
+          DefiningOperation(logical, source.operands[1]);
       if (destination && destination->name == "bufferization.to_tensor" &&
           !destination->operands.empty())
-        destination = C7DefiningOperation(logical,
+        destination = DefiningOperation(logical,
                                           destination->operands.front());
       if (!destination ||
           destination->name != "memref_ext.alloc_workspace")
@@ -2090,7 +2090,7 @@ private:
           auto buffer = valueBuffers.find(source.operands[index]);
           if (buffer != valueBuffers.end()) {
             bool preserveInsertSourceSubview = false;
-            // C7 records the post-bufferization operand order.  The original
+            // PlanMemoryInput records the post-bufferization operand order.  The original
             // tensor value binding can name an older alias after DPS conflict
             // copies, so use it only to identify target-buffer positions.
             if (accessIndex >= event.accesses.size())
@@ -2156,7 +2156,7 @@ private:
                     return false;
                   return std::any_of(users->second.begin(), users->second.end(),
                                      [&](int userId) {
-                    const C1OperationRecord &user = logical.operations.at(
+                    const GenericOperation &user = logical.operations.at(
                         static_cast<size_t>(userId));
                     return user.name == "tensor.insert_slice" &&
                            !user.operands.empty() &&
@@ -2180,7 +2180,7 @@ private:
                  (source.name == "tensor.insert_slice" &&
                   [&]() {
                     const std::vector<size_t> destinations =
-                        C1DpsInitOperandIndices(
+                        DpsInitOperandIndices(
                             source.name, source.operands.size(),
                             source.properties);
                     return std::find(destinations.begin(), destinations.end(),
@@ -2200,9 +2200,9 @@ private:
                     return extent.has_value();
                   });
               if (staticShape) {
-                const MemRefTypeModel aligned = C4AlignedOperandType(
+                const MemRefTypeModel aligned = AlignedOperandType(
                     *record->second, *parsed,
-                    module.c6.c5.c4.alignStorage);
+                    module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.alignStorage);
                 type = PlanMemoryPreserveAddressSpace(
                     PlanMemoryFormatMemRefType(aligned),
                     bufferTypes.at(identity));
@@ -2355,8 +2355,8 @@ private:
                 !requestedMemRef->hasStridedLayout));
           if (existingType != namedValueTypes.end()) {
             const auto existingMemRef = ParseMemRefType(existingType->second);
-            if (C7PhysicalTypeSignature(existingType->second) ==
-                    C7PhysicalTypeSignature(type) ||
+            if (PhysicalTypeSignature(existingType->second) ==
+                    PhysicalTypeSignature(type) ||
                 (initialAliases && existingMemRef && requestedMemRef &&
                  existingMemRef->shape == requestedMemRef->shape &&
                  existingMemRef->elementType ==
@@ -2406,13 +2406,13 @@ private:
           for (const auto &[existingResult, existing] :
                composedCollapseShapes) {
             if (existing.source != effectiveOperandName ||
-                C7PhysicalTypeSignature(existing.sourceType) !=
-                    C7PhysicalTypeSignature(effectiveSourceType))
+                PhysicalTypeSignature(existing.sourceType) !=
+                    PhysicalTypeSignature(effectiveSourceType))
               continue;
             auto existingType = namedValueTypes.find(existingResult);
             if (existingType == namedValueTypes.end() ||
-                C7PhysicalTypeSignature(existingType->second) !=
-                    C7PhysicalTypeSignature(type))
+                PhysicalTypeSignature(existingType->second) !=
+                    PhysicalTypeSignature(type))
               continue;
             const OperationRecord &existingOperation = result.operations.at(
                 static_cast<size_t>(existing.operation));
@@ -2426,8 +2426,8 @@ private:
         const std::vector<int> aliasPath =
             regionOverride ? *regionOverride : regionPath(source);
         cseKey = operationName + "\n" + effectiveOperandName + "\n" +
-                 C7PhysicalTypeSignature(effectiveSourceType) + "\n" +
-                 C7PhysicalTypeSignature(type);
+                 PhysicalTypeSignature(effectiveSourceType) + "\n" +
+                 PhysicalTypeSignature(type);
         if (composedExpandShapes.count(operandName) != 0)
           cseKey += "\n" + effectiveSemanticProperties;
         auto aliases = collapseCseAliases.find(cseKey);
@@ -2489,7 +2489,7 @@ private:
     }
 
     std::vector<std::vector<size_t>> reassociation =
-        C4UniformReassociationPipeline(operandTypes);
+        UniformReassociationPipeline(operandTypes);
     const bool dimensionLimitedOperation =
         event.operationName == "hivm.hir.vreduce" ||
         event.operationName == "hivm.hir.vbrc" ||
@@ -2505,7 +2505,7 @@ private:
           FindDictionaryValue(source.properties, dimensionName);
       if (dimensions.empty())
         dimensions = FindDictionaryValue(source.attributes, dimensionName);
-      reassociation = C4UniformReassociationPipelineWithBarriers(
+      reassociation = UniformReassociationPipelineWithBarriers(
           operandTypes, DecomposeI64Array(dimensions));
     }
     if (event.operationName == "hivm.hir.vtranspose") {
@@ -2617,7 +2617,7 @@ private:
     bool allLastDimensionsContiguous = true;
     for (const MemRefTypeModel &type : operandTypes)
       allLastDimensionsContiguous =
-          allLastDimensionsContiguous && C4IsLastDimContiguous(type);
+          allLastDimensionsContiguous && IsLastDimContiguous(type);
     const bool liftLowestStride =
         hasLiftLowestStridePattern(event.operationName) &&
         !operandTypes.empty() && !allLastDimensionsContiguous;
@@ -2673,7 +2673,7 @@ private:
     return aliases;
   }
 
-  void emitSynthetic(const C1OperationRecord &source, const std::string &name,
+  void emitSynthetic(const GenericOperation &source, const std::string &name,
                      const std::vector<int> &path, int operationId) {
     OperationRecord operation = baseOperation(source, name);
     operation.operationId = operationId;
@@ -2683,7 +2683,7 @@ private:
     result.operations.push_back(std::move(operation));
   }
 
-  void emitSyncBlockLowering(const C1OperationRecord &source) {
+  void emitSyncBlockLowering(const GenericOperation &source) {
     std::string mode =
         DecomposeEnumValue(FindDictionaryValue(source.properties,
                                                 "sync_block_mode"));
@@ -2704,15 +2704,15 @@ private:
                   nextOperationId++);
   }
 
-  void emitAtomicLockStart(const C1OperationRecord &source) {
-    const C1OperationRecord *function = C4EnclosingFunction(logical, source);
+  void emitAtomicLockStart(const GenericOperation &source) {
+    const GenericOperation *function = EnclosingFunction(logical, source);
     if (!function || function->regions.empty())
       throw std::runtime_error("HIVMDecomposeOp: atomic outside function");
-    const C1RegionRecord &region = logical.regions.at(
+    const GenericRegion &region = logical.regions.at(
         static_cast<size_t>(function->regions.front()));
     if (region.blocks.empty())
       throw std::runtime_error("HIVMDecomposeOp: atomic function has no block");
-    const C1BlockRecord &entry =
+    const GenericBlock &entry =
         logical.blocks.at(static_cast<size_t>(region.blocks.front()));
     if (entry.arguments.size() < 2)
       throw std::runtime_error("HIVMDecomposeOp: missing sync-lock argument");
@@ -2739,7 +2739,7 @@ private:
     result.operations.push_back(std::move(acquire));
   }
 
-  void emitAtomicLockEnd(const C1OperationRecord &source) {
+  void emitAtomicLockEnd(const GenericOperation &source) {
     auto lock = atomicLockValues.find(source.id);
     if (lock == atomicLockValues.end())
       return;
@@ -2750,7 +2750,7 @@ private:
     result.operations.push_back(std::move(release));
   }
 
-  void emitControlStart(const C1OperationRecord &source) {
+  void emitControlStart(const GenericOperation &source) {
     OperationRecord operation = baseOperation(source, source.name);
     operation.operationId = source.id;
     std::ostringstream text;
@@ -2774,9 +2774,9 @@ private:
                           (IsTensorType(source.resultTypes[index]) ||
                            IsMemRefType(source.resultTypes[index]));
       if (shaped &&
-          (module.c6.c5.c4.c3.singlePoint.canonicalizedIterArgAccesses.count(
+          (module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.canonicalizedIterArgAccesses.count(
                {source.id, static_cast<int>(index + 3)}) != 0 ||
-           module.c6.c5.c4.c3.singlePoint.canonicalizedIterArgResultKeys.count(
+           module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.canonicalizedIterArgResultKeys.count(
                {source.id, static_cast<int>(index)}) != 0))
         continue;
       if (hasResult)
@@ -2805,17 +2805,17 @@ private:
                             IsMemRefType(source.operandTypes[index]);
         hasScalarIterArg =
             hasScalarIterArg || !shaped ||
-            (module.c6.c5.c4.c3.singlePoint
+            (module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint
                      .canonicalizedIterArgAccesses.count(
                          {source.id, static_cast<int>(index)}) == 0 &&
-             module.c6.c5.c4.c3.singlePoint
+             module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint
                      .canonicalizedIterArgResultKeys.count(
                          {source.id, static_cast<int>(index - 3)}) == 0);
       }
       if (hasScalarIterArg && !source.regions.empty()) {
-        const C1RegionRecord &region = logical.regions.at(
+        const GenericRegion &region = logical.regions.at(
             static_cast<size_t>(source.regions.front()));
-        const C1BlockRecord &block = logical.blocks.at(
+        const GenericBlock &block = logical.blocks.at(
             static_cast<size_t>(region.blocks.front()));
         text << " iter_args(";
         bool firstIterArg = true;
@@ -2824,10 +2824,10 @@ private:
                               (IsTensorType(source.operandTypes[index]) ||
                                IsMemRefType(source.operandTypes[index]));
           if (shaped &&
-              (module.c6.c5.c4.c3.singlePoint
+              (module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint
                        .canonicalizedIterArgAccesses.count(
                            {source.id, static_cast<int>(index)}) != 0 ||
-               module.c6.c5.c4.c3.singlePoint
+               module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint
                        .canonicalizedIterArgResultKeys.count(
                            {source.id, static_cast<int>(index - 3)}) != 0))
             continue;
@@ -2856,10 +2856,10 @@ private:
           const bool shaped = IsTensorType(source.operandTypes[index]) ||
                               IsMemRefType(source.operandTypes[index]);
           if (!shaped ||
-              module.c6.c5.c4.c3.singlePoint
+              module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint
                       .canonicalizedIterArgResultKeys.count(
                           {source.id, static_cast<int>(index - 3)}) != 0 ||
-              module.c6.c5.c4.c3.singlePoint
+              module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint
                       .canonicalizedIterArgAccesses.count(
                           {source.id, static_cast<int>(index)}) != 0)
             continue;
@@ -2868,9 +2868,9 @@ private:
         }
       }
       if (!source.regions.empty()) {
-        const C1RegionRecord &region = logical.regions.at(
+        const GenericRegion &region = logical.regions.at(
             static_cast<size_t>(source.regions.front()));
-        const C1BlockRecord &block = logical.blocks.at(
+        const GenericBlock &block = logical.blocks.at(
             static_cast<size_t>(region.blocks.front()));
         for (size_t index = 3; index < source.operands.size(); ++index) {
           const size_t resultIndex = index - 3;
@@ -2879,7 +2879,7 @@ private:
               (!IsTensorType(source.operandTypes[index]) &&
                !IsMemRefType(source.operandTypes[index])) ||
               argumentIndex >= block.arguments.size() ||
-              module.c6.c5.c4.c3.singlePoint
+              module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint
                       .canonicalizedIterArgResultKeys.count(
                           {source.id, static_cast<int>(resultIndex)}) == 0)
             continue;
@@ -2915,7 +2915,7 @@ private:
                               (IsTensorType(source.resultTypes[index]) ||
                                IsMemRefType(source.resultTypes[index]));
           if (shaped &&
-              module.c6.c5.c4.c3.singlePoint
+              module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint
                       .canonicalizedIterArgResultKeys.count(
                           {source.id, static_cast<int>(index)}) != 0)
             continue;
@@ -2939,9 +2939,9 @@ private:
             if (rawBuffer != bufferizedBufferIds.end()) {
               for (const std::string &alternative :
                    BufferAlternatives(rawBuffer->second)) {
-                const std::string sourceIdentity = C4MappedBufferIdentity(
+                const std::string sourceIdentity = MappedBufferIdentity(
                     alternative,
-                    module.c6.c5.c4.c3.singlePoint.bufferMapping);
+                    module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.bufferMapping);
                 if (targetSourceIdentities.count(sourceIdentity) == 0)
                   continue;
                 const std::string &identity =
@@ -2981,7 +2981,7 @@ private:
     result.operations.push_back(std::move(operation));
   }
 
-  void emitTerminator(const C1OperationRecord &source) {
+  void emitTerminator(const GenericOperation &source) {
     OperationRecord operation = baseOperation(source, source.name);
     operation.text = source.name;
     bool emittedOperand = false;
@@ -2993,10 +2993,10 @@ private:
         continue;
       const bool canonicalizedResult =
           source.parentId >= 0 &&
-          module.c6.c5.c4.c3.singlePoint.canonicalizedIterArgResultKeys.count(
+          module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.canonicalizedIterArgResultKeys.count(
               {source.parentId, static_cast<int>(index)}) != 0;
       if (canonicalizedResult ||
-          module.c6.c5.c4.c3.singlePoint.canonicalizedIterArgAccesses.count(
+          module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.canonicalizedIterArgAccesses.count(
               {source.id, static_cast<int>(index)}) != 0)
         continue;
       std::string name = valueName(source.operands[index]);
@@ -3017,7 +3017,7 @@ private:
     result.operations.push_back(std::move(operation));
   }
 
-  std::string scalarArithmeticName(const C1OperationRecord &source) const {
+  std::string scalarArithmeticName(const GenericOperation &source) const {
     const std::string element =
         source.operandTypes.empty()
             ? std::string()
@@ -3047,7 +3047,7 @@ private:
                              source.name);
   }
 
-  void emitScalarStore(const C1OperationRecord &source,
+  void emitScalarStore(const GenericOperation &source,
                        const PlanMemoryInputAccessRecord &event,
                        const std::string &scalar,
                        const std::vector<int> &indices) {
@@ -3070,7 +3070,7 @@ private:
     result.operations.push_back(std::move(operation));
   }
 
-  std::string emitScalarLoad(const C1OperationRecord &source,
+  std::string emitScalarLoad(const GenericOperation &source,
                              const PlanMemoryInputAccessRecord &event,
                              const std::vector<int> &indices,
                              std::optional<int> memoryValue = std::nullopt) {
@@ -3096,8 +3096,8 @@ private:
   }
 
   std::vector<int> singlePointIndices(
-      const C1OperationRecord &source) const {
-    const C1OperationRecord *function = C4EnclosingFunction(logical, source);
+      const GenericOperation &source) const {
+    const GenericOperation *function = EnclosingFunction(logical, source);
     if (!function)
       throw std::runtime_error(
           "PlanMemory bridge: scalar operation has no enclosing function");
@@ -3114,7 +3114,7 @@ private:
     scalarValueBlocks[value] = block;
   }
 
-  void emitScalarizedOperation(const C1OperationRecord &source) {
+  void emitScalarizedOperation(const GenericOperation &source) {
     const auto events = eventsBySource.find(source.id);
     if (source.name == "tensor.insert") {
       if (!source.results.empty() && !source.operands.empty())
@@ -3162,7 +3162,7 @@ private:
                             singlePointIndices(source));
       return;
     }
-    const std::vector<size_t> destinations = C1DpsInitOperandIndices(
+    const std::vector<size_t> destinations = DpsInitOperandIndices(
         source.name, source.operands.size(), source.properties);
     std::set<size_t> destinationSet(destinations.begin(), destinations.end());
     std::vector<const PlanMemoryInputAccessRecord *> inputLoads;
@@ -3221,7 +3221,7 @@ private:
     return name;
   }
 
-  bool isErasedTensorOperation(const C1OperationRecord &source) const {
+  bool isErasedTensorOperation(const GenericOperation &source) const {
     static const std::set<std::string> erased = {
         "tensor.empty", "bufferization.alloc_tensor",
         "bufferization.to_tensor", "tensor.insert", "tensor.extract",
@@ -3235,7 +3235,7 @@ private:
            preservedSSAValues.count(source.results.front()) == 0;
   }
 
-  bool isRemovedIfResult(const C1OperationRecord &operation,
+  bool isRemovedIfResult(const GenericOperation &operation,
                          size_t resultIndex) const {
     if (operation.name != "scf.if" || resultIndex >= operation.results.size())
       return false;
@@ -3257,7 +3257,7 @@ private:
     for (int userId : users->second) {
       if (erasedOperations.count(userId) != 0)
         continue;
-      const C1OperationRecord &user =
+      const GenericOperation &user =
           logical.operations.at(static_cast<size_t>(userId));
       if (!isErasedTensorOperation(user))
         return false;
@@ -3265,7 +3265,7 @@ private:
     return true;
   }
 
-  void emitPassthrough(const C1OperationRecord &source) {
+  void emitPassthrough(const GenericOperation &source) {
     if (isErasedTensorOperation(source)) {
       if ((source.name == "bufferization.to_tensor" ||
            source.name == "bufferization.to_memref") &&
@@ -3313,8 +3313,8 @@ private:
         const std::string targetType = bufferizedResultType(source, 0);
         const std::string collapseKey =
             name + "\n" + operandName + "\n" +
-            C7PhysicalTypeSignature(sourceType) + "\n" +
-            C7PhysicalTypeSignature(targetType);
+            PhysicalTypeSignature(sourceType) + "\n" +
+            PhysicalTypeSignature(targetType);
         auto existing = collapseCseAliases.find(collapseKey);
         if (existing != collapseCseAliases.end()) {
           std::vector<int> prefix = regionPath(source);
@@ -3335,7 +3335,7 @@ private:
         viewKey += "\nregion:" + std::to_string(region);
       for (int operand : source.operands)
         viewKey += "\n" + valueName(operand);
-      viewKey += "\n" + C7PhysicalTypeSignature(
+      viewKey += "\n" + PhysicalTypeSignature(
                               bufferizedResultType(source, 0));
       auto existing = cseAliases.find(viewKey);
       if (existing != cseAliases.end()) {
@@ -3442,8 +3442,8 @@ private:
       resultTypes.push_back(
           bufferizedResultType(source, index));
     if (!operandTypes.empty() || !resultTypes.empty()) {
-      text << " : (" << C1Join(operandTypes, ", ") << ") -> ("
-           << C1Join(resultTypes, ", ") << ')';
+      text << " : (" << JoinDelimited(operandTypes, ", ") << ") -> ("
+           << JoinDelimited(resultTypes, ", ") << ')';
     }
     operation.text = text.str();
     const size_t normalizationEqual = operation.text.find('=');
@@ -3497,7 +3497,7 @@ private:
     }
   }
 
-  void emitBoundary(const C1OperationRecord &source,
+  void emitBoundary(const GenericOperation &source,
                     const std::string &name, int regionId = -1) {
     OperationRecord operation = baseOperation(source, name);
     operation.operationId = source.id;
@@ -3508,7 +3508,7 @@ private:
     result.operations.push_back(std::move(operation));
   }
 
-  std::string emitScalarOperation(const C1OperationRecord &source,
+  std::string emitScalarOperation(const GenericOperation &source,
                                   const std::string &name,
                                   const std::vector<std::string> &operands,
                                   const std::string &type) {
@@ -3524,12 +3524,12 @@ private:
     return value;
   }
 
-  void emitExtendedMultiply(const C1OperationRecord &source) {
+  void emitExtendedMultiply(const GenericOperation &source) {
     if (source.operands.size() < 2 || source.results.size() != 2 ||
         source.operandTypes.empty() || source.operandTypes.front() != "i32")
       throw std::runtime_error("HIVMDecomposeOp: malformed extended multiply");
     const bool isUnsigned = source.name == "arith.mului_extended";
-    const C1OperationRecord *function = C4EnclosingFunction(logical, source);
+    const GenericOperation *function = EnclosingFunction(logical, source);
     if (!function)
       throw std::runtime_error("HIVMDecomposeOp: extended multiply outside function");
     auto constants = generatedFunctionConstants.find(function->id);
@@ -3578,7 +3578,7 @@ private:
     }
   }
 
-  bool isDeadPureView(const C1OperationRecord &source) const {
+  bool isDeadPureView(const GenericOperation &source) const {
     static const std::set<std::string> pureViews = {
         "tensor.cast",          "tensor.collapse_shape",
         "tensor.expand_shape", "tensor.extract_slice",
@@ -3595,7 +3595,7 @@ private:
       for (int userId : users->second) {
         if (erasedOperations.count(userId) != 0)
           continue;
-        const C1OperationRecord &user =
+        const GenericOperation &user =
             logical.operations.at(static_cast<size_t>(userId));
         if (isErasedTensorOperation(user))
           continue;
@@ -3617,16 +3617,16 @@ private:
     return true;
   }
 
-  const C1OperationRecord *
-  findInPlaceInsertSliceForProducer(const C1OperationRecord &producer) const {
+  const GenericOperation *
+  findInPlaceInsertSliceForProducer(const GenericOperation &producer) const {
     if (producer.name != "hivm.hir.load" || producer.operands.size() < 2)
       return nullptr;
-    for (const C1OperationRecord &toTensor : logical.operations) {
+    for (const GenericOperation &toTensor : logical.operations) {
       if (toTensor.name != "bufferization.to_tensor" ||
           toTensor.operands.size() != 1 || toTensor.results.size() != 1 ||
           toTensor.operands.front() != producer.operands[1])
         continue;
-      for (const C1OperationRecord &insertSlice : logical.operations) {
+      for (const GenericOperation &insertSlice : logical.operations) {
         if (insertSlice.name != "tensor.insert_slice" ||
             insertSlice.operands.empty() ||
             insertSlice.operands.front() != toTensor.results.front())
@@ -3639,20 +3639,20 @@ private:
     return nullptr;
   }
 
-  const C1OperationRecord *
-  findInsertSliceDestinationAllocation(const C1OperationRecord &insertSlice) const {
-    const C1OperationRecord *current = &insertSlice;
+  const GenericOperation *
+  findInsertSliceDestinationAllocation(const GenericOperation &insertSlice) const {
+    const GenericOperation *current = &insertSlice;
     std::set<int> visited;
     while (current && current->name == "tensor.insert_slice" &&
            current->operands.size() >= 2 && visited.insert(current->id).second) {
-      current = C7DefiningOperation(logical, current->operands[1]);
+      current = DefiningOperation(logical, current->operands[1]);
     }
     return current && current->name == "tensor.empty" ? current : nullptr;
   }
 
   void emitInsertSliceProducerSubview(
-      const C1OperationRecord &insertSlice,
-      const C1OperationRecord &producer,
+      const GenericOperation &insertSlice,
+      const GenericOperation &producer,
       const PlanMemoryInputAccessRecord &event,
       std::map<std::string, std::string> &aliases) {
     std::string destinationIdentity;
@@ -3683,7 +3683,7 @@ private:
     std::vector<int64_t> staticSizes = DecomposeI64Array(
         FindDictionaryValue(insertSlice.properties, "static_sizes"));
     const std::vector<size_t> segments =
-        C1OperandSegmentSizes(insertSlice.properties);
+        OperandSegmentSizes(insertSlice.properties);
     if (segments.size() >= 4) {
       size_t dynamicSizeOperand = 2 + segments[2];
       for (int64_t &size : staticSizes) {
@@ -3763,7 +3763,7 @@ private:
         destinationAlias;
   }
 
-  void emitOperation(const C1OperationRecord &source) {
+  void emitOperation(const GenericOperation &source) {
     if (erasedOperations.count(source.id) != 0)
       return;
     if (transformedInsertSlices.count(source.id) != 0)
@@ -3774,9 +3774,9 @@ private:
       return;
     }
     if (replayedInsertSliceProducers.count(source.id) == 0) {
-      if (const C1OperationRecord *insertSlice =
+      if (const GenericOperation *insertSlice =
               findInPlaceInsertSliceForProducer(source)) {
-        if (const C1OperationRecord *allocation =
+        if (const GenericOperation *allocation =
                 findInsertSliceDestinationAllocation(*insertSlice)) {
           insertSliceByProducer[source.id] = insertSlice;
           transformedInsertSlices.insert(insertSlice->id);
@@ -3833,13 +3833,13 @@ private:
 
     auto deferred = deferredInsertSliceProducers.find(source.id);
     if (deferred != deferredInsertSliceProducers.end()) {
-      for (const C1OperationRecord *producer : deferred->second) {
+      for (const GenericOperation *producer : deferred->second) {
         replayedInsertSliceProducers.insert(producer->id);
         emitOperation(*producer);
       }
     }
 
-    const C1OperationRecord *producerInsertSlice = nullptr;
+    const GenericOperation *producerInsertSlice = nullptr;
     auto producerSlice = insertSliceByProducer.find(source.id);
     if (producerSlice != insertSliceByProducer.end())
       producerInsertSlice = producerSlice->second;
@@ -3866,7 +3866,7 @@ private:
       return;
     }
 
-    if (module.c6.c5.c4.c3.singlePoint.scalarizedOperations.count(source.id)) {
+    if (module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.scalarizedOperations.count(source.id)) {
       emitScalarizedOperation(source);
       if (source.name == "hivm.hir.atomic_xchg" ||
           source.name == "hivm.hir.atomic_rmw" ||
@@ -3927,10 +3927,10 @@ private:
       namedValueTypes[index] = "index";
 
       for (int regionId : source.regions) {
-        const C1RegionRecord &region =
+        const GenericRegion &region =
             logical.regions.at(static_cast<size_t>(regionId));
         for (int blockRecordId : region.blocks) {
-          const C1BlockRecord &block =
+          const GenericBlock &block =
               logical.blocks.at(static_cast<size_t>(blockRecordId));
           if (!block.arguments.empty())
             rememberScalar(block.arguments.front(), index, block.id);
@@ -3943,13 +3943,13 @@ private:
         source.name == "scf.while" || source.name == "scope.scope") {
       emitControlStart(source);
       for (size_t index = 0; index < source.regions.size(); ++index) {
-        const C1RegionRecord &region = logical.regions.at(
+        const GenericRegion &region = logical.regions.at(
             static_cast<size_t>(source.regions[index]));
         bool implicitEmptyRegion = source.name == "scf.if";
         for (int block : region.blocks)
           for (int operationId :
                logical.blocks.at(static_cast<size_t>(block)).operations) {
-            const C1OperationRecord &operation = logical.operations.at(
+            const GenericOperation &operation = logical.operations.at(
                 static_cast<size_t>(operationId));
             bool emptyYield = operation.name == "scf.yield";
             for (size_t operand = 0; operand < operation.operands.size();
@@ -3957,7 +3957,7 @@ private:
               emptyYield =
                   emptyYield &&
                   (isRemovedIfResult(source, operand) ||
-                   module.c6.c5.c4.c3.singlePoint
+                   module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint
                            .canonicalizedIterArgResultKeys.count(
                                {source.id, static_cast<int>(operand)}) != 0);
             implicitEmptyRegion = implicitEmptyRegion && emptyYield;
@@ -4018,7 +4018,7 @@ private:
     if (events != eventsBySource.end()) {
       const bool conditionalFill =
           source.name == "hivm.hir.load" &&
-          C4HasBooleanProperty(source, "init_out_buffer") &&
+          HasBooleanProperty(source, "init_out_buffer") &&
           [&]() {
             const std::vector<int64_t> segments = DecomposeI64Array(
                 FindDictionaryValue(source.properties,
@@ -4134,7 +4134,7 @@ private:
   }
 
   void emitEventExtraAllocations(
-      const C1OperationRecord &source,
+      const GenericOperation &source,
       const PlanMemoryInputAccessRecord &event) {
     for (const auto &[identity, effect] : event.accesses) {
       (void)effect;
@@ -4160,7 +4160,7 @@ private:
   }
 
   void emitAtomicTemporaryView(
-      const C1OperationRecord &source,
+      const GenericOperation &source,
       const PlanMemoryInputAccessRecord &event,
       std::map<std::string, std::string> &aliases) {
     if (source.name != "hivm.hir.atomic_xchg" &&
@@ -4176,8 +4176,8 @@ private:
     if (source.operands.size() <= shapeOperand ||
         source.operandTypes.size() <= shapeOperand)
       return;
-    const C1OperationRecord *shapeSource =
-        C7DefiningOperation(logical, source.operands[shapeOperand]);
+    const GenericOperation *shapeSource =
+        DefiningOperation(logical, source.operands[shapeOperand]);
     if (!shapeSource || shapeSource->name != "memref.subview")
       return;
     for (const auto &[identity, effect] : event.accesses) {
@@ -4199,7 +4199,7 @@ private:
         viewType = ConvertTensorToMemRefType(viewType);
       viewType = PlanMemoryPreserveAddressSpace(viewType,
                                                 bufferTypes.at(identity));
-      const C1OperationRecord *function = C4EnclosingFunction(logical, source);
+      const GenericOperation *function = EnclosingFunction(logical, source);
       auto constants = function ? integerConstants.find(function->id)
                                 : integerConstants.end();
       if (constants == integerConstants.end() ||
@@ -4226,7 +4226,7 @@ private:
   }
 
   void emitInsertSliceDestinationSubview(
-      const C1OperationRecord &source,
+      const GenericOperation &source,
       const PlanMemoryInputAccessRecord &event,
       std::map<std::string, std::string> &aliases) {
     if (source.name != "tensor.insert_slice" || event.outOfPlaceCopy)
@@ -4265,7 +4265,7 @@ private:
     std::vector<int64_t> staticSizes = DecomposeI64Array(
         FindDictionaryValue(source.properties, "static_sizes"));
     const std::vector<size_t> segments =
-        C1OperandSegmentSizes(source.properties);
+        OperandSegmentSizes(source.properties);
     if (segments.size() >= 4) {
       size_t dynamicSizeOperand = 2 + segments[2];
       for (int64_t &size : staticSizes) {
@@ -4325,8 +4325,8 @@ private:
         continue;
       auto typeIt = namedValueTypes.find(results.front());
       if (typeIt != namedValueTypes.end() &&
-          C7PhysicalTypeSignature(typeIt->second) ==
-              C7PhysicalTypeSignature(viewType)) {
+          PhysicalTypeSignature(typeIt->second) ==
+              PhysicalTypeSignature(viewType)) {
         aliases[destinationIdentity] = results.front();
         return;
       }
@@ -4372,7 +4372,7 @@ private:
     aliases[destinationIdentity] = destinationAlias;
   }
 
-  void emitBlock(const C1BlockRecord &block) {
+  void emitBlock(const GenericBlock &block) {
     for (int operation : block.operations)
       emitOperation(logical.operations.at(static_cast<size_t>(operation)));
   }
@@ -4403,7 +4403,7 @@ private:
   }
 
   const PlanMemoryInputSemanticIR &module;
-  const C1SemanticModule &logical;
+  const GenericModule &logical;
   PlanMemoryInput result;
   int nextOperationId = 1000000;
   int nextFlattenValue = 0;
@@ -4416,7 +4416,7 @@ private:
   std::set<std::string> targetSourceIdentities;
   std::map<std::string, std::string> bufferNames;
   std::map<std::string, std::string> bufferTypes;
-  std::map<std::string, const C4BufferRecord *> finalBufferRecords;
+  std::map<std::string, const LocalBufferRecord *> finalBufferRecords;
   std::map<std::string, std::string> namedValueTypes;
   std::map<std::string, std::string> allocationViewAliases;
   std::map<std::string, std::string> latestSubviewAliases;
@@ -4443,9 +4443,9 @@ private:
   std::map<const PlanMemoryInputAccessRecord *, std::vector<int64_t>>
       limitedDimensionMappings;
   std::map<int, std::vector<std::string>> controlInitAliases;
-  std::map<int, std::vector<const C1OperationRecord *>>
+  std::map<int, std::vector<const GenericOperation *>>
       deferredInsertSliceProducers;
-  std::map<int, const C1OperationRecord *> insertSliceByProducer;
+  std::map<int, const GenericOperation *> insertSliceByProducer;
   std::set<int> transformedInsertSlices;
   std::set<int> replayedInsertSliceProducers;
   std::map<int, std::string> atomicLockValues;
@@ -4515,7 +4515,7 @@ SerializeCanonicalPlanMemoryInput(const PlanMemoryInput &input) {
     const IRAllocRecord &allocation = input.allocations[index];
     valueIds[allocation.name] = "b" + std::to_string(index);
     output << "ALLOC\t" << index << '\t' << allocation.constBits << '\t'
-           << HexEncode(C7PhysicalTypeSignature(allocation.memrefType))
+           << HexEncode(PhysicalTypeSignature(allocation.memrefType))
            << '\n';
   }
   for (size_t index = 0; index < input.functionArguments.size(); ++index)
@@ -4562,9 +4562,9 @@ SerializeCanonicalPlanMemoryInput(const PlanMemoryInput &input) {
       const std::optional<MemRefTypeModel> type = ParseMemRefType(types[index]);
       const std::string addressSpace =
           type && type->addressSpace != AddressSpace::Unknown
-              ? C4AddressSpaceName(type->addressSpace)
+              ? AddressSpaceName(type->addressSpace)
               : "gm";
-      result << C7PhysicalTypeSignature(types[index]) << '@'
+      result << PhysicalTypeSignature(types[index]) << '@'
              << addressSpace;
     }
     return result.str();

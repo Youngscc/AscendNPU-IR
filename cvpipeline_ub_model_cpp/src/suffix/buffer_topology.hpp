@@ -1,7 +1,7 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_BUFFER_TOPOLOGY_HPP
 #define CVPIPELINE_UB_MODEL_CPP_BUFFER_TOPOLOGY_HPP
 
-#include "../semantic_ir/c1_semantic_ir.hpp"
+#include "../semantic_ir/generic_ir.hpp"
 
 namespace cvub {
 
@@ -45,7 +45,7 @@ inline std::string FindDictionaryValue(const std::string &dictionary,
 
 class SuffixBufferTopologyBuilder {
 public:
-  explicit SuffixBufferTopologyBuilder(const C1SemanticModule &module)
+  explicit SuffixBufferTopologyBuilder(const GenericModule &module)
       : module(module) {
     indexValues();
   }
@@ -53,7 +53,7 @@ public:
   SuffixBufferTopology Build() {
     SuffixBufferTopology topology;
     std::map<int, size_t> recordByRoot;
-    for (const C1OperationRecord &operation : module.operations) {
+    for (const GenericOperation &operation : module.operations) {
       if (operation.name != "memref.alloc")
         continue;
       for (size_t index = 0; index < operation.results.size(); ++index) {
@@ -80,7 +80,7 @@ public:
       if (found != recordByRoot.end())
         topology.localBuffers[found->second].aliases.push_back(valueId);
     }
-    for (const C1OperationRecord &operation : module.operations) {
+    for (const GenericOperation &operation : module.operations) {
       for (size_t index = 0; index < operation.operands.size(); ++index) {
         int valueId = operation.operands[index];
         int root = resolveRoot(valueId);
@@ -96,13 +96,13 @@ public:
 
 private:
   void indexValues() {
-    for (const C1BlockRecord &block : module.blocks)
+    for (const GenericBlock &block : module.blocks)
       for (size_t index = 0; index < block.arguments.size(); ++index) {
         valueTypes[block.arguments[index]] = block.argumentTypes[index];
         blockArgumentOwner[block.arguments[index]] = {block.id,
                                                        static_cast<int>(index)};
       }
-    for (const C1OperationRecord &operation : module.operations)
+    for (const GenericOperation &operation : module.operations)
       for (size_t index = 0; index < operation.results.size(); ++index) {
         if (index < operation.resultTypes.size())
           valueTypes[operation.results[index]] = operation.resultTypes[index];
@@ -126,7 +126,7 @@ private:
   int resolveRootImpl(int valueId) {
     auto definition = definingOperation.find(valueId);
     if (definition != definingOperation.end()) {
-      const C1OperationRecord &operation = module.operations.at(
+      const GenericOperation &operation = module.operations.at(
           static_cast<size_t>(definition->second.first));
       const int resultIndex = definition->second.second;
       if (operation.name == "memref.alloc")
@@ -150,11 +150,11 @@ private:
     auto blockArgument = blockArgumentOwner.find(valueId);
     if (blockArgument == blockArgumentOwner.end())
       return -1;
-    const C1BlockRecord &block = module.blocks.at(
+    const GenericBlock &block = module.blocks.at(
         static_cast<size_t>(blockArgument->second.first));
-    const C1RegionRecord &region = module.regions.at(
+    const GenericRegion &region = module.regions.at(
         static_cast<size_t>(block.regionId));
-    const C1OperationRecord &owner = module.operations.at(
+    const GenericOperation &owner = module.operations.at(
         static_cast<size_t>(region.parentOperation));
     const int argument = blockArgument->second.second;
     if (owner.name == "scf.for" && argument > 0 &&
@@ -166,18 +166,18 @@ private:
     return -1;
   }
 
-  int resolveIfResult(const C1OperationRecord &operation, int resultIndex) {
+  int resolveIfResult(const GenericOperation &operation, int resultIndex) {
     int common = -1;
     for (int regionId : operation.regions) {
-      const C1RegionRecord &region =
+      const GenericRegion &region =
           module.regions.at(static_cast<size_t>(regionId));
       if (region.blocks.empty())
         continue;
-      const C1BlockRecord &block =
+      const GenericBlock &block =
           module.blocks.at(static_cast<size_t>(region.blocks.back()));
       if (block.operations.empty())
         continue;
-      const C1OperationRecord &yield =
+      const GenericOperation &yield =
           module.operations.at(static_cast<size_t>(block.operations.back()));
       if (yield.name != "scf.yield" ||
           static_cast<size_t>(resultIndex) >= yield.operands.size())
@@ -192,7 +192,7 @@ private:
     return common;
   }
 
-  const C1SemanticModule &module;
+  const GenericModule &module;
   std::map<int, std::string> valueTypes;
   std::map<int, std::pair<int, int>> definingOperation;
   std::map<int, std::pair<int, int>> blockArgumentOwner;
@@ -201,7 +201,7 @@ private:
 };
 
 inline SuffixBufferTopology
-BuildSuffixBufferTopology(const C1SemanticModule &module) {
+BuildSuffixBufferTopology(const GenericModule &module) {
   return SuffixBufferTopologyBuilder(module).Build();
 }
 

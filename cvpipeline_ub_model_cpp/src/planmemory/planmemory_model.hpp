@@ -1,4 +1,4 @@
-// Public facade for the frozen B-stage PlanMemory model.
+// Public facade for the standalone PlanMemory-local UB model.
 #ifndef CVPIPELINE_UB_MODEL_CPP_PLANMEMORY_MODEL_HPP
 #define CVPIPELINE_UB_MODEL_CPP_PLANMEMORY_MODEL_HPP
 

@@ -1,7 +1,7 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_MARK_MULTI_BUFFER_HPP
 #define CVPIPELINE_UB_MODEL_CPP_MARK_MULTI_BUFFER_HPP
 
-#include "c5_semantic_ir.hpp"
+#include "after_inline_load_copy.hpp"
 
 namespace cvub {
 
@@ -46,26 +46,26 @@ inline MultiBufferStrategy ParseMultiBufferStrategy(const std::string &value) {
   return MultiBufferStrategy::NoLimit;
 }
 
-inline bool C6IsHostFunction(const C1OperationRecord &function) {
+inline bool IsHostFunction(const GenericOperation &function) {
   return DecomposeEnumValue(
              FindDictionaryValue(function.attributes, "hacc.function_kind")) ==
          "HOST";
 }
 
-inline bool C6IsMixFunction(const C1OperationRecord &function) {
+inline bool IsMixFunction(const GenericOperation &function) {
   const std::string core = DecomposeEnumValue(
       FindDictionaryValue(function.attributes, "hivm.func_core_type"));
   return core == "MIX" ||
          HasDictionaryEntry(function.attributes, "hivm.part_of_mix");
 }
 
-inline bool C6IsForLoop(const C1OperationRecord &operation) {
+inline bool IsForLoop(const GenericOperation &operation) {
   return operation.name == "scf.for";
 }
 
-inline const C1OperationRecord *C6ParentLoop(
-    const C1SemanticModule &module, const C1OperationRecord &operation) {
-  const C1OperationRecord *current = &operation;
+inline const GenericOperation *ParentLoop(
+    const GenericModule &module, const GenericOperation &operation) {
+  const GenericOperation *current = &operation;
   while (current->parentId >= 0) {
     current = &module.operations.at(static_cast<size_t>(current->parentId));
     if (current->name != "scf.for" && current->name != "scf.while" &&
@@ -82,15 +82,15 @@ inline const C1OperationRecord *C6ParentLoop(
   return nullptr;
 }
 
-inline int C6BufferOwnerOperation(const C3SemanticIR &c3,
-                                  const C4BufferRecord &buffer) {
+inline int BufferOwnerOperation(const PostBufferizationRewriteState &postBufferization,
+                                  const LocalBufferRecord &buffer) {
   if (startsWith(buffer.sourceIdentity, "base:")) {
     const size_t ordinal = static_cast<size_t>(
         std::stoull(buffer.sourceIdentity.substr(std::string("base:").size())));
-    if (ordinal >= c3.singlePoint.allocations.size())
+    if (ordinal >= postBufferization.singlePoint.allocations.size())
       return -1;
-    return C4AllocationSourceOperation(
-        c3.singlePoint.allocations[ordinal].source);
+    return AllocationSourceOperation(
+        postBufferization.singlePoint.allocations[ordinal].source);
   }
   if (startsWith(buffer.sourceIdentity, "decompose:")) {
     const size_t begin = std::string("decompose:").size();
@@ -100,77 +100,77 @@ inline int C6BufferOwnerOperation(const C3SemanticIR &c3,
                : std::stoi(buffer.sourceIdentity.substr(begin, end - begin));
   }
   if (startsWith(buffer.sourceIdentity, "extra-source:")) {
-    for (const C1OperationRecord &operation :
-         c3.bufferized.logicalModule.operations)
+    for (const GenericOperation &operation :
+         postBufferization.bufferized.logicalModule.operations)
       if (operation.name == buffer.ownerName)
         return operation.id;
   }
   return -1;
 }
 
-inline int C6BufferOwnerOperation(const C4SemanticIR &c4,
-                                  const C4BufferRecord &buffer) {
-  auto found = c4.bufferOwnerOperations.find(buffer.sourceIdentity);
-  return found == c4.bufferOwnerOperations.end()
-             ? C6BufferOwnerOperation(c4.c3, buffer)
+inline int BufferOwnerOperation(const AfterAllocExtraBufferState &afterAllocExtraBuffer,
+                                  const LocalBufferRecord &buffer) {
+  auto found = afterAllocExtraBuffer.bufferOwnerOperations.find(buffer.sourceIdentity);
+  return found == afterAllocExtraBuffer.bufferOwnerOperations.end()
+             ? BufferOwnerOperation(afterAllocExtraBuffer.postBufferization, buffer)
              : found->second;
 }
 
-inline const C4BufferRecord *C6FindBuffer(
-    const C5SemanticIR &c5, const std::string &identity) {
-  return C4FindSourceBuffer(c5.buffers, identity);
+inline const LocalBufferRecord *FindLocalBuffer(
+    const AfterInlineLoadCopyState &afterInlineLoadCopy, const std::string &identity) {
+  return FindSourceBuffer(afterInlineLoadCopy.buffers, identity);
 }
 
-inline bool C6HasProperParentLoop(const C5SemanticIR &c5,
-                                  const C4BufferRecord &buffer) {
-  const C1SemanticModule &module = c5.c4.c3.bufferized.logicalModule;
-  const int ownerId = C6BufferOwnerOperation(c5.c4, buffer);
+inline bool HasProperParentLoop(const AfterInlineLoadCopyState &afterInlineLoadCopy,
+                                  const LocalBufferRecord &buffer) {
+  const GenericModule &module = afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized.logicalModule;
+  const int ownerId = BufferOwnerOperation(afterInlineLoadCopy.afterAllocExtraBuffer, buffer);
   if (ownerId < 0 || static_cast<size_t>(ownerId) >= module.operations.size())
     return false;
-  const C1OperationRecord *loop =
-      C6ParentLoop(module, module.operations.at(static_cast<size_t>(ownerId)));
+  const GenericOperation *loop =
+      ParentLoop(module, module.operations.at(static_cast<size_t>(ownerId)));
   if (!loop)
     return false;
   while (loop) {
-    if (!C6IsForLoop(*loop))
+    if (!IsForLoop(*loop))
       return false;
-    loop = C6ParentLoop(module, *loop);
+    loop = ParentLoop(module, *loop);
   }
   return true;
 }
 
 inline std::vector<std::pair<std::string, std::string>>
-C6FinalOperationBuffers(const C5SemanticIR &c5,
-                        const C1OperationRecord &operation) {
-  for (const InlineLoadCopyRewrite &rewrite : c5.inlineLoadCopy.rewrites) {
+FinalOperationBuffers(const AfterInlineLoadCopyState &afterInlineLoadCopy,
+                        const GenericOperation &operation) {
+  for (const InlineLoadCopyRewrite &rewrite : afterInlineLoadCopy.inlineLoadCopy.rewrites) {
     if (rewrite.loadOperation == operation.id)
       return {{rewrite.loadSource, "source"},
               {rewrite.copyDestination, "destination"}};
   }
-  if (c5.inlineLoadCopy.erasedOperations.count(operation.id) != 0)
+  if (afterInlineLoadCopy.inlineLoadCopy.erasedOperations.count(operation.id) != 0)
     return {};
-  const C3SemanticIR &c3 = c5.c4.c3;
-  for (const C3OperationRewrite &rewrite : c3.operationRewrites) {
+  const PostBufferizationRewriteState &postBufferization = afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization;
+  for (const OperationRewriteDelta &rewrite : postBufferization.operationRewrites) {
     if (rewrite.sourceOperation != operation.id)
       continue;
     std::vector<std::pair<std::string, std::string>> result;
-    for (const C3GeneratedOperation &generated : rewrite.replacement) {
+    for (const GeneratedOperationRewrite &generated : rewrite.replacement) {
       if (generated.name != "hivm.hir.load" &&
           generated.name != "hivm.hir.store" &&
           generated.name != "hivm.hir.nd2nz" &&
           generated.name != "hivm.hir.fixpipe")
         continue;
       for (size_t index = 0; index < generated.buffers.size(); ++index)
-        result.push_back({C4MappedBufferIdentity(
+        result.push_back({MappedBufferIdentity(
                               generated.buffers[index],
-                              c3.singlePoint.bufferMapping),
+                              postBufferization.singlePoint.bufferMapping),
                           index == 0 ? "source" : "destination"});
     }
     return result;
   }
   const std::map<size_t, std::string> buffers =
-      C5OperationBuffers(c3, operation.id);
-  std::vector<size_t> inits = C1DpsInitOperandIndices(
+      OperationBufferMap(postBufferization, operation.id);
+  std::vector<size_t> inits = DpsInitOperandIndices(
       operation.name, operation.operands.size(), operation.properties);
   std::vector<size_t> inputs;
   for (size_t index = 0; index < operation.operands.size(); ++index)
@@ -192,23 +192,23 @@ C6FinalOperationBuffers(const C5SemanticIR &c5,
 }
 
 inline MarkMultiBufferResult ModelMarkMultiBuffer(
-    const C5SemanticIR &c5, const MarkMultiBufferOptions &options) {
+    const AfterInlineLoadCopyState &afterInlineLoadCopy, const MarkMultiBufferOptions &options) {
   MarkMultiBufferResult result;
-  const C1SemanticModule &module = c5.c4.c3.bufferized.logicalModule;
-  auto mark = [&](const C1OperationRecord &function,
-                  const C4BufferRecord &buffer, unsigned count, bool preload,
-                  const C1OperationRecord &trigger) {
+  const GenericModule &module = afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized.logicalModule;
+  auto mark = [&](const GenericOperation &function,
+                  const LocalBufferRecord &buffer, unsigned count, bool preload,
+                  const GenericOperation &trigger) {
     if (result.buffer2MultiNum.count(buffer.sourceIdentity) != 0)
       return false;
     result.buffer2MultiNum[buffer.sourceIdentity] = count;
     if (preload)
       result.preloadLocalBuffers.insert(buffer.sourceIdentity);
-    result.marks.push_back({C5FunctionName(function), buffer.sourceIdentity,
+    result.marks.push_back({GenericFunctionName(function), buffer.sourceIdentity,
                             count, preload, trigger.id, trigger.name});
     return true;
   };
 
-  for (const C1OperationRecord &operation : module.operations) {
+  for (const GenericOperation &operation : module.operations) {
     if (operation.name != "annotation.mark")
       continue;
     std::string count =
@@ -218,12 +218,12 @@ inline MarkMultiBufferResult ModelMarkMultiBuffer(
     if (count.empty())
       continue;
     const std::map<size_t, std::string> buffers =
-        C5OperationBuffers(c5.c4.c3, operation.id);
+        OperationBufferMap(afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization, operation.id);
     auto operand = buffers.find(0);
     if (operand == buffers.end())
       continue;
-    const C4BufferRecord *buffer = C6FindBuffer(c5, operand->second);
-    const C1OperationRecord *function = C4EnclosingFunction(module, operation);
+    const LocalBufferRecord *buffer = FindLocalBuffer(afterInlineLoadCopy, operand->second);
+    const GenericOperation *function = EnclosingFunction(module, operation);
     if (!buffer || !function)
       continue;
     std::string preload = FindDictionaryValue(
@@ -241,9 +241,9 @@ inline MarkMultiBufferResult ModelMarkMultiBuffer(
   if (!options.enableAuto)
     return result;
 
-  for (const C1OperationRecord &operation : module.operations) {
-    const C1OperationRecord *function = C4EnclosingFunction(module, operation);
-    if (!function || C6IsHostFunction(*function))
+  for (const GenericOperation &operation : module.operations) {
+    const GenericOperation *function = EnclosingFunction(module, operation);
+    if (!function || IsHostFunction(*function))
       continue;
 
     if (operation.name == "scope.scope") {
@@ -256,18 +256,18 @@ inline MarkMultiBufferResult ModelMarkMultiBuffer(
       if (preload.empty() || std::stoll(preload) == 0 || core == "CUBE" ||
           operation.regions.empty())
         continue;
-      const C1RegionRecord &region =
+      const GenericRegion &region =
           module.regions.at(static_cast<size_t>(operation.regions.front()));
       if (region.blocks.empty())
         continue;
-      const C1BlockRecord &block =
+      const GenericBlock &block =
           module.blocks.at(static_cast<size_t>(region.blocks.front()));
       if (block.operations.empty())
         continue;
-      const C1OperationRecord &terminator = module.operations.at(
+      const GenericOperation &terminator = module.operations.at(
           static_cast<size_t>(block.operations.back()));
-      const std::map<int, const C1OperationRecord *> definitions =
-          C1DefiningOperations(module);
+      const std::map<int, const GenericOperation *> definitions =
+          DefiningOperations(module);
       for (size_t index = 0;
            index < terminator.operands.size() && index < operation.results.size();
            ++index) {
@@ -276,7 +276,7 @@ inline MarkMultiBufferResult ModelMarkMultiBuffer(
             returned->second->name != "memref.alloc")
           continue;
         bool usedByV1 = false;
-        for (const C1OperationRecord &user : module.operations) {
+        for (const GenericOperation &user : module.operations) {
           if (std::find(user.operands.begin(), user.operands.end(),
                         operation.results[index]) == user.operands.end())
             continue;
@@ -289,13 +289,13 @@ inline MarkMultiBufferResult ModelMarkMultiBuffer(
         if (!usedByV1)
           continue;
         for (const BufferizedValueBinding &binding :
-             c5.c4.c3.bufferized.values) {
+             afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized.values) {
           if (binding.valueId != terminator.operands[index])
             continue;
-          const C4BufferRecord *buffer = C6FindBuffer(
-              c5, C4MappedBufferIdentity(
+          const LocalBufferRecord *buffer = FindLocalBuffer(
+              afterInlineLoadCopy, MappedBufferIdentity(
                       binding.bufferId,
-                      c5.c4.c3.singlePoint.bufferMapping));
+                      afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.bufferMapping));
           if (buffer && buffer->addressSpace != AddressSpace::GM)
             mark(*function, *buffer, 4, true, operation);
         }
@@ -304,11 +304,11 @@ inline MarkMultiBufferResult ModelMarkMultiBuffer(
     }
 
     const std::vector<std::pair<std::string, std::string>> operands =
-        C6FinalOperationBuffers(c5, operation);
-    const C4BufferRecord *source = nullptr;
-    const C4BufferRecord *destination = nullptr;
+        FinalOperationBuffers(afterInlineLoadCopy, operation);
+    const LocalBufferRecord *source = nullptr;
+    const LocalBufferRecord *destination = nullptr;
     for (const auto &[identity, role] : operands) {
-      const C4BufferRecord *buffer = C6FindBuffer(c5, identity);
+      const LocalBufferRecord *buffer = FindLocalBuffer(afterInlineLoadCopy, identity);
       if (role == "source" && !source)
         source = buffer;
       if (role == "destination" && !destination)
@@ -321,7 +321,7 @@ inline MarkMultiBufferResult ModelMarkMultiBuffer(
         destination->addressSpace == AddressSpace::L1)
       finalName = "hivm.hir.nd2nz";
 
-    const bool mix = C6IsMixFunction(*function);
+    const bool mix = IsMixFunction(*function);
     bool enabledPattern = false;
     if (finalName == "hivm.hir.nd2nz" ||
         finalName == "hivm.hir.fixpipe") {
@@ -341,12 +341,12 @@ inline MarkMultiBufferResult ModelMarkMultiBuffer(
     if (!enabledPattern)
       continue;
 
-    const C4BufferRecord *candidate =
+    const LocalBufferRecord *candidate =
         source && source->addressSpace != AddressSpace::GM ? source
         : destination && destination->addressSpace != AddressSpace::GM
             ? destination
             : nullptr;
-    if (candidate && C6HasProperParentLoop(c5, *candidate))
+    if (candidate && HasProperParentLoop(afterInlineLoadCopy, *candidate))
       mark(*function, *candidate, 2, false, operation);
   }
   return result;

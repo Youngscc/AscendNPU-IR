@@ -1,22 +1,22 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_INLINE_LOAD_COPY_HPP
 #define CVPIPELINE_UB_MODEL_CPP_INLINE_LOAD_COPY_HPP
 
-#include "c4_semantic_ir.hpp"
+#include "after_alloc_extra_buffer.hpp"
 
 namespace cvub {
 
-enum class C5MemoryEffect : unsigned {
+enum class InlineLoadCopyMemoryEffect : unsigned {
   None = 0,
   Read = 1,
   Write = 2,
 };
 
-inline C5MemoryEffect operator|(C5MemoryEffect lhs, C5MemoryEffect rhs) {
-  return static_cast<C5MemoryEffect>(static_cast<unsigned>(lhs) |
+inline InlineLoadCopyMemoryEffect operator|(InlineLoadCopyMemoryEffect lhs, InlineLoadCopyMemoryEffect rhs) {
+  return static_cast<InlineLoadCopyMemoryEffect>(static_cast<unsigned>(lhs) |
                                      static_cast<unsigned>(rhs));
 }
 
-inline bool C5HasEffect(C5MemoryEffect effects, C5MemoryEffect effect) {
+inline bool HasMemoryEffect(InlineLoadCopyMemoryEffect effects, InlineLoadCopyMemoryEffect effect) {
   return (static_cast<unsigned>(effects) & static_cast<unsigned>(effect)) != 0;
 }
 
@@ -35,7 +35,7 @@ struct InlineLoadCopyResult {
   std::set<int> erasedOperations;
 };
 
-inline std::string C5FunctionName(const C1OperationRecord &function) {
+inline std::string GenericFunctionName(const GenericOperation &function) {
   std::string name = FindDictionaryValue(function.properties, "sym_name");
   if (name.empty())
     name = FindDictionaryValue(function.attributes, "sym_name");
@@ -44,7 +44,7 @@ inline std::string C5FunctionName(const C1OperationRecord &function) {
   return name;
 }
 
-inline bool C5IsViewLikeOperation(const std::string &name) {
+inline bool IsViewLikeOperation(const std::string &name) {
   static const std::set<std::string> operations = {
       "bufferization.to_memref",
       "bufferization.to_tensor",
@@ -64,80 +64,80 @@ inline bool C5IsViewLikeOperation(const std::string &name) {
   return operations.count(name) != 0;
 }
 
-inline bool C5IsCopyOperation(const std::string &name) {
+inline bool IsCopyOperation(const std::string &name) {
   return name == "hivm.hir.copy" || name == "tensor.insert_slice";
 }
 
-inline std::map<size_t, std::string> C5OperationBuffers(
-    const C3SemanticIR &c3, int operationId) {
+inline std::map<size_t, std::string> OperationBufferMap(
+    const PostBufferizationRewriteState &postBufferization, int operationId) {
   std::map<size_t, std::string> result;
-  for (const BufferizedOperandAccess &access : c3.bufferized.accesses)
+  for (const BufferizedOperandAccess &access : postBufferization.bufferized.accesses)
     if (access.operationId == operationId)
       result[static_cast<size_t>(access.operandNumber)] =
-          C4MappedBufferIdentity(access.bufferId,
-                                 c3.singlePoint.bufferMapping);
+          MappedBufferIdentity(access.bufferId,
+                                 postBufferization.singlePoint.bufferMapping);
   return result;
 }
 
-inline C5MemoryEffect C5OperandEffect(const C1OperationRecord &operation,
+inline InlineLoadCopyMemoryEffect OperandMemoryEffect(const GenericOperation &operation,
                                       size_t operandNumber) {
-  if (C5IsViewLikeOperation(operation.name))
-    return C5MemoryEffect::None;
+  if (IsViewLikeOperation(operation.name))
+    return InlineLoadCopyMemoryEffect::None;
   if (operation.name == "hivm.hir.load" ||
       operation.name == "hivm.hir.copy" ||
       operation.name == "hivm.hir.store" ||
       operation.name == "tensor.insert_slice")
-    return operandNumber == 0 ? C5MemoryEffect::Read : C5MemoryEffect::Write;
+    return operandNumber == 0 ? InlineLoadCopyMemoryEffect::Read : InlineLoadCopyMemoryEffect::Write;
   if (operation.name == "memref.load")
-    return C5MemoryEffect::Read;
+    return InlineLoadCopyMemoryEffect::Read;
   if (operation.name == "memref.store")
-    return operandNumber == 0 ? C5MemoryEffect::Read : C5MemoryEffect::Write;
+    return operandNumber == 0 ? InlineLoadCopyMemoryEffect::Read : InlineLoadCopyMemoryEffect::Write;
   if (IsDestinationStyleOp(operation.name)) {
-    const std::vector<size_t> initIndices = C1DpsInitOperandIndices(
+    const std::vector<size_t> initIndices = DpsInitOperandIndices(
         operation.name, operation.operands.size(), operation.properties);
     return std::find(initIndices.begin(), initIndices.end(), operandNumber) ==
                    initIndices.end()
-               ? C5MemoryEffect::Read
-               : C5MemoryEffect::Write;
+               ? InlineLoadCopyMemoryEffect::Read
+               : InlineLoadCopyMemoryEffect::Write;
   }
-  return C5MemoryEffect::Read | C5MemoryEffect::Write;
+  return InlineLoadCopyMemoryEffect::Read | InlineLoadCopyMemoryEffect::Write;
 }
 
-inline bool C5OperationIsBefore(const C1OperationRecord &lhs,
-                                const C1OperationRecord &rhs) {
+inline bool OperationIsBefore(const GenericOperation &lhs,
+                                const GenericOperation &rhs) {
   return lhs.blockId == rhs.blockId && lhs.ordinal < rhs.ordinal;
 }
 
-inline bool C5WriteBeforeCopy(const C1OperationRecord &write,
-                              const C1OperationRecord &load,
-                              const C1OperationRecord &copy) {
+inline bool WriteBeforeCopy(const GenericOperation &write,
+                              const GenericOperation &load,
+                              const GenericOperation &copy) {
   if (write.id == load.id)
     return false;
-  return write.blockId != copy.blockId || C5OperationIsBefore(write, copy);
+  return write.blockId != copy.blockId || OperationIsBefore(write, copy);
 }
 
-inline bool C5ReadAfterLoad(const C1OperationRecord &read,
-                            const C1OperationRecord &load,
-                            const C1OperationRecord &copy) {
+inline bool ReadAfterLoad(const GenericOperation &read,
+                            const GenericOperation &load,
+                            const GenericOperation &copy) {
   if (read.id == copy.id)
     return false;
-  return read.blockId != load.blockId || C5OperationIsBefore(load, read);
+  return read.blockId != load.blockId || OperationIsBefore(load, read);
 }
 
-inline bool C5HappensAfterLoadBeforeCopy(const C1OperationRecord &candidate,
-                                         const C1OperationRecord &load,
-                                         const C1OperationRecord &copy) {
+inline bool HappensAfterLoadBeforeCopy(const GenericOperation &candidate,
+                                         const GenericOperation &load,
+                                         const GenericOperation &copy) {
   if (candidate.id == load.id || candidate.id == copy.id)
     return false;
   if (candidate.blockId == load.blockId)
-    return C5OperationIsBefore(load, candidate);
+    return OperationIsBefore(load, candidate);
   if (candidate.blockId == copy.blockId)
-    return C5OperationIsBefore(candidate, copy);
+    return OperationIsBefore(candidate, copy);
   return true;
 }
 
-inline int C5TraceTensorBufferValue(
-    int value, const std::map<int, const C1OperationRecord *> &definitions) {
+inline int TraceTensorBufferValue(
+    int value, const std::map<int, const GenericOperation *> &definitions) {
   std::set<int> visited;
   while (visited.insert(value).second) {
     auto found = definitions.find(value);
@@ -153,71 +153,71 @@ inline int C5TraceTensorBufferValue(
   return value;
 }
 
-inline bool C5HasInterveningMemoryEffect(
-    const C3SemanticIR &c3, const std::string &buffer,
-    const C1OperationRecord &load, const C1OperationRecord &copy,
+inline bool HasInterveningMemoryEffect(
+    const PostBufferizationRewriteState &postBufferization, const std::string &buffer,
+    const GenericOperation &load, const GenericOperation &copy,
     bool copySourceRole) {
-  for (const BufferizedOperandAccess &access : c3.bufferized.accesses) {
-    const std::string identity = C4MappedBufferIdentity(
-        access.bufferId, c3.singlePoint.bufferMapping);
+  for (const BufferizedOperandAccess &access : postBufferization.bufferized.accesses) {
+    const std::string identity = MappedBufferIdentity(
+        access.bufferId, postBufferization.singlePoint.bufferMapping);
     if (identity != buffer || access.operationId == load.id)
       continue;
-    const C1OperationRecord &operation =
-        c3.bufferized.logicalModule.operations.at(
+    const GenericOperation &operation =
+        postBufferization.bufferized.logicalModule.operations.at(
             static_cast<size_t>(access.operationId));
-    if (C5IsViewLikeOperation(operation.name))
+    if (IsViewLikeOperation(operation.name))
       continue;
-    const C5MemoryEffect effects = C5OperandEffect(
+    const InlineLoadCopyMemoryEffect effects = OperandMemoryEffect(
         operation, static_cast<size_t>(access.operandNumber));
-    if (C5HasEffect(effects, C5MemoryEffect::Write)) {
-      if (copySourceRole ? C5WriteBeforeCopy(operation, load, copy)
-                         : C5HappensAfterLoadBeforeCopy(operation, load, copy))
+    if (HasMemoryEffect(effects, InlineLoadCopyMemoryEffect::Write)) {
+      if (copySourceRole ? WriteBeforeCopy(operation, load, copy)
+                         : HappensAfterLoadBeforeCopy(operation, load, copy))
         return true;
     }
-    if (copySourceRole && C5HasEffect(effects, C5MemoryEffect::Read) &&
-        C5ReadAfterLoad(operation, load, copy)) {
+    if (copySourceRole && HasMemoryEffect(effects, InlineLoadCopyMemoryEffect::Read) &&
+        ReadAfterLoad(operation, load, copy)) {
       return true;
     }
   }
   return false;
 }
 
-inline InlineLoadCopyResult ModelInlineLoadCopy(const C4SemanticIR &c4) {
-  const C3SemanticIR &c3 = c4.c3;
-  const C1SemanticModule &module = c3.bufferized.logicalModule;
-  const std::map<int, const C1OperationRecord *> definitions =
-      C1DefiningOperations(module);
+inline InlineLoadCopyResult ModelInlineLoadCopy(const AfterAllocExtraBufferState &afterAllocExtraBuffer) {
+  const PostBufferizationRewriteState &postBufferization = afterAllocExtraBuffer.postBufferization;
+  const GenericModule &module = postBufferization.bufferized.logicalModule;
+  const std::map<int, const GenericOperation *> definitions =
+      DefiningOperations(module);
   InlineLoadCopyResult result;
   std::set<int> erasedOperations;
-  for (const C1OperationRecord &copy : module.operations) {
-    if (!C5IsCopyOperation(copy.name) ||
-        c3.singlePoint.scalarizedOperations.count(copy.id) != 0 ||
+  for (const GenericOperation &copy : module.operations) {
+    if (!IsCopyOperation(copy.name) ||
+        postBufferization.singlePoint.scalarizedOperations.count(copy.id) != 0 ||
         erasedOperations.count(copy.id) != 0)
       continue;
     const std::map<size_t, std::string> copyBuffers =
-        C5OperationBuffers(c3, copy.id);
+        OperationBufferMap(postBufferization, copy.id);
     auto copySource = copyBuffers.find(0);
     auto copyDestination = copyBuffers.find(1);
     if (copySource == copyBuffers.end() ||
         copyDestination == copyBuffers.end())
       continue;
 
-    const C1OperationRecord *matchedLoad = nullptr;
-    for (const C1OperationRecord &load : module.operations) {
+    const GenericOperation *matchedLoad = nullptr;
+    for (const GenericOperation &load : module.operations) {
       if (load.name != "hivm.hir.load" ||
           erasedOperations.count(load.id) != 0 ||
           load.blockId != copy.blockId ||
-          !C5OperationIsBefore(load, copy))
+          !OperationIsBefore(load, copy))
         continue;
       const std::map<size_t, std::string> loadBuffers =
-          C5OperationBuffers(c3, load.id);
+          OperationBufferMap(postBufferization, load.id);
       auto loadDestination = loadBuffers.find(1);
       if (loadDestination == loadBuffers.end() ||
           loadDestination->second != copySource->second)
         continue;
       if (!copy.operands.empty() && load.operands.size() > 1 &&
-          C5TraceTensorBufferValue(copy.operands[0], definitions) !=
-              C5TraceTensorBufferValue(load.operands[1], definitions))
+          TraceTensorBufferValue(copy.operands[0], definitions) !=
+              TraceTensorBufferValue(load.operands[1], definitions))
         continue;
       matchedLoad = &load;
       break;
@@ -225,23 +225,23 @@ inline InlineLoadCopyResult ModelInlineLoadCopy(const C4SemanticIR &c4) {
     if (!matchedLoad)
       continue;
     const std::map<size_t, std::string> loadBuffers =
-        C5OperationBuffers(c3, matchedLoad->id);
+        OperationBufferMap(postBufferization, matchedLoad->id);
     auto loadSource = loadBuffers.find(0);
     if (loadSource == loadBuffers.end() ||
-        C5HasInterveningMemoryEffect(c3, copySource->second, *matchedLoad,
+        HasInterveningMemoryEffect(postBufferization, copySource->second, *matchedLoad,
                                      copy, true) ||
-        C5HasInterveningMemoryEffect(c3, loadSource->second, *matchedLoad,
+        HasInterveningMemoryEffect(postBufferization, loadSource->second, *matchedLoad,
                                      copy, false))
       continue;
-    const C4BufferRecord *middle =
-        C4FindSourceBuffer(c4.buffers, copySource->second);
+    const LocalBufferRecord *middle =
+        FindSourceBuffer(afterAllocExtraBuffer.buffers, copySource->second);
     if (!middle || middle->extraBuffer)
       continue;
-    const C1OperationRecord *function = C4EnclosingFunction(module, copy);
+    const GenericOperation *function = EnclosingFunction(module, copy);
     if (!function)
       throw std::runtime_error("InlineLoadCopy: copy outside function");
     result.rewrites.push_back(
-        {C5FunctionName(*function), matchedLoad->id, copy.id,
+        {GenericFunctionName(*function), matchedLoad->id, copy.id,
          loadSource->second, copySource->second, copyDestination->second});
     result.erasedBuffers.insert(middle->sourceIdentity);
     erasedOperations.insert(matchedLoad->id);

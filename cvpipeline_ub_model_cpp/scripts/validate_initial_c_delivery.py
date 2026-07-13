@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Acceptance gate for the initial C1-to-PlanMemory production delivery."""
+"""Acceptance gate for the before-OneShotBufferize-to-PlanMemory production delivery."""
 
 from __future__ import annotations
 
@@ -44,8 +44,8 @@ def main() -> int:
                   digest / "pass_tree/builtin_module_no-symbol-name" /
                   "0_one-shot-bufferize.mlir")
         command = [
-            str(binary), "--action=plan-c1-suffix",
-            f"--c1-generic-ir={source}", "--random-seed=0", "--format=json",
+            str(binary), "--action=plan-before-one-shot-bufferize",
+            f"--before-one-shot-bufferize-ir={source}", "--random-seed=0", "--format=json",
             "--limit-auto-multi-buffer-of-local-buffer", row["local_strategy"],
             "--limit-auto-multi-buffer-buffer", row["mix_strategy"]]
         if row["enable_auto"] == "1":
@@ -58,7 +58,7 @@ def main() -> int:
             continue
         precision = output.get("precision", "")
         status = output.get("status", "")
-        if precision == "initial_c_model" and status in {"success", "overflow"}:
+        if precision == "before_one_shot_bufferize_model" and status in {"success", "overflow"}:
             accepted += 1
             report_rows.append((digest, "accepted", status))
         elif precision == "blocked" and status == "blocker":

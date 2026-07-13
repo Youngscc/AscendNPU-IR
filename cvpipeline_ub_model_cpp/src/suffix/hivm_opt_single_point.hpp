@@ -54,7 +54,7 @@ public:
 
   HIVMOptSinglePointResult Run() const {
     HIVMOptSinglePointResult result;
-    for (const C1OperationRecord &operation : module.logicalModule.operations)
+    for (const GenericOperation &operation : module.logicalModule.operations)
       if (isScalarized(operation))
         result.scalarizedOperations.insert(operation.id);
     result.canonicalizedIterArgResults = collectCanonicalizedIterArgResults(
@@ -63,7 +63,7 @@ public:
 
     std::set<std::string> required;
     std::map<std::string, int> scalarAvailable;
-    for (const C1OperationRecord &operation : module.logicalModule.operations) {
+    for (const GenericOperation &operation : module.logicalModule.operations) {
       const std::vector<std::string> buffers = buffersForOperation(
           operation.id, &ignoredIterArgAccesses);
       if (result.scalarizedOperations.count(operation.id) == 0) {
@@ -123,7 +123,7 @@ private:
   std::map<std::string, size_t> collectCanonicalizedIterArgResults(
       std::set<std::pair<int, int>> *keys = nullptr) const {
     std::map<std::string, size_t> result;
-    for (const C1OperationRecord &operation : module.logicalModule.operations) {
+    for (const GenericOperation &operation : module.logicalModule.operations) {
       if (operation.name == "scf.if") {
         for (size_t index = 0; index < operation.results.size(); ++index) {
           if (valueUseCount(operation.results[index]) == 0) {
@@ -135,19 +135,19 @@ private:
           bool equivalent = !operation.regions.empty();
           std::optional<int> yieldedValue;
           for (int regionId : operation.regions) {
-            const C1RegionRecord &region = module.logicalModule.regions.at(
+            const GenericRegion &region = module.logicalModule.regions.at(
                 static_cast<size_t>(regionId));
             if (region.blocks.empty()) {
               equivalent = false;
               break;
             }
-            const C1BlockRecord &block = module.logicalModule.blocks.at(
+            const GenericBlock &block = module.logicalModule.blocks.at(
                 static_cast<size_t>(region.blocks.back()));
             if (block.operations.empty()) {
               equivalent = false;
               break;
             }
-            const C1OperationRecord &yield =
+            const GenericOperation &yield =
                 module.logicalModule.operations.at(
                     static_cast<size_t>(block.operations.back()));
             if (yield.name != "scf.yield" || index >= yield.operands.size() ||
@@ -164,15 +164,15 @@ private:
           }
         }
       } else if (operation.name == "scf.for" && !operation.regions.empty()) {
-        const C1RegionRecord &region = module.logicalModule.regions.at(
+        const GenericRegion &region = module.logicalModule.regions.at(
             static_cast<size_t>(operation.regions.front()));
         if (region.blocks.empty())
           continue;
-        const C1BlockRecord &block = module.logicalModule.blocks.at(
+        const GenericBlock &block = module.logicalModule.blocks.at(
             static_cast<size_t>(region.blocks.front()));
         if (block.operations.empty())
           continue;
-        const C1OperationRecord &yield = module.logicalModule.operations.at(
+        const GenericOperation &yield = module.logicalModule.operations.at(
             static_cast<size_t>(block.operations.back()));
         if (yield.name != "scf.yield")
           continue;
@@ -195,14 +195,14 @@ private:
 
   size_t valueUseCount(int value) const {
     size_t count = 0;
-    for (const C1OperationRecord &operation : module.logicalModule.operations)
+    for (const GenericOperation &operation : module.logicalModule.operations)
       count += static_cast<size_t>(
           std::count(operation.operands.begin(), operation.operands.end(),
                      value));
     return count;
   }
 
-  bool hasNoSideEffects(const C1OperationRecord &operation) const {
+  bool hasNoSideEffects(const GenericOperation &operation) const {
     if (operation.effects != "none" && !operation.effects.empty())
       return false;
     if (operation.regions.empty())
@@ -211,13 +211,13 @@ private:
         operation.name != "scf.while")
       return false;
     for (int regionId : operation.regions) {
-      const C1RegionRecord &region = module.logicalModule.regions.at(
+      const GenericRegion &region = module.logicalModule.regions.at(
           static_cast<size_t>(regionId));
       for (int blockId : region.blocks) {
-        const C1BlockRecord &block = module.logicalModule.blocks.at(
+        const GenericBlock &block = module.logicalModule.blocks.at(
             static_cast<size_t>(blockId));
         for (int operationId : block.operations) {
-          const C1OperationRecord &nested = module.logicalModule.operations.at(
+          const GenericOperation &nested = module.logicalModule.operations.at(
               static_cast<size_t>(operationId));
           if (nested.name == "scf.yield" || nested.name == "scf.condition")
             continue;
@@ -229,8 +229,8 @@ private:
     return true;
   }
 
-  bool isIterationIndependent(const C1BlockRecord &body,
-                              const C1OperationRecord &allowedYield,
+  bool isIterationIndependent(const GenericBlock &body,
+                              const GenericOperation &allowedYield,
                               size_t resultNumber) const {
     const size_t argumentNumber = resultNumber + 1;
     if (argumentNumber >= body.arguments.size())
@@ -241,7 +241,7 @@ private:
     while (!worklist.empty()) {
       const int value = worklist.back();
       worklist.pop_back();
-      for (const C1OperationRecord &user : module.logicalModule.operations) {
+      for (const GenericOperation &user : module.logicalModule.operations) {
         for (size_t operandNumber = 0;
              operandNumber < user.operands.size(); ++operandNumber) {
           if (user.operands[operandNumber] != value)
@@ -264,9 +264,9 @@ private:
     return true;
   }
 
-  bool isOperationNestedIn(const C1OperationRecord &operation,
-                           const C1OperationRecord &ancestor) const {
-    const C1OperationRecord *current = &operation;
+  bool isOperationNestedIn(const GenericOperation &operation,
+                           const GenericOperation &ancestor) const {
+    const GenericOperation *current = &operation;
     while (current && current->parentId >= 0) {
       if (current->parentId == ancestor.id)
         return true;
@@ -276,9 +276,9 @@ private:
     return false;
   }
 
-  const C1OperationRecord *definingOperation(int value,
+  const GenericOperation *definingOperation(int value,
                                              size_t &resultNumber) const {
-    for (const C1OperationRecord &operation : module.logicalModule.operations)
+    for (const GenericOperation &operation : module.logicalModule.operations)
       for (size_t index = 0; index < operation.results.size(); ++index)
         if (operation.results[index] == value) {
           resultNumber = index;
@@ -287,8 +287,8 @@ private:
     return nullptr;
   }
 
-  const C1BlockRecord *argumentBlock(int value, size_t &argumentNumber) const {
-    for (const C1BlockRecord &block : module.logicalModule.blocks)
+  const GenericBlock *argumentBlock(int value, size_t &argumentNumber) const {
+    for (const GenericBlock &block : module.logicalModule.blocks)
       for (size_t index = 0; index < block.arguments.size(); ++index)
         if (block.arguments[index] == value) {
           argumentNumber = index;
@@ -297,15 +297,15 @@ private:
     return nullptr;
   }
 
-  bool traceEquivalentValue(int value, const C1OperationRecord &outerLoop,
+  bool traceEquivalentValue(int value, const GenericOperation &outerLoop,
                             std::set<int> &equivalence,
                             std::vector<int> &worklist) const {
     if (equivalence.count(value) != 0)
       return true;
     size_t resultNumber = 0;
-    const C1OperationRecord *definition =
+    const GenericOperation *definition =
         definingOperation(value, resultNumber);
-    const C1OperationRecord *loop = nullptr;
+    const GenericOperation *loop = nullptr;
     size_t iterArgNumber = 0;
     if (definition) {
       if (!isOperationNestedIn(*definition, outerLoop))
@@ -347,15 +347,15 @@ private:
       if (definition->name == "scf.if") {
         equivalence.insert(value);
         for (int regionId : definition->regions) {
-          const C1RegionRecord &region = module.logicalModule.regions.at(
+          const GenericRegion &region = module.logicalModule.regions.at(
               static_cast<size_t>(regionId));
           if (region.blocks.empty())
             return false;
-          const C1BlockRecord &block = module.logicalModule.blocks.at(
+          const GenericBlock &block = module.logicalModule.blocks.at(
               static_cast<size_t>(region.blocks.front()));
           if (block.operations.empty())
             return false;
-          const C1OperationRecord &yield = module.logicalModule.operations.at(
+          const GenericOperation &yield = module.logicalModule.operations.at(
               static_cast<size_t>(block.operations.back()));
           if (yield.name != "scf.yield" ||
               resultNumber >= yield.operands.size())
@@ -370,10 +370,10 @@ private:
       iterArgNumber = resultNumber;
     } else {
       size_t argumentNumber = 0;
-      const C1BlockRecord *block = argumentBlock(value, argumentNumber);
+      const GenericBlock *block = argumentBlock(value, argumentNumber);
       if (!block)
         return false;
-      const C1RegionRecord &region = module.logicalModule.regions.at(
+      const GenericRegion &region = module.logicalModule.regions.at(
           static_cast<size_t>(block->regionId));
       loop = &module.logicalModule.operations.at(
           static_cast<size_t>(region.parentOperation));
@@ -393,18 +393,18 @@ private:
       return false;
     equivalence.insert(loop->results[iterArgNumber]);
     for (int regionId : loop->regions) {
-      const C1RegionRecord &region = module.logicalModule.regions.at(
+      const GenericRegion &region = module.logicalModule.regions.at(
           static_cast<size_t>(regionId));
       if (region.blocks.empty())
         return false;
-      const C1BlockRecord &block = module.logicalModule.blocks.at(
+      const GenericBlock &block = module.logicalModule.blocks.at(
           static_cast<size_t>(region.blocks.front()));
       const size_t argument =
           iterArgNumber + (loop->name == "scf.for" ? 1 : 0);
       if (argument >= block.arguments.size() || block.operations.empty())
         return false;
       equivalence.insert(block.arguments[argument]);
-      const C1OperationRecord &terminator = module.logicalModule.operations.at(
+      const GenericOperation &terminator = module.logicalModule.operations.at(
           static_cast<size_t>(block.operations.back()));
       if (iterArgNumber >= terminator.operands.size())
         return false;
@@ -414,9 +414,9 @@ private:
     return true;
   }
 
-  bool isIterArgUnchanged(const C1OperationRecord &loop,
-                          const C1BlockRecord &body,
-                          const C1OperationRecord &yield,
+  bool isIterArgUnchanged(const GenericOperation &loop,
+                          const GenericBlock &body,
+                          const GenericOperation &yield,
                           size_t resultNumber) const {
     const size_t init = resultNumber + 3;
     const size_t argument = resultNumber + 1;
@@ -447,18 +447,18 @@ private:
   }
 
   void indexCanonicalizedIterArgs() {
-    for (const C1OperationRecord &operation : module.logicalModule.operations) {
+    for (const GenericOperation &operation : module.logicalModule.operations) {
       if (operation.name != "scf.for" || operation.regions.empty())
         continue;
-      const C1RegionRecord &region = module.logicalModule.regions.at(
+      const GenericRegion &region = module.logicalModule.regions.at(
           static_cast<size_t>(operation.regions.front()));
       if (region.blocks.empty())
         continue;
-      const C1BlockRecord &block = module.logicalModule.blocks.at(
+      const GenericBlock &block = module.logicalModule.blocks.at(
           static_cast<size_t>(region.blocks.front()));
       if (block.operations.empty())
         continue;
-      const C1OperationRecord &yield = module.logicalModule.operations.at(
+      const GenericOperation &yield = module.logicalModule.operations.at(
           static_cast<size_t>(block.operations.back()));
       if (yield.name != "scf.yield")
         continue;
@@ -536,7 +536,7 @@ private:
     return true;
   }
 
-  bool isScalarized(const C1OperationRecord &operation) const {
+  bool isScalarized(const GenericOperation &operation) const {
     auto buffers = operationBuffers.find(operation.id);
     if (buffers == operationBuffers.end() || buffers->second.empty())
       return false;

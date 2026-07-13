@@ -1,36 +1,36 @@
-#ifndef CVPIPELINE_UB_MODEL_CPP_C3_SEMANTIC_IR_ORACLE_HPP
-#define CVPIPELINE_UB_MODEL_CPP_C3_SEMANTIC_IR_ORACLE_HPP
+#ifndef CVPIPELINE_UB_MODEL_CPP_POST_BUFFERIZATION_REWRITE_ORACLE_HPP
+#define CVPIPELINE_UB_MODEL_CPP_POST_BUFFERIZATION_REWRITE_ORACLE_HPP
 
 #include "bufferized_semantic_ir_oracle.hpp"
 #include "hivm_decompose_op_oracle.hpp"
-#include "../suffix/c3_semantic_ir.hpp"
+#include "../suffix/post_bufferization_rewrites.hpp"
 
 namespace cvub {
 
-using C3OperationSignatures = std::map<std::string, int64_t>;
+using OperationSignatures = std::map<std::string, int64_t>;
 
-struct C3RewriteValidation {
+struct PostBufferizationRewriteValidation {
   size_t checkedSignatures = 0;
   std::vector<std::string> errors;
 };
 
-struct C3FunctionAllocation {
+struct FunctionAllocation {
   size_t globalOrdinal = 0;
   std::string type;
 };
 
-inline std::vector<C3FunctionAllocation> C3FunctionAllocations(
-    const C1SemanticModule &module, const std::string &function) {
-  std::vector<C3FunctionAllocation> result;
+inline std::vector<FunctionAllocation> FunctionAllocations(
+    const GenericModule &module, const std::string &function) {
+  std::vector<FunctionAllocation> result;
   size_t global = 0;
-  for (const C1OperationRecord &operation : module.operations) {
+  for (const GenericOperation &operation : module.operations) {
     if (operation.name != "memref.alloc")
       continue;
-    const C1OperationRecord *owner = C1EnclosingFunction(module, operation);
+    const GenericOperation *owner = EnclosingFunction(module, operation);
     for (const std::string &type : operation.resultTypes) {
       if (!IsMemRefType(type))
         continue;
-      if (owner && C1FunctionName(*owner) == function)
+      if (owner && FunctionSymName(*owner) == function)
         result.push_back({global, type});
       ++global;
     }
@@ -38,9 +38,9 @@ inline std::vector<C3FunctionAllocation> C3FunctionAllocations(
   return result;
 }
 
-inline std::map<std::string, std::string> C3ActualBufferLabels(
-    const std::vector<C3FunctionAllocation> &before,
-    const std::vector<C3FunctionAllocation> &after, bool afterPass) {
+inline std::map<std::string, std::string> ActualBufferLabels(
+    const std::vector<FunctionAllocation> &before,
+    const std::vector<FunctionAllocation> &after, bool afterPass) {
   std::map<std::string, std::string> result;
   if (!afterPass) {
     for (size_t index = 0; index < before.size(); ++index)
@@ -76,7 +76,7 @@ inline std::map<std::string, std::string> C3ActualBufferLabels(
   return result;
 }
 
-inline std::string C3NormalizeBuffer(
+inline std::string NormalizeBufferLabel(
     const std::string &buffer,
     const std::map<std::string, std::string> &labels) {
   auto found = labels.find(buffer);
@@ -87,7 +87,7 @@ inline std::string C3NormalizeBuffer(
   std::vector<std::string> alternatives;
   for (const std::string &item :
        splitTopLevel(buffer.substr(7, buffer.size() - 8))) {
-    const std::string normalized = C3NormalizeBuffer(item, labels);
+    const std::string normalized = NormalizeBufferLabel(item, labels);
     if (!normalized.empty())
       alternatives.push_back(normalized);
   }
@@ -105,7 +105,7 @@ inline std::string C3NormalizeBuffer(
   return result + ')';
 }
 
-inline std::string C3OperationSignature(
+inline std::string OperationSignature(
     const std::string &name, const std::vector<std::string> &buffers) {
   std::string result = name;
   for (const std::string &buffer : buffers)
@@ -113,14 +113,14 @@ inline std::string C3OperationSignature(
   return result;
 }
 
-inline C3OperationSignatures C3ActualOperationSignatures(
-    const C1SemanticModule &module, const std::string &function,
+inline OperationSignatures ActualOperationSignatures(
+    const GenericModule &module, const std::string &function,
     const std::map<std::string, std::string> &labels) {
-  C3OperationSignatures result;
+  OperationSignatures result;
   AfterBufferRootResolver roots(module);
-  for (const C1OperationRecord &operation : module.operations) {
-    const C1OperationRecord *owner = C1EnclosingFunction(module, operation);
-    if (!owner || C1FunctionName(*owner) != function ||
+  for (const GenericOperation &operation : module.operations) {
+    const GenericOperation *owner = EnclosingFunction(module, operation);
+    if (!owner || FunctionSymName(*owner) != function ||
         !IsUBRelevantDecomposeOperation(operation))
       continue;
     std::vector<std::string> buffers;
@@ -129,17 +129,17 @@ inline C3OperationSignatures C3ActualOperationSignatures(
           !IsMemRefType(operation.operandTypes[index]))
         continue;
       const std::string normalized =
-          C3NormalizeBuffer(roots.root(operation.operands[index]), labels);
+          NormalizeBufferLabel(roots.root(operation.operands[index]), labels);
       if (!normalized.empty())
         buffers.push_back(normalized);
     }
     if (!buffers.empty())
-      ++result[C3OperationSignature(operation.name, buffers)];
+      ++result[OperationSignature(operation.name, buffers)];
   }
   return result;
 }
 
-inline int C3AllocationSourceOperation(const BufferAllocation &allocation) {
+inline int RewriteAllocationSourceOperation(const BufferAllocation &allocation) {
   const size_t colon = allocation.source.find(':');
   if (colon == std::string::npos)
     return -1;
@@ -149,60 +149,60 @@ inline int C3AllocationSourceOperation(const BufferAllocation &allocation) {
   return std::stoi(allocation.source.substr(colon + 1, end - colon - 1));
 }
 
-inline std::map<std::string, std::string> C3ModelBufferLabels(
-    const C3SemanticIR &model, const std::string &function,
+inline std::map<std::string, std::string> ModelBufferLabels(
+    const PostBufferizationRewriteState &model, const std::string &function,
     const std::map<std::string, std::string> &baseLabels) {
   std::map<std::string, std::string> result = baseLabels;
   size_t inserted = 0;
   std::map<int, size_t> ownerOrdinals;
   for (const DecomposeBufferAllocation &allocation :
        model.decomposeAllocations) {
-    const C1OperationRecord &operation = model.bufferized.logicalModule.operations
+    const GenericOperation &operation = model.bufferized.logicalModule.operations
                                              .at(static_cast<size_t>(
                                                  allocation.ownerOperation));
-    const C1OperationRecord *owner = C1EnclosingFunction(
+    const GenericOperation *owner = EnclosingFunction(
         model.bufferized.logicalModule, operation);
     const size_t ordinal = ownerOrdinals[allocation.ownerOperation]++;
-    if (owner && C1FunctionName(*owner) == function)
+    if (owner && FunctionSymName(*owner) == function)
       result["decompose:" + std::to_string(allocation.ownerOperation) + ":" +
              std::to_string(ordinal)] = "new:" + std::to_string(inserted++);
   }
   return result;
 }
 
-inline C3OperationSignatures C3ModelOperationDelta(
-    const C3SemanticIR &model, const std::string &function,
+inline OperationSignatures ModelOperationDelta(
+    const PostBufferizationRewriteState &model, const std::string &function,
     const std::map<std::string, std::string> &baseLabels) {
   const std::map<std::string, std::string> labels =
-      C3ModelBufferLabels(model, function, baseLabels);
-  C3OperationSignatures result;
-  for (const C3OperationRewrite &rewrite : model.operationRewrites) {
-    const C1OperationRecord &source = model.bufferized.logicalModule.operations
+      ModelBufferLabels(model, function, baseLabels);
+  OperationSignatures result;
+  for (const OperationRewriteDelta &rewrite : model.operationRewrites) {
+    const GenericOperation &source = model.bufferized.logicalModule.operations
                                           .at(static_cast<size_t>(
                                               rewrite.sourceOperation));
-    const C1OperationRecord *owner =
-        C1EnclosingFunction(model.bufferized.logicalModule, source);
-    if (!owner || C1FunctionName(*owner) != function)
+    const GenericOperation *owner =
+        EnclosingFunction(model.bufferized.logicalModule, source);
+    if (!owner || FunctionSymName(*owner) != function)
       continue;
     std::vector<std::string> sourceBuffers;
     for (const std::string &buffer :
-         C3OperationBuffers(model.bufferized, rewrite.sourceOperation,
+         OperationBufferOperands(model.bufferized, rewrite.sourceOperation,
                             &model.singlePoint.bufferMapping)) {
-      const std::string normalized = C3NormalizeBuffer(buffer, labels);
+      const std::string normalized = NormalizeBufferLabel(buffer, labels);
       if (!normalized.empty())
         sourceBuffers.push_back(normalized);
     }
     if (!sourceBuffers.empty())
-      --result[C3OperationSignature(rewrite.sourceName, sourceBuffers)];
-    for (const C3GeneratedOperation &operation : rewrite.replacement) {
+      --result[OperationSignature(rewrite.sourceName, sourceBuffers)];
+    for (const GeneratedOperationRewrite &operation : rewrite.replacement) {
       std::vector<std::string> buffers;
       for (const std::string &buffer : operation.buffers) {
-        const std::string normalized = C3NormalizeBuffer(buffer, labels);
+        const std::string normalized = NormalizeBufferLabel(buffer, labels);
         if (!normalized.empty())
           buffers.push_back(normalized);
       }
       if (!buffers.empty())
-        ++result[C3OperationSignature(operation.name, buffers)];
+        ++result[OperationSignature(operation.name, buffers)];
     }
   }
   for (auto iterator = result.begin(); iterator != result.end();) {
@@ -214,29 +214,29 @@ inline C3OperationSignatures C3ModelOperationDelta(
   return result;
 }
 
-inline C3RewriteValidation ValidateC3OperationRewrites(
-    const C3SemanticIR &model, const C1SemanticModule &before,
-    const C1SemanticModule &after, const std::string &function) {
-  C3RewriteValidation validation;
-  const std::vector<C3FunctionAllocation> beforeAllocations =
-      C3FunctionAllocations(before, function);
-  const std::vector<C3FunctionAllocation> afterAllocations =
-      C3FunctionAllocations(after, function);
-  C3OperationSignatures actual = C3ActualOperationSignatures(
+inline PostBufferizationRewriteValidation ValidatePostBufferizationOperationRewrites(
+    const PostBufferizationRewriteState &model, const GenericModule &before,
+    const GenericModule &after, const std::string &function) {
+  PostBufferizationRewriteValidation validation;
+  const std::vector<FunctionAllocation> beforeAllocations =
+      FunctionAllocations(before, function);
+  const std::vector<FunctionAllocation> afterAllocations =
+      FunctionAllocations(after, function);
+  OperationSignatures actual = ActualOperationSignatures(
       after, function,
-      C3ActualBufferLabels(beforeAllocations, afterAllocations, true));
-  const C3OperationSignatures baseline = C3ActualOperationSignatures(
+      ActualBufferLabels(beforeAllocations, afterAllocations, true));
+  const OperationSignatures baseline = ActualOperationSignatures(
       before, function,
-      C3ActualBufferLabels(beforeAllocations, beforeAllocations, false));
+      ActualBufferLabels(beforeAllocations, beforeAllocations, false));
   for (const auto &[signature, count] : baseline) {
     actual[signature] -= count;
     if (actual[signature] == 0)
       actual.erase(signature);
   }
-  const C3OperationSignatures expected =
-      C3ModelOperationDelta(
+  const OperationSignatures expected =
+      ModelOperationDelta(
           model, function,
-          C3ActualBufferLabels(beforeAllocations, beforeAllocations, false));
+          ActualBufferLabels(beforeAllocations, beforeAllocations, false));
   validation.checkedSignatures = actual.size() + expected.size();
   if (actual != expected) {
     for (const auto &[signature, count] : expected)
@@ -254,8 +254,8 @@ inline C3RewriteValidation ValidateC3OperationRewrites(
 }
 
 inline std::vector<NonContiguousReshapeCopy>
-CollectNonContiguousReshapeToCopyOracle(const C1SemanticModule &before,
-                                        const C1SemanticModule &after) {
+CollectNonContiguousReshapeToCopyOracle(const GenericModule &before,
+                                        const GenericModule &after) {
   const std::vector<BufferAllocation> lhs =
       CollectBufferAllocationOracle(before);
   const std::vector<BufferAllocation> rhs = CollectBufferAllocationOracle(after);
@@ -285,10 +285,10 @@ CollectNonContiguousReshapeToCopyOracle(const C1SemanticModule &before,
 }
 
 inline std::map<std::string, size_t> CollectCanonicalizedIterArgResultsOracle(
-    const C1SemanticModule &before, const C1SemanticModule &after) {
-  const auto count = [](const C1SemanticModule &module) {
+    const GenericModule &before, const GenericModule &after) {
+  const auto count = [](const GenericModule &module) {
     std::map<std::string, size_t> result;
-    for (const C1OperationRecord &operation : module.operations) {
+    for (const GenericOperation &operation : module.operations) {
       if (operation.name != "scf.if" && operation.name != "scf.for" &&
           operation.name != "scf.while")
         continue;

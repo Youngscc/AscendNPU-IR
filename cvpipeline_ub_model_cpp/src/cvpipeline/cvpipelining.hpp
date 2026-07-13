@@ -1,7 +1,7 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_CVPIPELINING_HPP
 #define CVPIPELINE_UB_MODEL_CPP_CVPIPELINING_HPP
 
-#include "../semantic_ir/c1_rewriter.hpp"
+#include "../semantic_ir/generic_rewriter.hpp"
 
 namespace cvub {
 
@@ -14,7 +14,7 @@ struct CVPipeliningOptions {
 
 enum class CVPipelineCoreType { Unknown, Cube, Vector, Mixed };
 
-inline bool CVPipelineHasAttribute(const C1OperationRecord &operation,
+inline bool CVPipelineHasAttribute(const GenericOperation &operation,
                                    const std::string &name) {
   for (const std::string &entry : splitTopLevel(
            operation.attributes.size() >= 2
@@ -28,7 +28,7 @@ inline bool CVPipelineHasAttribute(const C1OperationRecord &operation,
   return false;
 }
 
-inline void CVPipelineSetUnitAttribute(C1OperationRecord &operation,
+inline void CVPipelineSetUnitAttribute(GenericOperation &operation,
                                        const std::string &name) {
   std::vector<std::string> entries;
   if (operation.attributes.size() >= 2)
@@ -47,7 +47,7 @@ inline void CVPipelineSetUnitAttribute(C1OperationRecord &operation,
 }
 
 inline CVPipelineCoreType
-CVPipelineQueryCoreType(const C1OperationRecord &operation) {
+CVPipelineQueryCoreType(const GenericOperation &operation) {
   if (CVPipelineHasAttribute(operation, "pipeline.cubeonly"))
     return CVPipelineCoreType::Cube;
   if (CVPipelineHasAttribute(operation, "pipeline.veconly"))
@@ -77,7 +77,7 @@ CVPipelineQueryCoreType(const C1OperationRecord &operation) {
   return CVPipelineCoreType::Unknown;
 }
 
-inline bool CVPipelineIsDescendant(const C1SemanticModule &module,
+inline bool CVPipelineIsDescendant(const GenericModule &module,
                                    int operation, int ancestor) {
   int current = operation;
   while (current >= 0) {
@@ -88,13 +88,13 @@ inline bool CVPipelineIsDescendant(const C1SemanticModule &module,
   return false;
 }
 
-inline bool CVPipelineIllegalRegionedOp(C1SemanticModule &module,
-                                        C1OperationRecord &operation) {
+inline bool CVPipelineIllegalRegionedOp(GenericModule &module,
+                                        GenericOperation &operation) {
   if (operation.regions.empty())
     return false;
   bool hasCube = false;
   bool hasVector = false;
-  for (const C1OperationRecord &nested : module.operations) {
+  for (const GenericOperation &nested : module.operations) {
     if (nested.id == operation.id ||
         !CVPipelineIsDescendant(module, nested.id, operation.id))
       continue;
@@ -111,18 +111,18 @@ inline bool CVPipelineIllegalRegionedOp(C1SemanticModule &module,
   return false;
 }
 
-inline void CVPipelineMarkRegionCoreTypes(C1SemanticModule &module,
-                                          const C1OperationRecord &loop) {
+inline void CVPipelineMarkRegionCoreTypes(GenericModule &module,
+                                          const GenericOperation &loop) {
   if (loop.regions.empty())
     return;
-  const C1RegionRecord &region =
+  const GenericRegion &region =
       module.regions.at(static_cast<size_t>(loop.regions.front()));
   if (region.blocks.empty())
     return;
-  const C1BlockRecord &body =
+  const GenericBlock &body =
       module.blocks.at(static_cast<size_t>(region.blocks.front()));
   for (int operationId : body.operations) {
-    C1OperationRecord &operation =
+    GenericOperation &operation =
         module.operations.at(static_cast<size_t>(operationId));
     if (!operation.regions.empty() && CVPipelineIllegalRegionedOp(module, operation))
       return;
@@ -130,12 +130,12 @@ inline void CVPipelineMarkRegionCoreTypes(C1SemanticModule &module,
 }
 
 inline void CVPipelineRemoveWorkspaceMultiBufferMarks(
-    C1SemanticModule &module) {
-  std::map<int, const C1OperationRecord *> definitions;
-  for (const C1OperationRecord &operation : module.operations)
+    GenericModule &module) {
+  std::map<int, const GenericOperation *> definitions;
+  for (const GenericOperation &operation : module.operations)
     for (int result : operation.results)
       definitions[result] = &operation;
-  for (C1OperationRecord &operation : module.operations) {
+  for (GenericOperation &operation : module.operations) {
     if (operation.name != "annotation.mark" || operation.operands.empty() ||
         !CVPipelineHasAttribute(operation, "hivm.multi_buffer"))
       continue;
@@ -158,13 +158,13 @@ inline void CVPipelineRemoveWorkspaceMultiBufferMarks(
   }
 }
 
-inline C1SemanticModule RunCVPipelining(
-    C1SemanticModule module, const CVPipeliningOptions &options) {
+inline GenericModule RunCVPipelining(
+    GenericModule module, const CVPipeliningOptions &options) {
   if (options.disabled || options.setDepthInUnrollMode == 0 ||
       options.setDepthInUnrollMode == 1)
     return module;
   for (size_t index = 0; index < module.operations.size(); ++index) {
-    C1OperationRecord &operation = module.operations[index];
+    GenericOperation &operation = module.operations[index];
     if (operation.name == "scf.for")
       CVPipelineMarkRegionCoreTypes(module, operation);
   }

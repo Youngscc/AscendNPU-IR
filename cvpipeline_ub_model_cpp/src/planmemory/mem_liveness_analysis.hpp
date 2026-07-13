@@ -577,7 +577,7 @@ inline bool IsReuseHIVMOp(
 }
 
 // The parsed PlanMemory input is deliberately independent from MLIR text.
-// C8 constructs this object from the suffix semantic state; the file overload
+// The suffix bridge constructs this object from the suffix semantic state; the file overload
 // below remains only for the PlanMemory-before-IR compatibility interface.
 struct PlanMemoryInput {
   std::vector<IRAllocRecord> allocations;
