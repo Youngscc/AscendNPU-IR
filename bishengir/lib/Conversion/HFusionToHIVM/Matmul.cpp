@@ -55,11 +55,14 @@ class MmadL1InfoCollector {
 public:
   explicit MmadL1InfoCollector(const T op) : op_(op) {
     mmadL1A_ = op_.getDpsInputOperand(0)->get();
+    mmadL1A_ = stripUnrealizedConversionCast(mmadL1A_);
     if (isTranposeLastAxis(mmadL1A_).has_value()) {
         transposeA_ = true;
         mmadL1A_ = isTranposeLastAxis(mmadL1A_).value();
     }
+
     mmadL1B_ = op_.getDpsInputOperand(1)->get();
+    mmadL1B_ = stripUnrealizedConversionCast(mmadL1B_);
     if (isTranposeLastAxis(mmadL1B_).has_value()) {
         transposeB_ = true;
         mmadL1B_ = isTranposeLastAxis(mmadL1B_).value();
@@ -187,6 +190,7 @@ private:
   void insertAndUseNewInitTensor(InitTensorInfo info,
                                  PatternRewriter &rewriter);
 
+  static Value stripUnrealizedConversionCast(Value v);
   SmallVector<Type> getMmadL1OpResultTypes() const;
   UnitAttr getMmadL1TransposeAFlag(OpBuilder &rewriter) const;
   UnitAttr getMmadL1TransposeBFlag(OpBuilder &rewriter) const;
@@ -440,6 +444,16 @@ void MmadL1InfoCollector<T, U>::insertAndUseNewInitTensor(
   Value oldInit = mmadL0C_;
   op_->replaceUsesOfWith(oldInit, newInitResult);
   mmadL0C_ = newInitResult;
+}
+
+template <typename T, typename U>
+Value MmadL1InfoCollector<T, U>::stripUnrealizedConversionCast(Value v) {
+  while (auto castOp = v.getDefiningOp<UnrealizedConversionCastOp>()) {
+    if (castOp->getNumOperands() != 1)
+      break;
+    v = castOp->getOperand(0);
+  }
+  return v;
 }
 
 template <typename T,

@@ -328,8 +328,8 @@ void MemLivenessAnalysis::RecursiveForOp(scf::ForOp forOp, Liveness live) {
   auto forBeginSeq = UpdateLinearOperation(forOp.getOperation());
   UpdateOpGenInfo(forBeginSeq, GetLiveBuffersInLoop(forOp, live));
   UpdateForOpInitArgsAlias(forOp);
-  RecursionIR(&forOp.getRegion(), live);
   UpdateForOpBufferAlias(forOp);
+  RecursionIR(&forOp.getRegion(), live);
   auto forEndSeq = UpdateLinearOperation(forOp.getOperation());
   OpKillHandle(forEndSeq, live, forOp->getBlock());
 }
@@ -715,8 +715,8 @@ void MemLivenessAnalysis::UpdateOperandGenInfo(OpInfo *opInfo, Value operand) {
     genKillMap[opInfo].gen.push_back(operand);
     buffer2status[iter_buffer->first] = BufferStatus::GENED;
   } else if (iter_buffer->second == BufferStatus::KILLED) {
-    llvm::report_fatal_error("The buffer memory has been released and cannot be used "
-                     "again! ");
+    llvm::report_fatal_error(
+        "The buffer memory has been released and cannot be used again! ");
   }
 }
 
@@ -894,7 +894,7 @@ bool MemLivenessAnalysis::IsBlockAfter(Block *afterBlock,
 }
 
 bool MemLivenessAnalysis::IsDeadAfterOp(Value value,
-                                           Operation *operation) const {
+                                        Operation *operation) const {
   auto *moduleBlock = utils::getTopLevelModuleOp(operation).getBody();
   // trace all blocks that contains ifOp until moduleBlock.
   DenseMap<Block *, Operation *> block2Op;
@@ -920,7 +920,8 @@ bool MemLivenessAnalysis::IsDeadAfterOp(Value value,
         // check whether parent ops are same, ex: if then ... else ...
         if (currentOp == op && userChildOp != nullptr &&
             currChildIt != parentToChild.end() &&
-            IsBlockAfter(userChildOp->getBlock(), currChildIt->second->getBlock())) {
+            IsBlockAfter(userChildOp->getBlock(),
+                         currChildIt->second->getBlock())) {
           return false;
         }
         // once different parent ops in same block, check the order
@@ -941,8 +942,7 @@ bool MemLivenessAnalysis::IsDeadAfterOp(Value value,
 bool MemLivenessAnalysis::AllDeadAfter(Operation *op, SetVector<Value> aliasVec,
                                        Liveness live) const {
   for (auto aliasBuffer : aliasVec) {
-    if (!live.isDeadAfter(aliasBuffer, op) ||
-        !IsDeadAfterOp(aliasBuffer, op)) {
+    if (!live.isDeadAfter(aliasBuffer, op) || !IsDeadAfterOp(aliasBuffer, op)) {
       return false;
     }
   }
@@ -2034,10 +2034,14 @@ bool MemPlan::VerifyConflictStage1(
   // Multi-buffer reuse multi buffer
 
   // Multi-buffer case: require enough multibuffer entries for all buffer
-  // instances.
-  if (e->multiBufferNum > 1 && otherBufferEntries.size() < e->multiBufferNum) {
+  // instances, and only first buffer(not other relation entries) can reuse in
+  // level1.
+  auto otherBufferEntriesSize = otherBufferEntries.size();
+  if (e->multiBufferNum > 1 &&
+      (otherBufferEntriesSize < e->multiBufferNum - 1 ||
+       e->otherBufferRelationEntries.empty())) {
     // Not enough historical multibuffer entries to match current multi-buffer
-    // requirement.
+    // requirement, or current entry is not first buffer.
     return true;
   }
 
@@ -2045,7 +2049,7 @@ bool MemPlan::VerifyConflictStage1(
   // entry conflicts with historical records at its offset, the whole
   // multi-buffer reuse fails. Only when all required multibuffer entries are
   // conflict-free can we reuse (return false).
-  for (uint32_t i = 0; i < e->multiBufferNum; ++i) {
+  for (uint32_t i = 0; i < otherBufferEntriesSize; ++i) {
     StorageEntry *multiRelationMultiBufferEntry = otherBufferEntries[i];
     if (!multiRelationMultiBufferEntry) {
       return true;
@@ -2126,32 +2130,34 @@ bool MemPlan::IsBufferLifeVecConflict(PlanRecord &r, uint64_t offset,
 
 void MemPlan::PlanRelationOtherBufferEntryAddress(
     llvm::ArrayRef<uint64_t> otherBufferOffsets, StorageEntry *e) {
-  if (e->multiBufferNum == 1) {
-    // Single-buffer entry expanded to use multibuffer. Create
-    // one extra StorageEntry per multibuffer offset and store in
-    // firstBufferEntry2RelationOtherBufferEntry as a vector.
-    auto &vec = firstBufferEntry2RelationOtherBufferEntry[e];
-    vec.clear();
-    vec.reserve(otherBufferOffsets.size());
-    for (uint64_t offset : otherBufferOffsets) {
-      auto entry = std::make_unique<StorageEntry>();
-      entry->bufInfo = e->bufInfo;
-      entry->bufferLifeVec = e->bufferLifeVec;
-      entry->alignedConstBits = e->alignedConstBits;
-      entry->inplaceBuffers = e->inplaceBuffers;
-      entry->multiBufferNum = e->multiBufferNum;
-      entry->bitsOffset = offset;
-      vec.push_back(std::move(entry));
+  // First loop: assign offsets to existing otherBufferRelationEntries.
+  // For each multibuffer index from 1 to multiBufferNum, the corresponding
+  // relation entry (at index i-1) gets the offset at index i-1.
+  for (size_t i = 1; i < e->multiBufferNum; ++i) {
+    if (i - 1 >= e->otherBufferRelationEntries.size() ||
+        i - 1 >= otherBufferOffsets.size()) {
+      continue;
     }
-  } else if (e->multiBufferNum > 1 && !e->otherBufferRelationEntries.empty()) {
-    // Multi-buffer entry: assign each relation entry its multibuffer offset
-    // from otherBufferOffsets.
-    for (size_t i = 0; i < e->otherBufferRelationEntries.size() &&
-                       i < otherBufferOffsets.size();
-         ++i) {
-      if (StorageEntry *re = e->otherBufferRelationEntries[i])
-        re->bitsOffset = otherBufferOffsets[i];
+    if (StorageEntry *re = e->otherBufferRelationEntries[i - 1]) {
+      re->bitsOffset = otherBufferOffsets[i - 1];
     }
+  }
+
+  // Second loop: create new StorageEntries for the remaining offsets (from
+  // index multiBufferNum-1 to the end of otherBufferOffsets) and store them
+  // in firstBufferEntry2RelationOtherBufferEntry as a vector.
+  auto &vec = firstBufferEntry2RelationOtherBufferEntry[e];
+  vec.clear();
+  vec.reserve(otherBufferOffsets.size());
+  for (size_t i = e->multiBufferNum - 1; i < otherBufferOffsets.size(); ++i) {
+    auto entry = std::make_unique<StorageEntry>();
+    entry->bufInfo = e->bufInfo;
+    entry->bufferLifeVec = e->bufferLifeVec;
+    entry->alignedConstBits = e->alignedConstBits;
+    entry->inplaceBuffers = e->inplaceBuffers;
+    entry->multiBufferNum = e->multiBufferNum;
+    entry->bitsOffset = otherBufferOffsets[i];
+    vec.push_back(std::move(entry));
   }
 }
 

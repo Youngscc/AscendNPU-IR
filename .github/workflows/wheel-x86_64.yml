@@ -79,8 +79,7 @@ jobs:
             --build-torch-mlir \
             --safety-options \
             --safety-ld-options \
-            --skip-rpath \
-            --apply-patches
+            --skip-rpath
 
       - name: Save LLVM build directory cache
         uses: actions/cache/save@v4
@@ -192,7 +191,7 @@ jobs:
     needs: build_binaries
     strategy:
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     container:
       image: quay.io/pypa/manylinux_2_28_x86_64:latest
 

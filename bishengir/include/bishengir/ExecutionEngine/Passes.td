@@ -107,11 +107,11 @@ def ExecutionEngineHIVMToUpstreamConversion : Pass<"execution-engine-convert-hiv
 def ExecutionEngineHFusionToUpstreamConversion : Pass<"execution-engine-convert-hfusion-to-upstream"> {
   let summary = "Convert HFusion operations to upstream dialect's equivalent for execution engine";
   let description = [{
-    Convert selected HFusion operations (e.g., HistogramOp) into upstream dialects 
+    Convert selected HFusion operations (e.g., HistogramOp, IsFiniteOp) into upstream dialects
     to allow for CPU execution and precision debugging.
 
     Modifications made:
-      * Decompose complex HFusion operations into standard Linalg, SCF, Arith, and Tensor ops.
+      * Decompose complex HFusion operations into standard Linalg, SCF, Arith, Math, and Tensor ops.
       * Support tensor shape collapsing, dynamic shape resolution, and mask semantics.
 
     Constraints/Assumptions:
@@ -122,6 +122,7 @@ def ExecutionEngineHFusionToUpstreamConversion : Pass<"execution-engine-convert-
     "arith::ArithDialect",
     "hfusion::HFusionDialect",
     "linalg::LinalgDialect",
+    "math::MathDialect",
     "scf::SCFDialect",
     "tensor::TensorDialect"
   ];

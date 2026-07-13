@@ -303,6 +303,9 @@ struct ConflictPair {
   Occurrence *backwardSyncLoopOcc{nullptr};
   EventIdInfo eventIdInfo;
   EventIdNode *eventIdNode{nullptr};
+  // When set, GraphSyncSolver must assign this event id for the conflict
+  // (from CustomMacroOp sync_event_slots with an optional pinned event).
+  std::optional<int64_t> pinnedEventId;
 
   ConflictPair(RWOperation *op1, RWOperation *op2, OperationBase *setOp,
                OperationBase *waitOp, Occurrence *setOcc, Occurrence *waitOcc,
@@ -348,6 +351,7 @@ struct ConflictPair {
     clonedConflictPair->backwardSyncLoopOcc = backwardSyncLoopOcc;
     clonedConflictPair->eventIdInfo = eventIdInfo;
     clonedConflictPair->eventIdNode = eventIdNode;
+    clonedConflictPair->pinnedEventId = pinnedEventId;
     return clonedConflictPair;
   }
 
@@ -462,6 +466,8 @@ llvm::SmallVector<int64_t>
 getHWAvailableEventIds(SyncMode syncMode,
                        hivm::PIPE setPipe = hivm::PIPE::PIPE_UNASSIGNED,
                        hivm::PIPE waitPipe = hivm::PIPE::PIPE_UNASSIGNED);
+
+std::optional<int64_t> getStaticLoopCount(LoopLikeOpInterface forOp);
 
 // Create a boolean Value that is true for the first iteration of `forOp`.
 Value getIsFirstIterationValue(scf::ForOp forOp, Location loc,

@@ -140,6 +140,10 @@ __aiv__ __attribute__((always_inline)) DST_T
 scalar_cast_float_to_int(SRC_T val, CastMode cast_mode) {
   float f_val = static_cast<float>(val);
   int64_t result = scalar_cast_float_to_int_internal<int64_t>(f_val, cast_mode);
+  constexpr DST_T min_val = std::numeric_limits<DST_T>::min();
+  constexpr DST_T max_val = std::numeric_limits<DST_T>::max();
+  if (result < static_cast<int64_t>(min_val)) result = static_cast<int64_t>(min_val);
+  if (result > static_cast<int64_t>(max_val)) result = static_cast<int64_t>(max_val);
   return static_cast<DST_T>(result);
 }
 
@@ -238,12 +242,15 @@ scalar_cast_1d_with_mode(memref_t<__ubuf__ SRC_T, 1> *src,
   if constexpr (std::is_same<SRC_T, bfloat16_t>::value ||
                 std::is_same<DST_T, bfloat16_t>::value) {
     // scalar cast bfloat16_t is not supported yet
+#ifdef ENABLE_CPU_TRACE_INTRINSIC
+    WARN_UNSUPPORTED_IMPL("scalar cast bfloat16_t is not supported yet, skipped");
+#endif
     return;
   }
 
   INTRINSIC(set_flag, PIPE_V, PIPE_S, LIB_EVENT_ID0);
   INTRINSIC(wait_flag, PIPE_V, PIPE_S, LIB_EVENT_ID0);
-  
+
   __ubuf__ SRC_T *src_ptr = src->aligned + src->offset;
   __ubuf__ DST_T *dst_ptr = dst->aligned + dst->offset;
   const int64_t n = src->sizes[0];

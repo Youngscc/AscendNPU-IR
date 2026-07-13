@@ -535,6 +535,54 @@ def HIVM_EventAttr : HIVM_Attr<"Event", "event"> {
   }];
 }
 
+def HIVM_SYNC_EVENT_SLOT_WAIT : I32EnumAttrCase<"wait", 0>;
+def HIVM_SYNC_EVENT_SLOT_SET : I32EnumAttrCase<"set", 1>;
+def HIVM_SYNC_EVENT_SLOT_INTERNAL : I32EnumAttrCase<"internal", 2>;
+
+def HIVM_SyncEventSlotMacroSyncEnum : HIVM_I32Enum<
+  "SyncEventSlotMacroSync",
+  "Whether the custom macro kernel waits, sets, or only needs an event id", [
+    HIVM_SYNC_EVENT_SLOT_WAIT,
+    HIVM_SYNC_EVENT_SLOT_SET,
+    HIVM_SYNC_EVENT_SLOT_INTERNAL
+  ]>;
+
+def HIVM_SyncEventSlotAttr : HIVM_Attr<"SyncEventSlot", "sync_event_slot"> {
+  let parameters = (ins OptionalParameter<"PipeAttr">:$set_pipe,
+      OptionalParameter<"PipeAttr">:$wait_pipe,
+      DefaultValuedParameter<"SyncEventSlotMacroSync",
+          "SyncEventSlotMacroSync::internal">:$macro_sync,
+      OptionalParameter<"EventAttr">:$event);
+  let hasCustomAssemblyFormat = 1;
+  let description = [{
+    One sync_event_slots entry for CustomMacroOp. macro_sync is `internal`
+    (default) when the macro only needs an allocated event id passed via
+    sync_related_args, without GraphSyncSolver inserting boundary
+    set_flag/wait_flag ops; `wait` when the macro kernel calls wait_flag on
+    (set_pipe, wait_pipe) and GraphSyncSolver injects set_flag before the macro;
+    `set` when the macro sets internally and GraphSyncSolver injects wait_flag
+    after the macro. set_pipe and wait_pipe are required for `wait`/`set` and
+    optional for `internal`. The optional event attribute pins a static hardware
+    event id for this slot.
+
+    Examples:
+    ```mlir
+    // internal (default): GSS allocates event id; pipes optional
+    #hivm.sync_event_slot<internal>
+    #hivm.sync_event_slot<#hivm.pipe<PIPE_MTE2>, #hivm.pipe<PIPE_MTE1>>
+    // wait: macro waits on (set_pipe, wait_pipe); GSS may inject set_flag
+    #hivm.sync_event_slot<#hivm.pipe<PIPE_MTE2>, #hivm.pipe<PIPE_MTE1>, wait>
+    // set: macro sets on (set_pipe, wait_pipe); GSS injects wait_flag after macro
+    #hivm.sync_event_slot<#hivm.pipe<PIPE_M>, #hivm.pipe<PIPE_MTE2>, set>
+    #hivm.sync_event_slot<#hivm.pipe<PIPE_MTE2>, #hivm.pipe<PIPE_MTE1>, internal, <EVENT_ID1>>
+    ```
+  }];
+}
+
+def SyncEventSlotArrayAttr
+    : TypedArrayAttrBase<HIVM_SyncEventSlotAttr,
+                         "sync-event-slot array attribute">;
+
 //===----------------------------------------------------------------------===//
 // Unit Flag Mode
 //===----------------------------------------------------------------------===//
@@ -1082,6 +1130,19 @@ def HIVM_MultiBufferAttr : HIVM_Attr<"MultiBuffer", "multi_buffer"> {
   }];
 }
 
+def HIVM_CVPipelinedMultiBufferAttr
+    : HIVM_Attr<"CVPipelinedMultiBuffer", "cv_pipelined_multi_buffer"> {
+  let description = [{
+    Marks a `memref.alloc` as a multi-buffered storage produced by the
+    cv-pipelining transformation. The leading dimension is the slot
+    dimension (one slot per pipeline stage); sibling slots may be in
+    concurrent use by other pipeline stages, so any pre-init / pad
+    operation derived from the aggregated `hivm.hir.nd2nz` (or similar)
+    must target only the current slot tile (the subview that drives the
+    consumer op), never the whole alloc.
+  }];
+}
+
 def HIVM_StrideAlignValueAttr : HIVM_Attr<"StrideAlignDims", "stride_align_dims"> {
   let description = [{
     HIVM stride align dims.
@@ -1114,6 +1175,10 @@ def HIVM_FuncDynMemrefArgsAttr
     HIVM FuncDynMemrefArgs to mark the index array of dynamic
     memref arguments of function.
   }];
+}
+
+def HIVM_VFAttr : HIVM_Attr<"VectorFunction", "vector_function"> {
+  let description = [{HIVM vector function attribute}];
 }
 
 def HIVM_TightlyCoupledBufferAttr

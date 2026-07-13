@@ -315,12 +315,12 @@ public:
       return failure();
     }
     if (!Op.getResults().empty()) { // If Op with results
-        if (!llvm::any_of(Op->getUsers(), [](Operation *user) {
-              return isa<annotation::MarkOp>(user);
-            })) {
-          return failure(); // If the user of StoreCopyOp is not MarkOp, it cannot be
-                            // a tiling start point.
-        }
+      if (!llvm::any_of(Op->getUsers(), [](Operation *user) {
+            return isa<annotation::MarkOp>(user);
+          })) {
+        return failure(); // If the user of StoreCopyOp is not MarkOp, it cannot
+                          // be a tiling start point.
+      }
     }
 
     /// We differentiate storeOp and copyOp
@@ -959,8 +959,7 @@ TileAndBindSubBlockPass::attemptBindSubBlock(func::FuncOp func) {
   bool isBroadcastAxisCase = false;
 
   newFunc->walk([&builder](Operation *op) {
-    if (!isa<tensor::ExtractSliceOp, memref::SubViewOp>(op) ||
-        op->hasOneUse())
+    if (!isa<tensor::ExtractSliceOp, memref::SubViewOp>(op) || op->hasOneUse())
       return;
     builder.setInsertionPoint(op);
     SmallVector<OpOperand *> uses;
@@ -1113,6 +1112,13 @@ void TileAndBindSubBlockPass::runOnOperation() {
     return;
   }
 
+  // If there is a possibility that loadOp and storeOp accessing the same
+  // address, skip this pass
+  if (areLoadAndStoreSameAddress(aivFunctions)) {
+    (void)limitAllAivToSubBlock0();
+    return;
+  }
+
   SmallVector<FuncRollbackBackup> aivRollbackBackups;
   SmallVector<FuncRollbackBackup> aicRollbackBackups;
   createFuncBackups(aivFunctions, aivRollbackBackups);
@@ -1192,6 +1198,7 @@ void TileAndBindSubBlockPass::runOnOperation() {
 #endif
 }
 
-std::unique_ptr<Pass> mlir::hivm::createTileAndBindSubBlockPass() {
-  return std::make_unique<TileAndBindSubBlockPass>();
+std::unique_ptr<Pass> mlir::hivm::createTileAndBindSubBlockPass(
+    const TileAndBindSubBlockOptions &options) {
+  return std::make_unique<TileAndBindSubBlockPass>(options);
 }

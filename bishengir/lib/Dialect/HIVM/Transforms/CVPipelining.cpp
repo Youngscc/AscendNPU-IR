@@ -266,8 +266,9 @@ struct CVPipeliningPass
 };
 } // namespace
 
-static LogicalResult filterMarkOpsValuesInsideLoop(ArrayRef<annotation::MarkOp> markOps,
-                                                   scf::ForOp loop) {
+static LogicalResult
+filterMarkOpsValuesInsideLoop(ArrayRef<annotation::MarkOp> markOps,
+                              scf::ForOp loop) {
   bool hasIlligalMarkOp = false;
   for (auto markOp : markOps) {
     SmallVector<mlir::Value> newValues;
@@ -284,7 +285,7 @@ static LogicalResult filterMarkOpsValuesInsideLoop(ArrayRef<annotation::MarkOp> 
 
     if (newValues.size() == oldValues.size())
       continue;
-    
+
     hasIlligalMarkOp = true;
     mlir::ArrayAttr keysAttr = markOp.getKeysAttr();
     llvm::SmallVector<mlir::Attribute> newKeys;
@@ -299,11 +300,8 @@ static LogicalResult filterMarkOpsValuesInsideLoop(ArrayRef<annotation::MarkOp> 
     mlir::OpBuilder builder(markOp);
     builder.setInsertionPoint(markOp);
     auto newMarkOp = builder.create<annotation::MarkOp>(
-        markOp.getLoc(),
-        markOp.getSrc(),
-        newValues,
-        newKeys.empty() ? mlir::ArrayAttr() : builder.getArrayAttr(newKeys)
-    );
+        markOp.getLoc(), markOp.getSrc(), newValues,
+        newKeys.empty() ? mlir::ArrayAttr() : builder.getArrayAttr(newKeys));
 
     for (auto namedAttr : markOp->getAttrs()) {
       if (namedAttr.getName() != "keys") {
@@ -467,10 +465,10 @@ static Operation *getContainedParent(Operation *containing, Value inner) {
 }
 
 /// Expand workspace by taking original workspace, and adding a multibuffer dim
-/// enable cvpipelining: if multibuffer is 2, original workspace is <16x16xf16>, then new
-/// expanded workspace is <2x16x16xf16>
-/// enable preload: if work item num is 4, original workspace is <16x16xf16>, then new
-/// expanded workspace is <4x16x16xf16>
+/// enable cvpipelining: if multibuffer is 2, original workspace is <16x16xf16>,
+/// then new expanded workspace is <2x16x16xf16> enable preload: if work item
+/// num is 4, original workspace is <16x16xf16>, then new expanded workspace is
+/// <4x16x16xf16>
 void CVPipelineImpl::expandWorkspace(OpBuilder &builder) {
   OpBuilder::InsertionGuard g(builder);
   builder.setInsertionPoint(pipelineLoop);
@@ -523,6 +521,8 @@ static tensor::InsertSliceOp createInsertSlice(OpBuilder &builder, Location loc,
   auto const0 = builder.getIndexAttr(0);
   auto originalType = cast<TensorType>(src.getType());
   SmallVector<OpFoldResult> offsets, sizes, strides;
+  if (!iv.getType().isIndex())
+    iv = builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), iv);
   offsets.push_back(iv);
   offsets.append(originalType.getRank(), const0);
 
@@ -548,6 +548,8 @@ static tensor::ExtractSliceOp createExtractSlice(OpBuilder &builder,
   SmallVector<OpFoldResult> offsets, sizes, strides;
   auto newType = cast<TensorType>(from.getType());
 
+  if (!iv.getType().isIndex())
+    iv = builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), iv);
   offsets.push_back(iv);
   offsets.append(newType.getRank() - 1, const0);
   sizes.push_back(const1);
@@ -568,14 +570,17 @@ static void createAttrForPreloadWS(OpBuilder &builder, Value markedVal) {
   markedOp->setAttr(hivm::PreloadWorkspaceAttr::name, builder.getUnitAttr());
 }
 
-static Value createWorkspaceSubview(OpBuilder &builder, Location loc, Value from,
-                                    Value iv, bool isPreload = false) {
+static Value createWorkspaceSubview(OpBuilder &builder, Location loc,
+                                    Value from, Value iv,
+                                    bool isPreload = false) {
   auto const1 = builder.getIndexAttr(1);
   auto const0 = builder.getIndexAttr(0);
   SmallVector<OpFoldResult> offsets, sizes, strides;
   auto newType = cast<MemRefType>(from.getType());
 
   // Set up offsets
+  if (!iv.getType().isIndex())
+    iv = builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), iv);
   offsets.push_back(iv);
   offsets.append(newType.getRank() - 1, const0);
   // Set up sizes
@@ -602,7 +607,7 @@ static Value createWorkspaceSubview(OpBuilder &builder, Location loc, Value from
   return builder.create<memref::CollapseShapeOp>(loc, subview, reass);
 }
 
-static void 
+static void
 processWorkspaceOutputs(OpBuilder &builder, WorkItem *item,
                         DenseMap<Value, Value> &expandedWorkspaceMap,
                         const IRMapping &loopMap) {
@@ -623,18 +628,31 @@ processWorkspaceOutputs(OpBuilder &builder, WorkItem *item,
           loc, TypeRange{}, fixpipe.getSrc(), newDst, fixpipe.getDmaModeAttr(),
           fixpipe.getDualDstModeAttr(), fixpipe.getPreQuantAttr(),
           fixpipe.getPreReluAttr(), fixpipe.getChannelSplitAttr());
-    
-    // remove old store related annotation mark op
-    for (Operation *usr : store->getUsers())
-      if (isa<annotation::MarkOp>(usr))
-        usr->erase();
-    store->erase();
 
-    // Create new toTensor
-    builder.setInsertionPointAfter(forOp);
-    expandedWorkspaceMap[original] =
-        builder.create<bufferization::ToTensorOp>(loc, newAlloc,
-                                                  /*restrict*/ true);
+    // Before forOp so to_tensor dominates in-loop and later consumers.
+    builder.setInsertionPoint(forOp);
+    auto workspaceOp = builder.create<bufferization::ToTensorOp>(
+        loc, newAlloc, /*restrict*/ true);
+    expandedWorkspaceMap[original] = workspaceOp;
+
+    Value sliceIdx = forOp.getInductionVar();
+    SmallVector<OpOperand *> operandsToUpdate;
+    for (OpOperand &operand : store->getUses())
+      operandsToUpdate.push_back(&operand);
+    for (OpOperand *operand : operandsToUpdate) {
+      Operation *userOp = operand->getOwner();
+      if (isa<annotation::MarkOp>(userOp)) {
+        userOp->erase();
+        continue;
+      }
+      if (!isa<TensorType>(operand->get().getType()))
+        continue;
+      builder.setInsertionPoint(userOp);
+      Value sliceOp = createExtractSlice(builder, loc, workspaceOp,
+                                         operand->get().getType(), sliceIdx);
+      operand->set(sliceOp);
+    }
+    store->erase();
   }
 }
 
@@ -667,11 +685,10 @@ static void processWorkspaceOutputUsers(
   }
 }
 
-static void
-processOutputUsers(OpBuilder &builder,
-                   ArrayRef<std::shared_ptr<WorkItem>> worklist,
-                   const DenseMap<Operation *, SmallVector<WorkItem *>> &opToWorkItemMap,
-                   const DenseMap<Value, Value> &expandedWorkspaceMap, scf::ForOp newLoop) {
+static void processOutputUsers(
+    OpBuilder &builder, ArrayRef<std::shared_ptr<WorkItem>> worklist,
+    const DenseMap<Operation *, SmallVector<WorkItem *>> &opToWorkItemMap,
+    const DenseMap<Value, Value> &expandedWorkspaceMap, scf::ForOp newLoop) {
   SmallVector<std::pair<OpOperand *, Value>> replaces;
   for (auto &item : worklist) {
     processWorkspaceOutputUsers(builder, item.get(), opToWorkItemMap,
@@ -690,6 +707,8 @@ Value CVPipelineImpl::createSubview(OpBuilder &builder, Location loc,
   auto const0 = builder.getIndexAttr(0);
   SmallVector<OpFoldResult> offsets, sizes, strides;
   auto targetTy = cast<MemRefType>(to);
+  if (!iv.getType().isIndex())
+    iv = builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), iv);
   offsets.push_back(iv);
   offsets.append(targetTy.getRank(), const0);
   sizes.push_back(const1);
@@ -955,9 +974,8 @@ void CVPipelineImpl::populateLoopCarriedDependencies() {
 LogicalResult
 CVPipelineImpl::traceMemrefSubnet(Operation *start,
                                   SmallVector<Operation *> &workingStack) {
-  if (llvm::all_of(start->getOperands(), [](Value val) {
-        return isa<TensorType>(val.getType());
-      }))
+  if (llvm::all_of(start->getOperands(),
+                   [](Value val) { return isa<TensorType>(val.getType()); }))
     return success();
 
   DestinationStyleOpInterface writer = nullptr;
@@ -1110,12 +1128,12 @@ LogicalResult CVPipelineImpl::traceDependentOps(WorkItem *item) {
         // their dependency
         return op->emitWarning(
             "[cv-pipelining] cannot pipeline op due to dependency");
-    } 
+    }
     // Other than core ops, we can skip them if we already inserted them into
     // this work item
     else if (item->ops.contains(op))
       continue;
-    
+
     // Determine whether a to_tensor should be skipped because it has already
     // been allocated to another work item.  The default guard fires for all
     // to_tensor ops, but with lazy loading we lift the restriction for
@@ -1294,7 +1312,8 @@ void CVPipelineImpl::collectAtomicEffects() {
 }
 
 static LogicalResult
-markWorkspaceOps(Operation *op, DenseMap<AllocWorkspaceOp, WorkspaceAllocParams> &allocs,
+markWorkspaceOps(Operation *op,
+                 DenseMap<AllocWorkspaceOp, WorkspaceAllocParams> &allocs,
                  unsigned multibuffer) {
   if (auto mark = dyn_cast<annotation::MarkOp>(op)) {
     if (auto alloc = llvm::dyn_cast_if_present<AllocWorkspaceOp>(
@@ -1417,7 +1436,7 @@ LogicalResult CVPipelineImpl::createWorkItems() {
 void CVPipelineImpl::markOutputs() {
   for (const auto &item : worklist) {
     for (Operation *op : item->ops) {
-      if (isa<StoreOp, FixpipeOp>(op) &&
+      if (isa<StoreLikeOpInterface>(op) &&
           getAllocWorkspace(cast<DestinationStyleOpInterface>(op)
                                 .getDpsInitOperand(0)
                                 ->get())) {
@@ -1445,7 +1464,13 @@ void CVPipelineImpl::markOutputs() {
           continue;
 
         for (Operation *usr : result.getUsers()) {
-          if (opToWorkItemMap.contains(usr) && !item->ops.contains(usr)) {
+          // Nested consumers (e.g. load/store inside a per-row scf.for) are
+          // not in `opToWorkItemMap`; resolve to the top-level owner first.
+          // Otherwise cross-item tensors are missed and `migrateOps` leaves
+          // dangling uses on `pipelineLoop`.
+          Operation *owner = getContainedParent(pipelineLoop, usr);
+          if (owner && opToWorkItemMap.contains(owner) &&
+              !item->ops.contains(owner)) {
             item->localOutputs.push_back(std::make_pair(result, nullptr));
             break;
           }
@@ -1495,7 +1520,7 @@ LogicalResult CVPipelineImpl::expandOutputInits(WorkItem *item) {
     if (!alloc)
       return toTensor->emitWarning(
           "[cv-pipelining] expected alloc from toTensor");
-    
+
     auto origTy = alloc.getMemref().getType();
     if (!origTy.hasStaticShape())
       return alloc->emitWarning(
@@ -1503,9 +1528,19 @@ LogicalResult CVPipelineImpl::expandOutputInits(WorkItem *item) {
     newShape.append(origTy.getShape().begin(), origTy.getShape().end());
     auto memspace = origTy.getMemorySpace();
     auto newType = MemRefType::get(newShape, origTy.getElementType(),
-                                  MemRefLayoutAttrInterface(), memspace);
-    expanded = builder.create<memref::AllocOp>(loc, newType, ValueRange(),
-                                              alloc.getAlignmentAttr());
+                                   MemRefLayoutAttrInterface(), memspace);
+    auto expandedAlloc = builder.create<memref::AllocOp>(
+        loc, newType, ValueRange(), alloc.getAlignmentAttr());
+    // Mark the expanded alloc with an `annotation.mark` carrying
+    // `hivm.cv_pipelined_multi_buffer` so downstream passes (notably
+    // the ND2NZOp aggregated-decompose pad/vbrc path) know this
+    // storage is sliced into per-stage slots — any pre-init must
+    // target only the current slot, never the whole alloc.
+    auto markOp =
+        builder.create<annotation::MarkOp>(loc, expandedAlloc.getResult());
+    markOp->setAttr(hivm::CVPipelinedMultiBufferAttr::name,
+                    UnitAttr::get(builder.getContext()));
+    expanded = expandedAlloc;
   }
   return success();
 }
@@ -1686,6 +1721,8 @@ FailureOr<Value> CVPipelineImpl::updateMaskingSubview(OpBuilder &builder,
   }
   SmallVector<OpFoldResult> offsets, sizes, strides;
   Attribute cst1Attr = builder.getI64IntegerAttr(1);
+  if (!iv.getType().isIndex())
+    iv = builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), iv);
   offsets.push_back(iv);
   offsets.append(subview.getMixedOffsets());
   sizes.push_back(cst1Attr);
@@ -1858,8 +1895,8 @@ LogicalResult CVPipelineImpl::migrateOps() {
   // this needed to be done after all the ops have been migrated
   // into their own loops: update user of local outputs to extract slices of
   // the for output in c220
-  processOutputUsers(builder, worklist, opToWorkItemMap,
-                     expandedWorkspaceMap_, newLoop);
+  processOutputUsers(builder, worklist, opToWorkItemMap, expandedWorkspaceMap_,
+                     newLoop);
 
   builder.setInsertionPointToEnd(newLoop.getBody());
   if (trailingAtomicEffect) {
@@ -1903,32 +1940,34 @@ LogicalResult CVPipelineImpl::migrateOpsForPreload(OpBuilder &builder) {
       builder.setInsertionPoint(storeLikeOp);
       auto sliceIdx = builder.create<arith::ConstantIndexOp>(loc, 0);
       Value newDst =
-        createWorkspaceSubview(builder, loc, newWsAlloc, sliceIdx, true);
-      
+          createWorkspaceSubview(builder, loc, newWsAlloc, sliceIdx, true);
+
       if (auto storeOp = dyn_cast<StoreOp>(storeLikeOp)) {
         builder.create<StoreOp>(loc, TypeRange{}, storeOp.getSrc(), newDst);
       } else if (auto fixpipe = dyn_cast<FixpipeOp>(storeLikeOp)) {
         builder.create<FixpipeOp>(
-          loc, TypeRange{}, fixpipe.getSrc(), newDst, fixpipe.getDmaModeAttr(),
-          fixpipe.getDualDstModeAttr(), fixpipe.getPreQuantAttr(),
-          fixpipe.getPreReluAttr(), fixpipe.getChannelSplitAttr());
+            loc, TypeRange{}, fixpipe.getSrc(), newDst,
+            fixpipe.getDmaModeAttr(), fixpipe.getDualDstModeAttr(),
+            fixpipe.getPreQuantAttr(), fixpipe.getPreReluAttr(),
+            fixpipe.getChannelSplitAttr());
       }
 
       builder.setInsertionPointAfter(item->scopeOp);
-      auto workspaceOp = builder.create<bufferization::ToTensorOp>(loc, newWsAlloc, /*restrict*/ true);
+      auto workspaceOp = builder.create<bufferization::ToTensorOp>(
+          loc, newWsAlloc, /*restrict*/ true);
       for (OpOperand &operand : storeLikeOp->getUses()) {
         Operation *userOp = operand.getOwner();
         if (auto loadOp = dyn_cast<LoadOp>(userOp)) {
           builder.setInsertionPoint(loadOp);
           auto sliceIdx1 = builder.create<arith::ConstantIndexOp>(loc, 0);
-          Value sliceOp = createExtractSlice(builder, loc, workspaceOp,
-                                             operand.get().getType(), sliceIdx1);
+          Value sliceOp = createExtractSlice(
+              builder, loc, workspaceOp, operand.get().getType(), sliceIdx1);
           createAttrForPreloadWS(builder, sliceOp);
           operand.set(sliceOp);
         }
       }
       LLVM_DEBUG(dbgs() << "\n\nAfter migrate:\n";
-             pipelineLoop->getParentOfType<func::FuncOp>()->dump());
+                 pipelineLoop->getParentOfType<func::FuncOp>()->dump());
       storeLikeOp->erase();
     }
   }
@@ -1985,7 +2024,7 @@ LogicalResult CVPipelineImpl::createNewLoopsForPreloadWithScopes() {
     for (Operation &op : parentFor.getBody()->getOperations()) {
       if (!item->ops.contains(&op))
         continue;
-      
+
       builder.clone(op, scopeMap);
       toErase.insert(&op);
     }
@@ -2033,7 +2072,7 @@ LogicalResult CVPipelineImpl::markScopesForPreload() {
 
   if (failed(createNewLoopsForPreloadWithScopes()))
     return failure();
-  
+
   if (failed(migrateOpsForPreload(builder))) {
     revert();
     return failure();
@@ -2145,7 +2184,6 @@ LogicalResult CVPipelineImpl::run() {
       for (auto output : item->workspaceOutputs) {
         dbgs().indent(4) << *output << '\n';
       }
-
     }
   });
 

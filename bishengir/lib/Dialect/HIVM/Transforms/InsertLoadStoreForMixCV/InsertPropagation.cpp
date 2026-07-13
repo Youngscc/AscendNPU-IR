@@ -17,6 +17,7 @@
 
 #include "bishengir/Dialect/HIVM/Transforms/InsertLoadStoreForMixCV/InsertPropagation.h"
 
+#include "bishengir/Dialect/HIVM/IR/CustomOp/CustomOpUtils.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -58,6 +59,11 @@ InsertPropagationPattern::matchAndRewrite(Operation *op,
 #include "bishengir/Dialect/HIVM/IR/HIVMDMAOps.cpp.inc"
           >(
           [&](Operation *op) { return insertPropagatorForDMAOp(op, rewriter); })
+      .Case<hivm::CustomOp, hivm::CustomMacroOp>([&](Operation *op) {
+        PropagatorUtil::insertPropagatorsForCustomLikeOp(getCustomLikePipes(op),
+                                                         op, rewriter);
+        return success();
+      })
       .Case<tensor::EmptyOp>([&](auto op) {
         if (isa<hivm::FixpipeOp>(*op->user_begin()))
           return failure();

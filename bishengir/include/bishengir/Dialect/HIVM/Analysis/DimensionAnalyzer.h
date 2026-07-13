@@ -65,6 +65,13 @@ public:
   /// @return int64_t The dimension index if a match is found; otherwise, -1.
   int64_t getTilingDim(Value v);
 
+  /// @description: Retrieves the globally unique identifier (ancestor ID) of
+  /// the final selected tiling axis for a given value.
+  ///
+  /// @param v The input value whose global tiling axis ID is being queried.
+  /// @return int64_t The globally unique ID of the tiling axis.
+  int64_t getGlobalTilingAxisId(Value v);
+
 protected:
   //===--------------------------------------------------------------------===//
   // Functions for initialization
@@ -131,6 +138,8 @@ protected:
   void processScopeOp(scope::ScopeOp op);
   void processTilingDimMapping(tensor::ExpandShapeOp expandShapeOp,
                                DictionaryAttr tilingDimMapping);
+  void processMmadL1Op(hivm::MmadL1Op op, bool isTransposeA = false,
+                       bool isTransposeB = false);
 
   //===--------------------------------------------------------------------===//
   // Helper function
@@ -162,6 +171,9 @@ protected:
       DenseMap<int64_t, DenseMap<int64_t, SmallVector<Dimension>>>
           &parallelDimMaps,
       DenseMap<int64_t, int> &numStoreOps);
+
+  template <typename StoreOpTy>
+  std::optional<size_t> inferForcedTilingDim(StoreOpTy op);
 
 protected:
   /// Chosen tiling axis index per SSA \c Value; \c -1 when not chosen.

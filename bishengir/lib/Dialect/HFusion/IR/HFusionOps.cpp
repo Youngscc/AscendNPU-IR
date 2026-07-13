@@ -72,31 +72,37 @@ namespace {
 // Utils for Conv Ops
 //===----------------------------------------------------------------------===//
 
-FailureOr<std::array<int64_t, 2>>
-getConv2DIntPairAttr(Attribute attr, StringRef attrName,
-                     function_ref<InFlightDiagnostic()> emitError) {
+template <size_t Rank>
+FailureOr<std::array<int64_t, Rank>>
+getConvIntArrayAttr(Attribute attr, StringRef attrName,
+                    function_ref<InFlightDiagnostic()> emitError) {
   auto emitInvalidAttr = [&]() {
-    emitError() << "`" << attrName
-                << "` must be an integer scalar or a 2-element integer array";
+    emitError() << "`" << attrName << "` must be an integer scalar or a "
+                << Rank << "-element integer array";
     return failure();
   };
 
   if (auto intAttr = dyn_cast<IntegerAttr>(attr)) {
     int64_t value = intAttr.getInt();
-    return std::array<int64_t, 2>{value, value};
+    std::array<int64_t, Rank> values;
+    values.fill(value);
+    return values;
   }
 
   if (auto denseAttr = dyn_cast<DenseI64ArrayAttr>(attr)) {
-    if (denseAttr.size() != 2)
+    if (denseAttr.size() != Rank)
       return emitInvalidAttr();
-    return std::array<int64_t, 2>{denseAttr[0], denseAttr[1]};
+    std::array<int64_t, Rank> values;
+    for (size_t idx = 0; idx < Rank; ++idx)
+      values[idx] = denseAttr[idx];
+    return values;
   }
 
   if (auto arrayAttr = dyn_cast<ArrayAttr>(attr)) {
-    if (arrayAttr.size() != 2)
+    if (arrayAttr.size() != Rank)
       return emitInvalidAttr();
 
-    std::array<int64_t, 2> values;
+    std::array<int64_t, Rank> values;
     for (auto [idx, element] : llvm::enumerate(arrayAttr)) {
       auto intAttr = dyn_cast<IntegerAttr>(element);
       if (!intAttr)
@@ -107,6 +113,18 @@ getConv2DIntPairAttr(Attribute attr, StringRef attrName,
   }
 
   return emitInvalidAttr();
+}
+
+FailureOr<std::array<int64_t, 2>>
+getConv2DIntPairAttr(Attribute attr, StringRef attrName,
+                     function_ref<InFlightDiagnostic()> emitError) {
+  return getConvIntArrayAttr<2>(attr, attrName, emitError);
+}
+
+FailureOr<std::array<int64_t, 3>>
+getConv3DIntTripleAttr(Attribute attr, StringRef attrName,
+                       function_ref<InFlightDiagnostic()> emitError) {
+  return getConvIntArrayAttr<3>(attr, attrName, emitError);
 }
 
 } // namespace
@@ -1732,6 +1750,9 @@ LogicalResult InterleaveOp::reifyResultShapes(
 
 LogicalResult DeinterleaveOp::verify() {
   auto inputType = llvm::dyn_cast<ShapedType>(getInput().getType());
+  if (inputType.getRank() < 1) {
+    return emitOpError() << "requires input rank to be at least 1";
+  }
   int64_t deinterleaveAxis = inputType.getRank() - 1;
   if (inputType.isDynamicDim(deinterleaveAxis)) {
     // not check deinterleave axis with dynamic size
@@ -3625,17 +3646,23 @@ LogicalResult Conv3DOp::verify() {
       return emitOpError() << "requires batch size of input and init to match";
   }
 
-  int64_t stride = getStride();
-  int64_t dilation = getDilation();
+  FailureOr<std::array<int64_t, 3>> stride = getConv3DIntTripleAttr(
+      getStrideAttr(), "stride", [&]() { return emitOpError(); });
+  FailureOr<std::array<int64_t, 3>> dilation = getConv3DIntTripleAttr(
+      getDilationAttr(), "dilation", [&]() { return emitOpError(); });
+  FailureOr<std::array<int64_t, 3>> padding = getConv3DIntTripleAttr(
+      getPaddingAttr(), "padding", [&]() { return emitOpError(); });
+  if (failed(stride) || failed(dilation) || failed(padding))
+    return failure();
 
   // Currently only support stride == 1 and dilation == 1
-  if (stride != 1 || dilation != 1)
+  if ((*stride)[0] != 1 || (*stride)[1] != 1 || (*stride)[2] != 1 ||
+      (*dilation)[0] != 1 || (*dilation)[1] != 1 || (*dilation)[2] != 1)
     return emitOpError()
            << "currently does not support stride != 1 or dilation != 1";
 
   // Check output depth/height/width
-  // oX = floor((iX + 2 * padding - dilation * (wX - 1) - 1) / stride + 1)
-  int64_t padding = getPadding();
+  // oX = floor((iX + 2 * paddingX - dilationX * (wX - 1) - 1) / strideX + 1)
   int64_t inputDDim = (inputRank == 4) ? 1 : 2;
   int64_t inputHDim = (inputRank == 4) ? 2 : 3;
   int64_t inputWDim = (inputRank == 4) ? 3 : 4;
@@ -3644,23 +3671,25 @@ LogicalResult Conv3DOp::verify() {
   int64_t outputWDim = (initRank == 4) ? 3 : 4;
 
   auto checkOutputDim = [&](int64_t inputDim, int64_t weightDim,
-                            int64_t outputDim,
+                            int64_t outputDim, int64_t dimIdx,
                             const char *dimName) -> LogicalResult {
     int64_t iX = inputTy.getDimSize(inputDim);
     int64_t wX = weightTy.getDimSize(weightDim);
     int64_t oXExpected =
-        (iX + 2 * padding - dilation * (wX - 1) - 1) / stride + 1;
+        (iX + 2 * (*padding)[dimIdx] - (*dilation)[dimIdx] * (wX - 1) - 1) /
+            (*stride)[dimIdx] +
+        1;
 
     if (initTy.getDimSize(outputDim) != oXExpected)
       return emitOpError()
              << "requires output " << dimName << " to be computed as: "
-             << "(iX + 2 * padding - dilation * (wX - 1) - 1) / stride + 1";
+             << "(iX + 2 * paddingX - dilationX * (wX - 1) - 1) / strideX + 1";
     return success();
   };
 
-  if (failed(checkOutputDim(inputDDim, 2, outputDDim, "depth oD")) ||
-      failed(checkOutputDim(inputHDim, 3, outputHDim, "height oH")) ||
-      failed(checkOutputDim(inputWDim, 4, outputWDim, "width oW")))
+  if (failed(checkOutputDim(inputDDim, 2, outputDDim, 0, "depth oD")) ||
+      failed(checkOutputDim(inputHDim, 3, outputHDim, 1, "height oH")) ||
+      failed(checkOutputDim(inputWDim, 4, outputWDim, 2, "width oW")))
     return failure();
 
   return success();
@@ -3669,9 +3698,18 @@ LogicalResult Conv3DOp::verify() {
 void Conv3DOp::build(OpBuilder &odsBuilder, OperationState &odsState,
                      ValueRange inputs, Value output, int32_t stride,
                      int32_t padding, int32_t dilation, int32_t groups) {
-  odsState.addAttribute("stride", odsBuilder.getI32IntegerAttr(stride));
-  odsState.addAttribute("padding", odsBuilder.getI32IntegerAttr(padding));
-  odsState.addAttribute("dilation", odsBuilder.getI32IntegerAttr(dilation));
+  build(odsBuilder, odsState, inputs, output,
+        odsBuilder.getI32IntegerAttr(stride),
+        odsBuilder.getI32IntegerAttr(padding),
+        odsBuilder.getI32IntegerAttr(dilation), groups);
+}
+
+void Conv3DOp::build(OpBuilder &odsBuilder, OperationState &odsState,
+                     ValueRange inputs, Value output, Attribute stride,
+                     Attribute padding, Attribute dilation, int32_t groups) {
+  odsState.addAttribute("stride", stride);
+  odsState.addAttribute("padding", padding);
+  odsState.addAttribute("dilation", dilation);
   odsState.addAttribute("groups", odsBuilder.getI32IntegerAttr(groups));
   auto outType = output.getType();
   odsState.addOperands(inputs);

@@ -20,6 +20,9 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "llvm/ADT/STLExtras.h"
 
+#include <array>
+#include <optional>
+
 using namespace mlir;
 using namespace mlir::hivm;
 
@@ -30,6 +33,25 @@ constexpr size_t kDimFour = 4;
 
 int64_t getRankFromShapedTypeValue(Value val) {
   return cast<ShapedType>(val.getType()).getRank();
+}
+
+std::optional<std::array<int64_t, 3>> getConv3DPaddingAttr(Attribute attr) {
+  if (auto intAttr = dyn_cast<IntegerAttr>(attr)) {
+    int64_t value = intAttr.getInt();
+    return std::array<int64_t, 3>{value, value, value};
+  }
+
+  auto arrayAttr = dyn_cast<ArrayAttr>(attr);
+  if (!arrayAttr || arrayAttr.size() != 3)
+    return std::nullopt;
+
+  auto padD = dyn_cast<IntegerAttr>(arrayAttr[0]);
+  auto padH = dyn_cast<IntegerAttr>(arrayAttr[1]);
+  auto padW = dyn_cast<IntegerAttr>(arrayAttr[2]);
+  if (!padD || !padH || !padW)
+    return std::nullopt;
+
+  return std::array<int64_t, 3>{padD.getInt(), padH.getInt(), padW.getInt()};
 }
 
 template <typename HIVMOP>
@@ -91,6 +113,18 @@ SmallVector<hivm::IteratorType> VArangeOp::getIteratorTypesArray() {
   auto iteratorTypes =
       SmallVector<hivm::IteratorType>(rank, hivm::IteratorType::kOpaque);
   return iteratorTypes;
+}
+
+ArrayAttr VArangeOp::getIndexingMaps() {
+  MLIRContext *context = getContext();
+  unsigned numLoops = getNumLoops();
+  AffineMap scalarMap = AffineMap::get(numLoops, 0, context);
+  AffineMap identityMap = AffineMap::getMultiDimIdentityMap(numLoops, context);
+  SmallVector<AffineMap> indexingMaps;
+  for (OpOperand &opOperand : getOperation()->getOpOperands()) {
+    indexingMaps.push_back(getRank(&opOperand) == 0 ? scalarMap : identityMap);
+  }
+  return Builder(context).getAffineMapArrayAttr(indexingMaps);
 }
 
 //===----------------------------------------------------------------------===//
@@ -188,10 +222,10 @@ SmallVector<hivm::IteratorType> VGatherMaskOp::getIteratorTypesArray() {
   OperandRange dstRange = getDst();
   Value dst = dstRange.front();
   int64_t rank = getRankFromShapedTypeValue(dst);
-  auto iteratorTypes = SmallVector<hivm::IteratorType>(rank, hivm::IteratorType::kParallel);
+  auto iteratorTypes =
+      SmallVector<hivm::IteratorType>(rank, hivm::IteratorType::kParallel);
   return iteratorTypes;
 }
-
 
 //===----------------------------------------------------------------------===//
 // VFlip
@@ -306,6 +340,32 @@ VTransposeOp::setIteratorTypesArray(const IteratorType iteratorType,
   assert(iteratorType == hivm::IteratorType::kTranspose);
   getOperation()->setAttr(stringifyIteratorType(iteratorType), arrayAttr);
   return success();
+}
+
+ArrayAttr VTransposeOp::getIndexingMaps() {
+  Builder builder(getContext());
+  int64_t rank = getRankFromShapedTypeValue(getDst());
+  // The iteration domain is the destination index space, so the output map is
+  // the identity.
+  AffineMap outputMap = builder.getMultiDimIdentityMap(rank);
+  ArrayRef<int64_t> perm = getPermutation();
+  AffineMap inputMap;
+  // `dim(dst, i) = dim(src, permutation[i])`, so loop dim `i` indexes the src
+  // axis `permutation[i]`. Build the src access map by placing loop dim `i` at
+  // src position `permutation[i]`, which yields a (projected) permutation map.
+  if (static_cast<int64_t>(perm.size()) != rank) {
+    // Degenerate/unspecified permutation: fall back to identity.
+    inputMap = outputMap;
+  } else {
+    SmallVector<AffineExpr, 4> srcExprs(rank);
+    for (int64_t i = 0; i < rank; ++i)
+      srcExprs[perm[i]] = builder.getAffineDimExpr(i);
+    inputMap = AffineMap::get(rank, 0, srcExprs, builder.getContext());
+  }
+  // Mirror VBrcOp/VReduceOp: emit one map per non-extra-buffer operand
+  // (src input followed by the dst init); the optional temp_buffer is an
+  // extra buffer and is intentionally excluded.
+  return builder.getAffineMapArrayAttr({inputMap, outputMap});
 }
 
 //===----------------------------------------------------------------------===//
@@ -686,7 +746,7 @@ ArrayAttr Conv3DL1Op::getIndexingMaps() {
     }
 
     if (initRank == 2) {
-      // rank2 output path uses fused shape [N*oD*oC, oH*oW].
+      // rank2 output path uses aligned fused shape [oH*oW, N*oD*oC].
       bool mappedRank2 = false;
       auto packedInputType = dyn_cast<ShapedType>(getInput().getType());
       auto packedWeightType = dyn_cast<ShapedType>(getWeight().getType());
@@ -699,32 +759,33 @@ ArrayAttr Conv3DL1Op::getIndexingMaps() {
         int64_t wH = packedWeightType.getDimSize(2);
         int64_t wW = packedWeightType.getDimSize(3);
         int64_t oC = packedWeightType.getDimSize(4);
-        int64_t padding = getPadding();
+        auto padding = getConv3DPaddingAttr(getPaddingAttr());
+        if (padding) {
+          int64_t oD = iD - wD + 1;
+          int64_t oH = iH + 2 * (*padding)[1] - wH + 1;
+          int64_t oW = iW + 2 * (*padding)[2] - wW + 1;
+          if (oD > 0 && oH > 0 && oW > 0 && oC > 0) {
+            AffineExpr d0 = getAffineDimExpr(0, ctx);
+            AffineExpr d6 = getAffineDimExpr(6, ctx);
+            AffineExpr d11 = getAffineDimExpr(11, ctx);
+            AffineExpr d12 = getAffineDimExpr(12, ctx);
+            AffineExpr d13 = getAffineDimExpr(13, ctx);
+            AffineExpr cOD = getAffineConstantExpr(oD, ctx);
+            AffineExpr cOC = getAffineConstantExpr(oC, ctx);
+            AffineExpr cOW = getAffineConstantExpr(oW, ctx);
 
-        int64_t oD = iD + 2 * padding - wD + 1;
-        int64_t oH = iH + 2 * padding - wH + 1;
-        int64_t oW = iW + 2 * padding - wW + 1;
-        if (oD > 0 && oH > 0 && oW > 0 && oC > 0) {
-          AffineExpr d0 = getAffineDimExpr(0, ctx);
-          AffineExpr d6 = getAffineDimExpr(6, ctx);
-          AffineExpr d11 = getAffineDimExpr(11, ctx);
-          AffineExpr d12 = getAffineDimExpr(12, ctx);
-          AffineExpr d13 = getAffineDimExpr(13, ctx);
-          AffineExpr cOD = getAffineConstantExpr(oD, ctx);
-          AffineExpr cOC = getAffineConstantExpr(oC, ctx);
-          AffineExpr cOW = getAffineConstantExpr(oW, ctx);
-
-          AffineExpr fusedNDOC = ((d0 * cOD) + d11) * cOC + d6;
-          AffineExpr fusedHW = d12 * cOW + d13;
-          indexingMaps[getInitMutable().getOperandNumber()] = AffineMap::get(
-              /*dimCount=*/14, /*symbolCount=*/0, {fusedNDOC, fusedHW}, ctx);
-          mappedRank2 = true;
+            AffineExpr fusedNDOC = ((d0 * cOD) + d11) * cOC + d6;
+            AffineExpr fusedHW = d12 * cOW + d13;
+            indexingMaps[getInitMutable().getOperandNumber()] = AffineMap::get(
+                /*dimCount=*/14, /*symbolCount=*/0, {fusedHW, fusedNDOC}, ctx);
+            mappedRank2 = true;
+          }
         }
       }
       if (!mappedRank2) {
         indexingMaps[getInitMutable().getOperandNumber()] = parseAffineMap(
             "(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, "
-            "d13) -> (d6, d13)",
+            "d13) -> (d13, d6)",
             ctx);
       }
       return Builder(ctx).getAffineMapArrayAttr(indexingMaps);
@@ -818,21 +879,4 @@ SmallVector<hivm::IteratorType> Conv3DL1Op::getIteratorTypesArray() {
         hivm::IteratorType::kReduction, hivm::IteratorType::kParallel,
         hivm::IteratorType::kParallel,  hivm::IteratorType::kParallel};
   }
-}
-
-ArrayAttr CustomOp::getIndexingMaps() {
-  if (auto attr = getOperation()->getAttrOfType<ArrayAttr>(kIndexingMapName))
-    return attr;
-  return ArrayAttr::get(getContext(), {});
-}
-
-SmallVector<hivm::IteratorType> CustomOp::getIteratorTypesArray() {
-  if (!getOperation()->hasAttr(kIteratorTypesName))
-    return {};
-
-  return llvm::to_vector(llvm::map_range(
-      getOperation()->getAttrOfType<ArrayAttr>(kIteratorTypesName),
-      [](Attribute attr) {
-        return cast<hivm::IteratorTypeAttr>(attr).getValue();
-      }));
 }

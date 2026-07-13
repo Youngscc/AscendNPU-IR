@@ -25,6 +25,7 @@
 #include "bishengir/Transforms/Passes.h"
 #include "bishengir/Transforms/Transforms.h"
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -69,6 +70,14 @@ public:
   LogicalResult
   verifyMarkedExtractSlicesAreBubbledUp(func::FuncOp funcOp) const {
     auto walkResult = funcOp->walk([this](Operation *op) {
+      if (isa<tensor::InsertSliceOp>(op)) {
+        auto insertSliceOp = cast<tensor::InsertSliceOp>(op);
+        // All marked insertslice is expected to be cancelled out
+        // No matter strict mode or not.
+        if (isMarkedInsertSliceOp(insertSliceOp))
+          return WalkResult::interrupt();
+      }
+
       if (!isa<tensor::ExtractSliceOp>(op)) {
         return WalkResult::advance();
       }
@@ -117,6 +126,7 @@ public:
     // Apply bubble up patterns
     RewritePatternSet patterns(funcOp.getContext());
     populateHoistAffinePattern(patterns);
+    affine::AffineApplyOp::getCanonicalizationPatterns(patterns, patterns.getContext());
     populateBubbleUpExtractSliceOpPatterns(patterns);
     populateCSEPattern(patterns);
     tensor::populateFoldTensorEmptyPatterns(patterns, true);
@@ -137,6 +147,7 @@ public:
     // opportunity.
     RewritePatternSet patterns2(funcOp.getContext());
     populateHoistAffinePattern(patterns2);
+    affine::AffineApplyOp::getCanonicalizationPatterns(patterns2, patterns.getContext());
     populateBubbleUpExtractSliceOpPatterns(patterns2);
     populateCSEPattern(patterns2);
     tensor::populateFoldTensorEmptyPatterns(patterns2, true);

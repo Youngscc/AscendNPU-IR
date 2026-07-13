@@ -91,16 +91,18 @@ load2d_transpose_b4(DST_QUALIFER *l0_buf, __cbuf__ int8_t *l1_ptr, int64_t k,
   for (uint64_t i = 0; i < l0_k1; i++) {
     for (uint64_t j = 0; j < l1_n1; j++) {
       if (std::is_same<DST_QUALIFER, __cb__ int8_t>::value) {
-        auto l0_loc = l0_buf;
-        if ((l1_n1 * elem_num_per_block - n) >= 24) {
-          l0_loc = l0_buf + i * (l1_n1 * 2048 - 1536) + j * 2048;
-        } else if ((l1_n1 * elem_num_per_block - n) >= 16) {
-          l0_loc = l0_buf + i * (l1_n1 * 2048 - 1024) + j * 2048;
-        } else if ((l1_n1 * elem_num_per_block - n) >= 8) {
-          l0_loc = l0_buf + i * (l1_n1 * 2048 - 512) + j * 2048;
+        int64_t l0_offset = 0;
+        int64_t diff = l1_n1 * elem_num_per_block - n;
+        if (diff >= 24) {
+          l0_offset = i * (l1_n1 * 2048 - 1536) + j * 2048;
+        } else if (diff >= 16) {
+          l0_offset = i * (l1_n1 * 2048 - 1024) + j * 2048;
+        } else if (diff >= 8) {
+          l0_offset = i * (l1_n1 * 2048 - 512) + j * 2048;
         } else {
-          l0_loc = l0_buf + i * l1_n1 * 2048 + j * 2048;
+          l0_offset = i * l1_n1 * 2048 + j * 2048;
         }
+        auto l0_loc = l0_buf + l0_offset;
         load2d_transpose_cbuf_to_cb_intrin_core_s4(
             load2d_transpose_intrin_args<void, DST_QUALIFER>{
                 l0_loc, l1_ptr + i * 2048 + j * k_total * 32, 0, 1, 1, 3,
@@ -210,12 +212,11 @@ __aicore__ __attribute__((always_inline)) void load_l1_to_l0b_with_trans(
   if (isk1n1Contiguous) {
     // for case that n_ceil is smaller than bn,  only valid data will be
     // loaded to l0
-    auto k1 = mb->sizes[0];
     auto l0_n1 = n_ceil / FRACTAL_BLOCK_NUM;
     auto l0_k1 = k_part_ceil / elem_num_per_block;
-    bool is_repeat_n1 = k1 <= l0_n1;
+    bool is_repeat_n1 = l0_k1 <= l0_n1;
     int64_t repeat_time = is_repeat_n1 ? l0_n1 : l0_k1;
-    int64_t loop_num = is_repeat_n1 ? k1 : l0_n1;
+    int64_t loop_num = is_repeat_n1 ? l0_k1 : l0_n1;
     auto n1 = mb->sizes[1];
     int64_t src_repeat_stride = is_repeat_n1 ? 1 : n1;
     int64_t dst_repeat_gap = is_repeat_n1 ? 0 : l0_n1 - 1;
@@ -348,13 +349,13 @@ mma_tile(memref_t<__cbuf__ SRC_TYPE, 4> *ma, memref_t<__cbuf__ SRC_TYPE, 4> *mb,
   const int64_t k_actual = k;
   const int64_t m0 = TA ? (ma->sizes[0] * ma->sizes[3]) : (ma->sizes[1] * ma->sizes[2]);
   const int64_t n0 = TB ? (mb->sizes[1] * mb->sizes[2]) : (mb->sizes[0] * mb->sizes[3]);
-  const int64_t mn_max = m0 > n0 ? m0 : n0;
+  const int64_t mn_max = I4 ? (m0 > 2 * n0 ? m0 : 2 * n0) : (m0 > n0 ? m0 : n0);
   const int64_t l0c_m_size = mc->sizes[1] * mc->sizes[2];
 
   bool k_direction_align = (sizeof(SRC_TYPE) == 4) && TA; // k alignment mode
   int64_t k_ceil = CEIL_FACTOR(k, L1_ALIGN_BYTES / sizeof(SRC_TYPE));
   k_ceil = k_direction_align ? CEIL_FACTOR(k_ceil, FRACTAL_BLOCK_NUM) : k_ceil;
-
+  const int64_t k_ceil_b = I4 ? CEIL_FACTOR(2 * k, L1_ALIGN_BYTES / sizeof(SRC_TYPE)) : 0;
   const int64_t elem_num_per_block = L1_ALIGN_BYTES / sizeof(SRC_TYPE);
   const int64_t max_align_value = elem_num_per_block > 16 ? elem_num_per_block : 16;
 
@@ -375,13 +376,14 @@ mma_tile(memref_t<__cbuf__ SRC_TYPE, 4> *ma, memref_t<__cbuf__ SRC_TYPE, 4> *mb,
   int64_t k_part = FLOOR_FACTOR(l0ab_pingpong_buffer_len /
                                     CEIL_FACTOR(mn_max, max_align_value),
                                 max_align_value);
-  if (k_part == 0 || I4) {
+  if (k_part == 0) {
     enable_double_buffer = false;
     l0ab_pingpong_buffer_len = L0AB_BUFFER_BYTES / sizeof(SRC_TYPE);
     k_part = FLOOR_FACTOR(l0ab_pingpong_buffer_len /
       CEIL_FACTOR(mn_max, max_align_value),
       max_align_value);
   }
+  int64_t k_part_b = (I4 && (m0 < n0)) ? (2 * k_part) : k_part;
 
   if (k_part == 0) {
     trap();
@@ -408,6 +410,15 @@ mma_tile(memref_t<__cbuf__ SRC_TYPE, 4> *ma, memref_t<__cbuf__ SRC_TYPE, 4> *mb,
         !is_outer_k_end ? k_part : (k_ceil - k_part_idx * k_part);
     int64_t k_part_actual =
         !is_outer_k_end ? k_part : (k_actual - k_part_idx * k_part);
+
+    int64_t k_part_ceil_b = 0;
+    int64_t k_part_actual_b = 0;
+    if constexpr (I4) {
+      k_part_ceil_b =
+          !is_outer_k_end ? k_part_b : (k_ceil_b - k_part_idx * k_part_b);
+      k_part_actual_b =
+          !is_outer_k_end ? k_part_b : (2 * k_actual - k_part_idx * k_part_b);
+    }
 
     int64_t ping_pong_id = 0;
     if (enable_double_buffer) {
@@ -446,8 +457,14 @@ mma_tile(memref_t<__cbuf__ SRC_TYPE, 4> *ma, memref_t<__cbuf__ SRC_TYPE, 4> *mb,
     if (is_outer_k_start && mmad_l1_wait_l1b_event != -1) {
       INTRINSIC(wait_flag, PIPE_MTE2, PIPE_MTE1, mmad_l1_wait_l1b_event);
     }
-    load_l1_to_l0b<SRC_TYPE, TB, I4>(l0b_buf, mb, k_part_idx, k_part, k_part_ceil,
-                                     k_part_loop, k_part_actual, n);
+
+    if constexpr (I4) {
+      load_l1_to_l0b<SRC_TYPE, TB, I4>(l0b_buf, mb, k_part_idx, k_part_b, k_part_ceil_b,
+                                       k_part_loop, k_part_actual_b, n);
+    } else {
+      load_l1_to_l0b<SRC_TYPE, TB, I4>(l0b_buf, mb, k_part_idx, k_part, k_part_ceil,
+                                       k_part_loop, k_part_actual, n);
+    }
 
     if (is_outer_k_end && l1b_wait_mmad_l1_event != -1) {
       INTRINSIC(set_flag, PIPE_MTE1, PIPE_MTE2, l1b_wait_mmad_l1_event);
