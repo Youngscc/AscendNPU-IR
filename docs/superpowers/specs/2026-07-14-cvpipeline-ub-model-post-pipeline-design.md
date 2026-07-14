@@ -255,10 +255,23 @@ cleanup. `no_inline` behavior follows the real pass options.
 
 ### 7.8 TileAndBindSubBlock
 
-The default enabled behavior is required. The model reproduces the AIV-side
-tiling/binding effects that alter slices, cloned operations, local buffer
-shapes, and stores. It covers the real pass's successful, skipped, fallback,
-and rollback paths for the supported input forms.
+The default enabled behavior is required. The model reproduces the real
+pass's skipped, fallback, and rollback paths exactly: the disable-attribute
+no-op, `enableTile=false`, the batch-matmul / implicit-transpose /
+same-address hazards, the `isFailed` revert, and the dynamic-store abort all
+reduce to `limitUniqueSubBlockToStore` (valueless stores) with
+`precision=exact`.
+
+**Known coverage gap — tiling-success path.** The real pass's *successful*
+sub-block tiling path — a static-shaped store with no hazard, the common AIV
+case — depends on `DimensionAnalyzer` and bubble-up extract-slice transforms
+that are not reproducible exactly at this modeling altitude. The model leaves
+the legal IR untouched and reports `precision=incomplete` for this path rather
+than risk an inexact "exact" tiled IR that would silently corrupt the UB peak.
+Inputs that trigger sub-block tiling therefore cannot yield an exact AIV UB
+plan; exact coverage holds only for inputs that disable tiling, hit a
+recognized hazard, or otherwise take a non-tiling path. Modeling the
+tiling-success path exactly is tracked as a follow-up.
 
 ### 7.9 Tensor-Empty and Canonicalization Stages
 
@@ -409,7 +422,9 @@ The feature is complete when:
 3. all new stage, pipeline, output, and invariant tests pass;
 4. both existing AIV demos retain their expected results;
 5. the new MIX demo reports exact AIV UB buffers and peak under real default
-   post-CVPipeline options;
+   post-CVPipeline options **for inputs that do not trigger sub-block tiling**;
+   inputs that take the tiling-success path report `precision=incomplete`
+   honestly (see §7.8 known coverage gap);
 6. multi-function reports use independent plans and a module maximum;
 7. unsupported variants at an otherwise valid before-CVPipeline boundary
    produce `incomplete` diagnostics without being mislabeled exact;
