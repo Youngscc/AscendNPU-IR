@@ -191,7 +191,7 @@ CVUB_TEST(default_vector_tiling_uses_ceil_div_and_shrinks_local_alloc) {
   CVUB_CHECK_EQ(OperationNamed(result.module, "hivm.hir.vadd").resultTypes,
                 std::vector<std::string>({"tensor<1x64xf16>"}));
   CVUB_CHECK_EQ(OperationNamed(result.module, "memref.alloc").resultTypes,
-                std::vector<std::string>({"memref<1x128xf16>"}));
+                std::vector<std::string>({"memref<1x64xf16>"}));
   const auto &slice = OperationNamed(result.module, "tensor.extract_slice");
   CVUB_CHECK_EQ(cvub::IRDictionaryValue(slice.attributes, "static_offsets"),
                 "[0, -9223372036854775808]");
@@ -210,14 +210,10 @@ CVUB_TEST(default_vector_tiling_uses_ceil_div_and_shrinks_local_alloc) {
   CVUB_CHECK_EQ(result.module.operations.at(static_cast<size_t>(source.parentId))
                     .name,
                 "func.func");
-  CVUB_CHECK_EQ(OperationCount(result.module, "memref.subview"), 1U);
-  const auto &destinationTile = OperationNamed(result.module, "memref.subview");
-  CVUB_CHECK_EQ(cvub::IRDictionaryValue(destinationTile.attributes,
-                                        "static_offsets"),
-                "[0, -9223372036854775808]");
-  CVUB_CHECK_EQ(cvub::IRDictionaryValue(destinationTile.attributes,
-                                        "static_sizes"),
-                "[1, 64]");
+  CVUB_CHECK_EQ(OperationCount(result.module, "memref.subview"), 0U);
+  CVUB_CHECK_EQ(DefinitionOf(result.module,
+      OperationNamed(result.module, "hivm.hir.store").operands[1]).name,
+                "memref.alloc");
   const auto &vadd = OperationNamed(result.module, "hivm.hir.vadd");
   const auto &inner = result.module.operations.at(
       static_cast<size_t>(vadd.parentId));
@@ -354,6 +350,122 @@ CVUB_TEST(cube_m_axis_is_forced_by_inside_a_load_dependency) {
   CVUB_CHECK_EQ(tiledMmad.operandTypes[0], "tensor<64x64xf16>");
   CVUB_CHECK_EQ(tiledMmad.operandTypes[1], "tensor<64x4096xf16>");
   cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(cube_inside_load_must_prove_the_group_axis) {
+  auto module = cvub::test::ParseFixture("tile_cube_loop.mlir");
+  auto &load = MutableOperationNamed(module, "hivm.hir.load");
+  load.attributes = cvub::SetDictionaryValue(load.attributes, "transpose",
+                                               "[1, 0]");
+  ExpectTileIncompleteAndUnchanged(module);
+}
+
+CVUB_TEST(cube_moves_only_the_selected_axis_branch) {
+  auto module = cvub::test::ParseFixture("tile_cube_loop.mlir");
+  auto &loop = MutableOperationNamed(module, "scf.for");
+  auto &lhs = MutableOperationNamed(module, "tensor.empty", 0);
+  auto &matmul = MutableOperationNamed(module, "hivm.hir.mmadL1");
+  cvub::GenericRewriter rewriter(module);
+  rewriter.removeFromBlock(lhs.blockId, lhs.id);
+  const auto &ops = module.blocks.at(static_cast<size_t>(matmul.blockId)).operations;
+  const size_t position = static_cast<size_t>(std::distance(
+      ops.begin(), std::find(ops.begin(), ops.end(), matmul.id)));
+  rewriter.insertToBlock(matmul.blockId, position, lhs.id);
+  lhs.parentId = loop.id;
+  lhs.regionId = matmul.regionId;
+  lhs.blockId = matmul.blockId;
+  cvub::ValidateGenericModule(module);
+
+  const auto result = cvub::RunTileCubeVectorLoop(module, 2, 2);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  const auto &kept = DefinitionOf(result.module,
+      OperationNamed(result.module, "hivm.hir.mmadL1").operands[0]);
+  CVUB_CHECK_EQ(result.module.operations.at(static_cast<size_t>(kept.parentId)).id,
+                OperationId(result.module, "scf.for"));
+}
+
+CVUB_TEST(tile_walk_rejects_nested_fixpipe_and_external_structured_ops) {
+  auto nested = cvub::test::ParseFixture("tile_cube_loop.mlir");
+  auto &fixpipe = MutableOperationNamed(nested, "hivm.hir.fixpipe");
+  fixpipe.parentId = MutableOperationNamed(nested, "hivm.hir.load").id;
+  ExpectTileIncompleteAndUnchanged(nested);
+
+  auto external = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  const auto load = MutableOperationNamed(external, "hivm.hir.load");
+  const auto yield = MutableOperationNamed(external, "scf.yield");
+  cvub::GenericRewriter rewriter(external);
+  const int unused = rewriter.createOperation(
+      yield.parentId, yield.regionId, yield.blockId, load.name,
+      load.resultTypes, load.operands, load.operandTypes, load.properties,
+      load.attributes);
+  const auto &ops = external.blocks.at(static_cast<size_t>(yield.blockId)).operations;
+  rewriter.insertToBlock(yield.blockId,
+      static_cast<size_t>(std::distance(ops.begin(),
+          std::find(ops.begin(), ops.end(), yield.id))), unused);
+  cvub::ValidateGenericModule(external);
+  ExpectTileIncompleteAndUnchanged(external);
+}
+
+CVUB_TEST(vector_local_destination_shrinks_but_gm_boundary_is_sliced) {
+  auto local = cvub::RunTileCubeVectorLoop(
+      cvub::test::ParseFixture("tile_vector_loop.mlir"), 2, 2);
+  CVUB_CHECK_EQ(local.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(OperationNamed(local.module, "memref.alloc").resultTypes,
+                std::vector<std::string>({"memref<1x64xf16>"}));
+
+  auto gm = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  auto &function = MutableOperationNamed(gm, "func.func");
+  auto &entry = gm.blocks.at(static_cast<size_t>(
+      gm.regions.at(static_cast<size_t>(function.regions.front())).blocks.front()));
+  int nextValue = 0;
+  for (const auto &operation : gm.operations)
+    for (int value : operation.results) nextValue = std::max(nextValue, value + 1);
+  for (const auto &block : gm.blocks)
+    for (int value : block.arguments) nextValue = std::max(nextValue, value + 1);
+  entry.arguments.push_back(nextValue);
+  entry.argumentTypes.push_back("memref<1x128xf16>");
+  auto &store = MutableOperationNamed(gm, "hivm.hir.store");
+  store.operands[1] = nextValue;
+  store.operandTypes[1] = "memref<1x128xf16>";
+  cvub::ValidateGenericModule(gm);
+  const auto boundary = cvub::RunTileCubeVectorLoop(gm, 2, 2);
+  CVUB_CHECK_EQ(boundary.precision, cvub::Precision::Exact);
+  const auto &tile = OperationNamed(boundary.module, "memref.subview");
+  CVUB_CHECK_EQ(cvub::IRDictionaryValue(tile.attributes, "static_offsets"),
+                "[0, -9223372036854775808]");
+}
+
+CVUB_TEST(vector_alignment_checks_boundary_operands_and_rejects_shape_only_axis) {
+  auto operand = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  auto &source = MutableOperationNamed(operand, "tensor.empty", 0);
+  source.resultTypes.front() = "tensor<1x128xf8>";
+  auto &slice = MutableOperationNamed(operand, "tensor.extract_slice");
+  slice.operandTypes.front() = "tensor<1x128xf8>";
+  auto &spec = operand.operations.front().attributes;
+  const size_t align = spec.find("256 : i32", spec.find("UB_ALIGN_SIZE"));
+  spec.replace(align, 9, "1024 : i32");
+  const auto operandRollback = cvub::RunTileCubeVectorLoop(operand, 2, 2);
+  CVUB_CHECK_EQ(operandRollback.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(OperationCount(operandRollback.module, "scf.for"), 1U);
+  CVUB_CHECK_EQ(OperationCount(operandRollback.module, "memref.subview"), 0U);
+  CVUB_CHECK_EQ(OperationNamed(operandRollback.module, "tensor.empty").resultTypes,
+                std::vector<std::string>({"tensor<1x128xf8>"}));
+
+  auto shapeOnly = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  auto &store = MutableOperationNamed(shapeOnly, "hivm.hir.store");
+  auto &empty = MutableOperationNamed(shapeOnly, "tensor.empty", 2);
+  store.operands[0] = empty.results.front();
+  store.operandTypes[0] = empty.resultTypes.front();
+  cvub::ValidateGenericModule(shapeOnly);
+  ExpectTileIncompleteAndUnchanged(shapeOnly);
+
+  auto cubeShapeOnly = cvub::test::ParseFixture("tile_cube_loop.mlir");
+  auto &cubeLoad = MutableOperationNamed(cubeShapeOnly, "hivm.hir.load");
+  auto &cubeMmad = MutableOperationNamed(cubeShapeOnly, "hivm.hir.mmadL1");
+  cubeMmad.operands[1] = cubeLoad.operands[0];
+  cubeMmad.operandTypes[1] = cubeLoad.operandTypes[0];
+  cvub::ValidateGenericModule(cubeShapeOnly);
+  ExpectTileIncompleteAndUnchanged(cubeShapeOnly);
 }
 
 CVUB_TEST(vector_alignment_rollback_still_runs_global_shrink) {
