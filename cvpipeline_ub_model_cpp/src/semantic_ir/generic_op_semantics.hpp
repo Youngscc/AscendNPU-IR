@@ -9,7 +9,8 @@ namespace cvub {
 
 inline bool HasModeledOperationSemantics(const std::string &name) {
   static const std::set<std::string> operations = {
-      "affine.apply", "annotation.mark", "bufferization.alloc_tensor",
+      "affine.apply", "affine.min", "annotation.mark",
+      "bufferization.alloc_tensor",
       "bufferization.to_tensor", "builtin.module", "cf.br", "cf.cond_br",
       "func.func", "func.return",
       "hivm.hir.atomic_cas", "hivm.hir.atomic_rmw", "hivm.hir.atomic_xchg",
@@ -65,7 +66,8 @@ inline std::vector<size_t> OperandSegmentSizes(const std::string &properties) {
 
 inline bool HasNoMemoryEffect(const std::string &name) {
   static const std::set<std::string> operations = {
-      "affine.apply", "cf.br", "cf.cond_br", "func.return", "llvm.inline_asm",
+      "affine.apply", "affine.min", "cf.br", "cf.cond_br", "func.return",
+      "llvm.inline_asm",
       "memref.collapse_shape", "memref.reinterpret_cast", "memref.subview",
       "scf.condition", "scf.yield", "tensor.collapse_shape", "tensor.empty",
       "tensor.expand_shape", "tensor.extract", "tensor.extract_slice",

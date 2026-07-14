@@ -308,19 +308,87 @@ CVUB_TEST(cube_fit_uses_fixpipe_destination_element_type) {
 }
 
 CVUB_TEST(default_cube_tiling_uses_ceil_div_and_fuses_mmad) {
+  auto input = cvub::test::ParseFixture("tile_cube_loop.mlir");
+  auto &inputMmad = MutableOperationNamed(input, "hivm.hir.mmadL1");
+  cvub::ApplyOperationSemantics(inputMmad);
+  CVUB_CHECK_EQ(inputMmad.operands.size(), 7U);
+  CVUB_CHECK_EQ(cvub::DpsInitOperandIndices(
+                    inputMmad.name, inputMmad.operands.size(),
+                    inputMmad.properties),
+                std::vector<size_t>({6U}));
+  CVUB_CHECK_EQ(inputMmad.dpsInits,
+                std::vector<int>({inputMmad.operands[6]}));
   const auto result = cvub::RunTileCubeVectorLoop(
-      cvub::test::ParseFixture("tile_cube_loop.mlir"), 2, 2);
+      input, 2, 2);
   CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
   CVUB_CHECK_EQ(OperationNamed(result.module, "hivm.hir.mmadL1").resultTypes,
                 std::vector<std::string>({"tensor<128x2048xf32>"}));
-  const auto &mmad = OperationNamed(result.module, "hivm.hir.mmadL1");
-  const auto &rhs = DefinitionOf(result.module, mmad.operands[1]);
+  const auto &matrix = OperationNamed(result.module, "hivm.hir.mmadL1");
+  CVUB_CHECK_EQ(matrix.operands.size(), 7U);
+  CVUB_CHECK_EQ(cvub::DpsInitOperandIndices(
+                    matrix.name, matrix.operands.size(), matrix.properties),
+                std::vector<size_t>({6U}));
+  CVUB_CHECK_EQ(matrix.dpsInits, std::vector<int>({matrix.operands[6]}));
+  CVUB_CHECK_EQ(DefinitionOf(result.module, matrix.operands[5])
+                    .name,
+                "affine.min");
+  CVUB_CHECK_EQ(cvub::IRDictionaryValue(
+                    DefinitionOf(result.module, matrix.operands[3])
+                        .attributes,
+                    "value"),
+                "128 : index");
+  CVUB_CHECK_EQ(cvub::IRDictionaryValue(
+                    DefinitionOf(result.module, matrix.operands[4])
+                        .attributes,
+                    "value"),
+                "64 : index");
+  const auto &rhs = DefinitionOf(result.module, matrix.operands[1]);
   CVUB_CHECK_EQ(rhs.resultTypes,
                 std::vector<std::string>({"tensor<64x2048xf16>"}));
-  CVUB_CHECK_EQ(result.module.operations.at(static_cast<size_t>(mmad.parentId))
+  CVUB_CHECK_EQ(result.module.operations.at(static_cast<size_t>(matrix.parentId))
                     .name,
                 "scf.for");
   cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(cube_rejects_legacy_four_operand_synthetic_mmad) {
+  auto module = cvub::test::ParseFixture("tile_cube_loop.mlir");
+  auto &legacy = MutableOperationNamed(module, "hivm.hir.mmadL1");
+  const std::vector<int> originalOperands = legacy.operands;
+  const std::vector<std::string> originalTypes = legacy.operandTypes;
+  legacy.operands = {originalOperands[0], originalOperands[1],
+                     originalOperands[2], originalOperands[6]};
+  legacy.operandTypes = {originalTypes[0], originalTypes[1], originalTypes[2],
+                         originalTypes[6]};
+  legacy.dpsInputs = {legacy.operands[0], legacy.operands[1],
+                      legacy.operands[2]};
+  legacy.dpsInits = {legacy.operands[3]};
+  legacy.properties = cvub::SetDictionaryValue(
+      legacy.properties, "operandSegmentSizes", "array<i32: 1, 1, 1, 1>");
+  legacy.attributes = cvub::SetDictionaryValue(
+      legacy.attributes, "operandSegmentSizes", "array<i32: 1, 1, 1, 1>");
+  cvub::ValidateGenericModule(module);
+  ExpectTileIncompleteAndUnchanged(module);
+}
+
+CVUB_TEST(cube_real_dimensions_must_match_the_static_matrix_shape) {
+  auto stale = cvub::test::ParseFixture("tile_cube_loop.mlir");
+  const auto &staleMmad = OperationNamed(stale, "hivm.hir.mmadL1");
+  auto &staleRealN = stale.operations.at(
+      static_cast<size_t>(DefinitionOf(stale, staleMmad.operands[5]).id));
+  staleRealN.attributes = cvub::SetDictionaryValue(
+      staleRealN.attributes, "value", "4095 : index");
+  ExpectTileIncompleteAndUnchanged(stale);
+
+  auto dynamic = cvub::test::ParseFixture("tile_cube_loop.mlir");
+  auto &dynamicMmad = MutableOperationNamed(dynamic, "hivm.hir.mmadL1");
+  const auto &wrapper = OperationNamed(dynamic, "scf.for");
+  const int body = dynamic.regions.at(
+      static_cast<size_t>(wrapper.regions.front())).blocks.front();
+  dynamicMmad.operands[5] =
+      dynamic.blocks.at(static_cast<size_t>(body)).arguments.front();
+  cvub::ValidateGenericModule(dynamic);
+  ExpectTileIncompleteAndUnchanged(dynamic);
 }
 
 CVUB_TEST(cube_m_axis_is_forced_by_inside_a_load_dependency) {
@@ -349,7 +417,38 @@ CVUB_TEST(cube_m_axis_is_forced_by_inside_a_load_dependency) {
                 std::vector<std::string>({"tensor<64x4096xf32>"}));
   CVUB_CHECK_EQ(tiledMmad.operandTypes[0], "tensor<64x64xf16>");
   CVUB_CHECK_EQ(tiledMmad.operandTypes[1], "tensor<64x4096xf16>");
+  CVUB_CHECK_EQ(DefinitionOf(result.module, tiledMmad.operands[3]).name,
+                "affine.min");
+  CVUB_CHECK_EQ(cvub::IRDictionaryValue(
+                    DefinitionOf(result.module, tiledMmad.operands[4])
+                        .attributes,
+                    "value"),
+                "64 : index");
+  CVUB_CHECK_EQ(cvub::IRDictionaryValue(
+                    DefinitionOf(result.module, tiledMmad.operands[5])
+                        .attributes,
+                    "value"),
+                "4096 : index");
   cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(cube_fixpipe_nz2nd_is_supported_but_other_dma_modes_fail_closed) {
+  const auto supported = cvub::RunTileCubeVectorLoop(
+      cvub::test::ParseFixture("tile_cube_loop.mlir"), 2, 2);
+  CVUB_CHECK_EQ(supported.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(cvub::IRDictionaryValue(
+                    OperationNamed(supported.module, "hivm.hir.fixpipe")
+                        .attributes,
+                    "dma_mode"),
+                "#hivm.dma_mode<nz2nd>");
+
+  auto unsupported = cvub::test::ParseFixture("tile_cube_loop.mlir");
+  auto &fixpipe = MutableOperationNamed(unsupported, "hivm.hir.fixpipe");
+  fixpipe.attributes = cvub::SetDictionaryValue(
+      fixpipe.attributes, "dma_mode", "#hivm.dma_mode<nz2dn>");
+  fixpipe.properties = cvub::SetDictionaryValue(
+      fixpipe.properties, "dma_mode", "#hivm.dma_mode<nz2dn>");
+  ExpectTileIncompleteAndUnchanged(unsupported);
 }
 
 CVUB_TEST(cube_inside_load_must_prove_the_group_axis) {
@@ -724,6 +823,15 @@ CVUB_TEST(tile_model_handles_cube_no_branch_l0c_skip_and_override) {
   auto &smallSubview = MutableOperationNamed(l0cSkip, "memref.subview");
   smallSubview.attributes = cvub::SetDictionaryValue(
       smallSubview.attributes, "static_sizes", "[64, 128]");
+  const auto &smallMmad = OperationNamed(l0cSkip, "hivm.hir.mmadL1");
+  auto &smallRealM = l0cSkip.operations.at(
+      static_cast<size_t>(DefinitionOf(l0cSkip, smallMmad.operands[3]).id));
+  auto &smallRealN = l0cSkip.operations.at(
+      static_cast<size_t>(DefinitionOf(l0cSkip, smallMmad.operands[5]).id));
+  smallRealM.attributes =
+      cvub::SetDictionaryValue(smallRealM.attributes, "value", "64 : index");
+  smallRealN.attributes =
+      cvub::SetDictionaryValue(smallRealN.attributes, "value", "128 : index");
   const auto skipResult = cvub::RunTileCubeVectorLoop(l0cSkip, 2, 2);
   CVUB_CHECK_EQ(skipResult.precision, cvub::Precision::Exact);
   CVUB_CHECK_EQ(OperationCount(skipResult.module, "scf.for"), 1U);

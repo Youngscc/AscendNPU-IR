@@ -38,6 +38,8 @@ struct LoopPlan {
   std::map<int, size_t> valueAxes;
   std::set<int> producerClosure;
   std::set<int> preservedProducerClosure;
+  int cubeMmadId = -1;
+  size_t cubeRealDimensionOperand = 0;
   int localDestinationSubview = -1;
   int localDestinationAlloc = -1;
 };
@@ -180,6 +182,26 @@ inline const GenericOperation *Definition(const GenericModule &module,
         operation.results.end())
       return &operation;
   return nullptr;
+}
+
+inline std::optional<int64_t> ConstantIndexValue(
+    const GenericModule &module, int value) {
+  const GenericOperation *definition = Definition(module, value);
+  if (definition == nullptr || definition->name != "arith.constant" ||
+      definition->resultTypes != std::vector<std::string>{"index"})
+    return std::nullopt;
+  const std::string attribute =
+      IRDictionaryValue(definition->attributes, "value");
+  static const std::regex indexValue(
+      R"(^([0-9]+)[[:space:]]*:[[:space:]]*index$)");
+  std::smatch match;
+  if (!std::regex_match(attribute, match, indexValue))
+    return std::nullopt;
+  try {
+    return std::stoll(match[1].str());
+  } catch (const std::exception &) {
+    return std::nullopt;
+  }
 }
 
 inline std::vector<const GenericOperation *>
@@ -574,7 +596,7 @@ inline bool HasExactIdentitySemantics(const GenericOperation &operation,
   } else if (operation.name == "hivm.hir.mmadL1") {
     allowed = {"hivm.tile_mix_cube_num", "operandSegmentSizes", "tcoretype"};
   } else if (operation.name == "hivm.hir.fixpipe") {
-    allowed = {"operandSegmentSizes", "tcoretype"};
+    allowed = {"dma_mode", "operandSegmentSizes", "tcoretype"};
   } else {
     reason = "operation has no exact identity-axis attribute model";
     return false;
@@ -598,6 +620,14 @@ inline bool HasExactIdentitySemantics(const GenericOperation &operation,
   if (!transpose.empty() && !IsIdentityPermutation(transpose, rank)) {
     reason = "transpose attribute breaks identity axis equivalence";
     return false;
+  }
+  if (operation.name == "hivm.hir.fixpipe") {
+    const std::string dmaMode =
+        IRDictionaryValue(operation.attributes, "dma_mode");
+    if (!dmaMode.empty() && dmaMode != "#hivm.dma_mode<nz2nd>") {
+      reason = "fixpipe dma_mode is outside the proven nz2nd axis model";
+      return false;
+    }
   }
   return true;
 }
@@ -882,23 +912,47 @@ inline bool AnalyzeLoop(const GenericModule &module,
       plan.skip = true;
       return true;
     }
+    std::vector<size_t> operandSegments;
+    std::vector<size_t> dpsInitIndices;
+    try {
+      operandSegments = OperandSegmentSizes(mmad->properties);
+      dpsInitIndices = DpsInitOperandIndices(
+          mmad->name, mmad->operands.size(), mmad->properties);
+    } catch (const std::exception &) {
+      reason = "MmadL1 has malformed operand segment metadata";
+      return false;
+    }
+    const std::vector<size_t> coreSegments = {1, 1, 1, 1, 1,
+                                               1, 1, 0, 0, 0};
     if (mmad->results.size() != 1 || mmad->resultTypes.size() != 1 ||
-        mmad->operands.size() != 4 || mmad->operandTypes.size() != 4 ||
+        mmad->operands.size() != 7 || mmad->operandTypes.size() != 7 ||
+        operandSegments != coreSegments ||
+        dpsInitIndices != std::vector<size_t>{6} ||
+        (!mmad->dpsInits.empty() &&
+         mmad->dpsInits != std::vector<int>{mmad->operands[6]}) ||
+        mmad->operandTypes[2] != "i1" || mmad->operandTypes[3] != "index" ||
+        mmad->operandTypes[4] != "index" ||
+        mmad->operandTypes[5] != "index" ||
         anchors.front()->operands.size() < 2 ||
         anchors.front()->operandTypes.size() < 2) {
-      reason = "MmadL1/fixpipe branch arity is outside the exact model";
+      reason = "MmadL1 does not match the exact ODS core operand layout";
       return false;
     }
     const auto destinationType =
         ParseStaticShapedType(anchors.front()->operandTypes[1]);
     const auto aType = ParseStaticShapedType(mmad->operandTypes[0]);
     const auto bType = ParseStaticShapedType(mmad->operandTypes[1]);
-    const auto accumulateType = ParseStaticShapedType(mmad->operandTypes[3]);
+    const auto accumulateType = ParseStaticShapedType(mmad->operandTypes[6]);
+    const auto realM = ConstantIndexValue(module, mmad->operands[3]);
+    const auto realK = ConstantIndexValue(module, mmad->operands[4]);
+    const auto realN = ConstantIndexValue(module, mmad->operands[5]);
     if (!aType || !bType || !accumulateType || aType->shape.size() != 2 ||
         bType->shape.size() != 2 || accumulateType->shape != sourceType->shape ||
         aType->shape[1] != bType->shape[0] ||
         sourceType->shape[0] != aType->shape[0] ||
         sourceType->shape[1] != bType->shape[1] ||
+        !realM || !realK || !realN || *realM != aType->shape[0] ||
+        *realK != aType->shape[1] || *realN != bType->shape[1] ||
         !HasExactIdentitySemantics(*mmad, 2, reason) ||
         !HasExactIdentitySemantics(*anchors.front(), 2, reason)) {
       if (reason.empty())
@@ -924,6 +978,8 @@ inline bool AnalyzeLoop(const GenericModule &module,
       return false;
     }
     plan.extent = sourceType->shape[*axis];
+    plan.cubeMmadId = mmad->id;
+    plan.cubeRealDimensionOperand = *axis == 0 ? 3U : 5U;
     if ((aInside != bInside) &&
         !ProveLoadAxisEvidence(module, loop, mmad->operands[*axis], *axis,
                                plan.extent, reason)) {
@@ -938,7 +994,7 @@ inline bool AnalyzeLoop(const GenericModule &module,
     plan.producerClosure.insert(mmad->id);
     if (!CollectProducerClosure(module, loop, mmad->operands[*axis], *kind,
                                 plan.producerClosure, reason) ||
-        !CollectProducerClosure(module, loop, mmad->operands[3], *kind,
+        !CollectProducerClosure(module, loop, mmad->operands[6], *kind,
                                 plan.producerClosure, reason))
       return false;
     const size_t otherAxis = *axis == 0 ? 1 : 0;
@@ -948,8 +1004,8 @@ inline bool AnalyzeLoop(const GenericModule &module,
     plan.producerClosure.insert(anchors.front()->id);
     if (!RecordValueAxis(module, plan, mmad->results[0], mmad->resultTypes[0],
                          *axis, plan.extent, reason) ||
-        !RecordValueAxis(module, plan, mmad->operands[3],
-                         mmad->operandTypes[3], *axis, plan.extent, reason) ||
+        !RecordValueAxis(module, plan, mmad->operands[6],
+                         mmad->operandTypes[6], *axis, plan.extent, reason) ||
         !RecordValueAxis(module, plan, anchors.front()->operands[1],
                          anchors.front()->operandTypes[1], *axis, plan.extent,
                          reason))
@@ -1048,6 +1104,30 @@ inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
       {"index"}, "", "{map = affine_map<(d0) -> (d0 * " +
                               std::to_string(tileSize) + ")>}");
   rewriter.appendToBlock(innerBlock, offset);
+
+  if (plan.kind == LoopKind::Cube) {
+    if (plan.cubeMmadId < 0)
+      throw std::runtime_error("Cube plan has no MmadL1 operation");
+    GenericOperation &matrix = module.operations.at(
+        static_cast<size_t>(plan.cubeMmadId));
+    if (plan.cubeRealDimensionOperand >= matrix.operands.size() ||
+        plan.cubeRealDimensionOperand >= matrix.operandTypes.size())
+      throw std::runtime_error("Cube MmadL1 real dimension operand is missing");
+    const int oldDimension = matrix.operands[plan.cubeRealDimensionOperand];
+    const int remaining = rewriter.createOperation(
+        innerLoop, innerRegion, innerBlock, "affine.min", {"index"},
+        {module.operations.at(static_cast<size_t>(offset)).results.front()},
+        {"index"}, "",
+        "{map = affine_map<(d0) -> (-d0 + " +
+            std::to_string(plan.extent) + ", " +
+            std::to_string(tileSize) + ")>}");
+    rewriter.appendToBlock(innerBlock, remaining);
+    const int tiledDimension =
+        module.operations.at(static_cast<size_t>(remaining)).results.front();
+    matrix.operands[plan.cubeRealDimensionOperand] = tiledDimension;
+    std::replace(matrix.dpsInputs.begin(), matrix.dpsInputs.end(), oldDimension,
+                 tiledDimension);
+  }
 
   if (plan.localDestinationAlloc >= 0) {
     GenericOperation &alloc = module.operations.at(
