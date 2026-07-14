@@ -1173,9 +1173,10 @@ inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
           "Cube MmadL1 DPS input position disagrees with its operand segment");
     const int remaining = rewriter.createOperation(
         innerLoop, innerRegion, innerBlock, "affine.min", {"index"},
-        {module.operations.at(static_cast<size_t>(offset)).results.front()},
+        {innerIV},
         {"index"},
-        "{map = affine_map<(d0) -> (-d0 + " +
+        "{map = affine_map<(d0) -> (-" + std::to_string(tileSize) +
+            "*d0 + " +
             std::to_string(plan.extent) + ", " +
             std::to_string(tileSize) + ")>}",
         "");

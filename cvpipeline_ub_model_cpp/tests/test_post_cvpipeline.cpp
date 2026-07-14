@@ -3,6 +3,7 @@
 #include "../src/post_cvpipeline/pipeline.hpp"
 #include "../src/post_cvpipeline/split_mix_aiv.hpp"
 #include "../src/post_cvpipeline/tile_cube_vector_loop.hpp"
+#include "../src/suffix/suffix_pipeline.hpp"
 
 #include <fstream>
 #include <string>
@@ -366,6 +367,17 @@ CVUB_TEST(default_cube_tiling_uses_ceil_div_and_fuses_mmad) {
   CVUB_CHECK_EQ(DefinitionOf(result.module, matrix.operands[5])
                     .name,
                 "affine.min");
+  const auto &minimum = DefinitionOf(result.module, matrix.operands[5]);
+  const auto &innerLoop = result.module.operations.at(
+      static_cast<size_t>(matrix.parentId));
+  const int innerBlock = result.module.regions.at(
+      static_cast<size_t>(innerLoop.regions.front())).blocks.front();
+  CVUB_CHECK_EQ(minimum.operands,
+                std::vector<int>({result.module.blocks.at(
+                    static_cast<size_t>(innerBlock)).arguments.front()}));
+  CVUB_CHECK_EQ(minimum.operandTypes, std::vector<std::string>({"index"}));
+  CVUB_CHECK_EQ(cvub::IRDictionaryValue(minimum.properties, "map"),
+                "affine_map<(d0) -> (-2048*d0 + 4096, 2048)>");
   CVUB_CHECK_EQ(cvub::IRDictionaryValue(
                     DefinitionOf(result.module, matrix.operands[3])
                         .attributes,
@@ -383,6 +395,132 @@ CVUB_TEST(default_cube_tiling_uses_ceil_div_and_fuses_mmad) {
                     .name,
                 "scf.for");
   cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(cube_affine_min_is_consumed_by_the_real_suffix_bridge) {
+  const auto prepareForSuffix = [](cvub::GenericModule &module) {
+    auto &minimum = MutableOperationNamed(module, "affine.min");
+    std::smatch tileMatch;
+    const std::string minimumMap = cvub::IRDictionaryValue(
+        minimum.properties, "map");
+    CVUB_CHECK(std::regex_search(
+        minimumMap, tileMatch,
+        std::regex(R"(,[[:space:]]*([0-9]+)\)>$)")));
+    const int64_t tileSize = std::stoll(tileMatch[1].str());
+    auto &innerLoop = module.operations.at(
+        static_cast<size_t>(minimum.parentId));
+    innerLoop.properties = cvub::SetDictionaryValue(
+        innerLoop.properties, "map_for_to_forall", "unit");
+
+    bool madeMinimumObservable = false;
+    for (cvub::GenericOperation &operation : module.operations) {
+      if (operation.name != "tensor.extract_slice" &&
+          operation.name != "memref.subview")
+        continue;
+      const std::string offsets = cvub::IRDictionaryValue(
+          operation.attributes, "static_offsets");
+      const std::string sizes = cvub::IRDictionaryValue(
+          operation.attributes, "static_sizes");
+      const std::string strides = cvub::IRDictionaryValue(
+          operation.attributes, "static_strides");
+      if (offsets.empty() || sizes.empty() || strides.empty())
+        continue;
+      const auto denseI64 = [](const std::string &array) {
+        return "array<i64: " + array.substr(1, array.size() - 2) + ">";
+      };
+      operation.properties = cvub::SetDictionaryValue(
+          operation.properties, "static_offsets", denseI64(offsets));
+      operation.properties = cvub::SetDictionaryValue(
+          operation.properties, "static_sizes", denseI64(sizes));
+      operation.properties = cvub::SetDictionaryValue(
+          operation.properties, "static_strides", denseI64(strides));
+      if (madeMinimumObservable || operation.operands.size() != 2)
+        continue;
+      std::vector<int64_t> dynamicSizes =
+          cvub::tile_cube_vector_loop_detail::ParseIntegerArray(sizes);
+      const auto resultType =
+          cvub::tile_cube_vector_loop_detail::ParseStaticShapedType(
+          operation.resultTypes.front());
+      if (!resultType || dynamicSizes.size() != resultType->shape.size())
+        continue;
+      size_t tiledAxis = dynamicSizes.size();
+      for (size_t axis = 0; axis < dynamicSizes.size(); ++axis)
+        if (dynamicSizes[axis] == resultType->shape[axis] &&
+            dynamicSizes[axis] == tileSize) {
+          tiledAxis = axis;
+          break;
+        }
+      if (tiledAxis == dynamicSizes.size())
+        continue;
+      dynamicSizes[tiledAxis] = std::numeric_limits<int64_t>::min();
+      operation.properties = cvub::SetDictionaryValue(
+          operation.properties, "static_sizes",
+          denseI64(cvub::tile_cube_vector_loop_detail::PrintIntegerArray(
+              dynamicSizes)));
+      operation.operands.push_back(minimum.results.front());
+      operation.operandTypes.push_back("index");
+      operation.properties = cvub::SetDictionaryValue(
+          operation.properties, "operandSegmentSizes",
+          "array<i32: 1, 1, 1, 0>");
+      madeMinimumObservable = true;
+    }
+    CVUB_CHECK(madeMinimumObservable);
+  };
+
+  auto nTiled = cvub::RunTileCubeVectorLoop(
+      cvub::test::ParseFixture("tile_cube_loop.mlir"), 2, 2);
+  CVUB_CHECK_EQ(nTiled.precision, cvub::Precision::Exact);
+  auto &nFunction = MutableOperationNamed(nTiled.module, "func.func");
+  nFunction.attributes = cvub::SetDictionaryValue(
+      nFunction.attributes, "hivm.func_core_type",
+      "#hivm.func_core_type<AIV>");
+  prepareForSuffix(nTiled.module);
+  const cvub::PlanMemoryInput nPlan =
+      cvub::BuildSuffixPlanMemoryInput(nTiled.module);
+  CVUB_CHECK(std::none_of(
+      nPlan.operations.begin(), nPlan.operations.end(),
+      [](const cvub::OperationRecord &operation) {
+        return operation.opName == "affine.min";
+      }));
+
+  auto mInput = cvub::test::ParseFixture("tile_cube_loop.mlir");
+  auto &mmad = MutableOperationNamed(mInput, "hivm.hir.mmadL1");
+  auto &load = MutableOperationNamed(mInput, "hivm.hir.load");
+  const int outsideA = mmad.operands[0];
+  const int outsideB = load.operands[0];
+  const int loaded = load.results.front();
+  auto &loadInit = mInput.operations.at(
+      static_cast<size_t>(DefinitionOf(mInput, load.operands[1]).id));
+  loadInit.resultTypes.front() = "tensor<128x64xf16>";
+  load.operands[0] = outsideA;
+  load.operandTypes = {"tensor<128x64xf16>", "tensor<128x64xf16>"};
+  load.resultTypes.front() = "tensor<128x64xf16>";
+  load.dpsInputs.clear();
+  load.dpsInits.clear();
+  load.effects.clear();
+  cvub::ApplyOperationSemantics(load);
+  mmad.operands[0] = loaded;
+  mmad.operandTypes[0] = "tensor<128x64xf16>";
+  mmad.operands[1] = outsideB;
+  mmad.operandTypes[1] = "tensor<64x4096xf16>";
+  mmad.dpsInputs.clear();
+  mmad.dpsInits.clear();
+  cvub::ApplyOperationSemantics(mmad);
+  cvub::ValidateGenericModule(mInput);
+  auto mTiled = cvub::RunTileCubeVectorLoop(mInput, 2, 2);
+  CVUB_CHECK_EQ(mTiled.precision, cvub::Precision::Exact);
+  auto &mFunction = MutableOperationNamed(mTiled.module, "func.func");
+  mFunction.attributes = cvub::SetDictionaryValue(
+      mFunction.attributes, "hivm.func_core_type",
+      "#hivm.func_core_type<AIV>");
+  prepareForSuffix(mTiled.module);
+  const cvub::PlanMemoryInput mPlan =
+      cvub::BuildSuffixPlanMemoryInput(mTiled.module);
+  CVUB_CHECK(std::none_of(
+      mPlan.operations.begin(), mPlan.operations.end(),
+      [](const cvub::OperationRecord &operation) {
+        return operation.opName == "affine.min";
+      }));
 }
 
 CVUB_TEST(cube_rejects_legacy_four_operand_synthetic_mmad) {
@@ -437,11 +575,17 @@ CVUB_TEST(cube_shared_real_dimensions_update_only_the_n_operand_and_metadata) {
   CVUB_CHECK_EQ(matrix.dpsInputs[5], matrix.operands[5]);
   const auto &minimum = DefinitionOf(result.module, matrix.operands[5]);
   CVUB_CHECK_EQ(cvub::IRDictionaryValue(minimum.properties, "map"),
-                "affine_map<(d0) -> (-d0 + 256, 128)>");
+                "affine_map<(d0) -> (-128*d0 + 256, 128)>");
   CVUB_CHECK(cvub::IRDictionaryValue(minimum.attributes, "map").empty());
   CVUB_CHECK_EQ(minimum.operands.size(), 1U);
   CVUB_CHECK_EQ(minimum.operandTypes, std::vector<std::string>({"index"}));
   CVUB_CHECK_EQ(minimum.resultTypes, std::vector<std::string>({"index"}));
+  const auto &innerLoop = result.module.operations.at(
+      static_cast<size_t>(minimum.parentId));
+  const int innerBlock = result.module.regions.at(
+      static_cast<size_t>(innerLoop.regions.front())).blocks.front();
+  CVUB_CHECK_EQ(minimum.operands.front(), result.module.blocks.at(
+      static_cast<size_t>(innerBlock)).arguments.front());
 }
 
 CVUB_TEST(cube_real_dimensions_must_match_the_static_matrix_shape) {
@@ -543,11 +687,17 @@ CVUB_TEST(cube_shared_real_dimensions_update_only_the_m_operand_and_metadata) {
   CVUB_CHECK_EQ(matrix.dpsInputs[5], shared);
   const auto &minimum = DefinitionOf(result.module, matrix.operands[3]);
   CVUB_CHECK_EQ(cvub::IRDictionaryValue(minimum.properties, "map"),
-                "affine_map<(d0) -> (-d0 + 256, 128)>");
+                "affine_map<(d0) -> (-128*d0 + 256, 128)>");
   CVUB_CHECK(cvub::IRDictionaryValue(minimum.attributes, "map").empty());
   CVUB_CHECK_EQ(minimum.operands.size(), 1U);
   CVUB_CHECK_EQ(minimum.operandTypes, std::vector<std::string>({"index"}));
   CVUB_CHECK_EQ(minimum.resultTypes, std::vector<std::string>({"index"}));
+  const auto &innerLoop = result.module.operations.at(
+      static_cast<size_t>(minimum.parentId));
+  const int innerBlock = result.module.regions.at(
+      static_cast<size_t>(innerLoop.regions.front())).blocks.front();
+  CVUB_CHECK_EQ(minimum.operands.front(), result.module.blocks.at(
+      static_cast<size_t>(innerBlock)).arguments.front());
 }
 
 CVUB_TEST(cube_fixpipe_nz2nd_is_supported_but_other_dma_modes_fail_closed) {
