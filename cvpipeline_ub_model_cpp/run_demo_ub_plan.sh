@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
-PRE_CVPIPELINE_IR="cvpipeline_ub_model_cpp/examples/inputs/demo_randn_before_cvpipeline.mlir"
+PRE_CVPIPELINE_IR="cvpipeline_ub_model_cpp/data/before_cvpipeline/triton.language.randn.ttadapter/before_cvpipelining_func_func_kernel_randn_32.mlir"
 DEMO_JSON="cvpipeline_ub_model_cpp/output/demo/ub_plan.json"
 DEMO_HTML="cvpipeline_ub_model_cpp/output/demo/ub_plan_visualizer.html"
 ORACLE_DIR="cvpipeline_ub_model_cpp/output/demo/suffix_oracle"
@@ -12,18 +12,18 @@ SUFFIX_TOOL="build/bin/bishengir-cvpipeline-suffix-compile"
 RUN_ORACLE=true
 BUILD_SUFFIX_ORACLE=true
 
-# CVPipeline 参数：只影响 createCVPipeliningPass 的建模路径。
+# CVPipeline parameters only affect the createCVPipeliningPass model path.
 CV_DISABLE_PIPELINING=false
 CV_PIPELINE_DEPTH=-1
 CV_ENABLE_PRELOAD=false
 CV_ENABLE_LAZY_LOADING=false
 
-# suffix / PlanMemory 参数：只影响 CVPipeline 之后的 UB buffer 和规划。
+# Suffix / PlanMemory parameters only affect post-CVPipeline UB planning.
 SUFFIX_ENABLE_AUTO_MULTI_BUFFER=false
 SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY=no-l0c
 SUFFIX_MIX_MULTI_BUFFER_STRATEGY=only-cube
 RESTRICT_INPLACE_AS_ISA=false
-# 默认留空，保持 PlanMemory retry/attempt 行为；只在定位固定 attempt 时设置。
+# Keep empty for PlanMemory retry mode; set only to reproduce one attempt.
 RANDOM_SEED=""
 
 usage() {
@@ -83,7 +83,7 @@ bash cvpipeline_ub_model_cpp/build.sh >/dev/null
 
 if [[ "${RUN_ORACLE}" == "true" && "${BUILD_SUFFIX_ORACLE}" == "true" ]]; then
   echo "[2/5] Building suffix compiler incrementally..."
-  # 保留 CMake/Ninja 输出，便于观察增量构建进度和编译错误。
+  # Keep CMake/Ninja output visible so incremental progress and errors are clear.
   cmake --build build --target bishengir-cvpipeline-suffix-compile -j8
 fi
 
@@ -91,15 +91,15 @@ echo "[3/5] Running lightweight model and writing JSON..."
 mkdir -p "$(dirname "${DEMO_JSON}")"
 model_args=(
   python3 cvpipeline_ub_model_cpp/scripts/plan_precvpipeline_ub.py
-  --pre-cvpipeline-ir="${PRE_CVPIPELINE_IR}" \
-  --cv-disable-pipelining="${CV_DISABLE_PIPELINING}" \
-  --cv-pipeline-depth="${CV_PIPELINE_DEPTH}" \
-  --cv-enable-preload="${CV_ENABLE_PRELOAD}" \
-  --cv-enable-lazy-loading="${CV_ENABLE_LAZY_LOADING}" \
-  --suffix-enable-auto-multi-buffer="${SUFFIX_ENABLE_AUTO_MULTI_BUFFER}" \
-  --suffix-local-multi-buffer-strategy="${SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY}" \
-  --suffix-mix-multi-buffer-strategy="${SUFFIX_MIX_MULTI_BUFFER_STRATEGY}" \
-  --format=json \
+  --pre-cvpipeline-ir="${PRE_CVPIPELINE_IR}"
+  --cv-disable-pipelining="${CV_DISABLE_PIPELINING}"
+  --cv-pipeline-depth="${CV_PIPELINE_DEPTH}"
+  --cv-enable-preload="${CV_ENABLE_PRELOAD}"
+  --cv-enable-lazy-loading="${CV_ENABLE_LAZY_LOADING}"
+  --suffix-enable-auto-multi-buffer="${SUFFIX_ENABLE_AUTO_MULTI_BUFFER}"
+  --suffix-local-multi-buffer-strategy="${SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY}"
+  --suffix-mix-multi-buffer-strategy="${SUFFIX_MIX_MULTI_BUFFER_STRATEGY}"
+  --format=json
   --output="${DEMO_JSON}"
 )
 if [[ "${RESTRICT_INPLACE_AS_ISA}" == "true" || "${RESTRICT_INPLACE_AS_ISA}" == "1" ]]; then
@@ -142,7 +142,7 @@ if [[ "${RUN_ORACLE}" == "true" ]]; then
   BISHENGIR_DUMP_PLAN_MEMORY_ATTEMPTS=1 "${suffix_args[@]}" \
     >"${ORACLE_DIR}/stdout.log" 2>"${oracle_tsv}"
 else
-  echo "[3/4] Skipping suffix-compile oracle."
+  echo "[4/5] Skipping suffix-compile oracle."
 fi
 
 echo

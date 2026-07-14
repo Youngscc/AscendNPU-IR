@@ -1,0 +1,905 @@
+//===- bishengir-cvpipeline-suffix-compile.cpp ------------------*- C++ -*-===//
+//
+// Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+//===----------------------------------------------------------------------===//
+//
+// Standalone suffix compiler for exact UB peak debugging. It expects an MLIR
+// module dumped immediately before createCVPipeliningPass, runs the existing
+// real passes from CVPipelining to local PlanMemory, and stops there. It does
+// not modify or call the normal bishengir-compile pipeline.
+//
+//===----------------------------------------------------------------------===//
+
+#include "bishengir/Dialect/Annotation/Transforms/Passes.h"
+#include "bishengir/Dialect/HIVM/IR/HIVM.h"
+#include "bishengir/Dialect/HIVM/Transforms/Passes.h"
+#include "bishengir/Dialect/MemRef/Transforms/Passes.h"
+#include "bishengir/Dialect/SCF/Transforms/Passes.h"
+#include "bishengir/Dialect/Scope/Transforms/Passes.h"
+#include "bishengir/Dialect/Tensor/Transforms/Passes.h"
+#include "bishengir/InitAllDialects.h"
+#include "bishengir/InitAllExtensions.h"
+#include "bishengir/InitAllPasses.h"
+#include "bishengir/Pass/PassManager.h"
+#include "bishengir/Transforms/Passes.h"
+#include "bishengir/Version/Version.h"
+
+#include "mlir/Dialect/Bufferization/Transforms/OneShotAnalysis.h"
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/Transforms/Passes.h"
+#include "mlir/Dialect/SCF/Transforms/Passes.h"
+#include "mlir/InitAllDialects.h"
+#include "mlir/InitAllExtensions.h"
+#include "mlir/InitAllPasses.h"
+#include "mlir/Parser/Parser.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Support/FileUtilities.h"
+#include "llvm/ADT/StringSwitch.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/InitLLVM.h"
+#include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/ToolOutputFile.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include <cstdlib>
+
+using namespace mlir;
+using namespace mlir::hivm;
+
+namespace {
+struct DumpIRBeforeLocalPlanMemoryPass
+    : public PassWrapper<DumpIRBeforeLocalPlanMemoryPass,
+                         OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(
+      DumpIRBeforeLocalPlanMemoryPass)
+
+  StringRef getArgument() const override {
+    return "hivm-dump-ir-before-local-plan-memory-debug";
+  }
+
+  StringRef getDescription() const override {
+    return "Dump IR immediately before local PlanMemory when requested";
+  }
+
+  void runOnOperation() override {
+    const char *path = std::getenv("BISHENGIR_DUMP_BEFORE_PLAN_MEMORY");
+    if (path == nullptr || path[0] == '\0') {
+      markAllAnalysesPreserved();
+      return;
+    }
+
+    std::error_code ec;
+    llvm::raw_fd_ostream os(path, ec, llvm::sys::fs::OF_Text);
+    if (ec) {
+      llvm::errs() << "[WARNING] Failed to dump IR before local PlanMemory to "
+                   << path << ": " << ec.message() << "\n";
+      markAllAnalysesPreserved();
+      return;
+    }
+    getOperation().print(os);
+    os << "\n";
+    markAllAnalysesPreserved();
+  }
+};
+
+static std::unique_ptr<Pass> createDumpIRBeforeLocalPlanMemoryPass() {
+  return std::make_unique<DumpIRBeforeLocalPlanMemoryPass>();
+}
+
+struct DumpIRAfterCVPipeliningPass
+    : public PassWrapper<DumpIRAfterCVPipeliningPass,
+                         OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(DumpIRAfterCVPipeliningPass)
+
+  explicit DumpIRAfterCVPipeliningPass(StringRef path) : path(path) {}
+
+  StringRef getArgument() const override {
+    return "hivm-dump-ir-after-cv-pipelining-debug";
+  }
+
+  StringRef getDescription() const override {
+    return "Dump IR immediately after CVPipelining for C-stage oracle data";
+  }
+
+  void runOnOperation() override {
+    if (path.empty())
+      return;
+
+    std::error_code ec;
+    llvm::raw_fd_ostream os(path, ec, llvm::sys::fs::OF_Text);
+    if (ec) {
+      llvm::errs() << "[ERROR] Failed to dump IR after CVPipelining to "
+                   << path << ": " << ec.message() << "\n";
+      signalPassFailure();
+      return;
+    }
+    getOperation().print(os);
+    os << "\n";
+    markAllAnalysesPreserved();
+  }
+
+private:
+  std::string path;
+};
+
+static std::unique_ptr<Pass>
+createDumpIRAfterCVPipeliningPass(StringRef path) {
+  return std::make_unique<DumpIRAfterCVPipeliningPass>(path);
+}
+
+template <typename T>
+static std::string printToString(T value) {
+  std::string storage;
+  llvm::raw_string_ostream os(storage);
+  value.print(os);
+  return os.str();
+}
+
+static std::string hexEncode(StringRef value) {
+  static constexpr char digits[] = "0123456789abcdef";
+  std::string result;
+  result.reserve(value.size() * 2);
+  for (unsigned char byte : value.bytes()) {
+    result.push_back(digits[byte >> 4]);
+    result.push_back(digits[byte & 0xf]);
+  }
+  return result;
+}
+
+struct DumpC1SemanticOraclePass
+    : public PassWrapper<DumpC1SemanticOraclePass, OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(DumpC1SemanticOraclePass)
+
+  DumpC1SemanticOraclePass(StringRef semanticPath, StringRef genericPath)
+      : semanticPath(semanticPath), genericPath(genericPath) {}
+
+  StringRef getArgument() const override {
+    return "hivm-dump-c1-semantic-oracle-debug";
+  }
+
+  void runOnOperation() override {
+    if (!genericPath.empty() && failed(writeGenericIR())) {
+      signalPassFailure();
+      return;
+    }
+    if (!semanticPath.empty() && failed(writeSemanticOracle())) {
+      signalPassFailure();
+      return;
+    }
+    markAllAnalysesPreserved();
+  }
+
+private:
+  LogicalResult openOutput(StringRef path,
+                           std::unique_ptr<llvm::raw_fd_ostream> &os) {
+    std::error_code ec;
+    os = std::make_unique<llvm::raw_fd_ostream>(
+        path, ec, llvm::sys::fs::OF_Text);
+    if (!ec)
+      return success();
+    llvm::errs() << "[ERROR] Failed to open C1 oracle output " << path
+                 << ": " << ec.message() << "\n";
+    return failure();
+  }
+
+  LogicalResult writeGenericIR() {
+    std::unique_ptr<llvm::raw_fd_ostream> os;
+    if (failed(openOutput(genericPath, os)))
+      return failure();
+    OpPrintingFlags flags;
+    flags.printGenericOpForm();
+    getOperation().print(*os, flags);
+    *os << '\n';
+    return success();
+  }
+
+  LogicalResult writeSemanticOracle() {
+    std::unique_ptr<llvm::raw_fd_ostream> os;
+    if (failed(openOutput(semanticPath, os)))
+      return failure();
+
+    DenseMap<Operation *, unsigned> operationIds;
+    DenseMap<Region *, unsigned> regionIds;
+    DenseMap<Block *, unsigned> blockIds;
+    DenseMap<Value, unsigned> valueIds;
+    unsigned nextOperation = 0;
+    unsigned nextRegion = 0;
+    unsigned nextBlock = 0;
+    unsigned nextValue = 0;
+
+    std::function<void(Operation *)> preassign = [&](Operation *operation) {
+      operationIds[operation] = nextOperation++;
+      for (Value result : operation->getResults())
+        valueIds[result] = nextValue++;
+      for (Region &region : operation->getRegions()) {
+        regionIds[&region] = nextRegion++;
+        for (Block &block : region) {
+          blockIds[&block] = nextBlock++;
+          for (BlockArgument argument : block.getArguments())
+            valueIds[argument] = nextValue++;
+          for (Operation &child : block)
+            preassign(&child);
+        }
+      }
+    };
+    preassign(getOperation());
+
+    auto idList = [](auto values, const auto &ids) {
+      std::string result;
+      llvm::raw_string_ostream stream(result);
+      llvm::interleaveComma(values, stream,
+                            [&](auto value) { stream << ids.lookup(value); });
+      return stream.str();
+    };
+    auto typeList = [](auto types) {
+      std::string result;
+      llvm::raw_string_ostream stream(result);
+      llvm::interleaveComma(types, stream, [&](Type type) {
+        stream << hexEncode(printToString(type));
+      });
+      return stream.str();
+    };
+    auto effectName = [](MemoryEffects::Effect *effect) -> StringRef {
+      if (isa<MemoryEffects::Allocate>(effect))
+        return "allocate";
+      if (isa<MemoryEffects::Free>(effect))
+        return "free";
+      if (isa<MemoryEffects::Read>(effect))
+        return "read";
+      if (isa<MemoryEffects::Write>(effect))
+        return "write";
+      return "other";
+    };
+
+    *os << "C1_SCHEMA\t1\n";
+    std::function<void(Operation *, int, int, int, unsigned)> emit =
+        [&](Operation *operation, int parentId, int regionId, int blockId,
+            unsigned ordinal) {
+          const unsigned operationId = operationIds.lookup(operation);
+          std::string properties;
+          if (Attribute property = operation->getPropertiesAsAttribute())
+            properties = printToString(property);
+          std::string attributes = printToString(operation->getAttrDictionary());
+          std::string effects = "none";
+          if (auto interface = dyn_cast<MemoryEffectOpInterface>(operation)) {
+            SmallVector<MemoryEffects::EffectInstance> instances;
+            interface.getEffects(instances);
+            effects.clear();
+            llvm::raw_string_ostream effectStream(effects);
+            llvm::interleaveComma(instances, effectStream, [&](const auto &effect) {
+              Value value = effect.getValue();
+              std::string parameters = effect.getParameters()
+                                           ? printToString(effect.getParameters())
+                                           : "";
+              effectStream << effectName(effect.getEffect()) << '@'
+                           << (value ? std::to_string(valueIds.lookup(value)) : "-")
+                           << '@' << hexEncode(effect.getResource()->getName())
+                           << '@' << effect.getStage() << '@'
+                           << static_cast<int>(effect.getEffectOnFullRegion())
+                           << '@' << hexEncode(parameters);
+            });
+          }
+          std::string dpsInputs;
+          std::string dpsInits;
+          if (auto dps = dyn_cast<DestinationStyleOpInterface>(operation)) {
+            dpsInputs = idList(dps.getDpsInputs(), valueIds);
+            dpsInits = idList(dps.getDpsInits(), valueIds);
+          }
+          SmallVector<Block *> successors(operation->getSuccessors());
+          *os << "OP\t" << operationId << '\t' << parentId << '\t'
+              << regionId << '\t' << blockId << '\t' << ordinal << '\t'
+              << hexEncode(operation->getName().getStringRef()) << '\t'
+              << idList(operation->getResults(), valueIds) << '\t'
+              << idList(operation->getOperands(), valueIds) << '\t'
+              << typeList(operation->getResultTypes()) << '\t'
+              << typeList(operation->getOperandTypes()) << '\t'
+              << hexEncode(properties) << '\t' << hexEncode(attributes) << '\t'
+              << idList(successors, blockIds) << '\t' << hexEncode(effects)
+              << '\t' << dpsInputs << '\t' << dpsInits << '\n';
+
+          for (auto [regionOrdinal, region] :
+               llvm::enumerate(operation->getRegions())) {
+            unsigned currentRegion = regionIds.lookup(&region);
+            *os << "REGION\t" << currentRegion << '\t' << operationId << '\t'
+                << regionOrdinal << '\n';
+            for (auto [blockOrdinal, block] : llvm::enumerate(region)) {
+              unsigned currentBlock = blockIds.lookup(&block);
+              *os << "BLOCK\t" << currentBlock << '\t' << currentRegion << '\t'
+                  << blockOrdinal << '\t'
+                  << idList(block.getArguments(), valueIds) << '\t'
+                  << typeList(block.getArgumentTypes()) << '\n';
+              for (auto [childOrdinal, child] : llvm::enumerate(block))
+                emit(&child, operationId, currentRegion, currentBlock,
+                     childOrdinal);
+            }
+          }
+        };
+    emit(getOperation(), -1, -1, -1, 0);
+    return success();
+  }
+
+  std::string semanticPath;
+  std::string genericPath;
+};
+
+static llvm::cl::opt<std::string> inputFilename(
+    llvm::cl::Positional, llvm::cl::desc("<input before-cvpipeline mlir>"),
+    llvm::cl::init("-"));
+
+static llvm::cl::opt<std::string>
+    outputFilename("o", llvm::cl::desc("Output suffix IR file"),
+                   llvm::cl::value_desc("filename"), llvm::cl::init("-"));
+
+static llvm::cl::opt<bool> allowUnregisteredDialects(
+    "allow-unregistered-dialect",
+    llvm::cl::desc("Allow operation with no registered dialects"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> enableMemoryDisplay(
+    "enable-memory-display",
+    llvm::cl::desc("Enable PlanMemory memory_info*.json output"),
+    llvm::cl::init(true));
+
+static llvm::cl::opt<bool> localPlanMemoryOnly(
+    "local-plan-memory-only",
+    llvm::cl::desc("Run only local PlanMemory on a before-PlanMemory IR"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<std::string> dumpIRAfterCVPipelining(
+    "dump-ir-after-cvpipelining",
+    llvm::cl::desc("Dump the module at the CVPipelining-after boundary"),
+    llvm::cl::value_desc("filename"), llvm::cl::init(""));
+
+static llvm::cl::opt<bool> stopAfterCVPipelining(
+    "stop-after-cvpipelining",
+    llvm::cl::desc("Stop the suffix pipeline at the CVPipelining-after boundary"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<std::string> dumpC1SemanticOracle(
+    "dump-c1-semantic-oracle",
+    llvm::cl::desc("Dump canonical C1 SemanticIR from real MLIR objects"),
+    llvm::cl::value_desc("filename"), llvm::cl::init(""));
+
+static llvm::cl::opt<std::string> dumpC1GenericIR(
+    "dump-c1-generic-ir",
+    llvm::cl::desc("Dump generic-form MLIR at the C1 input boundary"),
+    llvm::cl::value_desc("filename"), llvm::cl::init(""));
+
+static llvm::cl::opt<int> planMemorySeed(
+    "plan-memory-seed",
+    llvm::cl::desc("Run local PlanMemory once with seed N; -1 keeps retries"),
+    llvm::cl::init(-1));
+
+static llvm::cl::opt<bool> restrictInplaceAsISA(
+    "restrict-inplace-as-isa",
+    llvm::cl::desc("Restrict local PlanMemory inplace reuse to ISA rules"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> enableTritonKernelCompile(
+    "enable-triton-kernel-compile",
+    llvm::cl::desc("Keep Triton-specific suffix passes enabled"),
+    llvm::cl::init(true));
+
+static llvm::cl::opt<bool> disableAutoCVWorkSpaceManage(
+    "disable-auto-cv-work-space-manage",
+    llvm::cl::desc("Disable the CV workspace manage suffix pieces"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> disableCVPipelining(
+    "disable-cv-pipelining",
+    llvm::cl::desc("Disable createCVPipeliningPass in the suffix"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> disableAutoCVGlobalWorkspacePlan(
+    "disable-auto-cv-global-workspace-plan",
+    llvm::cl::desc("Disable global workspace PlanMemory before bufferization"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> enableHIVMGlobalWorkspaceReuse(
+    "enable-hivm-global-workspace-reuse",
+    llvm::cl::desc("Enable global workspace reuse in workspace PlanMemory"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> disableSplitMixKernel(
+    "disable-split-mix-kernel",
+    llvm::cl::desc("Disable SplitMixKernel in the suffix"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> enableAutoBindSubBlock(
+    "enable-auto-bind-sub-block",
+    llvm::cl::desc("Enable TileAndBindSubBlock in the suffix"),
+    llvm::cl::init(true));
+
+static llvm::cl::opt<int> tileMixCubeLoop(
+    "tile-mix-cube-loop", llvm::cl::desc("Cube loop tiling factor"),
+    llvm::cl::init(1));
+
+static llvm::cl::opt<int> tileMixVectorLoop(
+    "tile-mix-vector-loop", llvm::cl::desc("Vector loop tiling factor"),
+    llvm::cl::init(1));
+
+static llvm::cl::opt<bool> enablePreload(
+    "enable-preload",
+    llvm::cl::desc("Enable CVPipelining skew/preload mode"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<int> cvPipelineDepth(
+    "cv-pipeline-depth",
+    llvm::cl::desc("Set CVPipelining unroll depth; -1 keeps automatic depth"),
+    llvm::cl::init(-1));
+
+static llvm::cl::opt<bool> enableCVLazyLoading(
+    "enable-cv-lazy-loading",
+    llvm::cl::desc("Enable CVPipelining lazy loading"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> enableCodeMotion(
+    "enable-code-motion",
+    llvm::cl::desc("Enable code motion passes before bufferization"),
+    llvm::cl::init(true));
+
+static llvm::cl::opt<bool> enableUbufSaving(
+    "enable-ubuf-saving",
+    llvm::cl::desc("Enable ubuf-saving sink pass before bufferization"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> enableAutoMultiBuffer(
+    "enable-auto-multi-buffer",
+    llvm::cl::desc("Enable local MarkMultiBuffer before local PlanMemory"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<std::string> limitAutoMultiBufferOfLocalBuffer(
+    "limit-auto-multi-buffer-of-local-buffer",
+    llvm::cl::desc("Local buffer multi-buffer strategy"),
+    llvm::cl::init("no-l0c"));
+
+static llvm::cl::opt<std::string> limitAutoMultiBufferBuffer(
+    "limit-auto-multi-buffer-buffer",
+    llvm::cl::desc("Mix local buffer multi-buffer strategy"),
+    llvm::cl::init("only-cube"));
+
+static llvm::cl::opt<bool> disableAlignAllocSize(
+    "disable-align-alloc-size",
+    llvm::cl::desc("Disable AlignAllocSize in the suffix"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> enableHIVMAutoStorageAlign(
+    "enable-hivm-auto-storage-align",
+    llvm::cl::desc("Enable MarkStrideAlign in the suffix"),
+    llvm::cl::init(true));
+
+static llvm::cl::opt<bool> disableEnableStrideAlign(
+    "disable-enable-stride-align",
+    llvm::cl::desc("Disable EnableStrideAlign in the suffix"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> disableInferHIVMDataLayout(
+    "disable-infer-hivm-data-layout",
+    llvm::cl::desc("Disable InferHIVMDataLayout in the suffix"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> enableHIVMCrossCoreGSS(
+    "enable-hivm-cross-core-gss",
+    llvm::cl::desc("Enable cross-core graph sync solver"),
+    llvm::cl::init(true));
+
+static llvm::cl::opt<bool> enableHIVMInjectBlockAllSync(
+    "enable-hivm-inject-block-all-sync",
+    llvm::cl::desc("Enable block-all sync mode"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> disableAutoInjectBlockSync(
+    "disable-auto-inject-block-sync",
+    llvm::cl::desc("Disable auto inject block sync"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> enableHIVMAssumeAliveLoops(
+    "enable-hivm-assume-alive-loops",
+    llvm::cl::desc("Assume alive loops for sync passes"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<std::string> ignoredTarget(
+    "target",
+    llvm::cl::desc("Accepted for bishengir-compile command-line similarity"),
+    llvm::cl::init("Ascend910_9382"));
+
+static MultiBufferStrategy parseMultiBufferStrategy(StringRef value) {
+  return llvm::StringSwitch<MultiBufferStrategy>(value)
+      .Case("no-limit", MultiBufferStrategy::NO_LIMIT)
+      .Case("only-cube", MultiBufferStrategy::ONLY_CUBE)
+      .Case("only-vector", MultiBufferStrategy::ONLY_VECTOR)
+      .Case("no-l0c", MultiBufferStrategy::CUBE_NO_L0C)
+      .Default(MultiBufferStrategy::NO_LIMIT);
+}
+
+static void addCanonicalizationHIVMPipeline(OpPassManager &pm) {
+  pm.addPass(createArithToAffineConversionPass());
+  pm.nest<func::FuncOp>().addPass(scf::createCanonicalizeIterArgPass());
+  pm.addPass(bishengir::createExtendedCanonicalizerPass());
+  pm.addPass(createSCFForLoopCanonicalizationPass());
+  pm.addPass(createCSEPass());
+  pm.nest<func::FuncOp>().addPass(bishengir::createExtendedCanonicalizerPass());
+  pm.nest<func::FuncOp>().addPass(createHIVMOptSinglePointPass());
+  pm.nest<func::FuncOp>().addPass(bishengir::createExtendedCanonicalizerPass());
+  pm.nest<func::FuncOp>().addPass(memref::createDeadStoreEliminationPass());
+}
+
+static void addInferAndSetBufferSizePipeline(OpPassManager &pm) {
+  pm.nest<func::FuncOp>().addPass(createAutoInferBufferSizePass());
+  pm.addPass(createArithToAffineConversionPass());
+  pm.nest<func::FuncOp>().addPass(createConstantizeBufferSizePass());
+  pm.nest<func::FuncOp>().addPass(createSetBufferSizePass());
+}
+
+static void addCrossCoreSyncPipeline(OpPassManager &pm) {
+  addCanonicalizationHIVMPipeline(pm);
+  pm.addPass(createMarkRealCoreTypePass());
+  if (enableHIVMCrossCoreGSS && !enableHIVMInjectBlockAllSync &&
+      !disableAutoInjectBlockSync) {
+    pm.nest<func::FuncOp>().addPass(createCrossCoreGSSPass());
+  } else {
+    InjectBlockSyncOptions blockSyncOption;
+    blockSyncOption.blockAllSync = enableHIVMInjectBlockAllSync;
+    blockSyncOption.assumeAliveLoops = enableHIVMAssumeAliveLoops;
+    blockSyncOption.disableAutoInjectBlockSync = disableAutoInjectBlockSync;
+    pm.nest<func::FuncOp>().addPass(createInjectBlockSyncPass(blockSyncOption));
+  }
+  MarkRealCoreTypeOptions markRealCoreTypeOptions;
+  markRealCoreTypeOptions.removeCoreTypeAttrs = true;
+  pm.addPass(createMarkRealCoreTypePass(markRealCoreTypeOptions));
+}
+
+static void addBufferizationPipeline(OpPassManager &pm) {
+  if (enableTritonKernelCompile) {
+    pm.nest<func::FuncOp>().addPass(
+        tensor::createOptimizeDpsOpWithYieldedInsertSlicePass());
+    pm.nest<func::FuncOp>().addPass(createCloneTensorEmptyPass());
+  }
+  if (enableUbufSaving)
+    pm.nest<func::FuncOp>().addPass(createSinkOpToConsumerInLoopPass());
+
+  bufferization::OneShotBufferizationOptions oneShotOptions;
+  oneShotOptions.bufferizeFunctionBoundaries = true;
+  oneShotOptions.setFunctionBoundaryTypeConversion(
+      bufferization::LayoutMapOption::IdentityLayoutMap);
+  oneShotOptions.allowReturnAllocsFromLoops = true;
+  oneShotOptions.allowUnknownOps = true;
+  pm.addPass(bufferization::createOneShotBufferizePass(oneShotOptions));
+  addCanonicalizationHIVMPipeline(pm);
+  if (enableTritonKernelCompile)
+    pm.addPass(createConvertToHIVMOpPass());
+  pm.addPass(bufferization::createDropEquivalentBufferResultsPass());
+  addCanonicalizationHIVMPipeline(pm);
+  pm.addPass(bufferization::createDropEquivalentBufferResultsPass());
+  if (!enableTritonKernelCompile)
+    pm.addPass(createConvertToHIVMOpPass());
+}
+
+static void addAlignStoragePipeline(OpPassManager &pm) {
+  if (!disableAlignAllocSize)
+    pm.nest<func::FuncOp>().addPass(createAlignAllocSizePass());
+  if (enableHIVMAutoStorageAlign)
+    pm.nest<func::FuncOp>().addPass(createMarkStrideAlignPass());
+  pm.nest<func::FuncOp>().addPass(memref::createFoldAllocReshapePass());
+  if (!disableEnableStrideAlign)
+    pm.nest<func::FuncOp>().addPass(createEnableStrideAlignPass());
+}
+
+static void addSyncBlockLockPreparePipeline(OpPassManager &pm) {
+  pm.nest<func::FuncOp>().addPass(createSyncBlockHoistingPass());
+  pm.nest<func::FuncOp>().addPass(createBindSyncBlockLockArgPass());
+  pm.nest<func::FuncOp>().addPass(
+      createInsertInferSyncBlockLockNumAndInitFuncPass());
+  pm.nest<func::FuncOp>().addPass(createSyncBlockLockLoweringPass());
+}
+
+static void addPostBufferizationToLocalPlanMemoryPipeline(OpPassManager &pm) {
+  pm.nest<func::FuncOp>().addPass(createLiftZeroRankPass());
+  pm.nest<func::FuncOp>().addPass(scf::createMapForToForallPass());
+  pm.nest<func::FuncOp>().addPass(createHIVMMapForallToBlocksPass());
+  pm.nest<func::FuncOp>().addPass(createHIVMDecomposeOpPass());
+  addSyncBlockLockPreparePipeline(pm);
+  pm.addPass(createNonContiguousReshapeToCopyPass());
+  pm.addPass(createInferHIVMMemScopePass());
+  pm.nest<func::FuncOp>().addPass(createHIVMDecomposeOpPass());
+
+  HIVMAggregatedDecomposeOpOptions decomposeOption;
+  decomposeOption.decomposePhase =
+      bishengir::DecomposePhase::BEFORE_HIVM_STRIDE_ALIGNMENT;
+  pm.nest<func::FuncOp>().addPass(
+      createHIVMAggregatedDecomposeOpPass(decomposeOption));
+
+  pm.nest<func::FuncOp>().addPass(createHIVMRecognizeDeinterleaveOpPass());
+  decomposeOption.decomposePhase =
+      bishengir::DecomposePhase::AFTER_RECOGNIZE_DEINTERLEAVE;
+  pm.nest<func::FuncOp>().addPass(
+      createHIVMAggregatedDecomposeOpPass(decomposeOption));
+  decomposeOption.decomposePhase =
+      bishengir::DecomposePhase::AFTER_RECOGNIZE_BROADCAST;
+  pm.nest<func::FuncOp>().addPass(
+      createHIVMAggregatedDecomposeOpPass(decomposeOption));
+
+  addAlignStoragePipeline(pm);
+
+  decomposeOption.decomposePhase =
+      bishengir::DecomposePhase::AFTER_HIVM_STRIDE_ALIGNMENT;
+  pm.nest<func::FuncOp>().addPass(
+      createHIVMAggregatedDecomposeOpPass(decomposeOption));
+
+  if (!disableInferHIVMDataLayout) {
+    pm.nest<func::FuncOp>().addPass(createInferHIVMDataLayoutPass());
+    pm.nest<func::FuncOp>().addPass(
+        createRemoveHIVMDataLayoutAnnotationPass());
+  }
+  decomposeOption.decomposePhase =
+      bishengir::DecomposePhase::AFTER_INFER_HIVM_DATA_LAYOUT;
+  pm.nest<func::FuncOp>().addPass(
+      createHIVMAggregatedDecomposeOpPass(decomposeOption));
+
+  pm.addPass(bishengir::createExtendedCanonicalizerPass());
+  addInferAndSetBufferSizePipeline(pm);
+  pm.nest<func::FuncOp>().addPass(createFlattenOpsPass());
+  decomposeOption.decomposePhase =
+      bishengir::DecomposePhase::AFTER_HIVM_FLATTEN_OPS;
+  pm.nest<func::FuncOp>().addPass(
+      createHIVMAggregatedDecomposeOpPass(decomposeOption));
+  pm.nest<func::FuncOp>().addPass(createReduceRankSubviewPass());
+  pm.nest<func::FuncOp>().addPass(createLiftLowestStridePass());
+  decomposeOption.decomposePhase =
+      bishengir::DecomposePhase::AFTER_LIFT_LOWEST_STRIDE;
+  pm.nest<func::FuncOp>().addPass(
+      createHIVMAggregatedDecomposeOpPass(decomposeOption));
+  pm.nest<func::FuncOp>().addPass(createAllocExtraBufferPass());
+  pm.addPass(createInferHIVMMemScopePass());
+  addCanonicalizationHIVMPipeline(pm);
+  pm.nest<func::FuncOp>().addPass(createInlineLoadCopyPass());
+
+  MarkMultiBufferOptions multiBufferOptions;
+  multiBufferOptions.enableAuto = enableAutoMultiBuffer;
+  multiBufferOptions.limitAutoMultiBufferOnlyForLocalBuffer = true;
+  multiBufferOptions.limitAutoMultiBufferOfLocalBuffer =
+      parseMultiBufferStrategy(limitAutoMultiBufferOfLocalBuffer);
+  multiBufferOptions.limitMixAutoMultiBufferBuffer =
+      parseMultiBufferStrategy(limitAutoMultiBufferBuffer);
+  pm.nest<func::FuncOp>().addPass(
+      createMarkMultiBufferPass(multiBufferOptions));
+  pm.addPass(createDumpIRBeforeLocalPlanMemoryPass());
+
+  PlanMemoryOptions planMemoryOption;
+  planMemoryOption.enableMemoryDisplay = enableMemoryDisplay;
+  planMemoryOption.restrictInplaceAsISA = restrictInplaceAsISA;
+  pm.nest<func::FuncOp>().addPass(createPlanMemoryPass(planMemoryOption));
+}
+
+static void buildSuffixPipeline(OpPassManager &pm) {
+  if (localPlanMemoryOnly) {
+    pm.addPass(createDumpIRBeforeLocalPlanMemoryPass());
+    PlanMemoryOptions planMemoryOption;
+    planMemoryOption.enableMemoryDisplay = enableMemoryDisplay;
+    planMemoryOption.restrictInplaceAsISA = restrictInplaceAsISA;
+    pm.nest<func::FuncOp>().addPass(createPlanMemoryPass(planMemoryOption));
+    return;
+  }
+
+  if (!disableAutoCVWorkSpaceManage && !disableCVPipelining) {
+    CVPipeliningOptions pipelineOptions;
+    pipelineOptions.enableSkewMode = enablePreload;
+    pipelineOptions.setDepthInUnrollMode = cvPipelineDepth;
+    pipelineOptions.enableLazyLoading = enableCVLazyLoading;
+    pm.nest<func::FuncOp>().addPass(createCVPipeliningPass(pipelineOptions));
+  }
+  if (!dumpIRAfterCVPipelining.empty())
+    pm.addPass(
+        createDumpIRAfterCVPipeliningPass(dumpIRAfterCVPipelining.getValue()));
+  if (!dumpC1SemanticOracle.empty() || !dumpC1GenericIR.empty())
+    pm.addPass(std::make_unique<DumpC1SemanticOraclePass>(
+        dumpC1SemanticOracle.getValue(), dumpC1GenericIR.getValue()));
+  if (stopAfterCVPipelining)
+    return;
+
+  if (tileMixCubeLoop != 1 || tileMixVectorLoop != 1) {
+    pm.addPass(createTileCubeVectorLoopPass(
+        TileCubeVectorLoopOptions{
+            static_cast<unsigned>(tileMixVectorLoop.getValue()),
+            static_cast<unsigned>(tileMixCubeLoop.getValue())}));
+  }
+
+  if (!disableAutoCVWorkSpaceManage && !disableAutoCVGlobalWorkspacePlan) {
+    addInferAndSetBufferSizePipeline(pm);
+    PlanMemoryOptions planMemoryOption;
+    planMemoryOption.memMode = MemPlanMode::GLOBAL_WORKSPACE_PLAN;
+    planMemoryOption.enableGlobalReuse = enableHIVMGlobalWorkspaceReuse;
+    pm.nest<func::FuncOp>().addPass(createPlanMemoryPass(planMemoryOption));
+  }
+
+  addCrossCoreSyncPipeline(pm);
+
+  if (enableTritonKernelCompile && !disableAutoCVWorkSpaceManage &&
+      !disableAutoCVGlobalWorkspacePlan) {
+    pm.nest<func::FuncOp>().addPass(createInsertInferWorkSpaceSizeFuncPass());
+  }
+
+  if (enableTritonKernelCompile)
+    pm.addPass(createInsertInferTaskTypeFuncPass());
+  if (!disableSplitMixKernel)
+    pm.addPass(createSplitMixKernelPass());
+  pm.addPass(scope::createInlineScopePass());
+  if (enableAutoBindSubBlock)
+    pm.addPass(createTileAndBindSubBlockPass());
+  pm.nest<func::FuncOp>().addPass(tensor::createFoldTensorEmptyPass());
+  addCanonicalizationHIVMPipeline(pm);
+  if (enableCodeMotion) {
+    pm.addPass(createLoopInvariantCodeMotionPass());
+    pm.addPass(createLoopInvariantSubsetHoistingPass());
+  }
+  pm.nest<func::FuncOp>().addPass(createCloneTensorEmptyPass());
+  pm.nest<func::FuncOp>().addPass(createHIVMInlineOTFLoadStorePass());
+
+  addBufferizationPipeline(pm);
+  addPostBufferizationToLocalPlanMemoryPipeline(pm);
+}
+
+static void printVersion(llvm::raw_ostream &os) {
+  os << bishengir::getBiShengIRToolFullVersion(
+            "bishengir-cvpipeline-suffix-compile")
+     << '\n';
+}
+
+static bool isPlanMemoryOracleDumpEnabled() {
+  const char *value = std::getenv("BISHENGIR_DUMP_PLAN_MEMORY_ATTEMPTS");
+  return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
+}
+} // namespace
+
+int main(int argc, char **argv) {
+  llvm::InitLLVM y(argc, argv);
+
+  DialectRegistry registry;
+  mlir::registerAllDialects(registry);
+  bishengir::registerAllDialects(registry);
+
+  mlir::registerAllPasses();
+  bishengir::registerAllPasses();
+
+  mlir::registerAllExtensions(registry);
+  bishengir::registerAllExtensions(registry);
+
+  mlir::registerMLIRContextCLOptions();
+  mlir::registerAsmPrinterCLOptions();
+  bishengir::registerPassManagerCLOptions();
+  mlir::registerPassManagerCLOptions();
+  llvm::cl::SetVersionPrinter(printVersion);
+  llvm::cl::ParseCommandLineOptions(
+      argc, argv,
+      "BiShengIR CVPipeline suffix compile tool\n\n"
+      "Input must be an MLIR dump immediately before createCVPipeliningPass.\n");
+
+  if (planMemorySeed < -1 || planMemorySeed >= 20) {
+    llvm::errs() << "[ERROR] --plan-memory-seed must be -1 or in [0, 19]\n";
+    return EXIT_FAILURE;
+  }
+  if (cvPipelineDepth < -1) {
+    llvm::errs() << "[ERROR] --cv-pipeline-depth must be -1 or non-negative\n";
+    return EXIT_FAILURE;
+  }
+  if (localPlanMemoryOnly &&
+      (stopAfterCVPipelining || !dumpIRAfterCVPipelining.empty())) {
+    llvm::errs() << "[ERROR] CVPipelining boundary options cannot be combined "
+                    "with --local-plan-memory-only\n";
+    return EXIT_FAILURE;
+  }
+  if (planMemorySeed >= 0) {
+    std::string seed = std::to_string(planMemorySeed.getValue());
+    if (::setenv("BISHENGIR_PLAN_MEMORY_FORCE_SEED", seed.c_str(), 1) != 0) {
+      llvm::errs() << "[ERROR] Failed to set PlanMemory seed\n";
+      return EXIT_FAILURE;
+    }
+  }
+
+  std::string errorMessage;
+  const std::string inputFile = inputFilename.getValue();
+  const std::string outputFile = outputFilename.getValue();
+  const bool dumpPlanMemoryOracle = isPlanMemoryOracleDumpEnabled();
+  if (dumpPlanMemoryOracle) {
+    llvm::errs() << "PLANMEM_RUN_CONFIG\tinput\t" << inputFile << "\tseed\t"
+                 << planMemorySeed.getValue()
+                 << "\trestrict_inplace_as_isa\t"
+                 << static_cast<int>(restrictInplaceAsISA.getValue())
+                 << "\tlocal_plan_memory_only\t"
+                 << static_cast<int>(localPlanMemoryOnly.getValue())
+                 << "\tdisable_cv_pipelining\t"
+                 << static_cast<int>(disableCVPipelining.getValue())
+                 << "\tenable_preload\t"
+                 << static_cast<int>(enablePreload.getValue())
+                 << "\tcv_pipeline_depth\t" << cvPipelineDepth.getValue()
+                 << "\tenable_cv_lazy_loading\t"
+                 << static_cast<int>(enableCVLazyLoading.getValue())
+                 << "\tenable_auto_multi_buffer\t"
+                 << static_cast<int>(enableAutoMultiBuffer.getValue())
+                 << "\tlocal_multi_buffer_strategy\t"
+                 << limitAutoMultiBufferOfLocalBuffer.getValue()
+                 << "\tmix_multi_buffer_strategy\t"
+                 << limitAutoMultiBufferBuffer.getValue()
+                 << "\tenable_code_motion\t"
+                 << static_cast<int>(enableCodeMotion.getValue())
+                 << "\tenable_ubuf_saving\t"
+                 << static_cast<int>(enableUbufSaving.getValue())
+                 << "\ttile_mix_cube_loop\t" << tileMixCubeLoop.getValue()
+                 << "\ttile_mix_vector_loop\t"
+                 << tileMixVectorLoop.getValue()
+                 << "\tdisable_align_alloc_size\t"
+                 << static_cast<int>(disableAlignAllocSize.getValue())
+                 << "\tenable_hivm_auto_storage_align\t"
+                 << static_cast<int>(enableHIVMAutoStorageAlign.getValue())
+                 << "\tdisable_enable_stride_align\t"
+                 << static_cast<int>(disableEnableStrideAlign.getValue())
+                 << "\tdisable_infer_hivm_data_layout\t"
+                 << static_cast<int>(disableInferHIVMDataLayout.getValue())
+                 << '\n';
+  }
+  auto file = openInputFile(inputFile, &errorMessage);
+  if (!file) {
+    llvm::errs() << "[ERROR] Failed to open input file: "
+                 << (inputFile == "-" ? "stdin" : inputFile)
+                 << " error message: " << errorMessage << "\n";
+    return EXIT_FAILURE;
+  }
+
+  MLIRContext context(registry);
+  context.allowUnregisteredDialects(allowUnregisteredDialects);
+
+  llvm::SourceMgr sourceMgr;
+  sourceMgr.AddNewSourceBuffer(std::move(file), SMLoc());
+  OwningOpRef<ModuleOp> moduleRef =
+      parseSourceFile<ModuleOp>(sourceMgr, &context);
+  if (!moduleRef) {
+    llvm::errs() << "[ERROR] Failed to parse input file: "
+                 << (inputFile == "-" ? "stdin" : inputFile) << "\n";
+    return EXIT_FAILURE;
+  }
+
+  ModuleOp module = moduleRef.get();
+  PassManager pm(&context);
+  buildSuffixPipeline(pm);
+  if (failed(applyPassManagerCLOptions(pm))) {
+    llvm::errs() << "[ERROR] Failed to apply pass manager options\n";
+    return EXIT_FAILURE;
+  }
+
+  if (failed(pm.run(module))) {
+    if (dumpPlanMemoryOracle)
+      llvm::errs() << "PLANMEM_RUN_RESULT\tfailure\n";
+    llvm::errs()
+        << "[ERROR] Failed to run CVPipeline suffix to local PlanMemory\n";
+    return EXIT_FAILURE;
+  }
+
+  auto output = openOutputFile(outputFile, &errorMessage);
+  if (!output) {
+    llvm::errs() << "[ERROR] Failed to open output file: "
+                 << (outputFile == "-" ? "stdout" : outputFile)
+                 << " error message: " << errorMessage << "\n";
+    return EXIT_FAILURE;
+  }
+  module.print(output->os());
+  output->keep();
+  if (dumpPlanMemoryOracle)
+    llvm::errs() << "PLANMEM_RUN_RESULT\tsuccess\n";
+  return EXIT_SUCCESS;
+}

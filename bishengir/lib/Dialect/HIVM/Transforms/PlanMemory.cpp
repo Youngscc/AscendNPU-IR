@@ -27,12 +27,14 @@
 
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/IR/AsmState.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/LogicalResult.h"
 #include <algorithm>
+#include <cstdlib>
 
 #define DEBUG_TYPE "hivm-plan-memory"
 #define LDBG(X) LLVM_DEBUG(llvm::dbgs() << X)
@@ -55,6 +57,28 @@ constexpr const int l1SpaceSize = 512 * 1024 * 8;
 constexpr const int l0cAlignSize = 512 * 8;
 constexpr const int l0cSpaceSize = 128 * 1024 * 8;
 constexpr const int workSpaceAlignSize = 32 * 8;
+
+bool isPlanMemoryAttemptDumpEnabled() {
+  const char *value = std::getenv("BISHENGIR_DUMP_PLAN_MEMORY_ATTEMPTS");
+  return value != nullptr && value[0] != '\0' &&
+         llvm::StringRef(value) != "0";
+}
+
+std::optional<int> getPlanMemoryForcedSeed() {
+  const char *value = std::getenv("BISHENGIR_PLAN_MEMORY_FORCE_SEED");
+  if (value == nullptr || value[0] == '\0')
+    return std::nullopt;
+  char *end = nullptr;
+  long seed = std::strtol(value, &end, 10);
+  if (end == value || *end != '\0' || seed < 0 || seed >= 20)
+    return std::nullopt;
+  return static_cast<int>(seed);
+}
+
+void printDebugValue(llvm::raw_ostream &os, Value value) {
+  OpPrintingFlags flags;
+  value.printAsOperand(os, flags);
+}
 
 bool isReusableCastOp(hivm::VCastOp &castOp, Value output, Value input) {
   auto rank = dyn_cast<MemRefType>(output.getType()).getRank();
@@ -185,6 +209,125 @@ void MemLivenessAnalysis::build() {
   // the lifetime of the buffer.
   GenerateBufferLife();
   InitializeInplacePairList();
+}
+
+void MemLivenessAnalysis::DumpDebugState(llvm::raw_ostream &os,
+                                         uint32_t attempt) {
+  DenseMap<Value, size_t> bufferDebugIds;
+  size_t nextBufferDebugId = 0;
+  for (const auto &item : bufferInfos)
+    bufferDebugIds[item.first] = nextBufferDebugId++;
+  os << "PLANMEM_LIVENESS_ATTEMPT\t" << func_.getSymName() << '\t'
+     << static_cast<int>(planMode) << '\t' << attempt << '\n';
+  for (const auto &opInfo : linearOperation) {
+    auto it = genKillMap.find(opInfo.get());
+    if (it == genKillMap.end())
+      continue;
+    for (Value value : it->second.gen) {
+      os << "PLANMEM_GEN\t" << attempt << '\t' << opInfo->index << '\t';
+      printDebugValue(os, value);
+      os << '\n';
+      auto debugId = bufferDebugIds.find(value);
+      if (debugId != bufferDebugIds.end())
+        os << "PLANMEM_EXACT_GEN\t" << attempt << '\t' << opInfo->index
+           << '\t' << debugId->second << '\n';
+    }
+    for (Value value : it->second.kill) {
+      os << "PLANMEM_KILL\t" << attempt << '\t' << opInfo->index << '\t';
+      printDebugValue(os, value);
+      os << '\n';
+      auto debugId = bufferDebugIds.find(value);
+      if (debugId != bufferDebugIds.end())
+        os << "PLANMEM_EXACT_KILL\t" << attempt << '\t' << opInfo->index
+           << '\t' << debugId->second << '\n';
+    }
+  }
+  for (const LiveShuffleInfo &trace : liveShuffleTrace) {
+    os << "PLANMEM_LIVE_BEFORE\t" << attempt << '\t' << trace.index;
+    for (Value value : trace.before) {
+      os << '\t';
+      printDebugValue(os, value);
+    }
+    os << '\n';
+    os << "PLANMEM_EXACT_LIVE_BEFORE\t" << attempt << '\t' << trace.index;
+    bool beforeComplete = true;
+    for (Value value : trace.before) {
+      auto debugId = bufferDebugIds.find(value);
+      if (debugId == bufferDebugIds.end()) {
+        beforeComplete = false;
+        break;
+      }
+      os << '\t' << debugId->second;
+    }
+    if (beforeComplete)
+      os << '\n';
+    else
+      os << "\tINVALID\n";
+    os << "PLANMEM_LIVE_AFTER\t" << attempt << '\t' << trace.index;
+    for (Value value : trace.after) {
+      os << '\t';
+      printDebugValue(os, value);
+    }
+    os << '\n';
+    os << "PLANMEM_EXACT_LIVE_AFTER\t" << attempt << '\t' << trace.index;
+    bool afterComplete = true;
+    for (Value value : trace.after) {
+      auto debugId = bufferDebugIds.find(value);
+      if (debugId == bufferDebugIds.end()) {
+        afterComplete = false;
+        break;
+      }
+      os << '\t' << debugId->second;
+    }
+    if (afterComplete)
+      os << '\n';
+    else
+      os << "\tINVALID\n";
+  }
+  for (const auto &item : bufferInfos) {
+    Value value = item.first;
+    const BufferInfo &info = item.second;
+    auto life = buffer2Life.find(value);
+    os << "PLANMEM_BUFFER\t" << attempt << '\t';
+    printDebugValue(os, value);
+    os << '\t' << info.constBits << '\t'
+       << static_cast<int>(info.bufferScope) << '\t'
+       << static_cast<int>(info.ignoreInplace) << '\t';
+    if (life == buffer2Life.end())
+      os << "-1\t-1\n";
+    else
+      os << life->second->allocTime << '\t' << life->second->freeTime << '\n';
+    os << "PLANMEM_EXACT_BUFFER\t" << attempt << '\t'
+       << bufferDebugIds.find(value)->second << '\t' << info.constBits << '\t'
+       << static_cast<int>(info.bufferScope) << '\t'
+       << static_cast<int>(info.ignoreInplace) << '\t';
+    if (life == buffer2Life.end())
+      os << "-1\t-1\n";
+    else
+      os << life->second->allocTime << '\t' << life->second->freeTime << '\n';
+  }
+  for (const ValuePair &pair : inplacePairList) {
+    os << "PLANMEM_INPLACE\t" << attempt << '\t';
+    printDebugValue(os, pair.first);
+    os << '\t';
+    printDebugValue(os, pair.second);
+    os << '\n';
+    auto firstId = bufferDebugIds.find(pair.first);
+    auto secondId = bufferDebugIds.find(pair.second);
+    if (firstId != bufferDebugIds.end() && secondId != bufferDebugIds.end())
+      os << "PLANMEM_EXACT_INPLACE\t" << attempt << '\t'
+         << firstId->second << '\t' << secondId->second << '\n';
+  }
+  for (const auto &item : buffer2MultiNum) {
+    os << "PLANMEM_MULTI\t" << attempt << '\t';
+    printDebugValue(os, item.first);
+    os << '\t' << item.second << '\n';
+    auto debugId = bufferDebugIds.find(item.first);
+    if (debugId != bufferDebugIds.end())
+      os << "PLANMEM_EXACT_MULTI\t" << attempt << '\t'
+         << debugId->second << '\t' << item.second << '\n';
+  }
+  os << "PLANMEM_LIVENESS_ATTEMPT_END\t" << attempt << '\n';
 }
 
 bool MemLivenessAnalysis::isLocalMemPlan() const {
@@ -831,8 +974,18 @@ void MemLivenessAnalysis::OpKillHandle(OpInfo *opInfo, Liveness live,
   }
 
   // TODO: Remove once plan-memory no longer depends on traversal order.
+  auto currentLiveValuesBeforeShuffle = currentLiveValues.takeVector();
   auto currentLiveValuesShuffled =
-      getShuffledRange(currentLiveValues.takeVector());
+      getShuffledRange(currentLiveValuesBeforeShuffle);
+  if (isPlanMemoryAttemptDumpEnabled()) {
+    LiveShuffleInfo trace;
+    trace.index = opInfo->index;
+    trace.before.append(currentLiveValuesBeforeShuffle.begin(),
+                        currentLiveValuesBeforeShuffle.end());
+    trace.after.append(currentLiveValuesShuffled.begin(),
+                       currentLiveValuesShuffled.end());
+    liveShuffleTrace.push_back(std::move(trace));
+  }
   for (const Value &operand : currentLiveValuesShuffled) {
     UpdateOpKillInfo(opInfo, operand, live);
   }
@@ -1312,6 +1465,69 @@ LogicalResult MemPlan::plan(bool emitErrors) {
   // Update the address information of each buffer after memory buffer.
   UpdateBuffer2Offsets();
   return success();
+}
+
+void MemPlan::DumpDebugState(llvm::raw_ostream &os, uint32_t attempt,
+                             bool success) {
+  DenseMap<Value, size_t> bufferDebugIds;
+  size_t nextBufferDebugId = 0;
+  for (const auto &item : bufferInfos)
+    bufferDebugIds[item.first] = nextBufferDebugId++;
+  os << "PLANMEM_PLAN_ATTEMPT\t" << func_.getSymName() << '\t' << attempt
+     << '\t'
+     << (success ? "success" : "failure") << '\n';
+  for (const auto &entryPtr : StorageEntryVec) {
+    const StorageEntry &entry = *entryPtr;
+    os << "PLANMEM_STORAGE\t" << attempt << '\t'
+       << static_cast<int>(entry.bufInfo->bufferScope) << '\t'
+       << entry.bufInfo->constBits << '\t' << entry.alignedConstBits << '\t'
+       << entry.bitsOffset << '\t' << entry.childIdx << '\t'
+       << entry.multiBufferNum;
+    for (Value value : entry.inplaceBuffers) {
+      os << '\t';
+      printDebugValue(os, value);
+    }
+    os << '\n';
+    for (const auto &life : entry.bufferLifeVec) {
+      os << "PLANMEM_STORAGE_LIFE\t" << attempt << '\t';
+      printDebugValue(os, life->buffer);
+      os << '\t' << life->allocTime << '\t' << life->freeTime << '\n';
+    }
+  }
+  for (const auto &item : failApplyBufferInfo)
+    os << "PLANMEM_REQUIRED\t" << attempt << '\t'
+       << static_cast<int>(item.first) << '\t' << item.second << '\n';
+  DenseMap<hivm::AddressSpace, uint64_t> peakBitsByScope;
+  for (const auto &item : bufferInfos) {
+    auto offsets = buffer2Offsets.find(item.first);
+    if (offsets == buffer2Offsets.end() || offsets->second.empty())
+      continue;
+    os << "PLANMEM_PLANNED_BUFFER\t" << attempt << '\t'
+       << static_cast<int>(item.second.bufferScope) << '\t';
+    printDebugValue(os, item.first);
+    os << '\t' << item.second.constBits;
+    const uint64_t extentBits = AlignUp(item.second.constBits, 8);
+    for (uint64_t offsetBytes : offsets->second) {
+      os << '\t' << offsetBytes;
+      peakBitsByScope[item.second.bufferScope] = std::max(
+          peakBitsByScope[item.second.bufferScope],
+          offsetBytes * 8 + extentBits);
+    }
+    os << '\n';
+    auto debugId = bufferDebugIds.find(item.first);
+    if (debugId != bufferDebugIds.end()) {
+      os << "PLANMEM_EXACT_PLANNED_BUFFER\t" << attempt << '\t'
+         << static_cast<int>(item.second.bufferScope) << '\t'
+         << debugId->second << '\t' << item.second.constBits;
+      for (uint64_t offsetBytes : offsets->second)
+        os << '\t' << offsetBytes;
+      os << '\n';
+    }
+  }
+  for (const auto &item : peakBitsByScope)
+    os << "PLANMEM_PEAK\t" << attempt << '\t'
+       << static_cast<int>(item.first) << '\t' << item.second << '\n';
+  os << "PLANMEM_PLAN_ATTEMPT_END\t" << attempt << '\n';
 }
 
 void MemPlan::GenerateStorageEntry() {
@@ -2816,19 +3032,31 @@ void PlanMemoryPass::runOnOperation() {
   constexpr int kPlanRetryCount = 20;
   DenseMap<Value, SmallVector<uint64_t>> plannedBuffer2Offsets;
 
+  std::optional<int> forcedSeed =
+      this->memMode == MemPlanMode::LOCAL_MEM_PLAN
+          ? getPlanMemoryForcedSeed()
+          : std::nullopt;
+  const bool forceRandomSeed = forcedSeed.has_value();
+  const int firstAttempt = forcedSeed.value_or(0);
+  const int attemptEnd = forceRandomSeed ? firstAttempt + 1 : kPlanRetryCount;
+
   // The current plan-memory algorithm is sensitive to the order in which some
   // candidate buffers are considered. We retry planning with different
   // deterministic shuffle seeds to improve the chance of finding a valid plan
   // without making the pass behavior non-reproducible.
   // TODO: Remove the retry loop once the plan-memory algorithm is improved to
   // produce a stable valid plan in a single attempt.
-  for (int attempt = 0; attempt < kPlanRetryCount; ++attempt) {
+  for (int attempt = firstAttempt; attempt < attemptEnd; ++attempt) {
     LDBG("Memory planning attempt " << attempt + 1 << "/" << kPlanRetryCount
                                     << "\n");
 
     MemLivenessAnalysis memLiveness(funcOp, this->memMode,
                                     /*randomSeed=*/attempt);
     memLiveness.build();
+    const bool dumpAttempts = isPlanMemoryAttemptDumpEnabled() &&
+                              this->memMode == MemPlanMode::LOCAL_MEM_PLAN;
+    if (dumpAttempts)
+      memLiveness.DumpDebugState(llvm::errs(), attempt);
 
     MemPlan memPlan(this->memMode, this->enableGlobalReuse,
                     this->enableMemoryDisplay, this->restrictInplaceAsISA);
@@ -2840,8 +3068,11 @@ void PlanMemoryPass::runOnOperation() {
     memPlan.SetBuffer2MultiNum(memLiveness.buffer2MultiNum);
     memPlan.SetInplacePairList(memLiveness.inplacePairList);
 
-    const bool isLastAttempt = attempt == kPlanRetryCount - 1;
-    if (succeeded(memPlan.plan(/*emitErrors=*/isLastAttempt))) {
+    const bool isLastAttempt = attempt + 1 == attemptEnd;
+    LogicalResult planResult = memPlan.plan(/*emitErrors=*/isLastAttempt);
+    if (dumpAttempts)
+      memPlan.DumpDebugState(llvm::errs(), attempt, succeeded(planResult));
+    if (succeeded(planResult)) {
       plannedBuffer2Offsets = memPlan.GetBuffer2Offsets();
       if (memPlan.enableMemoryDisplay) {
         SmallVector<MemoryDisplayInfo> memoryDisplayInfoList;
