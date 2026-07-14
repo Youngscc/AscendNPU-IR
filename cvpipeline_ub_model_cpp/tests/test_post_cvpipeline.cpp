@@ -2,6 +2,7 @@
 #include "../src/post_cvpipeline/ir_utils.hpp"
 #include "../src/post_cvpipeline/pipeline.hpp"
 #include "../src/post_cvpipeline/split_mix_aiv.hpp"
+#include "../src/post_cvpipeline/tile_cube_vector_loop.hpp"
 
 #include <fstream>
 #include <string>
@@ -99,6 +100,23 @@ const cvub::GenericOperation &OperationWithCase(
   throw std::runtime_error("missing operation case: " + caseName);
 }
 
+const cvub::GenericOperation &OperationNamed(
+    const cvub::GenericModule &module, const std::string &name) {
+  for (const cvub::GenericOperation &operation : module.operations)
+    if (operation.name == name)
+      return operation;
+  throw std::runtime_error("missing operation: " + name);
+}
+
+size_t OperationCount(const cvub::GenericModule &module,
+                      const std::string &name) {
+  return static_cast<size_t>(std::count_if(
+      module.operations.begin(), module.operations.end(),
+      [&](const cvub::GenericOperation &operation) {
+        return operation.name == name;
+      }));
+}
+
 bool HasMarkOfCase(const cvub::GenericModule &module,
                    const std::string &caseName) {
   const int source = OperationWithCase(module, caseName).results.front();
@@ -125,6 +143,81 @@ CVUB_TEST(post_pipeline_defaults_match_compiler) {
   CVUB_CHECK(options.enableAutoBindSubBlock);
   CVUB_CHECK(options.enableCodeMotion);
   CVUB_CHECK(!options.enableUbufSaving);
+}
+
+CVUB_TEST(default_vector_tiling_uses_ceil_div_and_shrinks_local_alloc) {
+  const auto result = cvub::RunTileCubeVectorLoop(
+      cvub::test::ParseFixture("tile_vector_loop.mlir"), 2, 2);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(OperationNamed(result.module, "hivm.hir.vadd").resultTypes,
+                std::vector<std::string>({"tensor<1x64xf16>"}));
+  CVUB_CHECK_EQ(OperationNamed(result.module, "memref.alloc").resultTypes,
+                std::vector<std::string>({"memref<1x64xf16>"}));
+  const auto &slice = OperationNamed(result.module, "tensor.extract_slice");
+  CVUB_CHECK_EQ(cvub::IRDictionaryValue(slice.attributes, "static_offsets"),
+                "[0, -9223372036854775808]");
+  CVUB_CHECK_EQ(cvub::IRDictionaryValue(slice.attributes, "static_sizes"),
+                "[1, 64]");
+  CVUB_CHECK_EQ(cvub::IRDictionaryValue(slice.attributes, "static_strides"),
+                "[1, 1]");
+  CVUB_CHECK_EQ(OperationCount(result.module, "scf.for"), 2U);
+  CVUB_CHECK_EQ(OperationWithCase(result.module, "unrelated").resultTypes,
+                std::vector<std::string>({"tensor<1x128xf16>"}));
+  const auto &vadd = OperationNamed(result.module, "hivm.hir.vadd");
+  const auto &inner = result.module.operations.at(
+      static_cast<size_t>(vadd.parentId));
+  CVUB_CHECK_EQ(inner.name, "scf.for");
+  cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(default_cube_tiling_uses_ceil_div_and_fuses_mmad) {
+  const auto result = cvub::RunTileCubeVectorLoop(
+      cvub::test::ParseFixture("tile_cube_loop.mlir"), 2, 2);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(OperationNamed(result.module, "hivm.hir.mmadL1").resultTypes,
+                std::vector<std::string>({"tensor<128x2048xf32>"}));
+  const auto &mmad = OperationNamed(result.module, "hivm.hir.mmadL1");
+  CVUB_CHECK_EQ(result.module.operations.at(static_cast<size_t>(mmad.parentId))
+                    .name,
+                "scf.for");
+  cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(vector_alignment_rollback_is_byte_equivalent) {
+  auto module = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  for (cvub::GenericOperation &operation : module.operations) {
+    for (std::string &type : operation.resultTypes)
+      if (type == "tensor<1x128xf16>")
+        type = "tensor<1x130xf16>";
+    for (std::string &type : operation.operandTypes)
+      if (type == "tensor<1x128xf16>")
+        type = "tensor<1x130xf16>";
+  }
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result = cvub::RunTileCubeVectorLoop(module, 2, 2);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+}
+
+CVUB_TEST(unimplemented_successful_loop_pattern_is_incomplete_and_unchanged) {
+  auto module = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  auto &loop = module.operations.at(
+      static_cast<size_t>(OperationId(module, "scf.for")));
+  loop.name = "scope.scope";
+  loop.operands.clear();
+  loop.operandTypes.clear();
+  auto &scopeBody = module.blocks.at(static_cast<size_t>(
+      module.regions.at(static_cast<size_t>(loop.regions.front()))
+          .blocks.front()));
+  scopeBody.arguments.clear();
+  scopeBody.argumentTypes.clear();
+  module.operations.at(static_cast<size_t>(OperationId(module, "scf.yield")))
+      .name = "scope.return";
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result = cvub::RunTileCubeVectorLoop(module, 2, 2);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+  CVUB_CHECK(!result.diagnostics.empty());
 }
 
 CVUB_TEST(split_mix_keeps_vector_and_workspace_boundary) {
@@ -410,7 +503,8 @@ CVUB_TEST(post_pipeline_manifest_has_real_order) {
                     "InlineOTFLoadStore"}));
   for (const cvub::StageCoverage &stage : stages)
     CVUB_CHECK_EQ(stage.disposition,
-                  stage.stage == "SplitMixKernelAIVProjection"
+                  stage.stage == "TileCubeVectorLoop" ||
+                          stage.stage == "SplitMixKernelAIVProjection"
                       ? cvub::CoverageDisposition::Modeled
                       : cvub::CoverageDisposition::Unsupported);
 }
@@ -456,7 +550,10 @@ CVUB_TEST(unsupported_stages_make_projection_incomplete) {
       cvub::test::ParseFixture("minimal_aiv.mlir"), {});
   CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
   CVUB_CHECK_EQ(result.coverage.size(), 14U);
-  CVUB_CHECK(HasDiagnostic(result, "TileCubeVectorLoop", "unsupported"));
+  CVUB_CHECK_EQ(result.coverage.front().disposition,
+                cvub::CoverageDisposition::Modeled);
+  CVUB_CHECK(!HasDiagnostic(result, "TileCubeVectorLoop", "unsupported"));
+  CVUB_CHECK(HasDiagnostic(result, "InferAndSetBufferSize", "unsupported"));
 }
 
 CVUB_TEST(replace_all_uses_updates_dps_and_block_edges) {

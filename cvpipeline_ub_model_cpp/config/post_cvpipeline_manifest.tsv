@@ -1,5 +1,5 @@
 order	stage	disposition
-1	TileCubeVectorLoop	unsupported
+1	TileCubeVectorLoop	modeled
 2	InferAndSetBufferSize	unsupported
 3	WorkspaceSemanticProjection	unsupported
 4	CanonicalizationBeforeSplit	unsupported

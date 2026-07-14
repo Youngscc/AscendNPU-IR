@@ -2,6 +2,7 @@
 #define CVPIPELINE_UB_MODEL_CPP_POST_CVPIPELINE_PIPELINE_HPP
 
 #include "types.hpp"
+#include "tile_cube_vector_loop.hpp"
 
 #include <array>
 #include <fstream>
@@ -115,14 +116,22 @@ inline std::vector<StageCoverage> CompiledPostCVPipelineCoverage() {
   stages.reserve(kPostCVPipelineStageNames.size());
   for (const char *stage : kPostCVPipelineStageNames)
     stages.push_back({stage, CoverageDisposition::Unsupported});
+  stages.front().disposition = CoverageDisposition::Modeled;
   return stages;
 }
 
 inline PostCVPipelineResult RunPostCVPipelineAIVProjection(
     GenericModule module, const PostCVPipelineOptions &options) {
-  (void)module;
   PostCVPipelineResult result;
   result.coverage = CompiledPostCVPipelineCoverage();
+
+  StageResult tiled = RunTileCubeVectorLoop(
+      std::move(module), options.tileMixVectorLoop, options.tileMixCubeLoop);
+  if (tiled.precision == Precision::Incomplete)
+    result.precision = Precision::Incomplete;
+  result.diagnostics.insert(result.diagnostics.end(),
+                            tiled.diagnostics.begin(),
+                            tiled.diagnostics.end());
 
   if (options.enableUbufSaving) {
     result.precision = Precision::Incomplete;
