@@ -45,12 +45,41 @@ int OperationId(const cvub::GenericModule &module,
   throw std::runtime_error("missing operation: " + operation);
 }
 
+const cvub::GenericOperation &DefinitionOf(const cvub::GenericModule &module,
+                                           int value) {
+  for (const cvub::GenericOperation &operation : module.operations)
+    if (std::find(operation.results.begin(), operation.results.end(), value) !=
+        operation.results.end())
+      return operation;
+  throw std::runtime_error("missing value definition");
+}
+
 bool HasOperation(const cvub::GenericModule &module,
                   const std::string &operation) {
   return std::any_of(module.operations.begin(), module.operations.end(),
                      [&](const cvub::GenericOperation &candidate) {
                        return candidate.name == operation;
                      });
+}
+
+bool HasOperationCase(const cvub::GenericModule &module,
+                      const std::string &caseName) {
+  return std::any_of(module.operations.begin(), module.operations.end(),
+                     [&](const cvub::GenericOperation &operation) {
+                       return cvub::UnquoteIRString(cvub::IRDictionaryValue(
+                                  operation.attributes, "case")) == caseName;
+                     });
+}
+
+bool HasUnitAttribute(const std::string &dictionary,
+                      const std::string &name) {
+  if (dictionary.size() < 2)
+    return false;
+  for (const std::string &entry : cvub::splitTopLevel(
+           dictionary.substr(1, dictionary.size() - 2)))
+    if (cvub::trim(entry) == name)
+      return true;
+  return false;
 }
 
 const cvub::GenericOperation &OperationWithCase(
@@ -131,6 +160,120 @@ CVUB_TEST(core_classification_rejects_non_enum_substring_matches) {
   custom.attributes = cvub::SetDictionaryValue(
       custom.attributes, "tcoretype", "#hivm.tcore_type<NOT_VECTOR>");
   CVUB_CHECK_EQ(cvub::ClassifyCore(module, custom), cvub::CoreKind::Unknown);
+}
+
+CVUB_TEST(core_classification_requires_exact_tcore_type_spelling) {
+  auto module = cvub::test::ParseFixture("control_flow_mix_before_split.mlir");
+  auto &custom = module.operations.at(
+      static_cast<size_t>(OperationId(module, "hivm.hir.custom")));
+  for (const std::string invalid : {"#bogus<CUBE>", "AIV",
+                                    "#hivm.foo<AIC>",
+                                    "#hivm.tcore_type<AIC>"}) {
+    custom.attributes =
+        cvub::SetDictionaryValue(custom.attributes, "tcoretype", invalid);
+    CVUB_CHECK_EQ(cvub::ClassifyCore(module, custom), cvub::CoreKind::Unknown);
+  }
+  custom.attributes = cvub::SetDictionaryValue(
+      custom.attributes, "tcoretype", "#hivm.tcore_type<VECTOR>");
+  CVUB_CHECK_EQ(cvub::ClassifyCore(module, custom), cvub::CoreKind::Vector);
+}
+
+CVUB_TEST(split_mix_models_contextual_core_rules) {
+  auto module = cvub::test::ParseFixture("task3_review_cases.mlir");
+  const auto classifyCase = [&](const std::string &caseName) {
+    return cvub::ClassifyCore(module, OperationWithCase(module, caseName));
+  };
+  CVUB_CHECK_EQ(classifyCase("load_vector"), cvub::CoreKind::Vector);
+  CVUB_CHECK_EQ(classifyCase("load_cube"), cvub::CoreKind::Cube);
+  CVUB_CHECK_EQ(classifyCase("copy_vector"), cvub::CoreKind::Vector);
+  CVUB_CHECK_EQ(classifyCase("copy_cube"), cvub::CoreKind::Cube);
+  CVUB_CHECK_EQ(classifyCase("vbrc_vector"), cvub::CoreKind::Vector);
+  CVUB_CHECK_EQ(classifyCase("vbrc_cube"), cvub::CoreKind::Cube);
+  CVUB_CHECK_EQ(cvub::ClassifyCore(
+                    module, module.operations.at(static_cast<size_t>(
+                                OperationId(module, "hivm.hir.matmul")))),
+                cvub::CoreKind::Cube);
+  CVUB_CHECK_EQ(cvub::ClassifyCore(module,
+                                  OperationWithCase(module, "context_unknown")),
+                cvub::CoreKind::Unknown);
+}
+
+CVUB_TEST(split_mix_scope_stubs_multi_results_and_preserves_unsafe_if) {
+  auto module = cvub::test::ParseFixture("task3_review_cases.mlir");
+  auto &dps = const_cast<cvub::GenericOperation &>(
+      OperationWithCase(module, "dps_multi"));
+  dps.dpsInits = {dps.operands[1], dps.operands[2]};
+  const auto result = cvub::ProjectMixFunctionsToAIV(std::move(module));
+  const auto &projected = ProjectedFunction(result, "review").module;
+  CVUB_CHECK(!HasOperation(projected, "scope.scope"));
+  CVUB_CHECK(HasOperation(projected, "scf.if"));
+  CVUB_CHECK_EQ(OperationWithCase(projected, "loop0").operands.front(),
+                ResultOf(projected, "tensor.empty"));
+  CVUB_CHECK(HasOperationCase(projected, "scope_tensor"));
+  CVUB_CHECK(HasOperationCase(projected, "scope_int"));
+  CVUB_CHECK(HasOperationCase(projected, "scope_external"));
+  CVUB_CHECK_EQ(DefinitionOf(projected,
+                            OperationWithCase(projected, "scope_tensor")
+                                .operands.front())
+                    .name,
+                "tensor.empty");
+  const auto &integerStub = DefinitionOf(
+      projected, OperationWithCase(projected, "scope_int").operands.front());
+  CVUB_CHECK_EQ(integerStub.name, "arith.constant");
+  CVUB_CHECK_EQ(cvub::IRDictionaryValue(integerStub.attributes, "value"),
+                "0 : i32");
+  CVUB_CHECK_EQ(OperationWithCase(projected, "scope_external").operands.front(),
+                OperationWithCase(projected, "scope_external").operands[1]);
+  CVUB_CHECK_EQ(OperationWithCase(projected, "dps0").operands.front(),
+                OperationWithCase(projected, "dps0").operands[1]);
+  CVUB_CHECK_EQ(OperationWithCase(projected, "dps1").operands.front(),
+                OperationWithCase(projected, "dps1").operands[1]);
+  CVUB_CHECK(HasDiagnostic(result, "SplitMixKernelAIVProjection",
+                           "branch yields"));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  cvub::ValidateGenericModule(projected);
+}
+
+CVUB_TEST(split_mix_preserves_multi_result_dps_on_count_mismatch) {
+  auto module = cvub::test::ParseFixture("task3_review_cases.mlir");
+  auto &dps = const_cast<cvub::GenericOperation &>(
+      OperationWithCase(module, "dps_multi"));
+  dps.dpsInits = {dps.operands[1]};
+  const auto result = cvub::ProjectMixFunctionsToAIV(std::move(module));
+  const auto &projected = ProjectedFunction(result, "review").module;
+  CVUB_CHECK(HasOperationCase(projected, "dps_multi"));
+  CVUB_CHECK(HasDiagnostic(result, "SplitMixKernelAIVProjection",
+                           "DPS init/result count mismatch"));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  cvub::ValidateGenericModule(projected);
+}
+
+CVUB_TEST(split_mix_uses_real_vector_cleanup_labels_and_function_attrs) {
+  auto module = cvub::test::ParseFixture("control_flow_mix_before_split.mlir");
+  auto &cube = module.operations.at(
+      static_cast<size_t>(OperationId(module, "hivm.hir.mmadL1")));
+  cube.dpsInits = {cube.operands.back()};
+  const auto result = cvub::ProjectMixFunctionsToAIV(std::move(module));
+  const auto &projected = ProjectedFunction(result, "control").module;
+  CVUB_CHECK(!HasOperation(projected, "annotation.mark"));
+  CVUB_CHECK(!HasOperation(projected, "tensor.extract"));
+  const auto &function = projected.operations.at(1);
+  CVUB_CHECK(HasUnitAttribute(function.attributes, "hivm.part_of_mix"));
+  CVUB_CHECK_EQ(cvub::IRDictionaryValue(function.attributes, "mix_mode"),
+                "\"mix\"");
+}
+
+CVUB_TEST(split_mix_already_aiv_unknown_is_incomplete) {
+  auto module = cvub::test::ParseFixture("control_flow_mix_before_split.mlir");
+  auto &function = module.operations.at(1);
+  function.attributes = cvub::SetDictionaryValue(
+      function.attributes, "hivm.func_core_type", "#hivm.func_core_type<AIV>");
+  const auto result = cvub::ProjectMixFunctionsToAIV(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "SplitMixKernelAIVProjection",
+                           "no compiler core classification"));
+  CVUB_CHECK(HasDiagnostic(result, "SplitMixKernelAIVProjection",
+                           "Cube-classified"));
 }
 
 CVUB_TEST(split_mix_replaces_dps_loop_if_and_scope_results) {
