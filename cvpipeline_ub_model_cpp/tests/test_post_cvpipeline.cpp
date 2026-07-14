@@ -45,6 +45,14 @@ int OperationId(const cvub::GenericModule &module,
   throw std::runtime_error("missing operation: " + operation);
 }
 
+int FunctionId(const cvub::GenericModule &module, const std::string &name) {
+  for (const cvub::GenericOperation &operation : module.operations)
+    if (operation.name == "func.func" &&
+        cvub::FunctionSymbolName(operation) == name)
+      return operation.id;
+  throw std::runtime_error("missing function: " + name);
+}
+
 const cvub::GenericOperation &DefinitionOf(const cvub::GenericModule &module,
                                            int value) {
   for (const cvub::GenericOperation &operation : module.operations)
@@ -89,6 +97,17 @@ const cvub::GenericOperation &OperationWithCase(
             cvub::IRDictionaryValue(operation.attributes, "case")) == caseName)
       return operation;
   throw std::runtime_error("missing operation case: " + caseName);
+}
+
+bool HasMarkOfCase(const cvub::GenericModule &module,
+                   const std::string &caseName) {
+  const int source = OperationWithCase(module, caseName).results.front();
+  return std::any_of(module.operations.begin(), module.operations.end(),
+                     [&](const cvub::GenericOperation &operation) {
+                       return operation.name == "annotation.mark" &&
+                              !operation.operands.empty() &&
+                              operation.operands.front() == source;
+                     });
 }
 
 const cvub::ProjectedAIVModule &ProjectedFunction(
@@ -261,6 +280,42 @@ CVUB_TEST(split_mix_uses_real_vector_cleanup_labels_and_function_attrs) {
   CVUB_CHECK(HasUnitAttribute(function.attributes, "hivm.part_of_mix"));
   CVUB_CHECK_EQ(cvub::IRDictionaryValue(function.attributes, "mix_mode"),
                 "\"mix\"");
+}
+
+CVUB_TEST(split_mix_vector_cleanup_mirrors_remove_useless_mark_conditions) {
+  auto module = cvub::test::ParseFixture("split_mix_cleanup.mlir");
+  cvub::PostProcessVectorFunction(module, FunctionId(module, "cleanup"));
+  module = cvub::CompactGenericModule(std::move(module));
+
+  CVUB_CHECK(!HasMarkOfCase(module, "removable_source"));
+  CVUB_CHECK(HasMarkOfCase(module, "only_mark_source"));
+  CVUB_CHECK(HasMarkOfCase(module, "fixpipe_source"));
+  CVUB_CHECK(HasMarkOfCase(module, "store_source"));
+  CVUB_CHECK(HasMarkOfCase(module, "attributed_source"));
+  cvub::ValidateGenericModule(module);
+}
+
+CVUB_TEST(split_mix_vector_cleanup_matches_extract_duplication_topology) {
+  auto module = cvub::test::ParseFixture("split_mix_cleanup.mlir");
+  cvub::PostProcessVectorFunction(module, FunctionId(module, "cleanup"));
+  module = cvub::CompactGenericModule(std::move(module));
+
+  CVUB_CHECK(HasOperationCase(module, "original_extract"));
+  CVUB_CHECK(!HasOperationCase(module, "dead_new_extract"));
+  CVUB_CHECK(HasOperationCase(module, "live_new_extract"));
+  cvub::ValidateGenericModule(module);
+}
+
+CVUB_TEST(split_mix_best_effort_cube_keeps_live_labeled_extract) {
+  const auto result = cvub::ProjectMixFunctionsToAIV(
+      cvub::test::ParseFixture("split_mix_cleanup.mlir"));
+  const auto &projected = ProjectedFunction(result, "cleanup").module;
+
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "SplitMixKernelAIVProjection",
+                           "no safe result replacement rule"));
+  CVUB_CHECK(HasOperationCase(projected, "live_new_extract"));
+  cvub::ValidateGenericModule(projected);
 }
 
 CVUB_TEST(split_mix_already_aiv_unknown_is_incomplete) {

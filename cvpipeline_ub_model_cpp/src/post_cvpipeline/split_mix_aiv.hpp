@@ -255,26 +255,105 @@ inline bool HasAttribute(const GenericOperation &operation,
          dictionaryHas(operation.properties);
 }
 
+inline bool HasAnyAttribute(const GenericOperation &operation) {
+  const auto dictionaryHasEntry = [](const std::string &dictionary) {
+    if (dictionary.size() < 2 || dictionary.front() != '{' ||
+        dictionary.back() != '}')
+      return false;
+    const std::vector<std::string> entries =
+        splitTopLevel(dictionary.substr(1, dictionary.size() - 2));
+    return std::any_of(entries.begin(), entries.end(),
+                       [](const std::string &entry) {
+                         return !trim(entry).empty();
+                       });
+  };
+  return dictionaryHasEntry(operation.attributes) ||
+         dictionaryHasEntry(operation.properties);
+}
+
+inline bool OperationUsesValue(const GenericOperation &operation, int value) {
+  const auto contains = [value](const std::vector<int> &values) {
+    return std::find(values.begin(), values.end(), value) != values.end();
+  };
+  return contains(operation.operands) || contains(operation.dpsInputs) ||
+         contains(operation.dpsInits);
+}
+
 inline void PostProcessVectorFunction(GenericModule &module, int functionId) {
   static const std::string replacementLabel =
       "DuplicateTensorExtractForCube::replacementLabel";
   static const std::string newExtractLabel =
       "DuplicateTensorExtractForCube::newExtractLabel";
-  std::vector<int> marks;
-  std::vector<int> extracts;
-  for (int operationId : PostOrderOperations(module, functionId)) {
+  std::vector<int> attached = PostOrderOperations(module, functionId);
+  const auto definingOperation = [&](int value) -> const GenericOperation * {
+    for (int operationId : attached) {
+      const GenericOperation &operation =
+          module.operations.at(static_cast<size_t>(operationId));
+      if (std::find(operation.results.begin(), operation.results.end(), value) !=
+          operation.results.end())
+        return &operation;
+    }
+    return nullptr;
+  };
+  const auto attachedUsers = [&](int value) {
+    std::vector<int> users;
+    for (int operationId : attached)
+      if (OperationUsesValue(
+              module.operations.at(static_cast<size_t>(operationId)), value))
+        users.push_back(operationId);
+    return users;
+  };
+
+  std::vector<int> uselessMarks;
+  for (int operationId : attached) {
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(operationId));
+    if (operation.name != "annotation.mark" || operation.operands.empty() ||
+        HasAnyAttribute(operation))
+      continue;
+    const GenericOperation *definition =
+        definingOperation(operation.operands.front());
+    if (definition != nullptr && (definition->name == "hivm.hir.fixpipe" ||
+                                  definition->name == "hivm.hir.store"))
+      continue;
+    const std::vector<int> users = attachedUsers(operation.operands.front());
+    const bool onlyMarks = std::all_of(users.begin(), users.end(), [&](int user) {
+      return module.operations.at(static_cast<size_t>(user)).name ==
+             "annotation.mark";
+    });
+    if (!onlyMarks)
+      uselessMarks.push_back(operationId);
+  }
+  for (int operationId : uselessMarks) {
+    EraseOperationTree(module, operationId);
+    attached.erase(std::remove(attached.begin(), attached.end(), operationId),
+                   attached.end());
+  }
+
+  std::vector<int> replacementMarks;
+  for (int operationId : attached) {
     const GenericOperation &operation =
         module.operations.at(static_cast<size_t>(operationId));
     if (operation.name == "annotation.mark" &&
         HasAttribute(operation, replacementLabel))
-      marks.push_back(operationId);
-    else if (operation.name == "tensor.extract" &&
-             HasAttribute(operation, newExtractLabel))
-      extracts.push_back(operationId);
+      replacementMarks.push_back(operationId);
   }
-  for (int operationId : marks)
+  for (int operationId : replacementMarks) {
     EraseOperationTree(module, operationId);
-  for (int operationId : extracts)
+    attached.erase(std::remove(attached.begin(), attached.end(), operationId),
+                   attached.end());
+  }
+
+  std::vector<int> deadExtracts;
+  for (int operationId : attached) {
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(operationId));
+    if (operation.name == "tensor.extract" &&
+        HasAttribute(operation, newExtractLabel) &&
+        attachedUsers(operation.results.front()).empty())
+      deadExtracts.push_back(operationId);
+  }
+  for (int operationId : deadExtracts)
     EraseOperationTree(module, operationId);
 }
 
