@@ -137,6 +137,40 @@ void ExpectTileIncompleteAndUnchanged(const cvub::GenericModule &module,
   CVUB_CHECK(!result.diagnostics.empty());
 }
 
+void MakeCubeDimensionsSharedAndSquare(cvub::GenericModule &module) {
+  for (cvub::GenericOperation &operation : module.operations) {
+    const auto rewriteTypes = [](std::vector<std::string> &types) {
+      for (std::string &type : types) {
+        size_t position = std::string::npos;
+        while ((position = type.find("128x4096")) != std::string::npos)
+          type.replace(position, 8, "256x256");
+        while ((position = type.find("64x4096")) != std::string::npos)
+          type.replace(position, 7, "64x256");
+        while ((position = type.find("128x64")) != std::string::npos)
+          type.replace(position, 6, "256x64");
+      }
+    };
+    rewriteTypes(operation.resultTypes);
+    rewriteTypes(operation.operandTypes);
+  }
+  auto &subview = MutableOperationNamed(module, "memref.subview");
+  subview.attributes = cvub::SetDictionaryValue(
+      subview.attributes, "static_sizes", "[256, 256]");
+  auto &mmad = MutableOperationNamed(module, "hivm.hir.mmadL1");
+  auto &sharedDimension = module.operations.at(
+      static_cast<size_t>(DefinitionOf(module, mmad.operands[5]).id));
+  sharedDimension.attributes = cvub::SetDictionaryValue(
+      sharedDimension.attributes, "value", "256 : index");
+  sharedDimension.resultTypes = {"index"};
+  const int sharedValue = sharedDimension.results.front();
+  mmad.operands[3] = sharedValue;
+  mmad.operands[5] = sharedValue;
+  mmad.dpsInputs.clear();
+  mmad.dpsInits.clear();
+  cvub::ApplyOperationSemantics(mmad);
+  cvub::ValidateGenericModule(module);
+}
+
 void DuplicateAnchorBeforeYield(cvub::GenericModule &module,
                                 const std::string &anchorName) {
   const cvub::GenericOperation anchor =
@@ -369,6 +403,45 @@ CVUB_TEST(cube_rejects_legacy_four_operand_synthetic_mmad) {
       legacy.attributes, "operandSegmentSizes", "array<i32: 1, 1, 1, 1>");
   cvub::ValidateGenericModule(module);
   ExpectTileIncompleteAndUnchanged(module);
+
+  auto dynamicInit = module;
+  auto &dynamicLegacy = MutableOperationNamed(dynamicInit, "hivm.hir.mmadL1");
+  const auto &wrapper = OperationNamed(dynamicInit, "scf.for");
+  const int body = dynamicInit.regions.at(
+      static_cast<size_t>(wrapper.regions.front())).blocks.front();
+  dynamicLegacy.operands[2] =
+      dynamicInit.blocks.at(static_cast<size_t>(body)).arguments.front();
+  dynamicLegacy.operandTypes[2] = "index";
+  dynamicLegacy.dpsInputs[2] = dynamicLegacy.operands[2];
+  cvub::ValidateGenericModule(dynamicInit);
+  ExpectTileIncompleteAndUnchanged(dynamicInit);
+
+  ExpectTileIncompleteAndUnchanged(module, 2, 1);
+}
+
+CVUB_TEST(cube_shared_real_dimensions_update_only_the_n_operand_and_metadata) {
+  auto module = cvub::test::ParseFixture("tile_cube_loop.mlir");
+  MakeCubeDimensionsSharedAndSquare(module);
+  const auto &before = OperationNamed(module, "hivm.hir.mmadL1");
+  const int shared = before.operands[3];
+  CVUB_CHECK_EQ(before.operands[5], shared);
+  CVUB_CHECK_EQ(before.dpsInputs[3], shared);
+  CVUB_CHECK_EQ(before.dpsInputs[5], shared);
+
+  const auto result = cvub::RunTileCubeVectorLoop(module, 2, 2);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  const auto &matrix = OperationNamed(result.module, "hivm.hir.mmadL1");
+  CVUB_CHECK_EQ(matrix.operands[3], shared);
+  CVUB_CHECK(matrix.operands[5] != shared);
+  CVUB_CHECK_EQ(matrix.dpsInputs[3], shared);
+  CVUB_CHECK_EQ(matrix.dpsInputs[5], matrix.operands[5]);
+  const auto &minimum = DefinitionOf(result.module, matrix.operands[5]);
+  CVUB_CHECK_EQ(cvub::IRDictionaryValue(minimum.properties, "map"),
+                "affine_map<(d0) -> (-d0 + 256, 128)>");
+  CVUB_CHECK(cvub::IRDictionaryValue(minimum.attributes, "map").empty());
+  CVUB_CHECK_EQ(minimum.operands.size(), 1U);
+  CVUB_CHECK_EQ(minimum.operandTypes, std::vector<std::string>({"index"}));
+  CVUB_CHECK_EQ(minimum.resultTypes, std::vector<std::string>({"index"}));
 }
 
 CVUB_TEST(cube_real_dimensions_must_match_the_static_matrix_shape) {
@@ -430,6 +503,51 @@ CVUB_TEST(cube_m_axis_is_forced_by_inside_a_load_dependency) {
                     "value"),
                 "4096 : index");
   cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(cube_shared_real_dimensions_update_only_the_m_operand_and_metadata) {
+  auto module = cvub::test::ParseFixture("tile_cube_loop.mlir");
+  MakeCubeDimensionsSharedAndSquare(module);
+  auto &mmad = MutableOperationNamed(module, "hivm.hir.mmadL1");
+  auto &load = MutableOperationNamed(module, "hivm.hir.load");
+  const int outsideA = mmad.operands[0];
+  const int outsideB = load.operands[0];
+  const int loaded = mmad.operands[1];
+  auto &loadInit = module.operations.at(
+      static_cast<size_t>(DefinitionOf(module, load.operands[1]).id));
+  loadInit.resultTypes.front() = "tensor<256x64xf16>";
+  load.operands[0] = outsideA;
+  load.operandTypes = {"tensor<256x64xf16>", "tensor<256x64xf16>"};
+  load.resultTypes.front() = "tensor<256x64xf16>";
+  load.dpsInputs.clear();
+  load.dpsInits.clear();
+  load.effects.clear();
+  cvub::ApplyOperationSemantics(load);
+  mmad.operands[0] = loaded;
+  mmad.operandTypes[0] = "tensor<256x64xf16>";
+  mmad.operands[1] = outsideB;
+  mmad.operandTypes[1] = "tensor<64x256xf16>";
+  mmad.dpsInputs.clear();
+  mmad.dpsInits.clear();
+  cvub::ApplyOperationSemantics(mmad);
+  const int shared = mmad.operands[3];
+  CVUB_CHECK_EQ(mmad.operands[5], shared);
+  cvub::ValidateGenericModule(module);
+
+  const auto result = cvub::RunTileCubeVectorLoop(module, 2, 2);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  const auto &matrix = OperationNamed(result.module, "hivm.hir.mmadL1");
+  CVUB_CHECK(matrix.operands[3] != shared);
+  CVUB_CHECK_EQ(matrix.operands[5], shared);
+  CVUB_CHECK_EQ(matrix.dpsInputs[3], matrix.operands[3]);
+  CVUB_CHECK_EQ(matrix.dpsInputs[5], shared);
+  const auto &minimum = DefinitionOf(result.module, matrix.operands[3]);
+  CVUB_CHECK_EQ(cvub::IRDictionaryValue(minimum.properties, "map"),
+                "affine_map<(d0) -> (-d0 + 256, 128)>");
+  CVUB_CHECK(cvub::IRDictionaryValue(minimum.attributes, "map").empty());
+  CVUB_CHECK_EQ(minimum.operands.size(), 1U);
+  CVUB_CHECK_EQ(minimum.operandTypes, std::vector<std::string>({"index"}));
+  CVUB_CHECK_EQ(minimum.resultTypes, std::vector<std::string>({"index"}));
 }
 
 CVUB_TEST(cube_fixpipe_nz2nd_is_supported_but_other_dma_modes_fail_closed) {
