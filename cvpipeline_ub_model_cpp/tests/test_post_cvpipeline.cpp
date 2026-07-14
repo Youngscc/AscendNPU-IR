@@ -3233,6 +3233,31 @@ CVUB_TEST(tile_bind_subblock_same_address_hazard_applies_store_limit) {
   cvub::ValidateGenericModule(result.module);
 }
 
+CVUB_TEST(tile_bind_subblock_implicit_transpose_hazard_applies_store_limit) {
+  auto module =
+      cvub::test::ParseFixture("subblock_bind_implicit_transpose.mlir");
+  const auto result = cvub::RunTileAndBindSubBlock(module, /*enableTile=*/true);
+  // The annotation.mark carries MayImplicitTransposeWithLastAxis = false.  The
+  // real pass's isAnnotatedBy reduces to hasAttr(key) (value-agnostic), so even
+  // an explicit = false spelling is a hazard that forces a fallback to
+  // limitUniqueSubBlockToStore.  The model mirrors that recognized fallback
+  // exactly.
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(result.diagnostics.empty());
+  CVUB_CHECK_EQ(OperationCount(result.module, "hivm.hir.get_sub_block_idx"), 1U);
+  const cvub::GenericOperation &limitIf = [&] {
+    for (const cvub::GenericOperation &operation : result.module.operations)
+      if (operation.name == "scf.if" &&
+          HasUnitAttribute(operation.attributes, "limit_sub_block_id0"))
+        return operation;
+    throw std::runtime_error("missing limit_sub_block_id0 scf.if");
+  }();
+  const cvub::GenericOperation &store =
+      OperationWithCase(result.module, "hazard_store");
+  CVUB_CHECK_EQ(store.parentId, limitIf.id);
+  cvub::ValidateGenericModule(result.module);
+}
+
 CVUB_TEST(tile_bind_subblock_disable_attribute_is_recognized_noop) {
   auto module = cvub::test::ParseFixture("subblock_bind_success.mlir");
   module.operations.front().attributes = cvub::SetDictionaryValue(
@@ -3298,6 +3323,30 @@ CVUB_TEST(tile_bind_subblock_dynamic_store_is_recognized_rollback) {
   CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
   CVUB_CHECK(result.diagnostics.empty());
   CVUB_CHECK_EQ(OperationCount(result.module, "scf.if"), 1U);
+  cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(tile_bind_subblock_slice_wrapped_dynamic_store_is_incomplete) {
+  auto module = cvub::test::ParseFixture("subblock_bind_slice_wrapped.mlir");
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result = cvub::RunTileAndBindSubBlock(module, /*enableTile=*/true);
+  // The store source has a dynamic-looking direct type (tensor<?x16xf16>) but
+  // is produced by a tensor.extract_slice of a static tensor.  The real pass
+  // traces through the extract_slice to the underlying static type and proceeds
+  // to tile instead of aborting.  The model must fail closed: it must NOT claim
+  // the dynamic-store Exact rollback (which would wrongly wrap the store), so
+  // the function is reported incomplete with the legal IR untouched.
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(!result.diagnostics.empty());
+  bool sliceDiagnostic = false;
+  for (const cvub::PostCVPipelineDiagnostic &diagnostic : result.diagnostics)
+    if (diagnostic.pipelineStage == "TileAndBindSubBlock" &&
+        diagnostic.reason.find("slice") != std::string::npos)
+      sliceDiagnostic = true;
+  CVUB_CHECK(sliceDiagnostic);
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+  CVUB_CHECK_EQ(OperationCount(result.module, "scf.if"), 0U);
+  CVUB_CHECK_EQ(OperationCount(result.module, "hivm.hir.get_sub_block_idx"), 0U);
   cvub::ValidateGenericModule(result.module);
 }
 

@@ -30,18 +30,6 @@ inline std::string CoreTypeOf(const GenericOperation &function) {
   return trim(IRDictionaryValue(function.attributes, kFuncCoreTypeAttr));
 }
 
-inline bool HasUnitAttribute(const std::string &dictionary,
-                             const std::string &name) {
-  if (dictionary.size() < 2 || dictionary.front() != '{' ||
-      dictionary.back() != '}')
-    return false;
-  for (const std::string &entry :
-       splitTopLevel(dictionary.substr(1, dictionary.size() - 2)))
-    if (trim(entry) == name)
-      return true;
-  return false;
-}
-
 inline bool IsDeviceFunction(const GenericOperation &operation) {
   if (operation.name != "func.func" || operation.regions.empty())
     return false;
@@ -54,10 +42,12 @@ inline bool IsMixPart(const GenericOperation &function) {
   return HasUnitAttribute(function.attributes, kPartOfMixAttr);
 }
 
-// collectMixAicAndAivFuncs in the real pass only collects DEVICE functions that
-// carry hivm.part_of_mix and a concrete AIV/AIC core type.  The projected AIV
-// module still carries part_of_mix (see SplitMixKernelAIVProjection), so this
-// selects the single projected function.
+// collectMixAicAndAivFuncs in the real pass collects every function carrying
+// hivm.part_of_mix and a concrete AIV/AIC core type; it does NOT filter on
+// hacc.function_kind.  This model additionally narrows the selection to DEVICE
+// functions, which is safe for the projected AIV modules this stage consumes
+// (SplitMixKernelAIVProjection emits DEVICE functions) and only ever makes the
+// model select fewer functions than the real pass.
 inline std::vector<int> CollectAivFunctions(const GenericModule &module) {
   std::vector<int> result;
   for (const GenericOperation &operation : module.operations)
@@ -142,11 +132,14 @@ inline const GenericOperation *ReinterpretCastDef(const GenericModule &module,
   return def;
 }
 
-// Mirrors hasImplicitTransposeWithLastAxisInAiv exactly: the hazard is raised
-// solely by an annotation.mark annotated with MayImplicitTransposeWithLastAxis.
-// The load/store snake-case attribute is intentionally NOT consulted, because
-// without the real mark-propagation analysis consulting it could make the model
-// apply the Exact fallback for a function the real pass would actually tile.
+// Mirrors hasImplicitTransposeWithLastAxisInAiv: the hazard is raised solely
+// by an annotation.mark annotated with MayImplicitTransposeWithLastAxis.  The
+// real pass consults markOp.isAnnotatedBy(...), which reduces to hasAttr(key)
+// and is therefore value-agnostic, so any spelling of the attribute (including
+// an explicit `= false`) is a hazard.  The load/store snake-case attribute is
+// intentionally NOT consulted, because without the real mark-propagation
+// analysis consulting it could make the model apply the Exact fallback for a
+// function the real pass would actually tile.
 inline bool HasImplicitTransposeHazard(const GenericModule &module,
                                        const std::vector<int> &aivFuncs) {
   for (int functionId : aivFuncs) {
@@ -157,7 +150,7 @@ inline bool HasImplicitTransposeHazard(const GenericModule &module,
         continue;
       const std::string mark =
           IRDictionaryValue(operation.attributes, kImplicitTransposeMark);
-      if (!mark.empty() && mark != "false")
+      if (!mark.empty())
         return true;
       if (HasUnitAttribute(operation.attributes, kImplicitTransposeMark))
         return true;
@@ -223,7 +216,10 @@ inline bool IsStoreLikeOp(const GenericOperation &operation) {
 }
 
 // Mirrors isCopytoL1: a copy is only restricted when its destination traces to
-// an L1 allocation.  Store/indirect_store are always eligible.
+// an L1 allocation, and the real pass checks the memref memory space via
+// getOptionalHIVMAddressSpace (i.e. #hivm.address_space<L1>) only — a bare
+// #hivm.mem_scope<L1> does not qualify.  Store/indirect_store are always
+// eligible.
 inline bool IsLimitEligible(const GenericModule &module,
                             const GenericOperation &operation) {
   if (operation.name == "hivm.hir.store" ||
@@ -236,8 +232,7 @@ inline bool IsLimitEligible(const GenericModule &module,
       def->resultTypes.empty())
     return false;
   const std::string &type = def->resultTypes.front();
-  return type.find("#hivm.address_space<L1>") != std::string::npos ||
-         type.find("#hivm.mem_scope<L1>") != std::string::npos;
+  return type.find("#hivm.address_space<L1>") != std::string::npos;
 }
 
 // A function with no store/copy/indirect_store leaves the isFailed flag true in
@@ -253,9 +248,11 @@ inline bool HasAnyStoreLikeOp(const GenericModule &module, int functionId) {
   return false;
 }
 
-// Mirrors the dynamic-store guard inside tileAndSliceOp: any store whose
-// source/destination is not a static shaped type aborts tiling and reverts to
-// limitUniqueSubBlockToStore.
+// Mirrors the direct-operand dynamic check that opens the dynamic-store guard
+// inside tileAndSliceOp: a store whose direct source/destination operand type
+// is not a static shaped type is a candidate for the abort path.  This is only
+// the first half of the real decision; see ClassifyDynamicStores for the
+// slice-tracing refinement.
 inline bool IsDynamicStore(const GenericOperation &store) {
   auto isStatic = [](const std::string &type) {
     const std::string trimmed = trim(type);
@@ -268,15 +265,62 @@ inline bool IsDynamicStore(const GenericOperation &store) {
   return !isStatic(store.operandTypes[0]) || !isStatic(store.operandTypes[1]);
 }
 
-inline bool FunctionHasDynamicStore(const GenericModule &module,
-                                    int functionId) {
+// The real pass (TileAndBindSubBlock.cpp:859-877) traces a dynamic-looking
+// store source/destination through tensor.extract_slice / memref.subview to the
+// underlying type before deciding the store is genuinely dynamic.  A store
+// whose dynamic-looking operand is a slice of a (possibly static) value is
+// therefore NOT an abort: the pass proceeds to tile it.  This helper recognizes
+// that slice-wrapped form so the model can avoid the unsound Exact
+// dynamic-store rollback for it.
+inline bool IsSliceWrappedSource(const GenericModule &module, int value) {
+  const GenericOperation *def = Definition(module, value);
+  return def != nullptr && (def->name == "tensor.extract_slice" ||
+                            def->name == "memref.subview");
+}
+
+enum class DynamicStoreDisposition {
+  // No dynamic store: the real pass proceeds to tile -> model reports Incomplete
+  // because the exact sub-block loop IR is not reproduced.
+  kNone,
+  // A non-slice-wrapped dynamic store: the real pass aborts tiling and reverts
+  // to limitUniqueSubBlockToStore -> model reproduces that as Exact.
+  kGenuineDynamic,
+  // A dynamic-looking store whose source/destination is a slice op: the real
+  // pass traces through the slice and proceeds to tile -> the model cannot
+  // reproduce the trace-and-tile, so it fails closed (Incomplete) rather than
+  // claiming the Exact dynamic-store rollback.
+  kSliceWrapped,
+};
+
+// Mirrors the dynamic-store guard in tileAndSliceOp at function granularity.
+// tileAndSliceOp aborts (and reverts to limitUniqueSubBlockToStore) as soon as
+// ANY store is genuinely dynamic.  A dynamic-looking but slice-wrapped store is
+// not an abort in the real pass, so it is reported separately (kSliceWrapped)
+// for fail-closed handling instead of the Exact rollback.
+inline DynamicStoreDisposition
+ClassifyDynamicStores(const GenericModule &module, int functionId) {
+  bool anySliceWrapped = false;
   for (int opId : AllOperations(module, functionId)) {
     const GenericOperation &operation =
         module.operations.at(static_cast<size_t>(opId));
-    if (operation.name == "hivm.hir.store" && IsDynamicStore(operation))
-      return true;
+    if (operation.name != "hivm.hir.store" || !IsDynamicStore(operation))
+      continue;
+    const bool srcSlice =
+        operation.operands.size() >= 1 &&
+        IsSliceWrappedSource(module, operation.operands.front());
+    const bool dstSlice =
+        operation.operands.size() >= 2 &&
+        IsSliceWrappedSource(module, operation.operands[1]);
+    if (srcSlice || dstSlice) {
+      // Conservatively fail closed: the real pass would trace the slice before
+      // deciding, which the model does not reproduce, so never claim Exact.
+      anySliceWrapped = true;
+      continue;
+    }
+    return DynamicStoreDisposition::kGenuineDynamic;
   }
-  return false;
+  return anySliceWrapped ? DynamicStoreDisposition::kSliceWrapped
+                         : DynamicStoreDisposition::kNone;
 }
 
 // Rewraps a single valueless store/indirect_store/L1-copy in an
@@ -384,8 +428,13 @@ inline void AddDiagnostic(StageResult &result, int operationId,
 //      skip, apply limitUniqueSubBlockToStore (Exact).
 //   4. attemptBindSubBlock per AIV func:
 //        - no store-like op            -> isFailed revert (recognized, Exact).
-//        - dynamic-shaped store source -> tileAndSliceOp abort (recognized,
-//                                         Exact) with limitUniqueSubBlockToStore.
+//        - genuinely dynamic store (a source/destination that is dynamic and
+//          NOT slice-wrapped) -> tileAndSliceOp abort (recognized, Exact) with
+//          limitUniqueSubBlockToStore.
+//        - dynamic-looking but slice-wrapped store (operand is a
+//          tensor.extract_slice / memref.subview) -> the real pass traces to
+//          the underlying type and tiles; that trace-and-tile is not reproduced
+//          here, so the form is reported incomplete (fail closed).
 //        - static-shaped store         -> the real pass would derive a tiling
 //                                         dimension and wrap the body in a
 //                                         sub-block loop.  That bubble-up tiling
@@ -433,25 +482,38 @@ inline StageResult RunTileAndBindSubBlock(GenericModule module,
   }
 
   // attemptBindSubBlock across the AIV functions.  Projected modules carry a
-  // single AIV function, but the per-function classification generalizes.
+  // single AIV function.  NOTE: the real pass's tileAivFuncs bails out of the
+  // whole AIV step on the FIRST function whose attemptBindSubBlock fails (it
+  // does not continue to later functions); this model instead classifies each
+  // function independently.  That is a deliberate model-added narrowing that
+  // stays fail-closed: every path that the real pass would actively tile is
+  // reported Incomplete here, so the model never silently produces an exact
+  // untiled result for a function the real pass transformed.
   for (int functionId : aivFuncs) {
     if (!HasAnyStoreLikeOp(result.module, functionId))
       continue; // isFailed revert -> limitUniqueSubBlockToStore no-op, Exact.
-    if (FunctionHasDynamicStore(result.module, functionId)) {
-      // tileAndSliceOp aborts on a dynamic store; the real pass reverts and
-      // applies limitUniqueSubBlockToStore.  Recognized rollback, Exact.
+    const DynamicStoreDisposition disposition =
+        ClassifyDynamicStores(result.module, functionId);
+    if (disposition == DynamicStoreDisposition::kGenuineDynamic) {
+      // tileAndSliceOp aborts on a non-slice-wrapped dynamic store; the real
+      // pass reverts and applies limitUniqueSubBlockToStore.  Recognized
+      // rollback, Exact.
       if (!LimitStoresToSubBlockZero(result.module, {functionId}))
         AddDiagnostic(result, functionId, "func.func", resultBearerReason);
       continue;
     }
-    // Static-shaped store: the real pass would wrap the body in a sub-block
-    // loop and slice the store.  That transformation depends on the
-    // DimensionAnalyzer + bubble-up-extract-slice machinery, which is not
-    // reproducible exactly.  Fail closed: keep the legal IR and report the
-    // function as an incomplete (unmodeled potentially-successful) form.
-    AddDiagnostic(result, functionId, "func.func",
-                  "AIV sub-block tiling would transform this function but the "
-                  "exact sub-block loop IR is not modeled");
+    // kNone (static store) or kSliceWrapped (the real pass traces the slice and
+    // then tiles): the exact sub-block loop IR is not reproduced.  Fail closed:
+    // keep the legal IR and report the function as an incomplete (unmodeled
+    // potentially-successful) form.
+    AddDiagnostic(
+        result, functionId, "func.func",
+        disposition == DynamicStoreDisposition::kSliceWrapped
+            ? "AIV sub-block tiling would trace the slice-wrapped dynamic "
+              "store and transform this function, but the exact sub-block loop "
+              "IR is not modeled"
+            : "AIV sub-block tiling would transform this function but the "
+              "exact sub-block loop IR is not modeled");
   }
 
   ValidateGenericModule(result.module);

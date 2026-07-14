@@ -14,18 +14,6 @@
 namespace cvub {
 namespace inline_scope_detail {
 
-inline bool HasUnitAttribute(const std::string &dictionary,
-                             const std::string &name) {
-  if (dictionary.size() < 2 || dictionary.front() != '{' ||
-      dictionary.back() != '}')
-    return false;
-  for (const std::string &entry :
-       splitTopLevel(dictionary.substr(1, dictionary.size() - 2)))
-    if (trim(entry) == name)
-      return true;
-  return false;
-}
-
 inline std::string UnsupportedScopeReason(const GenericModule &module,
                                           const GenericOperation &scope) {
   if (scope.regions.size() != 1)

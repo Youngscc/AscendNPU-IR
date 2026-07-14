@@ -115,6 +115,21 @@ inline std::string IRDictionaryValue(const std::string &dictionary,
   return "";
 }
 
+// True when `name` appears as a valueless (unit) entry in the `{...}`
+// dictionary, i.e. a bare `name` token with no `=` assignment.  Shared by the
+// post-CVPipeline stages that need to detect unit attributes.
+inline bool HasUnitAttribute(const std::string &dictionary,
+                             const std::string &name) {
+  if (dictionary.size() < 2 || dictionary.front() != '{' ||
+      dictionary.back() != '}')
+    return false;
+  for (const std::string &entry :
+       splitTopLevel(dictionary.substr(1, dictionary.size() - 2)))
+    if (trim(entry) == name)
+      return true;
+  return false;
+}
+
 inline std::string UnquoteIRString(std::string value) {
   value = trim(std::move(value));
   if (value.size() >= 2 && value.front() == '"' && value.back() == '"')
