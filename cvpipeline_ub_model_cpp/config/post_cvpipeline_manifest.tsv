@@ -6,7 +6,7 @@ order	stage	disposition
 5	CrossCoreSyncInvariant	ub-invariant
 6	SplitMixKernelAIVProjection	modeled
 7	InlineScope	modeled
-8	TileAndBindSubBlock	unsupported
+8	TileAndBindSubBlock	modeled
 9	FoldTensorEmpty	modeled
 10	CanonicalizationAfterSplit	modeled
 11	LoopInvariantCodeMotion	unsupported

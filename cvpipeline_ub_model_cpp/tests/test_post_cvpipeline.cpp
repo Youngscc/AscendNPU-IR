@@ -6,6 +6,7 @@
 #include "../src/post_cvpipeline/pipeline.hpp"
 #include "../src/post_cvpipeline/split_mix_aiv.hpp"
 #include "../src/post_cvpipeline/tensor_empty.hpp"
+#include "../src/post_cvpipeline/tile_bind_subblock.hpp"
 #include "../src/post_cvpipeline/tile_cube_vector_loop.hpp"
 #include "../src/suffix/suffix_pipeline.hpp"
 
@@ -1458,6 +1459,7 @@ CVUB_TEST(post_pipeline_manifest_has_real_order) {
                             stage.stage == "CanonicalizationBeforeSplit" ||
                             stage.stage == "SplitMixKernelAIVProjection" ||
                             stage.stage == "InlineScope" ||
+                            stage.stage == "TileAndBindSubBlock" ||
                             stage.stage == "FoldTensorEmpty" ||
                             stage.stage == "CanonicalizationAfterSplit" ||
                             stage.stage == "CloneTensorEmpty"
@@ -1510,7 +1512,10 @@ CVUB_TEST(unsupported_stages_make_projection_incomplete) {
                 cvub::CoverageDisposition::Modeled);
   CVUB_CHECK(!HasDiagnostic(result, "TileCubeVectorLoop", "unsupported"));
   CVUB_CHECK(!HasDiagnostic(result, "InferAndSetBufferSize", "unsupported"));
-  CVUB_CHECK(HasDiagnostic(result, "TileAndBindSubBlock", "unsupported"));
+  // Task 7 flips TileAndBindSubBlock to modeled; minimal_aiv has no store, so
+  // the stage reports an exact recognized no-op and never emits "unsupported".
+  CVUB_CHECK(!HasDiagnostic(result, "TileAndBindSubBlock", "unsupported"));
+  CVUB_CHECK(HasDiagnostic(result, "LoopInvariantCodeMotion", "unsupported"));
 }
 
 CVUB_TEST(post_pipeline_passes_size_and_canonicalization_output_to_split) {
@@ -2988,12 +2993,138 @@ CVUB_TEST(post_split_scope_empty_stages_are_ordered_and_propagated) {
       cvub::test::ParseFixture("minimal_aiv.mlir"), {});
   CVUB_CHECK_EQ(result.coverage[6].disposition,
                 cvub::CoverageDisposition::Modeled);
+  CVUB_CHECK_EQ(result.coverage[7].disposition,
+                cvub::CoverageDisposition::Modeled);
   CVUB_CHECK_EQ(result.coverage[8].disposition,
                 cvub::CoverageDisposition::Modeled);
   CVUB_CHECK_EQ(result.coverage[9].disposition,
                 cvub::CoverageDisposition::Modeled);
   CVUB_CHECK_EQ(result.coverage[12].disposition,
                 cvub::CoverageDisposition::Modeled);
+  CVUB_CHECK(!result.functions.empty());
+  cvub::ValidateGenericModule(result.functions.front().module);
+}
+
+CVUB_TEST(tile_bind_subblock_success_form_is_reported_incomplete) {
+  auto module = cvub::test::ParseFixture("subblock_bind_success.mlir");
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result = cvub::RunTileAndBindSubBlock(module, /*enableTile=*/true);
+  // The real pass would derive a tiling dimension for the static-shaped store
+  // and wrap the body in a sub-block loop.  The lightweight model cannot
+  // reproduce the bubble-up tiling exactly, so it must fail closed: keep the
+  // legal IR untouched and report incomplete instead of a silent exact result.
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(!result.diagnostics.empty());
+  bool namedAivFunction = false;
+  for (const cvub::PostCVPipelineDiagnostic &diagnostic : result.diagnostics)
+    if (diagnostic.pipelineStage == "TileAndBindSubBlock" &&
+        diagnostic.reason.find("sub-block") != std::string::npos)
+      namedAivFunction = true;
+  CVUB_CHECK(namedAivFunction);
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+  CVUB_CHECK_EQ(OperationCount(result.module, "scf.if"), 0U);
+  CVUB_CHECK_EQ(OperationCount(result.module, "hivm.hir.get_sub_block_idx"), 0U);
+  cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(tile_bind_subblock_same_address_hazard_applies_store_limit) {
+  auto module = cvub::test::ParseFixture("subblock_bind_fallback.mlir");
+  const auto result = cvub::RunTileAndBindSubBlock(module, /*enableTile=*/true);
+  // Both the load source and the store destination trace through
+  // reinterpret_cast to the same block argument, so the real pass detects the
+  // same-address hazard and falls back to limitUniqueSubBlockToStore.  The
+  // model mirrors that recognized fallback exactly.
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(result.diagnostics.empty());
+  CVUB_CHECK_EQ(OperationCount(result.module, "hivm.hir.get_sub_block_idx"), 1U);
+  const cvub::GenericOperation &limitIf = [&] {
+    for (const cvub::GenericOperation &operation : result.module.operations)
+      if (operation.name == "scf.if" &&
+          HasUnitAttribute(operation.attributes, "limit_sub_block_id0"))
+        return operation;
+    throw std::runtime_error("missing limit_sub_block_id0 scf.if");
+  }();
+  const cvub::GenericOperation &store =
+      OperationNamed(result.module, "hivm.hir.store");
+  CVUB_CHECK_EQ(store.parentId, limitIf.id);
+  CVUB_CHECK_EQ(OperationCount(result.module, "hivm.hir.store"), 1U);
+  CVUB_CHECK_EQ(OperationCount(result.module, "scf.if"), 1U);
+  CVUB_CHECK_EQ(OperationCount(result.module, "arith.index_cast"), 1U);
+  CVUB_CHECK_EQ(OperationCount(result.module, "arith.cmpi"), 1U);
+  cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(tile_bind_subblock_disable_attribute_is_recognized_noop) {
+  auto module = cvub::test::ParseFixture("subblock_bind_success.mlir");
+  module.operations.front().attributes =
+      "{hivm.disable_auto_tile_and_bind_subblock}";
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result = cvub::RunTileAndBindSubBlock(module, /*enableTile=*/true);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(result.diagnostics.empty());
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+}
+
+CVUB_TEST(tile_bind_subblock_enable_tile_false_applies_store_limit) {
+  auto module = cvub::test::ParseFixture("subblock_bind_success.mlir");
+  const auto result = cvub::RunTileAndBindSubBlock(module, /*enableTile=*/false);
+  // enableTile=false still applies limitUniqueSubBlockToStore in the real pass.
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(result.diagnostics.empty());
+  CVUB_CHECK_EQ(OperationCount(result.module, "scf.if"), 1U);
+  const cvub::GenericOperation &store =
+      OperationNamed(result.module, "hivm.hir.store");
+  const cvub::GenericOperation &limitIf = [&] {
+    for (const cvub::GenericOperation &operation : result.module.operations)
+      if (operation.name == "scf.if" &&
+          HasUnitAttribute(operation.attributes, "limit_sub_block_id0"))
+        return operation;
+    throw std::runtime_error("missing limit_sub_block_id0 scf.if");
+  }();
+  CVUB_CHECK_EQ(store.parentId, limitIf.id);
+  cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(tile_bind_subblock_function_without_store_is_recognized_noop) {
+  auto module = cvub::test::ParseFixture("minimal_aiv.mlir");
+  const std::string before = cvub::SerializeGenericModule(module);
+  // With no store/copy/indirect_store, attemptBindSubBlock's isFailed check
+  // stays true and the real pass reverts to limitUniqueSubBlockToStore (a
+  // no-op).  The model mirrors that recognized rollback exactly.
+  const auto result = cvub::RunTileAndBindSubBlock(module, /*enableTile=*/true);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(result.diagnostics.empty());
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+}
+
+CVUB_TEST(tile_bind_subblock_dynamic_store_is_recognized_rollback) {
+  auto module = cvub::test::ParseFixture("subblock_bind_success.mlir");
+  // Drive the whole store-source chain to a dynamic shape consistently so the
+  // module stays valid.  A dynamic-shaped store source makes tileAndSliceOp
+  // abort in the real pass, which then reverts to limitUniqueSubBlockToStore.
+  for (cvub::GenericOperation &operation : module.operations) {
+    for (std::string &type : operation.resultTypes)
+      if (type == "tensor<16x16xf16>")
+        type = "tensor<?x16xf16>";
+    for (std::string &type : operation.operandTypes)
+      if (type == "tensor<16x16xf16>")
+        type = "tensor<?x16xf16>";
+  }
+  cvub::ValidateGenericModule(module);
+  const auto result = cvub::RunTileAndBindSubBlock(module, /*enableTile=*/true);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(result.diagnostics.empty());
+  CVUB_CHECK_EQ(OperationCount(result.module, "scf.if"), 1U);
+  cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(tile_bind_subblock_pipeline_marks_stage_modeled) {
+  const auto result = cvub::RunPostCVPipelineAIVProjection(
+      cvub::test::ParseFixture("minimal_aiv.mlir"), {});
+  CVUB_CHECK_EQ(result.coverage[7].stage, "TileAndBindSubBlock");
+  CVUB_CHECK_EQ(result.coverage[7].disposition,
+                cvub::CoverageDisposition::Modeled);
+  CVUB_CHECK(!HasDiagnostic(result, "TileAndBindSubBlock", "unsupported"));
   CVUB_CHECK(!result.functions.empty());
   cvub::ValidateGenericModule(result.functions.front().module);
 }

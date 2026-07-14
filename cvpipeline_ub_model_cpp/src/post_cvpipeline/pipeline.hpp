@@ -7,6 +7,7 @@
 #include "inline_scope.hpp"
 #include "split_mix_aiv.hpp"
 #include "tensor_empty.hpp"
+#include "tile_bind_subblock.hpp"
 #include "tile_cube_vector_loop.hpp"
 
 #include <array>
@@ -128,6 +129,7 @@ inline std::vector<StageCoverage> CompiledPostCVPipelineCoverage() {
   stages[4].disposition = CoverageDisposition::UBInvariant;
   stages[5].disposition = CoverageDisposition::Modeled;
   stages[6].disposition = CoverageDisposition::Modeled;
+  stages[7].disposition = CoverageDisposition::Modeled;
   stages[8].disposition = CoverageDisposition::Modeled;
   stages[9].disposition = CoverageDisposition::Modeled;
   stages[12].disposition = CoverageDisposition::Modeled;
@@ -182,8 +184,12 @@ inline PostCVPipelineResult RunPostCVPipelineAIVProjection(
   };
   for (ProjectedAIVModule &function : result.functions) {
     applyProjectedStage(function, RunInlineScope(std::move(function.module)));
-    // TileAndBindSubBlock is inserted here by Task 7.  Keeping the subsequent
-    // stages in their real relative order makes unsupported coverage explicit.
+    // TileAndBindSubBlock mirrors createTileAndBindSubBlockPass on the
+    // projected AIV module.  Keeping the subsequent stages in their real
+    // relative order makes unsupported coverage explicit.
+    applyProjectedStage(function,
+                        RunTileAndBindSubBlock(std::move(function.module),
+                                               options.enableAutoBindSubBlock));
     applyProjectedStage(function,
                         RunFoldTensorEmpty(std::move(function.module)));
     applyProjectedStage(
