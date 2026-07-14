@@ -1,5 +1,7 @@
 "builtin.module"() ({
-  "func.func"() <{function_type = () -> (), sym_name = "used_decl"}> : () -> ()
+  "func.func"() <{function_type = () -> (), sym_name = "used_decl"}> ({
+    "func.return"() : () -> ()
+  }) : () -> ()
   "func.func"() <{function_type = () -> (), sym_name = "unused_decl"}> : () -> ()
   "func.func"() <{function_type = () -> (), sym_name = "first_mix_aiv"}> ({
     "func.call"() <{callee = @used_decl}> : () -> ()

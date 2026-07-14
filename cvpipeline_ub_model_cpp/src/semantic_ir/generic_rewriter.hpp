@@ -14,6 +14,17 @@ inline void RemapValues(std::vector<int> &values,
   }
 }
 
+inline void RemapValuesOrThrow(std::vector<int> &values,
+                               const std::map<int, int> &mapping) {
+  for (int &value : values) {
+    const auto found = mapping.find(value);
+    if (found == mapping.end())
+      throw std::runtime_error("generic IR compaction: unmapped value " +
+                               std::to_string(value));
+    value = found->second;
+  }
+}
+
 class GenericRewriter {
 public:
   explicit GenericRewriter(GenericModule &module) : module(module) {
@@ -53,6 +64,8 @@ public:
     GenericRegion region;
     region.id = static_cast<int>(module.regions.size());
     region.parentOperation = parentOperation;
+    region.ordinal = static_cast<int>(
+        module.operations.at(static_cast<size_t>(parentOperation)).regions.size());
     module.regions.push_back(std::move(region));
     module.operations.at(static_cast<size_t>(parentOperation))
         .regions.push_back(static_cast<int>(module.regions.size() - 1));
@@ -63,6 +76,8 @@ public:
     GenericBlock block;
     block.id = static_cast<int>(module.blocks.size());
     block.regionId = region;
+    block.ordinal = static_cast<int>(
+        module.regions.at(static_cast<size_t>(region)).blocks.size());
     block.argumentTypes = argumentTypes;
     for (size_t index = 0; index < argumentTypes.size(); ++index)
       block.arguments.push_back(nextValue++);
@@ -283,12 +298,16 @@ inline GenericModule CompactGenericModule(GenericModule module) {
   }
 
   for (GenericOperation &operation : compact.operations) {
-    RemapValues(operation.operands, valueIds);
-    RemapValues(operation.dpsInputs, valueIds);
-    RemapValues(operation.dpsInits, valueIds);
-    for (int &successor : operation.successors)
-      if (blockIds.count(successor))
-        successor = blockIds.at(successor);
+    RemapValuesOrThrow(operation.operands, valueIds);
+    RemapValuesOrThrow(operation.dpsInputs, valueIds);
+    RemapValuesOrThrow(operation.dpsInits, valueIds);
+    for (int &successor : operation.successors) {
+      const auto found = blockIds.find(successor);
+      if (found == blockIds.end())
+        throw std::runtime_error("generic IR compaction: unmapped successor block " +
+                                 std::to_string(successor));
+      successor = found->second;
+    }
   }
   for (GenericBlock &block : compact.blocks)
     for (size_t index = 0; index < block.operations.size(); ++index)

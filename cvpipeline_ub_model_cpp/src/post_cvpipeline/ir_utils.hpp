@@ -150,7 +150,7 @@ DeviceFunctionNames(const GenericModule &module) {
       continue;
     const std::string kind =
         IRDictionaryValue(operation.attributes, "hacc.function_kind");
-    if (kind.find("DEVICE") == std::string::npos)
+    if (trim(kind) != "#hacc.function_kind<DEVICE>")
       continue;
     const std::string name = FunctionSymbolName(operation);
     if (!name.empty())
@@ -186,7 +186,6 @@ GenericValueTypes(const GenericModule &module) {
 inline void ValidateGenericModule(const GenericModule &module) {
   if (module.operations.empty())
     throw std::runtime_error("generic IR validation: missing module root");
-  const std::map<int, std::string> valueTypes = GenericValueTypes(module);
 
   for (size_t index = 0; index < module.operations.size(); ++index)
     if (module.operations[index].id != static_cast<int>(index))
@@ -197,6 +196,43 @@ inline void ValidateGenericModule(const GenericModule &module) {
   for (size_t index = 0; index < module.blocks.size(); ++index)
     if (module.blocks[index].id != static_cast<int>(index))
       throw std::runtime_error("generic IR validation: non-unique block ids");
+
+  std::vector<int> regionParentLinks(module.regions.size());
+  std::vector<int> blockParentLinks(module.blocks.size());
+  std::vector<int> operationParentLinks(module.operations.size());
+  for (const GenericOperation &operation : module.operations)
+    for (int regionId : operation.regions) {
+      if (regionId < 0 || static_cast<size_t>(regionId) >= module.regions.size())
+        throw std::runtime_error("generic IR validation: invalid region link");
+      ++regionParentLinks[static_cast<size_t>(regionId)];
+    }
+  for (const GenericRegion &region : module.regions)
+    for (int blockId : region.blocks) {
+      if (blockId < 0 || static_cast<size_t>(blockId) >= module.blocks.size())
+        throw std::runtime_error("generic IR validation: invalid block link");
+      ++blockParentLinks[static_cast<size_t>(blockId)];
+    }
+  for (const GenericBlock &block : module.blocks)
+    for (int operationId : block.operations) {
+      if (operationId < 0 ||
+          static_cast<size_t>(operationId) >= module.operations.size())
+        throw std::runtime_error("generic IR validation: invalid operation link");
+      ++operationParentLinks[static_cast<size_t>(operationId)];
+    }
+  for (int links : regionParentLinks)
+    if (links != 1)
+      throw std::runtime_error(
+          "generic IR validation: region must have exactly one parent link");
+  for (int links : blockParentLinks)
+    if (links != 1)
+      throw std::runtime_error(
+          "generic IR validation: block must have exactly one parent link");
+  if (operationParentLinks.front() != 0)
+    throw std::runtime_error("generic IR validation: module root has parent link");
+  for (size_t index = 1; index < operationParentLinks.size(); ++index)
+    if (operationParentLinks[index] != 1)
+      throw std::runtime_error(
+          "generic IR validation: operation must have exactly one parent link");
 
   for (const GenericRegion &region : module.regions) {
     if (region.parentOperation < 0 ||
@@ -210,8 +246,6 @@ inline void ValidateGenericModule(const GenericModule &module) {
       throw std::runtime_error("generic IR validation: invalid region ordinal");
     for (size_t ordinal = 0; ordinal < region.blocks.size(); ++ordinal) {
       const int blockId = region.blocks[ordinal];
-      if (blockId < 0 || static_cast<size_t>(blockId) >= module.blocks.size())
-        throw std::runtime_error("generic IR validation: invalid block link");
       const GenericBlock &block =
           module.blocks.at(static_cast<size_t>(blockId));
       if (block.regionId != region.id ||
@@ -226,9 +260,6 @@ inline void ValidateGenericModule(const GenericModule &module) {
       throw std::runtime_error("generic IR validation: invalid block region");
     for (size_t ordinal = 0; ordinal < block.operations.size(); ++ordinal) {
       const int operationId = block.operations[ordinal];
-      if (operationId < 0 ||
-          static_cast<size_t>(operationId) >= module.operations.size())
-        throw std::runtime_error("generic IR validation: invalid operation link");
       const GenericOperation &operation =
           module.operations.at(static_cast<size_t>(operationId));
       const GenericRegion &region =
@@ -239,6 +270,110 @@ inline void ValidateGenericModule(const GenericModule &module) {
         throw std::runtime_error("generic IR validation: invalid operation parent");
     }
   }
+
+  struct ValueDefinition {
+    int regionId;
+    int blockId;
+    int operationId;
+    std::string type;
+  };
+  std::map<int, ValueDefinition> definitions;
+  for (const GenericBlock &block : module.blocks) {
+    if (block.arguments.size() != block.argumentTypes.size())
+      throw std::runtime_error(
+          "generic IR validation: block argument/type mismatch");
+    for (size_t index = 0; index < block.arguments.size(); ++index)
+      if (!definitions
+               .emplace(block.arguments[index],
+                        ValueDefinition{block.regionId, block.id, -1,
+                                        block.argumentTypes[index]})
+               .second)
+        throw std::runtime_error("generic IR validation: duplicate value id " +
+                                 std::to_string(block.arguments[index]));
+  }
+  for (const GenericOperation &operation : module.operations) {
+    if (operation.results.size() != operation.resultTypes.size())
+      throw std::runtime_error("generic IR validation: result/type mismatch at " +
+                               std::to_string(operation.id));
+    for (size_t index = 0; index < operation.results.size(); ++index)
+      if (!definitions
+               .emplace(operation.results[index],
+                        ValueDefinition{operation.regionId, operation.blockId,
+                                        operation.id,
+                                        operation.resultTypes[index]})
+               .second)
+        throw std::runtime_error("generic IR validation: duplicate value id " +
+                                 std::to_string(operation.results[index]));
+  }
+
+  std::map<int, std::map<int, std::set<int>>> dominators;
+  for (const GenericRegion &region : module.regions) {
+    if (region.blocks.empty())
+      continue;
+    const std::set<int> allBlocks(region.blocks.begin(), region.blocks.end());
+    std::map<int, std::set<int>> predecessors;
+    for (int blockId : region.blocks)
+      for (int operationId :
+           module.blocks.at(static_cast<size_t>(blockId)).operations)
+        for (int successor : module.operations
+                                 .at(static_cast<size_t>(operationId))
+                                 .successors)
+          if (allBlocks.count(successor) != 0)
+            predecessors[successor].insert(blockId);
+    auto &regionDominators = dominators[region.id];
+    for (int blockId : region.blocks)
+      regionDominators[blockId] =
+          blockId == region.blocks.front() ? std::set<int>{blockId} : allBlocks;
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (size_t index = 1; index < region.blocks.size(); ++index) {
+        const int blockId = region.blocks[index];
+        std::set<int> next;
+        const auto pred = predecessors.find(blockId);
+        if (pred != predecessors.end() && !pred->second.empty()) {
+          next = regionDominators.at(*pred->second.begin());
+          for (auto iterator = std::next(pred->second.begin());
+               iterator != pred->second.end(); ++iterator) {
+            std::set<int> intersection;
+            std::set_intersection(next.begin(), next.end(),
+                                  regionDominators.at(*iterator).begin(),
+                                  regionDominators.at(*iterator).end(),
+                                  std::inserter(intersection, intersection.begin()));
+            next = std::move(intersection);
+          }
+        }
+        next.insert(blockId);
+        if (next != regionDominators.at(blockId)) {
+          regionDominators[blockId] = std::move(next);
+          changed = true;
+        }
+      }
+    }
+  }
+
+  const auto definitionDominatesOperation = [&](const ValueDefinition &definition,
+                                                int operationId) {
+    int anchor = operationId;
+    while (anchor >= 0) {
+      const GenericOperation &use =
+          module.operations.at(static_cast<size_t>(anchor));
+      if (use.regionId == definition.regionId) {
+        if (use.blockId == definition.blockId)
+          return definition.operationId < 0 ||
+                 module.operations
+                         .at(static_cast<size_t>(definition.operationId))
+                         .ordinal < use.ordinal;
+        const auto region = dominators.find(definition.regionId);
+        return region != dominators.end() &&
+               region->second.at(use.blockId).count(definition.blockId) != 0;
+      }
+      if (use.regionId < 0)
+        return false;
+      anchor = module.regions.at(static_cast<size_t>(use.regionId)).parentOperation;
+    }
+    return false;
+  };
 
   for (const GenericOperation &operation : module.operations) {
     if (operation.id == 0) {
@@ -259,8 +394,12 @@ inline void ValidateGenericModule(const GenericModule &module) {
           region.ordinal != static_cast<int>(ordinal))
         throw std::runtime_error("generic IR validation: invalid region parent");
     }
+    if (operation.operands.size() != operation.operandTypes.size())
+      throw std::runtime_error(
+          "generic IR validation: operand/type count mismatch at " +
+          std::to_string(operation.id));
     for (int operand : operation.operands)
-      if (valueTypes.count(operand) == 0)
+      if (definitions.count(operand) == 0)
         throw std::runtime_error("generic IR validation: undefined operand " +
                                  std::to_string(operand));
     for (int successor : operation.successors) {
@@ -271,6 +410,46 @@ inline void ValidateGenericModule(const GenericModule &module) {
         throw std::runtime_error("generic IR validation: invalid successor");
     }
 
+    const size_t forwardedOffset = operation.name == "cf.cond_br" ? 1U : 0U;
+    if (operation.name == "cf.br" || operation.name == "cf.cond_br") {
+      const size_t expectedSuccessors = operation.name == "cf.br" ? 1U : 2U;
+      size_t forwardedCount = 0;
+      for (int successor : operation.successors)
+        forwardedCount += module.blocks.at(static_cast<size_t>(successor))
+                              .arguments.size();
+      if (operation.successors.size() != expectedSuccessors ||
+          operation.operands.size() != forwardedOffset + forwardedCount)
+        throw std::runtime_error(
+            "generic IR validation: successor operand count mismatch");
+      size_t operandIndex = forwardedOffset;
+      for (int successor : operation.successors) {
+        const GenericBlock &target =
+            module.blocks.at(static_cast<size_t>(successor));
+        for (const std::string &argumentType : target.argumentTypes) {
+          if (operation.operandTypes[operandIndex] != argumentType)
+            throw std::runtime_error(
+                "generic IR validation: successor operand type mismatch");
+          ++operandIndex;
+        }
+      }
+    }
+
+    for (size_t index = 0; index < operation.operands.size(); ++index) {
+      const auto definition = definitions.find(operation.operands[index]);
+      if (definition == definitions.end())
+        continue;
+      if (!definitionDominatesOperation(definition->second, operation.id)) {
+        const bool sameBlock = definition->second.blockId == operation.blockId;
+        throw std::runtime_error(
+            std::string("generic IR validation: operand ") +
+            (sameBlock ? "does not dominate use" : "not visible at use"));
+      }
+      if (operation.operandTypes[index] != definition->second.type)
+        throw std::runtime_error(
+            "generic IR validation: operand type mismatch at " +
+            std::to_string(operation.id));
+    }
+
     const auto validateDps = [&](const std::vector<int> &values) {
       for (int value : values) {
         const auto operand =
@@ -279,11 +458,11 @@ inline void ValidateGenericModule(const GenericModule &module) {
           throw std::runtime_error("generic IR validation: DPS value is not an operand");
         const size_t operandIndex = static_cast<size_t>(
             std::distance(operation.operands.begin(), operand));
-        const auto type = valueTypes.find(value);
-        if (type == valueTypes.end())
+        const auto type = definitions.find(value);
+        if (type == definitions.end())
           throw std::runtime_error("generic IR validation: undefined DPS value");
         if (operandIndex >= operation.operandTypes.size() ||
-            operation.operandTypes[operandIndex] != type->second)
+            operation.operandTypes[operandIndex] != type->second.type)
           throw std::runtime_error("generic IR validation: DPS value type mismatch");
       }
     };
@@ -346,6 +525,9 @@ inline GenericModule ExtractFunctionModule(const GenericModule &module,
   }
 
   GenericModule isolated = module;
+  for (int operationId : keep)
+    if (operationId != selected->second)
+      isolated.operations.at(static_cast<size_t>(operationId)).regions.clear();
   if (isolated.operations.front().regions.size() != 1)
     throw std::runtime_error("generic IR extraction: expected one module region");
   const int rootRegion = isolated.operations.front().regions.front();
@@ -379,12 +561,12 @@ inline void ValidateBeforeCVPipelineBoundary(const GenericModule &module) {
       continue;
     const std::string kind =
         IRDictionaryValue(function.attributes, "hacc.function_kind");
-    if (kind.find("DEVICE") == std::string::npos)
+    if (trim(kind) != "#hacc.function_kind<DEVICE>")
       continue;
     const std::string core =
         IRDictionaryValue(function.attributes, "hivm.func_core_type");
-    if (core.find("AIV") == std::string::npos &&
-        core.find("MIX") == std::string::npos)
+    if (trim(core) != "#hivm.func_core_type<AIV>" &&
+        trim(core) != "#hivm.func_core_type<MIX>")
       continue;
     foundDeviceFunction = true;
     std::function<void(int)> visit = [&](int operationId) {
