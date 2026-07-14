@@ -1,0 +1,15 @@
+order	stage	disposition
+1	TileCubeVectorLoop	unsupported
+2	InferAndSetBufferSize	unsupported
+3	WorkspaceSemanticProjection	unsupported
+4	CanonicalizationBeforeSplit	unsupported
+5	CrossCoreSyncInvariant	unsupported
+6	SplitMixKernelAIVProjection	unsupported
+7	InlineScope	unsupported
+8	TileAndBindSubBlock	unsupported
+9	FoldTensorEmpty	unsupported
+10	CanonicalizationAfterSplit	unsupported
+11	LoopInvariantCodeMotion	unsupported
+12	LoopInvariantSubsetHoisting	unsupported
+13	CloneTensorEmpty	unsupported
+14	InlineOTFLoadStore	unsupported
