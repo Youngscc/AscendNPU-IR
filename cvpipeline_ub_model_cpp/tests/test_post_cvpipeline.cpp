@@ -1,5 +1,7 @@
 #include "test_support.hpp"
 #include "../src/post_cvpipeline/ir_utils.hpp"
+#include "../src/post_cvpipeline/buffer_size.hpp"
+#include "../src/post_cvpipeline/canonicalization.hpp"
 #include "../src/post_cvpipeline/pipeline.hpp"
 #include "../src/post_cvpipeline/split_mix_aiv.hpp"
 #include "../src/post_cvpipeline/tile_cube_vector_loop.hpp"
@@ -18,6 +20,15 @@ bool HasDiagnostic(const cvub::PostCVPipelineResult &result,
         diagnostic.reason.find(reason) != std::string::npos)
       return true;
   }
+  return false;
+}
+
+bool HasDiagnostic(const cvub::StageResult &result, const std::string &stage,
+                   const std::string &reason) {
+  for (const cvub::PostCVPipelineDiagnostic &diagnostic : result.diagnostics)
+    if (diagnostic.pipelineStage == stage &&
+        diagnostic.reason.find(reason) != std::string::npos)
+      return true;
   return false;
 }
 
@@ -1424,11 +1435,18 @@ CVUB_TEST(post_pipeline_manifest_has_real_order) {
                     "LoopInvariantSubsetHoisting", "CloneTensorEmpty",
                     "InlineOTFLoadStore"}));
   for (const cvub::StageCoverage &stage : stages)
-    CVUB_CHECK_EQ(stage.disposition,
-                  stage.stage == "TileCubeVectorLoop" ||
-                          stage.stage == "SplitMixKernelAIVProjection"
-                      ? cvub::CoverageDisposition::Modeled
-                      : cvub::CoverageDisposition::Unsupported);
+    if (stage.stage == "WorkspaceSemanticProjection" ||
+        stage.stage == "CrossCoreSyncInvariant")
+      CVUB_CHECK_EQ(stage.disposition,
+                    cvub::CoverageDisposition::UBInvariant);
+    else
+      CVUB_CHECK_EQ(stage.disposition,
+                    stage.stage == "TileCubeVectorLoop" ||
+                            stage.stage == "InferAndSetBufferSize" ||
+                            stage.stage == "CanonicalizationBeforeSplit" ||
+                            stage.stage == "SplitMixKernelAIVProjection"
+                        ? cvub::CoverageDisposition::Modeled
+                        : cvub::CoverageDisposition::Unsupported);
 }
 
 CVUB_TEST(ub_saving_configuration_is_reported_incomplete) {
@@ -1475,14 +1493,27 @@ CVUB_TEST(unsupported_stages_make_projection_incomplete) {
   CVUB_CHECK_EQ(result.coverage.front().disposition,
                 cvub::CoverageDisposition::Modeled);
   CVUB_CHECK(!HasDiagnostic(result, "TileCubeVectorLoop", "unsupported"));
-  CVUB_CHECK(HasDiagnostic(result, "InferAndSetBufferSize", "unsupported"));
+  CVUB_CHECK(!HasDiagnostic(result, "InferAndSetBufferSize", "unsupported"));
+  CVUB_CHECK(HasDiagnostic(result, "InlineScope", "unsupported"));
+}
+
+CVUB_TEST(post_pipeline_passes_size_and_canonicalization_output_to_split) {
+  auto input = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"), "dynamic_sizes");
+  const auto result =
+      cvub::RunPostCVPipelineAIVProjection(std::move(input), {});
+  CVUB_CHECK_EQ(result.functions.size(), 1U);
+  const auto &projected = result.functions.front().module;
+  CVUB_CHECK_EQ(OperationCount(projected, "memref.view"), 2U);
+  CVUB_CHECK(!HasOperation(projected, "annotation.mark"));
+  cvub::ValidateGenericModule(projected);
 }
 
 CVUB_TEST(post_pipeline_returns_tile_stage_output_to_downstream) {
   const auto input = cvub::test::ParseFixture("tile_vector_loop.mlir");
   const auto result = cvub::RunPostCVPipelineAIVProjection(input, {});
   CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
-  CVUB_CHECK_EQ(OperationCount(result.module, "scf.for"), 2U);
+  CVUB_CHECK_EQ(OperationCount(result.module, "scf.for"), 1U);
   CVUB_CHECK_EQ(OperationNamed(result.module, "hivm.hir.vadd").resultTypes,
                 std::vector<std::string>({"tensor<1x64xf16>"}));
   CVUB_CHECK(cvub::SerializeGenericModule(result.module) !=
@@ -1730,6 +1761,109 @@ CVUB_TEST(boundary_validation_rejects_post_bufferization_only_input) {
   CVUB_CHECK_THROWS_CONTAINS(
       cvub::ValidateBeforeCVPipelineBoundary(module),
       "expected tensor-level before-CVPipeline device function");
+}
+
+CVUB_TEST(buffer_size_inference_materializes_physical_views) {
+  auto input = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"), "dynamic_sizes");
+  const auto result = cvub::RunInferAndSetBufferSize(std::move(input));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(OperationCount(result.module, "memref.view"), 2U);
+  CVUB_CHECK(!HasOperation(result.module, "annotation.mark"));
+  std::vector<std::string> allocTypes;
+  for (const auto &operation : result.module.operations)
+    if (operation.name == "memref.alloc")
+      allocTypes.push_back(operation.resultTypes.front());
+  CVUB_CHECK(std::find(allocTypes.begin(), allocTypes.end(),
+                       "memref<64xi8, #hivm.address_space<UB>>") !=
+             allocTypes.end());
+  CVUB_CHECK(std::find(allocTypes.begin(), allocTypes.end(),
+                       "memref<128xi8, #hivm.address_space<UB>>") !=
+             allocTypes.end());
+  CVUB_CHECK(std::find(allocTypes.begin(), allocTypes.end(),
+                       "memref<8xf16, #hivm.address_space<UB>>") !=
+             allocTypes.end());
+  cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(buffer_size_conflict_is_operation_level_incomplete) {
+  auto input = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
+      "conflicting_sizes");
+  const auto before = cvub::SerializeGenericModule(input);
+  const auto result = cvub::RunInferAndSetBufferSize(std::move(input));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "InferAndSetBufferSize", "conflicting"));
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+}
+
+CVUB_TEST(unresolved_dynamic_local_size_is_incomplete) {
+  auto input = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
+      "conflicting_sizes");
+  for (auto &operation : input.operations)
+    if (operation.name == "annotation.mark")
+      cvub::GenericRewriter(input).removeFromBlock(operation.blockId,
+                                                   operation.id);
+  input = cvub::CompactGenericModule(std::move(input));
+  const auto result = cvub::RunInferAndSetBufferSize(std::move(input));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "InferAndSetBufferSize",
+                           "unresolved physical size"));
+}
+
+CVUB_TEST(pre_split_canonicalization_reaches_fixed_point) {
+  auto module = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"), "canonicalize");
+  const auto result = cvub::RunPreSplitCanonicalization(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(!HasOperation(result.module, "tensor.empty"));
+  CVUB_CHECK(!HasOperation(result.module, "annotation.mark"));
+  CVUB_CHECK(!HasOperation(result.module, "scf.for"));
+  CVUB_CHECK(!HasOperation(result.module, "arith.addi"));
+  CVUB_CHECK_EQ(OperationCount(result.module, "arith.constant"), 1U);
+  const auto &consume = OperationNamed(result.module, "test.consume");
+  CVUB_CHECK_EQ(consume.operands.front(), consume.operands.back());
+  cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(workspace_offsets_and_operandless_sync_are_ub_invariant) {
+  const auto baseline =
+      cvub::test::ParseFixture("workspace_sync_invariant.mlir");
+  auto changed = baseline;
+  auto &workspace = MutableOperationNamed(changed,
+                                          "memref_ext.alloc_workspace");
+  workspace.attributes = cvub::SetDictionaryValue(
+      workspace.attributes, "workspace_offset", "4096 : i64");
+  auto workspaceResult =
+      cvub::VerifyWorkspaceUBInvariant(baseline, std::move(changed));
+  CVUB_CHECK_EQ(workspaceResult.precision, cvub::Precision::Exact);
+  auto syncResult =
+      cvub::VerifyCrossCoreSyncUBInvariant(std::move(workspaceResult.module));
+  CVUB_CHECK_EQ(syncResult.precision, cvub::Precision::Exact);
+}
+
+CVUB_TEST(workspace_and_sync_invariants_fail_closed) {
+  const auto baseline =
+      cvub::test::ParseFixture("workspace_sync_invariant.mlir");
+  auto changed = baseline;
+  MutableOperationNamed(changed, "hivm.hir.load").resultTypes.front() =
+      "tensor<32xf32>";
+  auto workspace = cvub::VerifyWorkspaceUBInvariant(baseline, std::move(changed));
+  CVUB_CHECK_EQ(workspace.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(workspace, "WorkspaceSemanticProjection",
+                           "AIV load result shape"));
+
+  auto syncModule = baseline;
+  auto &sync = MutableOperationNamed(syncModule, "hivm.hir.sync_block");
+  const auto &load = OperationNamed(syncModule, "hivm.hir.load");
+  sync.operands = {load.operands.front()};
+  sync.operandTypes = {"memref<256xi8, #hivm.address_space<UB>>"};
+  auto syncResult =
+      cvub::VerifyCrossCoreSyncUBInvariant(std::move(syncModule));
+  CVUB_CHECK_EQ(syncResult.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(syncResult, "CrossCoreSyncInvariant",
+                           "local buffer"));
 }
 
 } // namespace

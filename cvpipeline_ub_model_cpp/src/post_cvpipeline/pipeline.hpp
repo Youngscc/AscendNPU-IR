@@ -2,6 +2,9 @@
 #define CVPIPELINE_UB_MODEL_CPP_POST_CVPIPELINE_PIPELINE_HPP
 
 #include "types.hpp"
+#include "buffer_size.hpp"
+#include "canonicalization.hpp"
+#include "split_mix_aiv.hpp"
 #include "tile_cube_vector_loop.hpp"
 
 #include <array>
@@ -117,7 +120,21 @@ inline std::vector<StageCoverage> CompiledPostCVPipelineCoverage() {
   for (const char *stage : kPostCVPipelineStageNames)
     stages.push_back({stage, CoverageDisposition::Unsupported});
   stages.front().disposition = CoverageDisposition::Modeled;
+  stages[1].disposition = CoverageDisposition::Modeled;
+  stages[2].disposition = CoverageDisposition::UBInvariant;
+  stages[3].disposition = CoverageDisposition::Modeled;
+  stages[4].disposition = CoverageDisposition::UBInvariant;
+  stages[5].disposition = CoverageDisposition::Modeled;
   return stages;
+}
+
+inline void MergeStageResult(PostCVPipelineResult &result, StageResult stage) {
+  if (stage.precision == Precision::Incomplete)
+    result.precision = Precision::Incomplete;
+  result.diagnostics.insert(result.diagnostics.end(),
+                            stage.diagnostics.begin(),
+                            stage.diagnostics.end());
+  result.module = std::move(stage.module);
 }
 
 inline PostCVPipelineResult RunPostCVPipelineAIVProjection(
@@ -127,12 +144,24 @@ inline PostCVPipelineResult RunPostCVPipelineAIVProjection(
 
   StageResult tiled = RunTileCubeVectorLoop(
       std::move(module), options.tileMixVectorLoop, options.tileMixCubeLoop);
-  if (tiled.precision == Precision::Incomplete)
+  MergeStageResult(result, std::move(tiled));
+
+  MergeStageResult(result,
+                   RunInferAndSetBufferSize(std::move(result.module)));
+  const GenericModule beforeWorkspace = result.module;
+  MergeStageResult(result, VerifyWorkspaceUBInvariant(
+                               beforeWorkspace, std::move(result.module)));
+  MergeStageResult(result,
+                   RunPreSplitCanonicalization(std::move(result.module)));
+  MergeStageResult(result,
+                   VerifyCrossCoreSyncUBInvariant(std::move(result.module)));
+
+  PostCVPipelineResult split = ProjectMixFunctionsToAIV(result.module);
+  if (split.precision == Precision::Incomplete)
     result.precision = Precision::Incomplete;
-  result.diagnostics.insert(result.diagnostics.end(),
-                            tiled.diagnostics.begin(),
-                            tiled.diagnostics.end());
-  result.module = std::move(tiled.module);
+  result.diagnostics.insert(result.diagnostics.end(), split.diagnostics.begin(),
+                            split.diagnostics.end());
+  result.functions = std::move(split.functions);
 
   if (options.enableUbufSaving) {
     result.precision = Precision::Incomplete;
