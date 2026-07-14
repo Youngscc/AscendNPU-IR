@@ -32,6 +32,27 @@ inline bool HasAttachedUsers(const GenericModule &module, int value,
   return false;
 }
 
+inline bool HasNonErasableTensorEmptyUser(const GenericModule &module,
+                                          int value) {
+  for (const GenericOperation &operation : module.operations) {
+    const bool uses =
+        std::find(operation.operands.begin(), operation.operands.end(), value) !=
+            operation.operands.end() ||
+        std::find(operation.dpsInputs.begin(), operation.dpsInputs.end(), value) !=
+            operation.dpsInputs.end() ||
+        std::find(operation.dpsInits.begin(), operation.dpsInits.end(), value) !=
+            operation.dpsInits.end();
+    if (!uses)
+      continue;
+    // The targeted model removes an attribute-free mark and then the dead
+    // tensor.empty at the fixed point.  Every other live empty participates
+    // in upstream tensor/HIVM canonicalization that can change ownership.
+    if (operation.name != "annotation.mark" || operation.attributes != "{}")
+      return true;
+  }
+  return false;
+}
+
 inline std::optional<int64_t> ConstantIntegerValue(
     const GenericModule &module, int value) {
   const GenericOperation *definition = DefinitionForBufferSize(module, value);
@@ -324,9 +345,62 @@ inline StageResult RunPreSplitCanonicalization(GenericModule module) {
   // and no equivalent rewrite is implemented here.
   for (const GenericOperation &operation : result.module.operations) {
     std::string family;
+    std::string detail;
     if (operation.name == "scf.if" || operation.name == "scf.while")
       family = "SCF canonicalization";
-    else if (operation.name == "memref.store")
+    else if (operation.name == "scf.for" && operation.operands.size() >= 3) {
+      const auto lower = ConstantIntegerValue(result.module,
+                                               operation.operands[0]);
+      const auto upper = ConstantIntegerValue(result.module,
+                                               operation.operands[1]);
+      const auto step = ConstantIntegerValue(result.module,
+                                              operation.operands[2]);
+      if (lower && upper && step && *step > 0 && *lower >= *upper) {
+        family = "SCF canonicalization";
+        detail = "zero-trip ";
+      } else if (operation.regions.size() == 1) {
+        const GenericOperation *yield = CanonicalSingleBlockTerminator(
+            result.module, operation.regions.front());
+        const GenericRegion &region = result.module.regions.at(
+            static_cast<size_t>(operation.regions.front()));
+        if (yield != nullptr && yield->name == "scf.yield" &&
+            region.blocks.size() == 1) {
+          const GenericBlock &body = result.module.blocks.at(
+              static_cast<size_t>(region.blocks.front()));
+          for (size_t index = 0; index < operation.results.size(); ++index) {
+            if (HasAttachedUsers(result.module, operation.results[index]) ||
+                index + 3 >= operation.operands.size() ||
+                index + 1 >= body.arguments.size() ||
+                index >= yield->operands.size())
+              continue;
+            const int yielded = yield->operands[index];
+            const bool modeledPassthrough =
+                yielded == operation.operands[3 + index] ||
+                yielded == body.arguments[1 + index];
+            if (!modeledPassthrough) {
+              family = "SCF canonicalization";
+              detail = "unused-result fold ";
+              break;
+            }
+          }
+        }
+      }
+    } else if (operation.name == "tensor.empty" &&
+               operation.results.size() == 1 &&
+               HasNonErasableTensorEmptyUser(result.module,
+                                              operation.results.front())) {
+      family = "live tensor.empty canonicalization";
+    } else if (operation.name == "tensor.extract_slice" ||
+             operation.name == "tensor.insert_slice" ||
+             operation.name == "tensor.collapse_shape" ||
+             operation.name == "tensor.expand_shape" ||
+             operation.name == "tensor.reshape") {
+      family = "tensor slice/reshape canonicalization";
+    } else if (operation.name == "memref.reinterpret_cast" ||
+             operation.name == "memref.expand_shape" ||
+             operation.name == "memref.collapse_shape") {
+      family = "extended memref reshape canonicalization";
+    } else if (operation.name == "memref.store")
       family = "memref dead-store elimination";
     else if (operation.name == "hivm.hir.vbrc" &&
              !operation.operandTypes.empty() && !operation.resultTypes.empty() &&
@@ -337,7 +411,7 @@ inline StageResult RunPreSplitCanonicalization(GenericModule module) {
     result.precision = Precision::Incomplete;
     result.diagnostics.push_back(
         {"CanonicalizationBeforeSplit", "", operation.id, operation.name,
-         "unmodeled applicable " + family + " pattern"});
+         "unmodeled applicable " + detail + family + " pattern"});
   }
   if (result.precision == Precision::Incomplete)
     return result;

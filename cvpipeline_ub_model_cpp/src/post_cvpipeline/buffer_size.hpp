@@ -49,7 +49,10 @@ inline std::optional<unsigned> ShapedElementBits(const std::string &type) {
   if (match[1].str() == "bf16")
     return 16U;
   try {
-    return static_cast<unsigned>(std::stoul(match[1].str().substr(1)));
+    const unsigned long parsed = std::stoul(match[1].str().substr(1));
+    if (parsed > std::numeric_limits<unsigned>::max())
+      return std::nullopt;
+    return static_cast<unsigned>(parsed);
   } catch (const std::exception &) {
     return std::nullopt;
   }
@@ -166,11 +169,15 @@ ResolveBufferSizeBound(const GenericModule &module, int value,
       valid = lhs >= 0 && rhs > 0;
       if (valid)
         result = lhs / rhs;
-    } else if (definition->name == "arith.remui" ||
-               definition->name == "arith.remsi") {
+    } else if (definition->name == "arith.remsi") {
       valid = lhs >= 0 && rhs > 0;
       if (valid)
-        result = operands[0]->exact ? lhs % rhs : rhs - 1;
+        // ArithToAffine rewrites index remsi to `(d0 mod d1)`.  The real
+        // Constantize pass then substitutes each operand's resolved upper
+        // bound and constant-folds that affine map, even when d0 is only a
+        // bound.  Mirror that observable behavior instead of inventing the
+        // mathematically safer but compiler-incompatible rhs-1 bound.
+        result = lhs % rhs;
     } else if (definition->name == "arith.minui" ||
                definition->name == "arith.minsi")
       result = std::min(lhs, rhs);
@@ -204,11 +211,14 @@ ResolveBufferSizeBound(const GenericModule &module, int value,
         R"(^affine_map<\(\) -> \((-?[0-9]+)\)>$)");
     std::smatch match;
     const std::string spelling = trim(expression);
-    if (std::regex_match(spelling, match, constantMap))
-      return done(BufferSizeBound{std::stoll(match[1].str()), true});
+    if (std::regex_match(spelling, match, constantMap)) {
+      const auto parsed = ParseIntegerAttribute(match[1].str());
+      return done(parsed ? std::optional<BufferSizeBound>{{*parsed, true}}
+                         : std::nullopt);
+    }
     static const std::regex binaryMap(
         R"(^affine_map<\(d0, d1\) -> \(d0\s*(\+|-|\*|ceildiv|floordiv|mod)\s*d1\)>$)");
-    if (allExact && operands.size() == 2 &&
+    if (operands.size() == 2 && operands[0] && operands[1] &&
         std::regex_match(spelling, match, binaryMap)) {
       const int64_t lhs = operands[0]->value;
       const int64_t rhs = operands[1]->value;
@@ -229,7 +239,7 @@ ResolveBufferSizeBound(const GenericModule &module, int value,
       else
         result = lhs % rhs;
       if (valid)
-        return done(BufferSizeBound{result, true});
+        return done(BufferSizeBound{result, allExact});
     }
   }
   return done(std::nullopt);
@@ -406,10 +416,15 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
     }
     const std::optional<unsigned> bits = ShapedElementBits(mark.operandTypes[0]);
     const int functionId = EnclosingFunctionId(result.module, mark);
-    if (bits && *bits != 0U && (*bytes * 8) % static_cast<int64_t>(*bits) == 0 &&
-        functionId >= 0) {
-      const int64_t elements =
-          (*bytes * 8) / static_cast<int64_t>(*bits);
+    if (bits && *bits != 0U && functionId >= 0) {
+      int64_t bufferBits = 0;
+      if (__builtin_mul_overflow(*bytes, int64_t{8}, &bufferBits)) {
+        result.precision = Precision::Incomplete;
+        result.diagnostics.push_back(BufferSizeDiagnostic(
+            result.module, mark, "auto-inferred buffer size overflows"));
+        continue;
+      }
+      const int64_t elements = bufferBits / static_cast<int64_t>(*bits);
       (void)functionElements.emplace(functionId, elements);
     }
   }
@@ -581,18 +596,27 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
     updatedAllocation.resultTypes.front() = physicalType;
     updatedAllocation.operands.clear();
     updatedAllocation.operandTypes.clear();
+    if (constantized.count(allocationId) != 0)
+      updatedAllocation.attributes = RemoveDictionaryAttribute(
+          updatedAllocation.attributes, "alignment");
     ApplyOperationSemantics(updatedAllocation);
     rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal + 1), zero);
     rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal + 2), view);
   }
 
-  // Both real passes remove only the buffer_size_in_byte attribute.  Marks
-  // carrying e.g. multi-buffer metadata must survive.
+  // Constantize erases every size-mark user after a successful rewrite,
+  // while SetBufferSize removes only the size attribute.  Keeping the two
+  // paths distinct matters for hivm.multi_buffer and therefore UB peak.
   for (const auto &[allocationId, markIds] : allocationMarks) {
-    (void)allocationId;
     for (int markId : markIds) {
       GenericOperation &mark = result.module.operations.at(
           static_cast<size_t>(markId));
+      if (mark.blockId < 0)
+        continue;
+      if (constantized.count(allocationId) != 0) {
+        GenericRewriter(result.module).removeFromBlock(mark.blockId, mark.id);
+        continue;
+      }
       mark.attributes = RemoveDictionaryAttribute(mark.attributes,
                                                   "buffer_size_in_byte");
       if (mark.attributes == "{}" && mark.blockId >= 0)
