@@ -3,17 +3,20 @@
 // CHECK-LABEL: func @test_args_to_hivm_op(
 // CHECK: %[[A:.*]]: memref<*xf16>, %[[B:.*]]: memref<*xf16>, %[[C:.*]]: memref<*xf16>,
 // CHECK-SAME: %[[ProgNumX:.*]]: i32, %[[ProgNumY:.*]]: i32, %[[ProgNumZ:.*]]: i32)
+// CHECK: %[[TMP_MUL:.+]] = arith.muli %[[ProgNumX]], %[[ProgNumY]]
+// CHECK: %[[LOGIC_BLOCK_NUM:.+]] = arith.muli %[[TMP_MUL]], %[[ProgNumZ]]
+// CHECK: annotation.mark %[[LOGIC_BLOCK_NUM]] {logical_block_num}
 // CHECK: %[[BLOCK_IDX:.+]] = hivm.hir.get_block_idx -> i64
 // CHECK: %[[CAST_OP_ID:.+]] = arith.trunci %[[BLOCK_IDX]] : i64 to i32
-// CHECK: %[[ACCSHAPE_Z:.+]] = arith.constant 1 : i32
-// CHECK: %[[TOTALINDEX_Z:.+]] = arith.divsi %[[CAST_OP_ID]], %[[ACCSHAPE_Z]]
-// CHECK: %[[ProgZ_ID:.+]] = arith.remsi %[[TOTALINDEX_Z]], %[[ProgNumZ]]
-// CHECK: %[[ACCSHAPE_Y:.+]] = arith.muli %[[ACCSHAPE_Z]], %[[ProgNumZ]]
-// CHECK: %[[TOTALINDEX_Y:.+]] = arith.divsi %[[CAST_OP_ID]], %[[ACCSHAPE_Y]]
-// CHECK: %[[ProgY_ID:.+]] = arith.remsi %[[TOTALINDEX_Y]], %[[ProgNumY]]
-// CHECK: %[[ACCSHAPE_X:.+]] = arith.muli %[[ACCSHAPE_Y]], %[[ProgNumY]]
+// CHECK: %[[ACCSHAPE_X:.+]] = arith.constant 1 : i32
 // CHECK: %[[TOTALINDEX_X:.+]] = arith.divsi %[[CAST_OP_ID]], %[[ACCSHAPE_X]]
 // CHECK: %[[ProgX_ID:.+]] = arith.remsi %[[TOTALINDEX_X]], %[[ProgNumX]]
+// CHECK: %[[ACCSHAPE_Y:.+]] = arith.muli %[[ACCSHAPE_X]], %[[ProgNumX]]
+// CHECK: %[[TOTALINDEX_Y:.+]] = arith.divsi %[[CAST_OP_ID]], %[[ACCSHAPE_Y]]
+// CHECK: %[[ProgY_ID:.+]] = arith.remsi %[[TOTALINDEX_Y]], %[[ProgNumY]]
+// CHECK: %[[ACCSHAPE_Z:.+]] = arith.muli %[[ACCSHAPE_Y]], %[[ProgNumY]]
+// CHECK: %[[TOTALINDEX_Z:.+]] = arith.divsi %[[CAST_OP_ID]], %[[ACCSHAPE_Z]]
+// CHECK: %[[ProgZ_ID:.+]] = arith.remsi %[[TOTALINDEX_Z]], %[[ProgNumZ]]
 // CHECK: arith.muli %[[ProgX_ID]]
 // CHECK: arith.muli %[[ProgY_ID]]
 // CHECK: arith.addi %[[ProgZ_ID]]
@@ -69,17 +72,20 @@ module {
 module {
   // CHECK: %arg2: memref<?xf32>, %[[ProgNumX:.*]]: i32, %[[ProgNumY:.*]]: i32, %[[ProgNumZ:.*]]: i32)
   func.func @test_args_for_scf_if(%arg0: memref<?xf32>, %arg1: memref<?xf32> , %arg2: memref<?xf32>, %arg3: i32, %arg4: i32, %arg5: i32, %arg6: i32, %arg7: i32, %arg8: i32) attributes {hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>} {
+    // CHECK: %[[TMP_MUL:.+]] = arith.muli %[[ProgNumX]], %[[ProgNumY]]
+    // CHECK: %[[LOGIC_BLOCK_NUM:.+]] = arith.muli %[[TMP_MUL]], %[[ProgNumZ]]
+    // CHECK: annotation.mark %[[LOGIC_BLOCK_NUM]] {logical_block_num}
     // CHECK: %[[BLOCK_IDX:.+]] = hivm.hir.get_block_idx -> i64
     // CHECK: %[[CAST_OP_ID:.+]] = arith.trunci %[[BLOCK_IDX]] : i64 to i32
-    // CHECK: %[[ACCSHAPE_Z:.+]] = arith.constant 1 : i32
-    // CHECK: %[[TOTALINDEX_Z:.+]] = arith.divsi %[[CAST_OP_ID]], %[[ACCSHAPE_Z]]
-    // CHECK: %[[ProgZ_ID:.+]] = arith.remsi %[[TOTALINDEX_Z]], %[[ProgNumZ]]
-    // CHECK: %[[ACCSHAPE_Y:.+]] = arith.muli %[[ACCSHAPE_Z]], %[[ProgNumZ]]
-    // CHECK: %[[TOTALINDEX_Y:.+]] = arith.divsi %[[CAST_OP_ID]], %[[ACCSHAPE_Y]]
-    // CHECK: %[[ProgY_ID:.+]] = arith.remsi %[[TOTALINDEX_Y]], %[[ProgNumY]]
-    // CHECK: %[[ACCSHAPE_X:.+]] = arith.muli %[[ACCSHAPE_Y]], %[[ProgNumY]]
+    // CHECK: %[[ACCSHAPE_X:.+]] = arith.constant 1 : i32
     // CHECK: %[[TOTALINDEX_X:.+]] = arith.divsi %[[CAST_OP_ID]], %[[ACCSHAPE_X]]
     // CHECK: %[[ProgX_ID:.+]] = arith.remsi %[[TOTALINDEX_X]], %[[ProgNumX]]
+    // CHECK: %[[ACCSHAPE_Y:.+]] = arith.muli %[[ACCSHAPE_X]], %[[ProgNumX]]
+    // CHECK: %[[TOTALINDEX_Y:.+]] = arith.divsi %[[CAST_OP_ID]], %[[ACCSHAPE_Y]]
+    // CHECK: %[[ProgY_ID:.+]] = arith.remsi %[[TOTALINDEX_Y]], %[[ProgNumY]]
+    // CHECK: %[[ACCSHAPE_Z:.+]] = arith.muli %[[ACCSHAPE_Y]], %[[ProgNumY]]
+    // CHECK: %[[TOTALINDEX_Z:.+]] = arith.divsi %[[CAST_OP_ID]], %[[ACCSHAPE_Z]]
+    // CHECK: %[[ProgZ_ID:.+]] = arith.remsi %[[TOTALINDEX_Z]], %[[ProgNumZ]]
     // CHECK: %[[CST0:.+]] = arith.constant 16 : i32
     // CHECK: %[[CST1:.+]] = arith.constant 51302 : i32
     // CHECK: %[[COND:.+]] = arith.cmpi slt, %[[ProgX_ID]], %[[CST0]] : i32

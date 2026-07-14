@@ -64,15 +64,15 @@ public:
 // is equivalent to the 3 actual args, [x, y, z], and PROGRAM_ID_ARGS will
 // later be erased from func args.
 //
-// New program_id expression:
+// New program_id expression keeps Triton's x-fastest launch order:
 // idx = hivm::get_block_idx
-// idx = program_id_0 * program_num_1(y) * program_num_2(z)
-//     + program_id_1 * program_num_2(z)
-//     + program_id_2
+// idx = program_id_0
+//     + program_id_1 * program_num_0(x)
+//     + program_id_2 * program_num_0(x) * program_num_1(y)
 // so,
-// program_id_2 = idx // (1)     mod z
-// program_id_1 = idx // (z)     mod y
-// program_id_0 = idx // (y * z) mod x
+// program_id_0 = idx // (1)     mod x
+// program_id_1 = idx // (x)     mod y
+// program_id_2 = idx // (x * y) mod z
 //
 // FixMe: How to take advantage of hivm::get_block_num?
 LogicalResult replaceProgramID(func::FuncOp funOp, IRRewriter &rewriter) {
@@ -114,7 +114,7 @@ LogicalResult replaceProgramID(func::FuncOp funOp, IRRewriter &rewriter) {
       loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(1));
   auto argProgNumAxis0 =
       (args.end() - (kProgramNumArgsNum + kProgramIdArgsNum));
-  for (int i = kProgramIdArgsNum - 1; i >= 0; --i) {
+  for (int i = 0; i < kProgramIdArgsNum; ++i) {
     auto curProgID = args.end() - (kProgramIdArgsNum) + i;
 
     auto indexAlongCurAxis =
@@ -122,7 +122,7 @@ LogicalResult replaceProgramID(func::FuncOp funOp, IRRewriter &rewriter) {
     auto realIndexAlongCurAxis = rewriter.create<arith::RemSIOp>(
         loc, indexAlongCurAxis, *(argProgNumAxis0 + i));
     rewriter.replaceAllUsesWith(*curProgID, realIndexAlongCurAxis);
-    if (i != 0) {
+    if (i != kProgramIdArgsNum - 1) {
       accumulateShape = rewriter.create<arith::MulIOp>(loc, accumulateShape,
                                                        *(argProgNumAxis0 + i));
     }
@@ -156,7 +156,7 @@ void addFuncDynMemrefArgAttr(func::FuncOp funOp, IRRewriter &rewriter) {
 }
 
 void TritonGlobalKernelArgsToHIVMOpPass::runOnOperation() {
-  auto funOp = dyn_cast<func::FuncOp>(getOperation());
+  func::FuncOp funOp = getOperation();
   if (!funOp) {
     return;
   }
