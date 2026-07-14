@@ -5,6 +5,15 @@
 
 namespace cvub {
 
+inline void RemapValues(std::vector<int> &values,
+                        const std::map<int, int> &mapping) {
+  for (int &value : values) {
+    const auto found = mapping.find(value);
+    if (found != mapping.end())
+      value = found->second;
+  }
+}
+
 class GenericRewriter {
 public:
   explicit GenericRewriter(GenericModule &module) : module(module) {
@@ -105,11 +114,7 @@ public:
     const GenericOperation source =
         module.operations.at(static_cast<size_t>(sourceId));
     std::vector<int> operands = source.operands;
-    for (int &operand : operands) {
-      auto mapped = values.find(operand);
-      if (mapped != values.end())
-        operand = mapped->second;
-    }
+    RemapValues(operands, values);
     const int clone = createOperation(
         parent, region, block, source.name, source.resultTypes, operands,
         source.operandTypes, source.properties, source.attributes);
@@ -117,16 +122,8 @@ public:
     result.effects = source.effects;
     result.dpsInputs = source.dpsInputs;
     result.dpsInits = source.dpsInits;
-    for (int &value : result.dpsInputs) {
-      auto mapped = values.find(value);
-      if (mapped != values.end())
-        value = mapped->second;
-    }
-    for (int &value : result.dpsInits) {
-      auto mapped = values.find(value);
-      if (mapped != values.end())
-        value = mapped->second;
-    }
+    RemapValues(result.dpsInputs, values);
+    RemapValues(result.dpsInits, values);
     result.successors = source.successors;
     return clone;
   }
@@ -286,9 +283,9 @@ inline GenericModule CompactGenericModule(GenericModule module) {
   }
 
   for (GenericOperation &operation : compact.operations) {
-    for (int &operand : operation.operands)
-      if (valueIds.count(operand))
-        operand = valueIds.at(operand);
+    RemapValues(operation.operands, valueIds);
+    RemapValues(operation.dpsInputs, valueIds);
+    RemapValues(operation.dpsInits, valueIds);
     for (int &successor : operation.successors)
       if (blockIds.count(successor))
         successor = blockIds.at(successor);

@@ -1,4 +1,5 @@
 #include "test_support.hpp"
+#include "../src/post_cvpipeline/ir_utils.hpp"
 #include "../src/post_cvpipeline/pipeline.hpp"
 
 #include <fstream>
@@ -26,6 +27,21 @@ cvub::fs::path WriteManifest(const std::string &name,
     throw std::runtime_error("cannot write test manifest: " + path.string());
   output << contents;
   return path;
+}
+
+int ResultOf(const cvub::GenericModule &module, const std::string &operation) {
+  for (const cvub::GenericOperation &candidate : module.operations)
+    if (candidate.name == operation && !candidate.results.empty())
+      return candidate.results.front();
+  throw std::runtime_error("missing result-producing operation: " + operation);
+}
+
+int OperationId(const cvub::GenericModule &module,
+                const std::string &operation) {
+  for (const cvub::GenericOperation &candidate : module.operations)
+    if (candidate.name == operation)
+      return candidate.id;
+  throw std::runtime_error("missing operation: " + operation);
 }
 
 CVUB_TEST(post_pipeline_defaults_match_compiler) {
@@ -96,6 +112,88 @@ CVUB_TEST(unsupported_stages_make_projection_incomplete) {
   CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
   CVUB_CHECK_EQ(result.coverage.size(), 14U);
   CVUB_CHECK(HasDiagnostic(result, "TileCubeVectorLoop", "unsupported"));
+}
+
+CVUB_TEST(replace_all_uses_updates_dps_and_block_edges) {
+  auto module = cvub::test::ParseFixture("generic_rewrite.mlir");
+  const int oldValue = ResultOf(module, "test.old");
+  const int newValue = ResultOf(module, "test.new");
+  cvub::GenericOperation &dps =
+      module.operations.at(static_cast<size_t>(OperationId(module, "test.dps")));
+  dps.dpsInputs = {oldValue};
+  dps.dpsInits = {oldValue};
+
+  cvub::ReplaceAllUses(module, oldValue, newValue);
+
+  CVUB_CHECK(!cvub::ModuleReferencesValue(module, oldValue));
+  cvub::ValidateGenericModule(module);
+}
+
+CVUB_TEST(compaction_remaps_dps_values) {
+  auto module = cvub::test::ParseFixture("generic_rewrite.mlir");
+  const int oldValue = ResultOf(module, "test.old");
+  cvub::GenericOperation &dps =
+      module.operations.at(static_cast<size_t>(OperationId(module, "test.dps")));
+  dps.dpsInputs = {oldValue};
+  dps.dpsInits = {oldValue};
+
+  cvub::EraseOperationTree(module, OperationId(module, "test.dead"));
+  module = cvub::CompactGenericModule(std::move(module));
+
+  cvub::ValidateGenericModule(module);
+  const cvub::GenericOperation &compactedDps = module.operations.at(
+      static_cast<size_t>(OperationId(module, "test.dps")));
+  CVUB_CHECK_EQ(compactedDps.dpsInputs, compactedDps.dpsInits);
+  CVUB_CHECK_EQ(compactedDps.dpsInputs.size(), 1U);
+  CVUB_CHECK(std::find(compactedDps.operands.begin(), compactedDps.operands.end(),
+                       compactedDps.dpsInputs.front()) !=
+             compactedDps.operands.end());
+}
+
+CVUB_TEST(erase_tree_and_move_before_keep_structure_consistent) {
+  auto module = cvub::test::ParseFixture("two_mix_functions.mlir");
+  cvub::EraseOperationTree(module, OperationId(module, "test.container"));
+  module = cvub::CompactGenericModule(std::move(module));
+  CVUB_CHECK_EQ(cvub::DeviceFunctionNames(module),
+                std::vector<std::string>({"first_mix_aiv",
+                                          "second_mix_aiv"}));
+
+  const int first = OperationId(module, "test.first");
+  const int second = OperationId(module, "test.second");
+  cvub::MoveOperationBefore(module, second, first);
+  const cvub::GenericBlock &block = module.blocks.at(
+      static_cast<size_t>(module.operations.at(static_cast<size_t>(first)).blockId));
+  CVUB_CHECK(std::find(block.operations.begin(), block.operations.end(), second) <
+             std::find(block.operations.begin(), block.operations.end(), first));
+  cvub::ValidateGenericModule(module);
+}
+
+CVUB_TEST(set_dictionary_value_replaces_or_appends) {
+  CVUB_CHECK_EQ(cvub::SetDictionaryValue("{alpha = 1, beta = [2, 3]}",
+                                         "alpha", "4"),
+                "{alpha = 4, beta = [2, 3]}");
+  CVUB_CHECK_EQ(cvub::SetDictionaryValue("{}", "core", "\"AIV\""),
+                "{core = \"AIV\"}");
+}
+
+CVUB_TEST(extract_function_keeps_required_declarations_only) {
+  auto module = cvub::test::ParseFixture("two_mix_functions.mlir");
+  auto isolated = cvub::ExtractFunctionModule(module, "first_mix_aiv");
+  CVUB_CHECK_EQ(cvub::DeviceFunctionNames(isolated),
+                std::vector<std::string>({"first_mix_aiv"}));
+  auto symbols = cvub::FunctionSymbolNames(isolated);
+  std::sort(symbols.begin(), symbols.end());
+  CVUB_CHECK_EQ(symbols,
+                std::vector<std::string>({"first_mix_aiv", "used_decl"}));
+  cvub::ValidateGenericModule(isolated);
+}
+
+CVUB_TEST(boundary_validation_rejects_post_bufferization_only_input) {
+  auto module =
+      cvub::test::ParseFixture("after_bufferization_only.mlir");
+  CVUB_CHECK_THROWS_CONTAINS(
+      cvub::ValidateBeforeCVPipelineBoundary(module),
+      "expected tensor-level before-CVPipeline device function");
 }
 
 } // namespace
