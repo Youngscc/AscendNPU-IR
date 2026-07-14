@@ -46,6 +46,15 @@ cvub::fs::path WriteManifest(const std::string &name,
   return path;
 }
 
+std::string ReadFixtureText(const std::string &name) {
+  std::ifstream input(cvub::fs::path("cvpipeline_ub_model_cpp/tests/fixtures") /
+                      name);
+  if (!input)
+    throw std::runtime_error("cannot read fixture: " + name);
+  return std::string(std::istreambuf_iterator<char>(input),
+                     std::istreambuf_iterator<char>());
+}
+
 int ResultOf(const cvub::GenericModule &module, const std::string &operation) {
   for (const cvub::GenericOperation &candidate : module.operations)
     if (candidate.name == operation && !candidate.results.empty())
@@ -2934,6 +2943,53 @@ CVUB_TEST(inline_scope_fail_closes_and_preserves_unsupported_region_shape) {
   CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
 }
 
+CVUB_TEST(inline_scope_inlines_private_multi_result_function_and_nested_scope) {
+  auto module = cvub::test::ParseFixture("scope_tensor_empty_review.mlir");
+  // Remove calls which deliberately exercise the fail-closed paths below.
+  for (auto &operation : module.operations)
+    if (HasOperationCase(module, "public_call") &&
+        (cvub::UnquoteIRString(cvub::IRDictionaryValue(operation.attributes,
+                                                       "case")) ==
+             "public_call" ||
+         cvub::UnquoteIRString(cvub::IRDictionaryValue(operation.attributes,
+                                                       "case")) ==
+             "noinline_call"))
+      cvub::GenericRewriter(module).removeFromBlock(operation.blockId,
+                                                    operation.id);
+  module = cvub::CompactGenericModule(std::move(module));
+  const auto result = cvub::RunInlineScope(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(!HasOperationCase(result.module, "inline_call"));
+  CVUB_CHECK(!HasOperationCase(result.module, "nested_callee_scope"));
+  CVUB_CHECK(!HasOperation(result.module, "private_pair"));
+  const auto &first = OperationWithCase(result.module, "nested_scope_first");
+  const auto &user = OperationWithCase(result.module, "inline_user");
+  CVUB_CHECK_EQ(user.operands[0], first.results.front());
+  CVUB_CHECK_EQ(user.operands[1],
+                OperationWithCase(result.module, "inline_input").results.front());
+  cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(inline_scope_fail_closes_unproven_call_but_honors_noinline) {
+  const auto input = cvub::test::ParseFixture("scope_tensor_empty_review.mlir");
+  const auto result = cvub::RunInlineScope(input);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "InlineScope", "private or internal"));
+  CVUB_CHECK(HasOperationCase(result.module, "public_call"));
+  CVUB_CHECK(HasOperationCase(result.module, "noinline_call"));
+}
+
+CVUB_TEST(inline_scope_fail_closes_recursive_private_call_graph) {
+  auto module = cvub::test::ParseFixture("scope_tensor_empty_review.mlir");
+  auto &recursive = MutableOperationNamed(module, "tensor.expand_shape");
+  recursive.name = "func.call";
+  recursive.properties = "{callee = @private_pair}";
+  recursive.attributes = "{callee = @private_pair}";
+  const auto result = cvub::RunInlineScope(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "InlineScope", "recursive"));
+}
+
 CVUB_TEST(fold_tensor_empty_replaces_empty_source_insert_slice_with_destination) {
   const auto result = cvub::RunFoldTensorEmpty(
       cvub::test::ParseFixture("scope_tensor_empty.mlir"));
@@ -2945,6 +3001,61 @@ CVUB_TEST(fold_tensor_empty_replaces_empty_source_insert_slice_with_destination)
   const auto &user = OperationWithCase(result.module, "fold_user");
   CVUB_CHECK_EQ(user.operands.front(), destination.results.front());
   cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(fold_tensor_empty_handles_static_extract_and_reshape_to_fixedpoint) {
+  auto module = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("minimal_aiv.mlir"), "minimal_aiv");
+  const auto ret = OperationNamed(module, "func.return");
+  cvub::GenericRewriter rewriter(module);
+  const int empty = rewriter.createOperation(
+      ret.parentId, ret.regionId, ret.blockId, "tensor.empty",
+      {"tensor<4xf32>"}, {}, {}, "", "{case = \"fold_chain_empty\"}");
+  rewriter.insertToBlock(ret.blockId, static_cast<size_t>(ret.ordinal), empty);
+  const int extract = rewriter.createOperation(
+      ret.parentId, ret.regionId, ret.blockId, "tensor.extract_slice",
+      {"tensor<4xf32>"},
+      {module.operations.at(static_cast<size_t>(empty)).results.front()},
+      {"tensor<4xf32>"},
+      "{static_offsets = array<i64: 0>, static_sizes = array<i64: 4>, "
+      "static_strides = array<i64: 1>}", "{case = \"fold_chain_extract\"}");
+  rewriter.insertToBlock(ret.blockId, static_cast<size_t>(ret.ordinal + 1),
+                         extract);
+  const int expand = rewriter.createOperation(
+      ret.parentId, ret.regionId, ret.blockId, "tensor.expand_shape",
+      {"tensor<1x4xf32>"},
+      {module.operations.at(static_cast<size_t>(extract)).results.front()},
+      {"tensor<4xf32>"}, "", "{case = \"fold_chain_expand\"}");
+  rewriter.insertToBlock(ret.blockId, static_cast<size_t>(ret.ordinal + 2),
+                         expand);
+  cvub::ValidateGenericModule(module);
+  const auto result = cvub::RunFoldTensorEmpty(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(!HasOperationCase(result.module, "fold_chain_extract"));
+  CVUB_CHECK(!HasOperationCase(result.module, "fold_chain_expand"));
+  CVUB_CHECK_EQ(OperationCount(result.module, "tensor.empty"), 1U);
+}
+
+CVUB_TEST(fold_tensor_empty_blocks_dynamic_or_version_patterns_not_modeled) {
+  auto module = cvub::test::ParseFixture("scope_tensor_empty.mlir");
+  auto &insert = MutableOperationNamed(module, "tensor.insert_slice");
+  insert.name = "tensor.pack";
+  const auto result = cvub::RunFoldTensorEmpty(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "FoldTensorEmpty", "tensor.pack"));
+}
+
+CVUB_TEST(post_split_canonicalization_relabels_blocker_diagnostics) {
+  auto module = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("workspace_sync_invariant.mlir"),
+      "workspace_sync");
+  MutableOperationNamed(module, "hivm.hir.load").name = "scf.if";
+  const auto result = cvub::RunPostSplitCanonicalization(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "CanonicalizationAfterSplit",
+                           "unmodeled applicable"));
+  CVUB_CHECK(!HasDiagnostic(result, "CanonicalizationBeforeSplit",
+                            "unmodeled applicable"));
 }
 
 CVUB_TEST(clone_tensor_empty_gives_every_destination_owner_distinct_storage) {
@@ -2988,6 +3099,53 @@ CVUB_TEST(clone_tensor_empty_gives_every_destination_owner_distinct_storage) {
   cvub::ValidateGenericModule(result.module);
 }
 
+CVUB_TEST(clone_tensor_empty_replaces_all_owner_uses_once_and_erases_dead_empty) {
+  auto module = cvub::test::ParseFixture("scope_tensor_empty.mlir");
+  auto &owner = MutableOperationNamed(module, "hivm.hir.vadd", 1);
+  const int oldValue = owner.operands.back();
+  owner.operands[0] = oldValue;
+  owner.operandTypes[0] = owner.operandTypes.back();
+  owner.dpsInputs = {oldValue, oldValue};
+  owner.dpsInits = {oldValue};
+  // Remove all other users and marks so this source becomes dead after clone.
+  for (auto &operation : module.operations)
+    if (operation.id != owner.id && operation.id !=
+            DefinitionOf(module, oldValue).id &&
+        (std::find(operation.operands.begin(), operation.operands.end(),
+                   oldValue) != operation.operands.end()))
+      cvub::GenericRewriter(module).removeFromBlock(operation.blockId,
+                                                    operation.id);
+  module = cvub::CompactGenericModule(std::move(module));
+  const auto result = cvub::RunCloneTensorEmpty(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  const auto &rewritten = OperationWithCase(result.module, "owner_zero");
+  CVUB_CHECK_EQ(rewritten.operands[0], rewritten.operands[2]);
+  CVUB_CHECK_EQ(rewritten.dpsInputs,
+                std::vector<int>({rewritten.operands[0], rewritten.operands[0]}));
+  CVUB_CHECK_EQ(rewritten.dpsInits,
+                std::vector<int>({rewritten.operands[0]}));
+  // The clone copies the case attribute; exactly one such operation proves
+  // that the old source was erased instead of becoming a phantom allocation.
+  CVUB_CHECK_EQ(OperationsWithCase(result.module, "shared_destination").size(),
+                1U);
+  const auto plan = cvub::PlanLocalMemoryForSeed(
+      cvub::BuildSuffixPlanMemoryInput(result.module), 0);
+  CVUB_CHECK(plan.success);
+  CVUB_CHECK(plan.peakBits > 0U);
+}
+
+CVUB_TEST(clone_tensor_empty_uses_exact_structured_registry) {
+  auto module = cvub::test::ParseFixture("scope_tensor_empty.mlir");
+  MutableOperationNamed(module, "hivm.hir.vadd", 1).name =
+      "hivm.hir.vector_but_not_registered";
+  const auto result = cvub::RunCloneTensorEmpty(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  const auto &owner = OperationWithCase(result.module, "owner_zero");
+  CVUB_CHECK_EQ(owner.operands.back(),
+                OperationWithCase(result.module, "shared_destination")
+                    .results.front());
+}
+
 CVUB_TEST(post_split_scope_empty_stages_are_ordered_and_propagated) {
   const auto result = cvub::RunPostCVPipelineAIVProjection(
       cvub::test::ParseFixture("minimal_aiv.mlir"), {});
@@ -3003,6 +3161,25 @@ CVUB_TEST(post_split_scope_empty_stages_are_ordered_and_propagated) {
                 cvub::CoverageDisposition::Modeled);
   CVUB_CHECK(!result.functions.empty());
   cvub::ValidateGenericModule(result.functions.front().module);
+}
+
+CVUB_TEST(scope_tensor_empty_full_rewrite_matches_checked_golden) {
+  auto inlineResult = cvub::RunInlineScope(
+      cvub::test::ParseFixture("scope_tensor_empty.mlir"));
+  auto foldResult =
+      cvub::RunFoldTensorEmpty(std::move(inlineResult.module));
+  auto canonicalResult =
+      cvub::RunPostSplitCanonicalization(std::move(foldResult.module));
+  auto cloneResult =
+      cvub::RunCloneTensorEmpty(std::move(canonicalResult.module));
+  CVUB_CHECK_EQ(inlineResult.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(foldResult.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(canonicalResult.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(canonicalResult, "CanonicalizationAfterSplit",
+                           "unmodeled applicable"));
+  CVUB_CHECK_EQ(cloneResult.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(cloneResult.module),
+                ReadFixtureText("scope_tensor_empty.golden.generic-ir"));
 }
 
 CVUB_TEST(tile_bind_subblock_success_form_is_reported_incomplete) {
@@ -3047,8 +3224,10 @@ CVUB_TEST(tile_bind_subblock_same_address_hazard_applies_store_limit) {
   const cvub::GenericOperation &store =
       OperationNamed(result.module, "hivm.hir.store");
   CVUB_CHECK_EQ(store.parentId, limitIf.id);
+  // Exactly one store is restricted and it lives inside the guard block.
   CVUB_CHECK_EQ(OperationCount(result.module, "hivm.hir.store"), 1U);
   CVUB_CHECK_EQ(OperationCount(result.module, "scf.if"), 1U);
+  // The condition plumbing mirrors the real pass.
   CVUB_CHECK_EQ(OperationCount(result.module, "arith.index_cast"), 1U);
   CVUB_CHECK_EQ(OperationCount(result.module, "arith.cmpi"), 1U);
   cvub::ValidateGenericModule(result.module);
@@ -3056,6 +3235,10 @@ CVUB_TEST(tile_bind_subblock_same_address_hazard_applies_store_limit) {
 
 CVUB_TEST(tile_bind_subblock_disable_attribute_is_recognized_noop) {
   auto module = cvub::test::ParseFixture("subblock_bind_success.mlir");
+  module.operations.front().attributes = cvub::SetDictionaryValue(
+      module.operations.front().attributes,
+      "hivm.disable_auto_tile_and_bind_subblock", "");
+  // A bare key with no value is the unit-attr spelling the real pass checks.
   module.operations.front().attributes =
       "{hivm.disable_auto_tile_and_bind_subblock}";
   const std::string before = cvub::SerializeGenericModule(module);

@@ -129,6 +129,15 @@ inline std::string FunctionSymbolName(const GenericOperation &function) {
   return UnquoteIRString(std::move(name));
 }
 
+inline bool IsProvablyLocalFunction(const GenericOperation &function) {
+  std::string visibility =
+      IRDictionaryValue(function.properties, "sym_visibility");
+  if (visibility.empty())
+    visibility = IRDictionaryValue(function.attributes, "sym_visibility");
+  visibility = UnquoteIRString(std::move(visibility));
+  return visibility == "private" || visibility == "internal";
+}
+
 inline std::vector<std::string>
 FunctionSymbolNames(const GenericModule &module) {
   std::vector<std::string> names;
@@ -526,7 +535,9 @@ inline GenericModule ExtractFunctionModule(const GenericModule &module,
 
   GenericModule isolated = module;
   for (int operationId : keep)
-    if (operationId != selected->second)
+    if (operationId != selected->second &&
+        !IsProvablyLocalFunction(
+            isolated.operations.at(static_cast<size_t>(operationId))))
       isolated.operations.at(static_cast<size_t>(operationId)).regions.clear();
   if (isolated.operations.front().regions.size() != 1)
     throw std::runtime_error("generic IR extraction: expected one module region");

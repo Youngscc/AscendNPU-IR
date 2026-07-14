@@ -54,12 +54,109 @@ inline bool HasAttachedUse(const GenericModule &module, int value) {
   return false;
 }
 
+inline bool IsStaticTensorType(const std::string &type) {
+  return startsWith(trim(type), "tensor<") && type.find('?') == std::string::npos;
+}
+
+inline bool AnyEmptyOperand(const GenericModule &module,
+                            const GenericOperation &operation) {
+  return std::any_of(operation.operands.begin(), operation.operands.end(),
+                     [&](int value) { return IsTensorEmptyValue(module, value); });
+}
+
+inline bool AllOperandsEmpty(const GenericModule &module,
+                             const GenericOperation &operation) {
+  return !operation.operands.empty() &&
+         std::all_of(operation.operands.begin(), operation.operands.end(),
+                     [&](int value) { return IsTensorEmptyValue(module, value); });
+}
+
+inline std::string UnsupportedFoldReason(const GenericModule &module,
+                                         const GenericOperation &operation) {
+  if (operation.blockId < 0 || operation.results.size() != 1 ||
+      operation.resultTypes.size() != 1)
+    return "";
+  const bool sourceEmpty = !operation.operands.empty() &&
+                           IsTensorEmptyValue(module, operation.operands.front());
+  if ((operation.name == "tensor.extract_slice" ||
+       operation.name == "tensor.expand_shape" ||
+       operation.name == "tensor.collapse_shape") &&
+      sourceEmpty && !IsStaticTensorType(operation.resultTypes.front()))
+    return operation.name +
+           " empty fold has dynamic result operands not modeled exactly";
+  if (operation.name == "tensor.concat" && AnyEmptyOperand(module, operation) &&
+      (!AllOperandsEmpty(module, operation) ||
+       !IsStaticTensorType(operation.resultTypes.front())))
+    return "tensor.concat empty pattern is applicable but not modeled exactly";
+  if ((operation.name == "tensor.pack" || operation.name == "tensor.unpack") &&
+      sourceEmpty && operation.operands.size() > 1 &&
+      IsTensorEmptyValue(module, operation.operands[1]))
+    return operation.name +
+           " empty source/destination pattern is applicable but not modeled exactly";
+  return "";
+}
+
+inline void EraseDeadEmpty(GenericModule &module, int value) {
+  const GenericOperation *definition = AttachedDefinition(module, value);
+  if (definition != nullptr && definition->name == "tensor.empty" &&
+      !HasAttachedUse(module, value))
+    GenericRewriter(module).removeFromBlock(definition->blockId, definition->id);
+}
+
+inline bool FoldEmptyProducer(GenericModule &module,
+                              GenericOperation operation) {
+  if (operation.blockId < 0 || operation.results.size() != 1 ||
+      operation.resultTypes.size() != 1 || operation.operands.empty() ||
+      !IsTensorEmptyValue(module, operation.operands.front()))
+    return false;
+  if (operation.name == "tensor.insert_slice" &&
+      operation.operands.size() >= 2) {
+    const int source = operation.operands.front();
+    ReplaceAllUses(module, operation.results.front(), operation.operands[1]);
+    GenericRewriter(module).removeFromBlock(operation.blockId, operation.id);
+    EraseDeadEmpty(module, source);
+    return true;
+  }
+  const bool reshapeOrSlice =
+      operation.name == "tensor.extract_slice" ||
+      operation.name == "tensor.expand_shape" ||
+      operation.name == "tensor.collapse_shape";
+  const bool concat = operation.name == "tensor.concat" &&
+                      AllOperandsEmpty(module, operation);
+  if ((!reshapeOrSlice && !concat) ||
+      !IsStaticTensorType(operation.resultTypes.front()))
+    return false;
+  const std::vector<int> sources = operation.operands;
+  GenericRewriter rewriter(module);
+  const int empty = rewriter.createOperation(
+      operation.parentId, operation.regionId, operation.blockId,
+      "tensor.empty", operation.resultTypes);
+  const GenericBlock &block =
+      module.blocks.at(static_cast<size_t>(operation.blockId));
+  const auto position =
+      std::find(block.operations.begin(), block.operations.end(), operation.id);
+  rewriter.insertToBlock(
+      operation.blockId,
+      static_cast<size_t>(std::distance(block.operations.begin(), position)),
+      empty);
+  ReplaceAllUses(module, operation.results.front(),
+                 module.operations.at(static_cast<size_t>(empty)).results.front());
+  rewriter.removeFromBlock(operation.blockId, operation.id);
+  for (int source : sources)
+    EraseDeadEmpty(module, source);
+  return true;
+}
+
 inline bool IsCloneStructuredOwner(const std::string &name) {
   static const std::set<std::string> fixed = {
       "hivm.hir.copy", "hivm.hir.load", "hivm.hir.store",
       "hivm.hir.fixpipe", "hivm.hir.mmadL1", "hivm.hir.Conv1dL1",
       "hivm.hir.Conv2dL1", "hivm.hir.Conv3dL1"};
-  return fixed.count(name) != 0 || startsWith(name, "hivm.hir.v");
+  // The real pass registers the generated HIVM vector op list, not arbitrary
+  // operations sharing a spelling prefix.  IsDestinationStyleOp is the
+  // generated-name registry used by this model.
+  return fixed.count(name) != 0 ||
+         (startsWith(name, "hivm.hir.v") && IsDestinationStyleOp(name));
 }
 
 inline std::vector<size_t> DestinationOperandIndices(
@@ -134,26 +231,23 @@ inline StageResult RunFoldTensorEmpty(GenericModule module) {
   StageResult result;
   result.module = std::move(module);
   ValidateGenericModule(result.module);
+  for (const GenericOperation &operation : result.module.operations) {
+    const std::string reason =
+        tensor_empty_detail::UnsupportedFoldReason(result.module, operation);
+    if (reason.empty())
+      continue;
+    result.precision = Precision::Incomplete;
+    result.diagnostics.push_back(
+        {"FoldTensorEmpty", "", operation.id, operation.name, reason});
+  }
+  if (result.precision == Precision::Incomplete)
+    return result;
   bool changed = true;
   while (changed) {
     changed = false;
     for (const GenericOperation &operation : result.module.operations) {
-      if (operation.blockId < 0 || operation.name != "tensor.insert_slice" ||
-          operation.operands.size() < 2 || operation.results.size() != 1 ||
-          !tensor_empty_detail::IsTensorEmptyValue(result.module,
-                                                   operation.operands[0]))
+      if (!tensor_empty_detail::FoldEmptyProducer(result.module, operation))
         continue;
-      const int source = operation.operands[0];
-      const int destination = operation.operands[1];
-      ReplaceAllUses(result.module, operation.results.front(), destination);
-      GenericRewriter(result.module).removeFromBlock(operation.blockId,
-                                                     operation.id);
-      const GenericOperation *sourceDefinition =
-          tensor_empty_detail::AttachedDefinition(result.module, source);
-      if (sourceDefinition != nullptr &&
-          !tensor_empty_detail::HasAttachedUse(result.module, source))
-        GenericRewriter(result.module)
-            .removeFromBlock(sourceDefinition->blockId, sourceDefinition->id);
       result.module = CompactGenericModule(std::move(result.module));
       changed = true;
       break;
@@ -182,12 +276,15 @@ inline StageResult RunCloneTensorEmpty(GenericModule module) {
     const GenericOperation owner = result.module.operations[id];
     if (owner.blockId < 0)
       continue;
+    std::map<int, int> replacements;
     for (size_t operandIndex :
          tensor_empty_detail::DestinationOperandIndices(owner)) {
       if (operandIndex >= result.module.operations[id].operands.size())
         continue;
       const int ownerId = static_cast<int>(id);
       const int oldValue = result.module.operations[id].operands[operandIndex];
+      if (replacements.count(oldValue) != 0)
+        continue;
       const GenericOperation *empty =
           tensor_empty_detail::AttachedDefinition(result.module, oldValue);
       if (empty == nullptr || empty->name != "tensor.empty" ||
@@ -198,19 +295,21 @@ inline StageResult RunCloneTensorEmpty(GenericModule module) {
           result.module, empty->id, ownerId);
       const int newValue = result.module.operations.at(
           static_cast<size_t>(clone)).results.front();
+      replacements[oldValue] = newValue;
       GenericOperation &mutableOwner = result.module.operations[id];
-      mutableOwner.operands[operandIndex] = newValue;
-      if (!mutableOwner.dpsInits.empty()) {
-        mutableOwner.dpsInits.clear();
-        for (size_t initIndex : tensor_empty_detail::DestinationOperandIndices(
-                 mutableOwner))
-          mutableOwner.dpsInits.push_back(mutableOwner.operands[initIndex]);
-      }
+      RemapValues(mutableOwner.operands, {{oldValue, newValue}});
+      RemapValues(mutableOwner.dpsInputs, {{oldValue, newValue}});
+      RemapValues(mutableOwner.dpsInits, {{oldValue, newValue}});
       if (tensor_empty_detail::IsCloneStructuredOwner(mutableOwner.name))
         tensor_empty_detail::CloneBufferSizeMarks(
             result.module, oldValue, newValue, ownerId);
     }
+    for (const auto &[oldValue, newValue] : replacements) {
+      (void)newValue;
+      tensor_empty_detail::EraseDeadEmpty(result.module, oldValue);
+    }
   }
+  result.module = CompactGenericModule(std::move(result.module));
   ValidateGenericModule(result.module);
   return result;
 }
