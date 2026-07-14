@@ -98,11 +98,14 @@ inline const std::vector<int> &CanonicalizationInputs(
 }
 
 inline bool DimensionListDropsUnitExtent(const GenericOperation &operation,
-                                         const std::string &property) {
-  if (operation.operandTypes.empty())
+                                         const std::string &property,
+                                         const std::string *shapedType = nullptr) {
+  if (shapedType == nullptr && operation.operandTypes.empty())
     return false;
   const std::vector<int64_t> shape =
-      CanonicalizationStaticShape(operation.operandTypes.front());
+      CanonicalizationStaticShape(shapedType == nullptr
+                                      ? operation.operandTypes.front()
+                                      : *shapedType);
   const std::vector<int64_t> dimensions = CanonicalizationI64Array(
       CanonicalizationProperty(operation, property));
   for (int64_t dimension : dimensions)
@@ -110,6 +113,124 @@ inline bool DimensionListDropsUnitExtent(const GenericOperation &operation,
         shape[static_cast<size_t>(dimension)] == 1)
       return true;
   return false;
+}
+
+inline std::optional<std::string> OperationValueType(
+    const GenericOperation &operation, int value) {
+  for (size_t index = 0; index < operation.operands.size(); ++index)
+    if (operation.operands[index] == value && index < operation.operandTypes.size())
+      return operation.operandTypes[index];
+  for (size_t index = 0; index < operation.results.size(); ++index)
+    if (operation.results[index] == value && index < operation.resultTypes.size())
+      return operation.resultTypes[index];
+  return std::nullopt;
+}
+
+inline std::optional<std::string>
+CanonicalizationVBrcDestinationType(const GenericOperation &operation) {
+  if (!operation.dpsInits.empty()) {
+    const auto type = OperationValueType(operation, operation.dpsInits.front());
+    if (type)
+      return type;
+  }
+  // Generic IR can be assembled before DPS metadata is reconstructed.  The
+  // real VBrc schema is src, dst, optional temp-buffer.
+  if (operation.operandTypes.size() >= 2)
+    return operation.operandTypes[1];
+  if (!operation.resultTypes.empty())
+    return operation.resultTypes.front();
+  return std::nullopt;
+}
+
+inline bool ConstantMatchesVReduceIdentity(const GenericOperation &reduce,
+                                           const GenericOperation &constant,
+                                           bool valueInit) {
+  if (!valueInit)
+    return true;
+  std::string arithmetic = CanonicalizationProperty(reduce, "arith");
+  std::string raw = IRDictionaryValue(constant.attributes, "value");
+  const size_t colon = raw.find(':');
+  if (colon != std::string::npos)
+    raw = raw.substr(0, colon);
+  double value = 0.0;
+  try {
+    value = std::stod(trim(raw));
+  } catch (const std::exception &) {
+    return false;
+  }
+  if (arithmetic.find("sum") != std::string::npos ||
+      arithmetic.find("xori") != std::string::npos ||
+      arithmetic.find("ori") != std::string::npos)
+    return value == 0.0;
+  if (arithmetic.find("prod") != std::string::npos)
+    return value == 1.0;
+  if (arithmetic.find("andi") != std::string::npos)
+    return value == -1.0;
+  // min/max identities are type-specific infinities or integer extrema.  Do
+  // not let their more varied textual encodings hide a potentially applicable
+  // redundant-init chain: the stage is fail-closed and will report Incomplete.
+  if (arithmetic.find("min") != std::string::npos ||
+      arithmetic.find("max") != std::string::npos)
+    return true;
+  return false;
+}
+
+inline bool TracesToVReduceConstantFill(const GenericModule &module, int value,
+                                        const GenericOperation &reduce,
+                                        bool valueInit,
+                                        std::set<int> &visiting) {
+  if (!visiting.insert(value).second)
+    return false;
+  const auto done = [&](bool result) {
+    visiting.erase(value);
+    return result;
+  };
+  const GenericOperation *definition = DefinitionForBufferSize(module, value);
+  if (definition != nullptr) {
+    if (definition->name == "hivm.hir.vbrc") {
+      const std::vector<int> &inputs = CanonicalizationInputs(*definition);
+      if (inputs.empty())
+        return done(false);
+      const GenericOperation *constant =
+          DefinitionForBufferSize(module, inputs.front());
+      return done(constant != nullptr && constant->name == "arith.constant" &&
+                  ConstantMatchesVReduceIdentity(reduce, *constant,
+                                                 valueInit));
+    }
+    if ((definition->name == "tensor.expand_shape" ||
+         definition->name == "tensor.collapse_shape") &&
+        !definition->operands.empty())
+      return done(TracesToVReduceConstantFill(
+          module, definition->operands.front(), reduce, valueInit, visiting));
+    return done(false);
+  }
+
+  for (const GenericBlock &block : module.blocks) {
+    const auto found = std::find(block.arguments.begin(), block.arguments.end(),
+                                 value);
+    if (found == block.arguments.end())
+      continue;
+    const size_t argument = static_cast<size_t>(
+        std::distance(block.arguments.begin(), found));
+    const GenericRegion &region =
+        module.regions.at(static_cast<size_t>(block.regionId));
+    const GenericOperation &parent = module.operations.at(
+        static_cast<size_t>(region.parentOperation));
+    if (parent.name != "scf.for" || argument == 0 ||
+        argument + 2 >= parent.operands.size())
+      return done(false);
+    return done(TracesToVReduceConstantFill(
+        module, parent.operands[argument + 2], reduce, valueInit, visiting));
+  }
+  return done(false);
+}
+
+inline bool TracesToVReduceConstantFill(const GenericModule &module, int value,
+                                        const GenericOperation &reduce,
+                                        bool valueInit) {
+  std::set<int> visiting;
+  return TracesToVReduceConstantFill(module, value, reduce, valueInit,
+                                     visiting);
 }
 
 inline bool ApplicableHIVMCanonicalization(const GenericModule &module,
@@ -143,16 +264,10 @@ inline bool ApplicableHIVMCanonicalization(const GenericModule &module,
   if (operation.name == "hivm.hir.vreduce") {
     if (DimensionListDropsUnitExtent(operation, "reduce_dims"))
       return true;
-    for (int init : operation.dpsInits) {
-      const GenericOperation *definition = DefinitionForBufferSize(module, init);
-      if (definition != nullptr && definition->name == "hivm.hir.vbrc" &&
-          !CanonicalizationInputs(*definition).empty()) {
-        const GenericOperation *constant = DefinitionForBufferSize(
-            module, CanonicalizationInputs(*definition).front());
-        if (constant != nullptr && constant->name == "arith.constant")
-          return true;
-      }
-    }
+    for (size_t index = 0; index < operation.dpsInits.size(); ++index)
+      if (TracesToVReduceConstantFill(module, operation.dpsInits[index],
+                                      operation, index == 0))
+        return true;
     return false;
   }
   if (operation.name == "hivm.hir.vcumsum" ||
@@ -223,8 +338,11 @@ inline bool ApplicableHIVMCanonicalization(const GenericModule &module,
            ParseIntegerAttribute(
                IRDictionaryValue(condition->attributes, "value")) == 1;
   }
-  if (operation.name == "hivm.hir.vbrc")
-    return DimensionListDropsUnitExtent(operation, "broadcast_dims");
+  if (operation.name == "hivm.hir.vbrc") {
+    const auto destination = CanonicalizationVBrcDestinationType(operation);
+    return destination && DimensionListDropsUnitExtent(
+                              operation, "broadcast_dims", &*destination);
+  }
   return false;
 }
 
@@ -481,6 +599,32 @@ inline bool SimplifyOneTrivialLoop(GenericModule &module,
     return true;
   }
 
+  // CanonicalizeYieldValPattern replaces a live tensor loop result when its
+  // yielded value is defined outside the loop.  This is independent of the
+  // init value and does not remove the iter arg/result from the loop itself.
+  bool replacedExternalYield = false;
+  for (size_t index = 0; index < loop.results.size(); ++index) {
+    if (!HasAttachedUsers(module, loop.results[index]) ||
+        index >= yield->operandTypes.size() ||
+        !startsWith(trim(yield->operandTypes[index]), "tensor<"))
+      continue;
+    const int yielded = yield->operands[index];
+    const GenericOperation *definition =
+        DefinitionForBufferSize(module, yielded);
+    bool external = definition != nullptr
+                        ? !IsNestedUnderOperation(module, definition->id,
+                                                  loop.id)
+                        : true;
+    if (definition == nullptr &&
+        std::find(body.arguments.begin(), body.arguments.end(), yielded) !=
+            body.arguments.end())
+      external = false;
+    if (!external)
+      continue;
+    ReplaceAllUses(module, loop.results[index], yielded);
+    replacedExternalYield = true;
+  }
+
   std::vector<size_t> passthrough;
   for (size_t index = 0; index < loop.results.size(); ++index) {
     const int init = loop.operands[3 + index];
@@ -489,7 +633,7 @@ inline bool SimplifyOneTrivialLoop(GenericModule &module,
       passthrough.push_back(index);
   }
   if (passthrough.empty())
-    return false;
+    return replacedExternalYield;
   GenericBlock &mutableBody =
       module.blocks.at(static_cast<size_t>(region.blocks.front()));
   GenericOperation &mutableYield = module.operations.at(

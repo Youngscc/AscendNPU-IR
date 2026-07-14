@@ -1836,6 +1836,11 @@ CVUB_TEST(buffer_size_conflict_is_operation_level_incomplete) {
   auto input = cvub::ExtractFunctionModule(
       cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
       "conflicting_sizes");
+  // Keep Constantize from erasing both marks before Set observes them: the
+  // logical 100xf16 allocation is larger than either requested backing.
+  auto &dimension = MutableOperationNamed(input, "arith.constant");
+  dimension.attributes = cvub::SetDictionaryValue(
+      dimension.attributes, "value", "100 : index");
   const auto before = cvub::SerializeGenericModule(input);
   const auto result = cvub::RunInferAndSetBufferSize(std::move(input));
   CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
@@ -2036,8 +2041,6 @@ CVUB_TEST(buffer_size_set_preserves_only_explicit_alignment) {
   auto &allocation = MutableOperationNamed(input, "memref.alloc");
   allocation.attributes =
       "{alignment = 64 : i64, discard_me = true}";
-  auto &maximum = MutableOperationNamed(input, "arith.maxui");
-  maximum.name = "test.dynamic_dim";
   auto &stack = MutableOperationNamed(input, "memref.alloca");
   const int stackValue = stack.results.front();
   stack.operands.clear();
@@ -2054,7 +2057,7 @@ CVUB_TEST(buffer_size_set_preserves_only_explicit_alignment) {
   CVUB_CHECK_EQ(backing.attributes, "{alignment = 64 : i64}");
 }
 
-CVUB_TEST(buffer_size_alias_view_annotation_drives_set_fallback) {
+CVUB_TEST(buffer_size_alias_view_annotation_cannot_hide_unknown_value_bounds) {
   auto input = cvub::ExtractFunctionModule(
       cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
       "conflicting_sizes");
@@ -2079,14 +2082,9 @@ CVUB_TEST(buffer_size_alias_view_annotation_drives_set_fallback) {
   input = cvub::CompactGenericModule(std::move(input));
 
   const auto result = cvub::RunInferAndSetBufferSize(std::move(input));
-  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
-  CVUB_CHECK(std::any_of(
-      result.module.operations.begin(), result.module.operations.end(),
-      [](const cvub::GenericOperation &operation) {
-        return operation.name == "memref.alloc" &&
-               operation.resultTypes.front() ==
-                   "memref<64xi8, #hivm.address_space<UB>>";
-      }));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "InferAndSetBufferSize",
+                           "unsupported ValueBounds"));
 }
 
 CVUB_TEST(buffer_size_unsupported_affine_map_cannot_fall_back_to_set) {
@@ -2098,10 +2096,60 @@ CVUB_TEST(buffer_size_unsupported_affine_map_cannot_fall_back_to_set) {
   maximum.properties =
       "{map = affine_map<(d0, d1) -> (d0 * 2 + d1)>}";
   auto &stack = MutableOperationNamed(input, "memref.alloca");
+  const int stackValue = stack.results.front();
   stack.operands.clear();
   stack.operandTypes.clear();
   stack.resultTypes.front() =
       "memref<20xf32, #hivm.address_space<UB>>";
+  for (auto &operation : input.operations)
+    for (size_t index = 0; index < operation.operands.size(); ++index)
+      if (operation.operands[index] == stackValue)
+        operation.operandTypes[index] = stack.resultTypes.front();
+  const auto result = cvub::RunInferAndSetBufferSize(std::move(input));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "InferAndSetBufferSize",
+                           "unsupported ValueBounds"));
+}
+
+CVUB_TEST(buffer_size_unsupported_affine_hidden_by_cast_and_add_fails_closed) {
+  auto input = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
+      "constant_bounds");
+  auto &apply = MutableOperationNamed(input, "arith.maxui");
+  apply.name = "affine.apply";
+  apply.properties =
+      "{map = affine_map<(d0, d1) -> (d0 * 2 + d1)>}";
+  auto &allocation = MutableOperationNamed(input, "memref.alloc");
+  auto &stack = MutableOperationNamed(input, "memref.alloca");
+  const int stackValue = stack.results.front();
+  stack.operands.clear();
+  stack.operandTypes.clear();
+  stack.resultTypes.front() =
+      "memref<20xf32, #hivm.address_space<UB>>";
+  for (auto &operation : input.operations)
+    for (size_t index = 0; index < operation.operands.size(); ++index)
+      if (operation.operands[index] == stackValue)
+        operation.operandTypes[index] = stack.resultTypes.front();
+  const int blockId = allocation.blockId;
+  const int parentId = allocation.parentId;
+  const int regionId = allocation.regionId;
+  const int ordinal = allocation.ordinal;
+  const auto &zero = MutableOperationNamed(input, "arith.constant", 1);
+  cvub::GenericRewriter rewriter(input);
+  const int cast = rewriter.createOperation(
+      parentId, regionId, blockId, "arith.index_cast", {"index"},
+      {apply.results.front()}, {"index"});
+  rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal), cast);
+  const int add = rewriter.createOperation(
+      parentId, regionId, blockId, "arith.addi", {"index"},
+      {input.operations.at(static_cast<size_t>(cast)).results.front(),
+       zero.results.front()},
+      {"index", "index"});
+  rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal + 1), add);
+  allocation.operands.front() =
+      input.operations.at(static_cast<size_t>(add)).results.front();
+  cvub::ValidateGenericModule(input);
+
   const auto result = cvub::RunInferAndSetBufferSize(std::move(input));
   CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
   CVUB_CHECK(HasDiagnostic(result, "InferAndSetBufferSize",
@@ -2307,8 +2355,12 @@ CVUB_TEST(pre_split_canonicalization_blocks_applicable_hivm_patterns) {
     } else if (name == "hivm.hir.vbrc") {
       auto &empty = MutableOperationNamed(module, "tensor.empty");
       empty.resultTypes.front() = "tensor<4x1xf32>";
-      candidate.operandTypes.front() = empty.resultTypes.front();
+      const auto &scalar = MutableOperationNamed(module, "arith.constant", 2);
+      candidate.operands = {scalar.results.front(), empty.results.front()};
+      candidate.operandTypes = {scalar.resultTypes.front(),
+                                empty.resultTypes.front()};
       candidate.attributes = "{broadcast_dims = [1]}";
+      cvub::ApplyOperationSemantics(candidate);
     }
     const auto result = cvub::RunPreSplitCanonicalization(std::move(module));
     CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
@@ -2400,6 +2452,180 @@ CVUB_TEST(pre_split_canonicalization_blocks_unmodeled_scf_iterarg_chain) {
   CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
   CVUB_CHECK(HasDiagnostic(result, "CanonicalizationBeforeSplit",
                            "iter-arg"));
+}
+
+CVUB_TEST(pre_split_canonicalization_replaces_live_external_tensor_yield) {
+  auto module = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"), "canonicalize");
+  auto &loop = MutableOperationNamed(module, "scf.for");
+  auto &yield = MutableOperationNamed(module, "scf.yield");
+  auto &consume = MutableOperationNamed(module, "test.consume");
+  const auto &external = MutableOperationNamed(module, "tensor.empty");
+  const int externalValue = external.results.front();
+  const int blockId = loop.blockId;
+  const int parentId = loop.parentId;
+  const int regionId = loop.regionId;
+  const int ordinal = loop.ordinal;
+  cvub::GenericRewriter rewriter(module);
+  const int upper = rewriter.createOperation(
+      parentId, regionId, blockId, "arith.constant", {"index"}, {}, {}, "",
+      "{value = 2 : index}");
+  rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal), upper);
+  const int init = rewriter.createOperation(
+      parentId, regionId, blockId, "tensor.empty", {"tensor<4xf32>"}, {}, {},
+      "", "{case = \"external_init\"}");
+  rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal + 1), init);
+  loop.operands[1] =
+      module.operations.at(static_cast<size_t>(upper)).results.front();
+  loop.operands[3] =
+      module.operations.at(static_cast<size_t>(init)).results.front();
+  loop.operandTypes[3] = "tensor<4xf32>";
+  loop.resultTypes.front() = "tensor<4xf32>";
+  const int bodyId = module.regions.at(static_cast<size_t>(loop.regions.front()))
+                         .blocks.front();
+  auto &body = module.blocks.at(static_cast<size_t>(bodyId));
+  body.argumentTypes[1] = "tensor<4xf32>";
+  yield.operands.front() = externalValue;
+  yield.operandTypes.front() = "tensor<4xf32>";
+  consume.operands.back() = loop.results.front();
+  consume.operandTypes.back() = "tensor<4xf32>";
+  cvub::ValidateGenericModule(module);
+
+  const auto result = cvub::RunPreSplitCanonicalization(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  const auto &updatedConsume = OperationNamed(result.module, "test.consume");
+  const auto &replacement = DefinitionOf(result.module,
+                                          updatedConsume.operands.back());
+  CVUB_CHECK_EQ(replacement.name, "tensor.empty");
+  CVUB_CHECK(replacement.id != OperationNamed(result.module, "scf.for").id);
+}
+
+CVUB_TEST(pre_split_canonicalization_uses_vbrc_destination_unit_dimension) {
+  auto module = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"), "canonicalize");
+  const auto &scalar = MutableOperationNamed(module, "arith.constant", 2);
+  auto &destination = MutableOperationNamed(module, "tensor.empty");
+  destination.resultTypes.front() = "tensor<4x1xi32>";
+  const int scalarValue = scalar.results.front();
+  const int destinationValue = destination.results.front();
+  const auto &mark = MutableOperationNamed(module, "annotation.mark");
+  const int markId = mark.id;
+  const int markBlockId = mark.blockId;
+  const int blockId = mark.blockId;
+  const int parentId = mark.parentId;
+  const int regionId = mark.regionId;
+  const int ordinal = mark.ordinal;
+  cvub::GenericRewriter rewriter(module);
+  const int vbrc = rewriter.createOperation(
+      parentId, regionId, blockId, "hivm.hir.vbrc", {"tensor<4x1xi32>"},
+      {scalarValue, destinationValue},
+      {"i32", "tensor<4x1xi32>"},
+      "{broadcast_dims = array<i64: 1>}");
+  cvub::ApplyOperationSemantics(
+      module.operations.at(static_cast<size_t>(vbrc)));
+  rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal), vbrc);
+  rewriter.removeFromBlock(markBlockId, markId);
+  module = cvub::CompactGenericModule(std::move(module));
+  cvub::ValidateGenericModule(module);
+
+  const auto result = cvub::RunPreSplitCanonicalization(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "CanonicalizationBeforeSplit",
+                           "HIVM canonicalization"));
+}
+
+CVUB_TEST(pre_split_canonicalization_traces_vreduce_init_through_reshape) {
+  auto module = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"), "canonicalize");
+  auto &source = MutableOperationNamed(module, "tensor.empty");
+  source.resultTypes.front() = "tensor<4xf32>";
+  auto &mark = MutableOperationNamed(module, "annotation.mark");
+  const int sourceValue = source.results.front();
+  const int markId = mark.id;
+  const int markBlockId = mark.blockId;
+  const int blockId = mark.blockId;
+  const int parentId = mark.parentId;
+  const int regionId = mark.regionId;
+  const int ordinal = mark.ordinal;
+  cvub::GenericRewriter rewriter(module);
+  const int zero = rewriter.createOperation(
+      parentId, regionId, blockId, "arith.constant", {"f32"}, {}, {}, "",
+      "{value = 0.0 : f32}");
+  rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal), zero);
+  const int zeroValue =
+      module.operations.at(static_cast<size_t>(zero)).results.front();
+  const int initEmpty = rewriter.createOperation(
+      parentId, regionId, blockId, "tensor.empty", {"tensor<1xf32>"});
+  rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal + 1), initEmpty);
+  const int fill = rewriter.createOperation(
+      parentId, regionId, blockId, "hivm.hir.vbrc", {"tensor<1xf32>"},
+      {zeroValue,
+       module.operations.at(static_cast<size_t>(initEmpty)).results.front()},
+      {"f32", "tensor<1xf32>"}, "{broadcast_dims = array<i64>} ");
+  cvub::ApplyOperationSemantics(
+      module.operations.at(static_cast<size_t>(fill)));
+  rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal + 2), fill);
+  const int expand = rewriter.createOperation(
+      parentId, regionId, blockId, "tensor.expand_shape", {"tensor<1x1xf32>"},
+      {module.operations.at(static_cast<size_t>(fill)).results.front()},
+      {"tensor<1xf32>"}, "{reassociation = [[0, 1]]}");
+  rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal + 3), expand);
+  const int collapse = rewriter.createOperation(
+      parentId, regionId, blockId, "tensor.collapse_shape", {"tensor<1xf32>"},
+      {module.operations.at(static_cast<size_t>(expand)).results.front()},
+      {"tensor<1x1xf32>"}, "{reassociation = [[0, 1]]}");
+  rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal + 4), collapse);
+  const int reduce = rewriter.createOperation(
+      parentId, regionId, blockId, "hivm.hir.vreduce", {"tensor<1xf32>"},
+      {sourceValue,
+       module.operations.at(static_cast<size_t>(collapse)).results.front()},
+      {"tensor<4xf32>", "tensor<1xf32>"},
+      "{operandSegmentSizes = array<i32: 1, 1, 0, 0>, "
+      "reduce_dims = array<i64: 0>, arith = #hivm.reduce_op<sum>}");
+  cvub::ApplyOperationSemantics(
+      module.operations.at(static_cast<size_t>(reduce)));
+  rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal + 5), reduce);
+  // Exercise the real recursive chain through a loop region iter argument.
+  auto &loop = MutableOperationNamed(module, "scf.for");
+  const int loopResult = loop.results.front();
+  const int loopBodyId =
+      module.regions.at(static_cast<size_t>(loop.regions.front())).blocks.front();
+  auto &loopBody = module.blocks.at(static_cast<size_t>(loopBodyId));
+  const int iterArg = loopBody.arguments[1];
+  const int collapseValue =
+      module.operations.at(static_cast<size_t>(collapse)).results.front();
+  loop.operands[3] = collapseValue;
+  loop.operandTypes[3] = "tensor<1xf32>";
+  loop.resultTypes.front() = "tensor<1xf32>";
+  loopBody.argumentTypes[1] = "tensor<1xf32>";
+  auto &yield = MutableOperationNamed(module, "scf.yield");
+  const int yieldId = yield.id;
+  yield.operands.front() = iterArg;
+  yield.operandTypes.front() = "tensor<1xf32>";
+  auto &reduceOpBeforeMove =
+      module.operations.at(static_cast<size_t>(reduce));
+  reduceOpBeforeMove.operands[1] = iterArg;
+  reduceOpBeforeMove.operandTypes[1] = "tensor<1xf32>";
+  reduceOpBeforeMove.dpsInputs.clear();
+  reduceOpBeforeMove.dpsInits.clear();
+  cvub::ApplyOperationSemantics(reduceOpBeforeMove);
+  cvub::MoveOperationBefore(module, reduce, yieldId);
+  for (auto &operation : module.operations)
+    for (size_t index = 0; index < operation.operands.size(); ++index)
+      if (operation.operands[index] == loopResult)
+        operation.operandTypes[index] = "tensor<1xf32>";
+  rewriter.removeFromBlock(markBlockId, markId);
+  module = cvub::CompactGenericModule(std::move(module));
+  cvub::ValidateGenericModule(module);
+  const auto &reduceOp = OperationNamed(module, "hivm.hir.vreduce");
+  CVUB_CHECK(!reduceOp.dpsInits.empty());
+  CVUB_CHECK(cvub::TracesToVReduceConstantFill(
+      module, reduceOp.dpsInits.front(), reduceOp, true));
+
+  const auto result = cvub::RunPreSplitCanonicalization(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "CanonicalizationBeforeSplit",
+                           "unmodeled applicable"));
 }
 
 CVUB_TEST(workspace_offsets_and_operandless_sync_are_ub_invariant) {

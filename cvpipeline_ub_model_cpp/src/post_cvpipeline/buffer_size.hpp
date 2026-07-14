@@ -388,7 +388,7 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
   // Direct annotations participate in AutoInfer/Constantize. SetBufferSize
   // traces both direct and aliased annotations to the root allocation.
   std::map<int, int64_t> annotatedSizes;
-  std::map<int, int64_t> setAnnotatedSizes;
+  std::map<int, std::vector<std::pair<int, int64_t>>> setAnnotatedSizes;
   std::map<int, int64_t> functionElements;
   std::map<int, std::vector<int>> allocationMarks;
   std::set<int> directAllocationMarks;
@@ -430,23 +430,13 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
       directAllocationMarks.insert(mark.id);
     if (direct && root.resultTypes.size() == 1 &&
         IsDynamicMemRef(root.resultTypes[0])) {
-      const auto inserted = annotatedSizes.emplace(allocation, *bytes);
-      if (!inserted.second && inserted.first->second != *bytes) {
-        result.precision = Precision::Incomplete;
-        result.diagnostics.push_back(BufferSizeDiagnostic(
-            result.module, mark,
-            "conflicting buffer size annotation on the same alloc"));
-      }
+      // Constantize consults one direct annotation and erases all direct size
+      // marks after a successful rewrite.  Do not report a Set-only conflict
+      // before that compiler stage has had the opportunity to remove it.
+      (void)annotatedSizes.emplace(allocation, *bytes);
     }
-    if (root.resultTypes.size() == 1 && IsDynamicMemRef(root.resultTypes[0])) {
-      const auto inserted = setAnnotatedSizes.emplace(allocation, *bytes);
-      if (!inserted.second && inserted.first->second != *bytes) {
-        result.precision = Precision::Incomplete;
-        result.diagnostics.push_back(BufferSizeDiagnostic(
-            result.module, mark,
-            "conflicting buffer size annotation on the same alloc"));
-      }
-    }
+    if (root.resultTypes.size() == 1 && IsDynamicMemRef(root.resultTypes[0]))
+      setAnnotatedSizes[allocation].push_back({mark.id, *bytes});
     const std::optional<unsigned> bits = ShapedElementBits(mark.operandTypes[0]);
     const int functionId = EnclosingFunctionId(result.module, mark);
     if (bits && *bits != 0U && functionId >= 0) {
@@ -499,7 +489,8 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
     }
     annotatedSizes[allocation.id] =
         elements * static_cast<int64_t>(*bits / 8U);
-    setAnnotatedSizes[allocation.id] = annotatedSizes[allocation.id];
+    setAnnotatedSizes[allocation.id].push_back(
+        {-1, annotatedSizes[allocation.id]});
   }
   if (result.precision == Precision::Incomplete) {
     result.module = original;
@@ -510,7 +501,7 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
   // upper bound before SetBufferSize consumes any remaining annotation.
   std::map<int, int64_t> physicalSizes;
   std::set<int> constantized;
-  std::set<int> unsupportedAffineBounds;
+  std::set<int> unresolvedBounds;
   for (const GenericOperation &allocation : result.module.operations) {
     if ((allocation.name != "memref.alloc" && allocation.name != "memref.alloca") ||
         allocation.resultTypes.size() != 1 || !IsDynamicMemRef(allocation.resultTypes[0]) ||
@@ -521,10 +512,11 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
     for (int dimension : allocation.operands) {
       const auto bound = ResolveBufferSizeBound(result.module, dimension);
       if (!bound || bound->value < 0) {
-        const GenericOperation *producer =
-            DefinitionForBufferSize(result.module, dimension);
-        if (producer != nullptr && producer->name == "affine.apply")
-          unsupportedAffineBounds.insert(allocation.id);
+        // ResolveBufferSizeBound recursively walks the complete producer
+        // graph.  A failure anywhere in that graph means we cannot prove
+        // whether ValueBounds/Constantize would rewrite and erase marks.  An
+        // annotation therefore cannot safely force the later Set path.
+        unresolvedBounds.insert(allocation.id);
         resolved = false;
         break;
       }
@@ -556,7 +548,7 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
     return result;
   }
 
-  for (int allocationId : unsupportedAffineBounds) {
+  for (int allocationId : unresolvedBounds) {
     const GenericOperation &allocation = result.module.operations.at(
         static_cast<size_t>(allocationId));
     result.precision = Precision::Incomplete;
@@ -571,9 +563,27 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
 
   // SetBufferSize applies only to allocations that Constantize did not
   // rewrite.  Remaining annotations determine their physical byte capacity.
-  for (const auto &[allocationId, bytes] : setAnnotatedSizes)
-    if (constantized.count(allocationId) == 0)
-      physicalSizes[allocationId] = bytes;
+  for (const auto &[allocationId, marks] : setAnnotatedSizes) {
+    if (constantized.count(allocationId) != 0 || marks.empty())
+      continue;
+    const int64_t bytes = marks.front().second;
+    for (const auto &[markId, candidate] : marks) {
+      if (candidate == bytes)
+        continue;
+      const GenericOperation &mark = result.module.operations.at(
+          static_cast<size_t>(markId >= 0 ? markId : allocationId));
+      result.precision = Precision::Incomplete;
+      result.diagnostics.push_back(BufferSizeDiagnostic(
+          result.module, mark,
+          "conflicting buffer size annotation on the same alloc"));
+      break;
+    }
+    physicalSizes[allocationId] = bytes;
+  }
+  if (result.precision == Precision::Incomplete) {
+    result.module = original;
+    return result;
+  }
 
   for (const GenericOperation &allocation : result.module.operations) {
     if ((allocation.name != "memref.alloc" && allocation.name != "memref.alloca") ||
