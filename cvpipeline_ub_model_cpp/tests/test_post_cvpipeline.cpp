@@ -360,6 +360,94 @@ CVUB_TEST(cube_inside_load_must_prove_the_group_axis) {
   ExpectTileIncompleteAndUnchanged(module);
 }
 
+CVUB_TEST(identity_dependencies_reject_axis_changes_anywhere_in_chain) {
+  auto upstreamTranspose = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  auto &load = MutableOperationNamed(upstreamTranspose, "hivm.hir.load");
+  load.attributes = cvub::SetDictionaryValue(load.attributes, "transpose",
+                                              "[1, 0]");
+  ExpectTileIncompleteAndUnchanged(upstreamTranspose);
+
+  auto upstreamImplicit = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  auto &implicitLoad = MutableOperationNamed(upstreamImplicit, "hivm.hir.load");
+  implicitLoad.attributes = cvub::SetDictionaryValue(
+      implicitLoad.attributes, "may_implicit_transpose_with_last_axis", "true");
+  ExpectTileIncompleteAndUnchanged(upstreamImplicit);
+
+  auto storeImplicit = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  auto &store = MutableOperationNamed(storeImplicit, "hivm.hir.store");
+  store.attributes = cvub::SetDictionaryValue(
+      store.attributes, "may_implicit_transpose_with_last_axis", "true");
+  ExpectTileIncompleteAndUnchanged(storeImplicit);
+
+  auto cubeImplicit = cvub::test::ParseFixture("tile_cube_loop.mlir");
+  auto &cubeLoad = MutableOperationNamed(cubeImplicit, "hivm.hir.load");
+  cubeLoad.attributes = cvub::SetDictionaryValue(
+      cubeLoad.attributes, "may_implicit_transpose_with_last_axis", "true");
+  ExpectTileIncompleteAndUnchanged(cubeImplicit);
+
+  auto unknownAxis = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  auto &sum = MutableOperationNamed(unknownAxis, "hivm.hir.vadd");
+  sum.attributes = cvub::SetDictionaryValue(sum.attributes,
+                                             "test.axis_mapping", "identity");
+  ExpectTileIncompleteAndUnchanged(unknownAxis);
+}
+
+CVUB_TEST(cube_global_axis_ambiguity_fails_closed) {
+  auto module = cvub::test::ParseFixture("tile_cube_loop.mlir");
+  auto &mmad = MutableOperationNamed(module, "hivm.hir.mmadL1");
+  const auto rhsLoad = MutableOperationNamed(module, "hivm.hir.load");
+  const auto &yield = MutableOperationNamed(module, "scf.yield");
+  cvub::GenericRewriter rewriter(module);
+  const int lhsInit = rewriter.createOperation(
+      yield.parentId, yield.regionId, yield.blockId, "tensor.empty",
+      {"tensor<128x64xf16>"});
+  const int lhsLoad = rewriter.createOperation(
+      yield.parentId, yield.regionId, yield.blockId, rhsLoad.name,
+      {"tensor<128x64xf16>"}, {mmad.operands[0],
+                                module.operations.at(static_cast<size_t>(lhsInit))
+                                    .results.front()},
+      {"tensor<128x64xf16>", "tensor<128x64xf16>"}, "",
+      "{may_implicit_transpose_with_last_axis = false}");
+  const auto &ops = module.blocks.at(static_cast<size_t>(yield.blockId)).operations;
+  const size_t position = static_cast<size_t>(std::distance(
+      ops.begin(), std::find(ops.begin(), ops.end(), rhsLoad.id)));
+  rewriter.insertToBlock(yield.blockId, position, lhsInit);
+  rewriter.insertToBlock(yield.blockId, position + 1, lhsLoad);
+  MutableOperationNamed(module, "hivm.hir.mmadL1").operands[0] =
+      module.operations.at(static_cast<size_t>(lhsLoad)).results.front();
+  cvub::ValidateGenericModule(module);
+  ExpectTileIncompleteAndUnchanged(module);
+}
+
+CVUB_TEST(direct_local_destination_moves_once_and_shrinks) {
+  auto module = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  auto &alloc = MutableOperationNamed(module, "memref.alloc");
+  auto &view = MutableOperationNamed(module, "memref.subview");
+  auto &store = MutableOperationNamed(module, "hivm.hir.store");
+  store.operands[1] = alloc.results.front();
+  store.operandTypes[1] = alloc.resultTypes.front();
+  cvub::EraseOperationTree(module, view.id);
+  module = cvub::CompactGenericModule(std::move(module));
+  cvub::ValidateGenericModule(module);
+
+  const auto result = cvub::RunTileCubeVectorLoop(module, 2, 2);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(OperationCount(result.module, "memref.alloc"), 1U);
+  const auto &movedAlloc = OperationNamed(result.module, "memref.alloc");
+  CVUB_CHECK_EQ(movedAlloc.resultTypes,
+                std::vector<std::string>({"memref<1x64xf16>"}));
+  CVUB_CHECK_EQ(result.module.operations.at(
+                    static_cast<size_t>(movedAlloc.parentId)).name,
+                "scf.for");
+  const auto &parentBlock = result.module.blocks.at(
+      static_cast<size_t>(movedAlloc.blockId)).operations;
+  CVUB_CHECK_EQ(static_cast<size_t>(std::count(parentBlock.begin(),
+                                               parentBlock.end(),
+                                               movedAlloc.id)),
+                1U);
+  cvub::ValidateGenericModule(result.module);
+}
+
 CVUB_TEST(cube_moves_only_the_selected_axis_branch) {
   auto module = cvub::test::ParseFixture("tile_cube_loop.mlir");
   auto &loop = MutableOperationNamed(module, "scf.for");

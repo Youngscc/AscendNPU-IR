@@ -10,7 +10,7 @@
     ^bb1(%iv: index):
       %slice = "tensor.extract_slice"(%src) {static_offsets = [0, 0], static_sizes = [1, 128], static_strides = [1, 1]} : (tensor<1x128xf16>) -> tensor<1x128xf16>
       %init = "tensor.empty"() : () -> tensor<1x128xf16>
-      %loaded = "hivm.hir.load"(%slice, %init) : (tensor<1x128xf16>, tensor<1x128xf16>) -> tensor<1x128xf16>
+      %loaded = "hivm.hir.load"(%slice, %init) {may_implicit_transpose_with_last_axis = false} : (tensor<1x128xf16>, tensor<1x128xf16>) -> tensor<1x128xf16>
       %sum_init = "tensor.empty"() : () -> tensor<1x128xf16>
       %sum = "hivm.hir.vadd"(%loaded, %loaded, %sum_init) : (tensor<1x128xf16>, tensor<1x128xf16>, tensor<1x128xf16>) -> tensor<1x128xf16>
       "hivm.hir.store"(%sum, %dst_view) : (tensor<1x128xf16>, memref<1x128xf16>) -> ()

@@ -337,9 +337,12 @@ inline bool IsDirectChild(const GenericOperation &root,
 }
 
 inline bool IsZeroUnitSubview(const GenericOperation &subview);
+inline bool HasExactIdentitySemantics(const GenericOperation &operation,
+                                      size_t rank, std::string &reason);
 
-inline const GenericOperation *FindInLoopLoadDependency(
+inline std::vector<const GenericOperation *> FindInLoopLoadDependencies(
     const GenericModule &module, const GenericOperation &loop, int value) {
+  std::vector<const GenericOperation *> loads;
   std::set<int> visited;
   std::vector<int> worklist{value};
   while (!worklist.empty()) {
@@ -349,30 +352,39 @@ inline const GenericOperation *FindInLoopLoadDependency(
         !visited.insert(definition->id).second)
       continue;
     if (definition->name == "hivm.hir.load")
-      return definition;
+      loads.push_back(definition);
     worklist.insert(worklist.end(), definition->operands.begin(),
                     definition->operands.end());
   }
-  return nullptr;
+  return loads;
+}
+
+inline const GenericOperation *FindInLoopLoadDependency(
+    const GenericModule &module, const GenericOperation &loop, int value) {
+  const auto loads = FindInLoopLoadDependencies(module, loop, value);
+  return loads.empty() ? nullptr : loads.front();
 }
 
 inline bool ProveLoadAxisEvidence(const GenericModule &module,
                                   const GenericOperation &loop, int value,
                                   size_t localAxis, int64_t groupExtent,
                                   std::string &reason) {
-  const GenericOperation *load = FindInLoopLoadDependency(module, loop, value);
-  if (load == nullptr)
+  const auto loads = FindInLoopLoadDependencies(module, loop, value);
+  if (loads.empty())
     return false;
-  if (load->results.size() != 1 || load->resultTypes.size() != 1 ||
-      load->attributes.find("transpose") != std::string::npos) {
-    reason = "in-loop load axis is not an identity mapping to the group axis";
-    return false;
-  }
-  const auto type = ParseStaticShapedType(load->resultTypes.front());
-  if (!type || localAxis >= type->shape.size() ||
-      type->shape[localAxis] != groupExtent) {
-    reason = "in-loop load axis does not match the selected group axis";
-    return false;
+  for (const GenericOperation *load : loads) {
+    if (load->results.size() != 1 || load->resultTypes.size() != 1) {
+      reason = "in-loop load axis is not an identity mapping to the group axis";
+      return false;
+    }
+    const auto type = ParseStaticShapedType(load->resultTypes.front());
+    if (!type || !HasExactIdentitySemantics(*load, type->shape.size(), reason))
+      return false;
+    if (localAxis >= type->shape.size() ||
+        type->shape[localAxis] != groupExtent) {
+      reason = "in-loop load axis does not match the selected group axis";
+      return false;
+    }
   }
   return true;
 }
@@ -410,6 +422,12 @@ inline bool ClassifyDestination(const GenericModule &module,
     reason = "destination scope cannot be classified as local or GM boundary";
     return false;
   }
+  const auto destinationType =
+      ParseStaticShapedType(anchor.operandTypes[1]);
+  if (!destinationType ||
+      !HasExactIdentitySemantics(*definition, destinationType->shape.size(),
+                                 reason))
+    return false;
   const GenericOperation *base = Definition(module, definition->operands[0]);
   if (base == nullptr)
     return true; // A subview of a block argument is a GM boundary.
@@ -507,16 +525,81 @@ inline bool RecordValueAxis(const GenericModule &module, LoopPlan &plan,
   return true;
 }
 
-inline bool TypeUsesAxisExactly(const ShapedType &type, int64_t extent,
-                                size_t axis) {
-  size_t occurrences = 0;
-  for (size_t index = 0; index < type.shape.size(); ++index)
-    if (type.shape[index] == extent) {
-      ++occurrences;
-      if (index != axis)
-        return false;
+inline std::vector<std::string>
+DictionaryKeys(const std::string &dictionary) {
+  std::vector<std::string> keys;
+  if (dictionary.size() < 2 || dictionary.front() != '{' ||
+      dictionary.back() != '}')
+    return keys;
+  for (const std::string &entry :
+       splitTopLevel(dictionary.substr(1, dictionary.size() - 2))) {
+    const size_t equal = entry.find('=');
+    const std::string key = trim(entry.substr(0, equal));
+    if (!key.empty())
+      keys.push_back(key);
+  }
+  return keys;
+}
+
+inline bool IsIdentityPermutation(const std::string &text, size_t rank) {
+  const auto permutation = ParseIntegerArray(text);
+  if (permutation.size() != rank)
+    return false;
+  for (size_t index = 0; index < rank; ++index)
+    if (permutation[index] != static_cast<int64_t>(index))
+      return false;
+  return true;
+}
+
+inline bool HasExactIdentitySemantics(const GenericOperation &operation,
+                                      size_t rank, std::string &reason) {
+  std::set<std::string> allowed;
+  if (operation.name == "tensor.empty") {
+    allowed = {};
+  } else if (operation.name == "tensor.extract_slice" ||
+             operation.name == "memref.subview") {
+    allowed = {"static_offsets", "static_sizes", "static_strides"};
+  } else if (operation.name == "hivm.hir.load") {
+    allowed = {"init_out_buffer", "may_implicit_transpose_with_last_axis",
+               "operandSegmentSizes", "tcoretype"};
+    if (operation.operands.size() != 2) {
+      reason = "load padding/condition operands are outside the identity model";
+      return false;
     }
-  return occurrences == 1;
+  } else if (operation.name == "hivm.hir.vadd") {
+    allowed = {"operandSegmentSizes", "tcoretype", "transpose"};
+  } else if (operation.name == "hivm.hir.store") {
+    allowed = {"atomic_kind", "may_implicit_transpose_with_last_axis",
+               "tcoretype"};
+  } else if (operation.name == "hivm.hir.mmadL1") {
+    allowed = {"hivm.tile_mix_cube_num", "operandSegmentSizes", "tcoretype"};
+  } else if (operation.name == "hivm.hir.fixpipe") {
+    allowed = {"operandSegmentSizes", "tcoretype"};
+  } else {
+    reason = "operation has no exact identity-axis attribute model";
+    return false;
+  }
+
+  for (const std::string &key : DictionaryKeys(operation.attributes)) {
+    if (allowed.count(key) == 0) {
+      reason = "operation attribute '" + key +
+               "' has unknown axis semantics";
+      return false;
+    }
+  }
+  const std::string implicit = IRDictionaryValue(
+      operation.attributes, "may_implicit_transpose_with_last_axis");
+  if (!implicit.empty() && implicit != "false") {
+    reason = "implicit transpose breaks identity axis equivalence";
+    return false;
+  }
+  const std::string transpose =
+      IRDictionaryValue(operation.attributes, "transpose");
+  if (!transpose.empty() && !IsIdentityPermutation(transpose, rank)) {
+    reason = "transpose attribute breaks identity axis equivalence";
+    return false;
+  }
+  return true;
 }
 
 inline bool RecordIdentityDependencyAxis(const GenericModule &module,
@@ -538,6 +621,10 @@ inline bool RecordIdentityDependencyAxis(const GenericModule &module,
     reason = "dependency axis equivalence is not explicitly modeled";
     return false;
   }
+  const auto resultType = ParseStaticShapedType(typeText);
+  if (!resultType ||
+      !HasExactIdentitySemantics(*definition, resultType->shape.size(), reason))
+    return false;
   for (size_t index = 0; index < definition->operands.size(); ++index) {
     if (!ParseStaticShapedType(definition->operandTypes[index]))
       continue;
@@ -545,6 +632,40 @@ inline bool RecordIdentityDependencyAxis(const GenericModule &module,
                                       definition->operands[index],
                                       definition->operandTypes[index], axis,
                                       extent, reason))
+      return false;
+  }
+  return true;
+}
+
+inline bool ValidateIdentityDependencyChain(
+    const GenericModule &module, const GenericOperation &loop, int value,
+    const std::string &typeText, size_t axis, int64_t extent,
+    std::set<int> &visited, std::string &reason) {
+  const auto type = ParseStaticShapedType(typeText);
+  if (!type || axis >= type->shape.size() || type->shape[axis] != extent) {
+    reason = "identity dependency type does not carry the semantic axis";
+    return false;
+  }
+  const GenericOperation *definition = Definition(module, value);
+  if (definition == nullptr || !IsAncestor(module, loop.id, definition->id) ||
+      definition->name == "tensor.empty" ||
+      !visited.insert(definition->id).second)
+    return true;
+  if (definition->name != "tensor.extract_slice" &&
+      definition->name != "memref.subview" &&
+      definition->name != "hivm.hir.load" &&
+      definition->name != "hivm.hir.vadd") {
+    reason = "dependency axis equivalence is not explicitly modeled";
+    return false;
+  }
+  if (!HasExactIdentitySemantics(*definition, type->shape.size(), reason))
+    return false;
+  for (size_t index = 0; index < definition->operands.size(); ++index) {
+    if (!ParseStaticShapedType(definition->operandTypes[index]))
+      continue;
+    if (!ValidateIdentityDependencyChain(
+            module, loop, definition->operands[index],
+            definition->operandTypes[index], axis, extent, visited, reason))
       return false;
   }
   return true;
@@ -681,6 +802,9 @@ inline bool AnalyzeLoop(const GenericModule &module,
       return false;
     }
     plan.extent = sourceType->shape[*axis];
+    if (!HasExactIdentitySemantics(*anchors.front(), sourceType->shape.size(),
+                                   reason))
+      return false;
     if (plan.extent % static_cast<int64_t>(plan.tripCount) != 0) {
       reason = "non-divisible tiling requires a dynamic remainder model";
       return false;
@@ -767,6 +891,20 @@ inline bool AnalyzeLoop(const GenericModule &module,
     }
     const auto destinationType =
         ParseStaticShapedType(anchors.front()->operandTypes[1]);
+    const auto aType = ParseStaticShapedType(mmad->operandTypes[0]);
+    const auto bType = ParseStaticShapedType(mmad->operandTypes[1]);
+    const auto accumulateType = ParseStaticShapedType(mmad->operandTypes[3]);
+    if (!aType || !bType || !accumulateType || aType->shape.size() != 2 ||
+        bType->shape.size() != 2 || accumulateType->shape != sourceType->shape ||
+        aType->shape[1] != bType->shape[0] ||
+        sourceType->shape[0] != aType->shape[0] ||
+        sourceType->shape[1] != bType->shape[1] ||
+        !HasExactIdentitySemantics(*mmad, 2, reason) ||
+        !HasExactIdentitySemantics(*anchors.front(), 2, reason)) {
+      if (reason.empty())
+        reason = "MmadL1/fixpipe lacks exact MxK.KxN-to-MxN axis evidence";
+      return false;
+    }
     if (!destinationType || destinationType->shape.size() != 2 ||
         destinationType->shape != sourceType->shape ||
         !HasStaticBoundaryView(module, anchors.front()->operands[1]) ||
@@ -822,6 +960,15 @@ inline bool AnalyzeLoop(const GenericModule &module,
             mmad->operandTypes[matrixOperand], *axis, plan.extent, reason))
       return false;
     if (!ClassifyDestination(module, *anchors.front(), plan, reason))
+      return false;
+    std::set<int> preservedEvidence;
+    const GenericOperation *matrix =
+        Definition(module, anchors.front()->operands.front());
+    const int64_t preservedExtent = sourceType->shape[otherAxis];
+    if (!ValidateIdentityDependencyChain(
+            module, loop, matrix->operands[otherAxis],
+            matrix->operandTypes[otherAxis],
+            otherAxis, preservedExtent, preservedEvidence, reason))
       return false;
     const auto bits = StaticSizeBits(*destinationType);
     if (!bits) {
@@ -927,6 +1074,8 @@ inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
 
   for (size_t index = 0; index + 1 < children.size(); ++index) {
     if (children[index] == plan.localDestinationSubview)
+      continue;
+    if (children[index] == plan.localDestinationAlloc)
       continue;
     if (affected.count(children[index]) == 0)
       continue;
