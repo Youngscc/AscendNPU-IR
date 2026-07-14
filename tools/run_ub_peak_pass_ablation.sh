@@ -101,7 +101,8 @@ IR, memory_info*.json, stdout, and stderr by default.
 
 Options:
   -i, --input FILE
-        Add one input file. Can be repeated. Defaults to data/attn_fwd.ttadapter.
+        Add one input file. Can be repeated. Defaults to
+        cvpipeline_ub_model_cpp/data/adapter/attn_fwd.ttadapter.
   -d, --data-dir DIR
         Scan one directory for input files when --input is omitted.
   -o, --output-root DIR
@@ -741,7 +742,7 @@ if [[ ${#INPUTS[@]} -eq 0 && -n "$DATA_DIR" ]]; then
 fi
 
 if [[ ${#INPUTS[@]} -eq 0 ]]; then
-  INPUTS=("data/attn_fwd.ttadapter")
+  INPUTS=("cvpipeline_ub_model_cpp/data/adapter/attn_fwd.ttadapter")
 fi
 
 [[ -f "$DUMP_SCRIPT" ]] || die "Dump script not found: $DUMP_SCRIPT"

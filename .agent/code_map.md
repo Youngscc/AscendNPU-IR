@@ -53,11 +53,16 @@ cvpipeline_ub_model_cpp/tests/
 ## 数据
 
 ```text
+cvpipeline_ub_model_cpp/data/adapter/
+cvpipeline_ub_model_cpp/data/before_cvpipeline/
 Output/adapters/<adapter>/<stage>/
 Output/index/
 Output/experiments/post_bufferization_pass_oracles/
 Output/index/c6_pass_oracles/summary.tsv
 ```
+
+前两项是可提交的稳定输入数据；`Output/` 只保存可重新生成的 oracle、日志和
+中间 pass dump。
 
 ## 常用命令
 

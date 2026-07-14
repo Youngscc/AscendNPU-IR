@@ -24,7 +24,7 @@ build/bin/bishengir-compile input.mlir \
 Triton / `.ttadapter` 路径常见用法：
 
 ```bash
-build/bin/bishengir-compile data/attn_fwd.ttadapter \
+build/bin/bishengir-compile cvpipeline_ub_model_cpp/data/adapter/attn_fwd.ttadapter \
   -o output.o \
   --target=Ascend910_9382 \
   --enable-hfusion-compile=true \
@@ -36,7 +36,7 @@ PlanMemory 调试常见用法：
 
 ```bash
 BISHENGIR_DUMP_BEFORE_PLAN_MEMORY=before_plan_memory.mlir \
-build/bin/bishengir-compile data/attn_fwd.ttadapter \
+build/bin/bishengir-compile cvpipeline_ub_model_cpp/data/adapter/attn_fwd.ttadapter \
   -o output.o \
   --enable-hfusion-compile=true \
   --enable-hivm-compile=true \
@@ -341,7 +341,7 @@ buildBiShengHIRPipeline
 
 ```bash
 BISHENGIR_DUMP_BEFORE_PLAN_MEMORY=before.mlir \
-build/bin/bishengir-compile data/attn_fwd.ttadapter \
+build/bin/bishengir-compile cvpipeline_ub_model_cpp/data/adapter/attn_fwd.ttadapter \
   -o output.o \
   --target=Ascend910_9382 \
   --enable-hfusion-compile=true \
@@ -381,4 +381,3 @@ build/bin/bishengir-compile data/attn_fwd.ttadapter \
 - legacy `hivmc` 下，如果开启 `enable-triton-kernel-compile`，会额外手动追加 `--enable-triton-kernel-compile=true`。
 - 对旧版 `hivmc` 会过滤部分不支持选项，例如 `enable-lir-compile`、`enable-cpu-trace-intrinsic`、`link-aicore-bitcode`。
 - `hivmc` 版本为 `0.1.0` 时，会过滤 `link-aicore-bitcode`。
-

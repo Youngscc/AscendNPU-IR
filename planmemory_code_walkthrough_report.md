@@ -2,7 +2,7 @@
 
 ## 范围和文件
 
-本报告以 `data/attn_fwd.ttadapter` 为例，解释第二次 PlanMemory，也就是
+本报告以 `cvpipeline_ub_model_cpp/data/adapter/attn_fwd.ttadapter` 为例，解释第二次 PlanMemory，也就是
 `hivmPostBufferizationOptimizationPipeline` 中的 **local PlanMemory**。
 
 先看这几个文件：

@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     repo = module.parent
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-root", type=Path,
-                        default=repo / "Output/adapters")
+                        default=module / "data/before_cvpipeline")
     parser.add_argument("--config-matrix", type=Path,
                         default=module / "testdata/config_matrix/p2_cvpipeline.tsv")
     parser.add_argument("--tool", type=Path,

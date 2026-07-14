@@ -3,7 +3,7 @@ set -euo pipefail
 
 MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "${MODULE_DIR}/.." && pwd)"
-MODEL="$(${MODULE_DIR}/scripts/build.sh)"
+MODEL="$(${MODULE_DIR}/build.sh)"
 
 bash "${MODULE_DIR}/scripts/verify_hivm_op_registry.sh"
 bash "${MODULE_DIR}/scripts/run_unit_tests.sh"

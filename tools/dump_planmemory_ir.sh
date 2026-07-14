@@ -2,7 +2,7 @@
 
 set -u
 
-DATA_DIR="data"
+DATA_DIR="cvpipeline_ub_model_cpp/data/adapter"
 OUTPUT_ROOT=""
 RUN_ID="compiler_default"
 COMPILER="build/bin/bishengir-compile"
@@ -24,7 +24,8 @@ Batch compile IR files and collect local PlanMemory before/after snapshots.
 
 Options:
   -d, --data-dir DIR
-        Directory to scan. Defaults to ./data.
+        Directory to scan. Defaults to
+        ./cvpipeline_ub_model_cpp/data/adapter.
   -o, --output-root DIR
         Unified output directory. Defaults to ./Output.
   --run-id NAME

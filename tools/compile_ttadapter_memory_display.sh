@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-INPUT="data/attn_fwd.ttadapter"
+INPUT="cvpipeline_ub_model_cpp/data/adapter/attn_fwd.ttadapter"
 OUTPUT="./tmp"
 COMPILER="build/bin/bishengir-compile"
 
@@ -16,13 +16,15 @@ smoke commands.
 
 Options:
   -i, --input FILE
-        Input .ttadapter. Defaults to data/attn_fwd.ttadapter.
+        Input .ttadapter. Defaults to
+        cvpipeline_ub_model_cpp/data/adapter/attn_fwd.ttadapter.
   -o, --output FILE
         Output file. Defaults to ./tmp.
   -c, --compiler FILE
         bishengir-compile binary. Defaults to build/bin/bishengir-compile.
   --fake
-        Shortcut for --input data/fake_attn_fwd.ttadapter.
+        Shortcut for --input
+        cvpipeline_ub_model_cpp/data/adapter/fake_attn_fwd.ttadapter.
   -h, --help
         Show this help.
 EOF
@@ -46,7 +48,7 @@ while [[ $# -gt 0 ]]; do
       COMPILER="$1"
       ;;
     --fake)
-      INPUT="data/fake_attn_fwd.ttadapter"
+      INPUT="cvpipeline_ub_model_cpp/data/adapter/fake_attn_fwd.ttadapter"
       ;;
     -h|--help)
       usage

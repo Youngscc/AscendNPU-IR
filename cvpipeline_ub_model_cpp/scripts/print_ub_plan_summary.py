@@ -14,6 +14,8 @@ def parse_args() -> argparse.Namespace:
         description="Print a compact terminal summary for a UB plan JSON file.")
     parser.add_argument("json_file", type=Path)
     parser.add_argument("--max-buffers", type=int, default=12)
+    parser.add_argument(
+        "--html", default="cvpipeline_ub_model_cpp/demo/ub_plan_visualizer.html")
     return parser.parse_args()
 
 
@@ -120,7 +122,7 @@ def main() -> int:
     print(divider())
     print(f"Input IR      : {input_path}")
     print(f"JSON report   : {args.json_file}")
-    print("Visualizer    : cvpipeline_ub_model_cpp/demo/ub_plan_visualizer.html")
+    print(f"Visualizer    : {args.html}")
     return 0
 
 
