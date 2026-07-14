@@ -83,7 +83,8 @@ bash cvpipeline_ub_model_cpp/build.sh >/dev/null
 
 if [[ "${RUN_ORACLE}" == "true" && "${BUILD_SUFFIX_ORACLE}" == "true" ]]; then
   echo "[2/5] Building suffix compiler incrementally..."
-  cmake --build build --target bishengir-cvpipeline-suffix-compile -j8 >/dev/null
+  # 保留 CMake/Ninja 输出，便于观察增量构建进度和编译错误。
+  cmake --build build --target bishengir-cvpipeline-suffix-compile -j8
 fi
 
 echo "[3/5] Running lightweight model and writing JSON..."

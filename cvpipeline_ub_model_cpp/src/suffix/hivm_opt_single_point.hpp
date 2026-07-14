@@ -43,8 +43,8 @@ inline std::set<std::string> BufferAlternatives(const std::string &buffer) {
 
 class HIVMOptSinglePointModel {
 public:
-  explicit HIVMOptSinglePointModel(const BufferizedSemanticIR &module)
-      : module(module) {
+  explicit HIVMOptSinglePointModel(const BufferizedSemanticIR &inputModule)
+      : module(inputModule) {
     for (size_t index = 0; index < module.allocations.size(); ++index)
       allocationTypes[LocalBufferId(index)] = module.allocations[index].type;
     for (const BufferizedOperandAccess &access : module.accesses)
