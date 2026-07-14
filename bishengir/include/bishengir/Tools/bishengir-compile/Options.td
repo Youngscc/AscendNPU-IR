@@ -275,6 +275,12 @@ def InjectIRFromFile : DFXControlOptions<
   bit isSharedWithDownstreamToolchain = 1;
 }
 
+def SaveTemps : DFXControlOptions<
+  "Save intermediate compilation results to specified directory.",
+  "std::string",
+  "\"\""
+>;
+
 //===----------------------------------------------------------------------===//
 // General Optimization Control Options
 //===----------------------------------------------------------------------===//
@@ -298,7 +304,7 @@ def EnableAutoMultiBuffer : GeneralOptimizationControlOptions<
 def LimitAutoMultiBufferOnlyForLocalBuffer : GeneralOptimizationControlOptions<
   "When enable-auto-multi-buffer = true, limit it only to work for local buffer",
   "bool",
-  "true"
+  "false"
 > {
   let passGroup = ["HFUSION", "HIVM"];
 }
@@ -451,9 +457,9 @@ def EnableHIVMInjectBlockAllSync : HIVMOptimizationControlOptions<
 >;
 
 def SetWorkspaceMultibuffer : HIVMOptimizationControlOptions<
-  "Override number of multibuffers for workspace, defaults to 2.",
+  "Override number of multibuffers for workspace, defaults to 4.",
   "unsigned",
-  "2"
+  "4"
 >;
 
 def EnableHIVMGlobalWorkspaceReuse : HIVMOptimizationControlOptions<
@@ -495,13 +501,13 @@ def EnableAutoBlockifyLoop : HIVMOptimizationControlOptions<
 def TileMixVectorLoop : HIVMOptimizationControlOptions<
   "The trip count of the tiled vector loop for mix kernels.",
   "unsigned",
-  "1"
+  "2"
 >;
 
 def TileMixCubeLoop : HIVMOptimizationControlOptions<
   "The trip count of the tiled cube loop for mix kernels.",
   "unsigned",
-  "1"
+  "2"
 >;
 
 //===----------------------------------------------------------------------===//

@@ -36,11 +36,17 @@ constexpr uint64_t MAX_UINT64 = ((uint64_t)1 << 63) - 1 + ((uint64_t)1 << 63);
 constexpr uint64_t HALF_BITS = 16;
 constexpr int64_t BITS_PER_BYTE = 8;
 constexpr int32_t MAX_VBRCB_REPEAT_TIMES = 254;
+constexpr int32_t UB_LIMIT_BYTES = 196608;
 
 //TODO: scalar warning print is enabled only when define ENABLE_CPU_TRACE_INTRINSIC. To be optimized.
 #define WARN_SCALAR_IMPL(x) \
 cce::printf("Warning: [%s] - This implementation uses scalar instructions, "\
   "which may result in suboptimal performance\n", (x))
+
+// Warn that an implementation is not supported yet and is skipped (no-op).
+// Used for type/combination paths that have no fallback, e.g. scalar cast of bfloat16_t.
+#define WARN_UNSUPPORTED_IMPL(x) \
+cce::printf("Warning: [%s] - This implementation is not supported yet and will be skipped\n", (x))
 
 enum class VectorOpTy : uint32_t {
   BINARY_VV_BEGIN = 100,

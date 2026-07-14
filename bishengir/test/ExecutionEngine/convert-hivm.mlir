@@ -1,5 +1,5 @@
 // REQUIRES: execution-engine
-// RUN: bishengir-opt --execution-engine-convert-hivm-to-upstream %s --split-input-file | FileCheck %s
+// RUN: bishengir-opt --execution-engine-convert-hfusion-to-upstream --execution-engine-convert-hivm-to-upstream %s --split-input-file | FileCheck %s
 // RUN: bishengir-opt --lower-for-cpu-runner-pipeline %s --split-input-file
 
 func.func @tensor_direct_linalg_lowering(%a: tensor<1x?x10xf32>, %b: tensor<?x5x10xf32>, %c: tensor<5x?x10xf32>) -> tensor<5x?x10xf32> attributes {hacc.function_kind = #hacc.function_kind<HOST>, hacc.host_func_type = #hacc.host_func_type<host_entry>} {
@@ -45,7 +45,7 @@ func.func @tensor_direct_linalg_lowering(%a: tensor<1x?x10xf32>, %b: tensor<?x5x
 
     // CHECK: linalg.select
     %13 = arith.constant true
-    %14 = hivm.hir.vsel ins(%13, %c, %c: i1, tensor<5x?x10xf32>, tensor<5x?x10xf32>) outs(%c: tensor<5x?x10xf32>) -> tensor<5x?x10xf32>
+    %14 = hivm.hir.vsel ins(%13, %12, %12: i1, tensor<5x?x10xf32>, tensor<5x?x10xf32>) outs(%c: tensor<5x?x10xf32>) -> tensor<5x?x10xf32>
 
     // CHECK: linalg.erf
     %15 = hivm.hir.verf ins(%14: tensor<5x?x10xf32>) outs(%0: tensor<5x?x10xf32>) -> tensor<5x?x10xf32>
@@ -116,6 +116,25 @@ func.func @memref_direct_linalg_lowering(%a: memref<1x?x10xf32>, %b: memref<?x5x
     hivm.hir.vtranspose ins(%b: memref<?x5x10xf32>) outs(%c: memref<5x?x10xf32>) permutation = [1, 0, 2]
 
     func.return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @hfusion_isfinite_to_linalg
+// CHECK-SAME: (%[[ARG0:.*]]: tensor<4xf32>) -> tensor<4xi1>
+func.func @hfusion_isfinite_to_linalg(%arg0: tensor<4xf32>) -> tensor<4xi1> attributes {hacc.function_kind = #hacc.function_kind<HOST>, hacc.host_func_type = #hacc.host_func_type<host_entry>} {
+  // CHECK: %[[INF:.*]] = arith.constant 0x7F800000 : f32
+  // CHECK: %[[EMPTY:.*]] = tensor.empty() : tensor<4xi1>
+  // CHECK: %[[RESULT:.*]] = linalg.generic
+  // CHECK-SAME: ins(%[[ARG0]] : tensor<4xf32>)
+  // CHECK-SAME: outs(%[[EMPTY]] : tensor<4xi1>)
+  // CHECK: ^bb0(%[[IN:.*]]: f32, %{{.*}}: i1):
+  // CHECK: %[[ABS:.*]] = math.absf %[[IN]] : f32
+  // CHECK: %[[CMP:.*]] = arith.cmpf olt, %[[ABS]], %[[INF]] : f32
+  // CHECK: linalg.yield %[[CMP]] : i1
+  // CHECK: return %[[RESULT]] : tensor<4xi1>
+  %0 = hfusion.isfinite %arg0 : tensor<4xf32> -> tensor<4xi1>
+  func.return %0 : tensor<4xi1>
 }
 
 // -----
@@ -205,7 +224,7 @@ func.func @cumulative_like_lowering(%a: tensor<5x?x10xf32>, %b: memref<5x?x10xi3
     // CHECK-NEXT:      linalg.yield %[[res]], %[[res]]
     hivm.hir.vcumsum ins(%b: memref<5x?x10xi32>) outs(%b: memref<5x?x10xi32>) cum_dims = [1] reverse = false
 
-    func.return %0: tensor<5x?x10xf32>
+    func.return %1: tensor<5x?x10xf32>
 }
 
 // -----

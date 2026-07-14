@@ -33,6 +33,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpImplementation.h"
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Support/LogicalResult.h"
 
@@ -72,8 +73,7 @@ int64_t AddressSpaceAttr::getRelativeIndex() const {
 
 LogicalResult
 DataLayoutAttr::verify(::llvm::function_ref<InFlightDiagnostic()> emitError,
-                       hivm::DataLayout data_layout,
-                       BoolAttr transpose,
+                       hivm::DataLayout data_layout, BoolAttr transpose,
                        DenseI64ArrayAttr fractalSizes) {
   // ND is transpose agnostic
   if (data_layout == hivm::DataLayout::ND)
@@ -84,13 +84,13 @@ DataLayoutAttr::verify(::llvm::function_ref<InFlightDiagnostic()> emitError,
       data_layout == hivm::DataLayout::DOTB_ND) {
     if (transpose == nullptr)
       return emitError() << "'transpose' must be set if data layout is "
-             "DOTA_ND or DOTB_ND";
+                            "DOTA_ND or DOTB_ND";
     return success();
   }
 
   if (transpose != nullptr)
     return emitError() << "'transpose' is only valid if data layout is "
-           "DOTA_ND or DOTB_ND or ND like";
+                          "DOTA_ND or DOTB_ND or ND like";
   return success();
 }
 
@@ -201,8 +201,8 @@ LogicalResult PointerCastOp::verify() {
     return emitOpError("addrs of PointerCastOp should not be empty!");
   }
 #if (!BISHENGIR_BUILD_STANDALONE_IR_ONLY)
-  const int64_t expectedDynamicDims = static_cast<int64_t>(
-      getResult().getType().getNumDynamicDims());
+  const int64_t expectedDynamicDims =
+      static_cast<int64_t>(getResult().getType().getNumDynamicDims());
   if (static_cast<int64_t>(getDynamicSizes().size()) != expectedDynamicDims) {
     return emitOpError() << "expected " << expectedDynamicDims
                          << " dynamic size operands, but found "
@@ -215,7 +215,7 @@ LogicalResult PointerCastOp::verify() {
 //===----------------------------------------------------------------------===//
 // LoadScalarOp
 //===----------------------------------------------------------------------===//
- 
+
 LogicalResult LoadScalarOp::verify() {
   auto ptrTy = cast<LLVM::LLVMPointerType>(getAddr().getType());
   if (ptrTy.getAddressSpace() != 1)
@@ -374,14 +374,13 @@ void hivm::detail::printHIVMStructuredDPSOp(OpAsmPrinter &p, Operation *op,
 
 void ConvertLayoutOp::build(OpBuilder &builder, OperationState &result,
                             Type resultType, Value source,
-                            DataLayoutAttr srcLayout,
-                            DataLayoutAttr dstLayout,
+                            DataLayoutAttr srcLayout, DataLayoutAttr dstLayout,
                             ArrayRef<OpFoldResult> outputShape) {
   SmallVector<Value> dynamicDims;
   SmallVector<int64_t> staticDims;
   dispatchIndexOpFoldResults(outputShape, dynamicDims, staticDims);
-  build(builder, result, resultType, source, srcLayout, dstLayout,
-        staticDims, dynamicDims);
+  build(builder, result, resultType, source, srcLayout, dstLayout, staticDims,
+        dynamicDims);
 }
 
 void ConvertLayoutOp::build(OpBuilder &builder, OperationState &result,
@@ -389,8 +388,8 @@ void ConvertLayoutOp::build(OpBuilder &builder, OperationState &result,
                             DataLayoutAttr srcLayout,
                             DataLayoutAttr dstLayout) {
   auto staticDims = cast<ShapedType>(resultType).getShape();
-  build(builder, result, resultType, source, srcLayout, dstLayout,
-        staticDims, {});
+  build(builder, result, resultType, source, srcLayout, dstLayout, staticDims,
+        {});
 }
 
 LogicalResult ConvertLayoutOp::verify() {
@@ -400,15 +399,15 @@ LogicalResult ConvertLayoutOp::verify() {
 
   // Verify operand's element type matches first result's element type.
   for (auto operand : getOperands()) {
-    if (!isa<ShapedType>(operand.getType())) continue;
+    if (!isa<ShapedType>(operand.getType()))
+      continue;
     if (getElementTypeOrSelf(operand) != elementType)
       return emitOpError(
           "requires the same element type for all operands and results");
   }
-  const size_t numDynamic = static_cast<size_t>(llvm::count_if(
-      getStaticOutputShape(), [](int64_t dim) {
-        return ShapedType::isDynamic(dim);
-      }));
+  const size_t numDynamic = static_cast<size_t>(
+      llvm::count_if(getStaticOutputShape(),
+                     [](int64_t dim) { return ShapedType::isDynamic(dim); }));
   if (numDynamic != getOutputShape().size()) {
     return emitOpError("expected ")
            << numDynamic << " dynamic dimensions but got "
@@ -418,231 +417,12 @@ LogicalResult ConvertLayoutOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// CustomOp
-//===----------------------------------------------------------------------===//
-
-// Builder with empty temp_buffers.
-void CustomOp::build(OpBuilder &builder, OperationState &result, StringRef name,
-                     TypeRange resultTypes, ValueRange inputs,
-                     ValueRange outputs) {
-  build(builder, result, resultTypes, name, inputs, outputs,
-        /*temp_buffers=*/ValueRange{});
-}
-
-// Helper functions
-void CustomOp::setPipe(PIPE pipe) {
-  getOperation()->setAttr(PipeAttr::name, PipeAttr::get(getContext(), pipe));
-}
-
-std::optional<TCoreType> CustomOp::getCoreType() {
-  if (const auto coreTypeAttr =
-          getOperation()->template getAttrOfType<TCoreTypeAttr>(
-              TCoreTypeAttr::name)) {
-    return coreTypeAttr.getTcoretype();
-  }
-
-  return {};
-}
-
-void CustomOp::setCoreType(TCoreType coreType) {
-  getOperation()->setAttr(TCoreTypeAttr::name,
-                          TCoreTypeAttr::get(getContext(), coreType));
-}
-
-std::optional<VFMode> CustomOp::getVFMode() {
-  if (const auto vfModeAttr =
-          getOperation()->template getAttrOfType<VFModeAttr>(
-              VFModeAttr::name)) {
-    return vfModeAttr.getValue();
-  }
-
-  return {};
-}
-
-void CustomOp::setVFMode(VFMode vfMode) {
-  getOperation()->setAttr(VFModeAttr::name,
-                          VFModeAttr::get(getContext(), vfMode));
-}
-
-bool CustomOp::isBuiltin() { return kBuiltins.contains(getName()); }
-
-ParseResult CustomOp::parse(OpAsmParser &parser, OperationState &result) {
-  if (succeeded(parser.parseOptionalLess())) {
-    if (parser.parseAttribute(result.propertiesAttr) || parser.parseGreater())
-      return failure();
-  }
-
-  // Parse attributes
-  SMLoc attrsLoc = parser.getCurrentLocation();
-  if (parser.parseOptionalAttrDict(result.attributes))
-    return failure();
-
-  { // Parse name
-    std::string name{};
-    if (parser.parseString(&name))
-      return failure();
-
-    result.addAttribute("name", parser.getBuilder().getStringAttr(name));
-  }
-
-  { // Parse variadic args
-    SmallVector<int32_t, 3> variadicArgsSizes;
-    auto parseVariadicArgs = [&](const std::string &nameHint) {
-      SMLoc loc;
-      SmallVector<Type, 1> types;
-      SmallVector<OpAsmParser::UnresolvedOperand, 4> operands;
-
-      if (succeeded(parser.parseOptionalKeyword(nameHint))) {
-        loc = parser.getCurrentLocation();
-        if (parser.parseLParen() || parser.parseOperandList(operands) ||
-            parser.parseColonTypeList(types) || parser.parseRParen())
-          return failure();
-      }
-
-      if (parser.resolveOperands(operands, types, loc, result.operands)) {
-        return failure();
-      }
-
-      variadicArgsSizes.push_back(static_cast<int32_t>(operands.size()));
-      return success();
-    };
-
-    if (failed(parseVariadicArgs("ins")) || failed(parseVariadicArgs("outs")) ||
-        failed(parseVariadicArgs("tmps"))) {
-      return failure();
-    }
-
-    // Update operandSegmentSizes attribute
-    const auto operandSegmentSizesAttr =
-        parser.getBuilder().getDenseI32ArrayAttr(variadicArgsSizes);
-    // This is a bit complex because we're trying to be backward compatible with
-    // operation syntax that mix the inherent attributes and the discardable
-    // ones in the same dictionary. If the properties are used, we append the
-    // operandSegmentSizes there directly. Otherwise we append it to the
-    // discardable attributes dictionary where it is handled by the generic
-    // Operation::create(...) method.
-    if (result.propertiesAttr) {
-      NamedAttrList attrs = llvm::cast<DictionaryAttr>(result.propertiesAttr);
-      attrs.append("operandSegmentSizes", operandSegmentSizesAttr);
-      result.propertiesAttr = attrs.getDictionary(parser.getContext());
-    } else {
-      result.addAttribute("operandSegmentSizes", operandSegmentSizesAttr);
-      std::optional<RegisteredOperationName> info =
-          result.name.getRegisteredInfo();
-      if (info) {
-        if (failed(info->verifyInherentAttrs(result.attributes, [&]() {
-              return parser.emitError(attrsLoc)
-                     << "'" << result.name.getStringRef() << "' op ";
-            })))
-          return failure();
-      }
-    }
-  }
-
-  { // Parse result types
-    SmallVector<Type, 1> resultTypes;
-    if (parser.parseOptionalArrowTypeList(resultTypes)) {
-      return failure();
-    }
-    result.addTypes(resultTypes);
-  }
-
-  return success();
-}
-
-void CustomOp::print(OpAsmPrinter &p) {
-  p.printOptionalAttrDict(getOperation()->getAttrs(),
-                          /*elidedAttrs=*/{"operandSegmentSizes", "name"});
-
-  p << " ";
-  p.printString(getName());
-
-  auto printVariadicArgs = [&](const auto &args, const std::string &nameHint) {
-    if (!args.empty())
-      p << " " << nameHint << "(" << args << " : " << args.getTypes() << ")";
-  };
-
-  printVariadicArgs(getInputs(), "ins");
-  printVariadicArgs(getOutputs(), "outs");
-  printVariadicArgs(getTempBuffers(), "tmps");
-
-  if (!getResults().empty())
-    p.printOptionalArrowTypeList(getResultTypes());
-}
-
-static LogicalResult verifyBuiltins(CustomOp op) {
-  const auto &builtinInfo = CustomOp::kBuiltins.at(op.getName());
-
-  const auto &coreType = op.getCoreType();
-  if (coreType && *coreType != builtinInfo.coreType)
-    return op.emitOpError() << "Specified core type conflict with "
-                            << op.getName() << "'s core type.";
-
-  const auto &pipe = op.getPipe();
-  if (pipe != PIPE::PIPE_UNASSIGNED && pipe != builtinInfo.pipe)
-    return op.emitOpError()
-           << "Specified pipe conflict with " << op.getName() << "'s pipe.";
-
-  const auto &vfMode = op.getVFMode();
-  if (vfMode && *vfMode != builtinInfo.vfMode)
-    return op.emitOpError() << "Specified vf mode conflict with "
-                            << op.getName() << "'s vf mode.";
-
-  return success();
-}
-
-LogicalResult CustomOp::verify() {
-  // Check builtins
-  if (isBuiltin())
-    return verifyBuiltins(*this);
-
-  // Check core type attribute
-  const auto coreType = getCoreType();
-  if (!coreType)
-    return emitOpError() << "Missing core type information";
-
-  // Check pipe attribute
-  if (getPipe() == PIPE::PIPE_UNASSIGNED)
-    return emitOpError() << "Missing pipe information";
-
-  // Check VF mode attribute
-  if (*coreType != TCoreType::CUBE) {
-    auto moduleOp =
-        this->getOperation()->template getParentOfType<mlir::ModuleOp>();
-    if (hacc::utils::isAscend910_95(moduleOp) && (!getVFMode()))
-      return emitOpError() << "Missing vf mode information";
-  } else { // Pure cube
-    // Cube function ignores vf mode information
-  }
-
-  // Check extra buffers attributes
-  const auto typeArrayAttr =
-      getOperation()->getAttrOfType<ArrayAttr>(kExtraBuffersTypesName);
-  const auto sizesArrayAttr =
-      getOperation()->getAttrOfType<ArrayAttr>(kExtraBuffersSizesName);
-  if (typeArrayAttr && sizesArrayAttr) {
-    if (typeArrayAttr.size() != sizesArrayAttr.size())
-      return emitOpError() << "Extra buffers' types and sizes mismatch";
-  } else if (!typeArrayAttr && !sizesArrayAttr) {
-    // No extra buffers attributes specified, ok
-  } else {
-    return emitOpError() << "Either extra buffers' types or sizes missing";
-  }
-
-  if (getSymbol().empty())
-    return emitOpError() << "Missing implementation function name";
-
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
 // GatherLoadOp
 //===----------------------------------------------------------------------===//
 
 LogicalResult GatherLoadOp::inferReturnTypes(
     MLIRContext *context, std::optional<Location> location,
-    GatherLoadOp::Adaptor adaptor,
-    SmallVectorImpl<Type> &inferredReturnTypes) {
+    GatherLoadOp::Adaptor adaptor, SmallVectorImpl<Type> &inferredReturnTypes) {
   auto dstType = dyn_cast<RankedTensorType>(adaptor.getDst().getType());
   if (dstType)
     inferredReturnTypes.push_back(dstType);
@@ -781,67 +561,6 @@ void IndirectStoreOp::getEffects(
         SideEffects::DefaultResource::get());
   }
 }
-
-PIPE CustomOp::getPipe() {
-  if (auto pipAttr =
-          getOperation()->template getAttrOfType<PipeAttr>(PipeAttr::name))
-    return pipAttr.getPipe();
-
-  return PIPE::PIPE_UNASSIGNED;
-}
-
-SmallVector<std::pair<Type, int64_t>> CustomOp::getExtraBuffersInfo() {
-  SmallVector<std::pair<Type, int64_t>> res;
-  const auto typeArrayAttr =
-      getOperation()->getAttrOfType<ArrayAttr>(kExtraBuffersTypesName);
-  const auto sizesArrayAttr =
-      getOperation()->getAttrOfType<ArrayAttr>(kExtraBuffersSizesName);
-  if (!typeArrayAttr) {
-    LLVM_DEBUG(assert(!sizesArrayAttr && "custom op verification failed?"));
-    return res;
-  }
-
-  LLVM_DEBUG(assert(typeArrayAttr.size() == sizesArrayAttr.size() &&
-                    "custom op verification failed?"));
-
-  for (auto [typeAttr, sizeAttr] : llvm::zip(typeArrayAttr, sizesArrayAttr)) {
-    const mlir::Type type = cast<mlir::TypeAttr>(typeAttr).getValue();
-    const int64_t size = cast<mlir::IntegerAttr>(sizeAttr).getInt();
-    res.push_back(std::make_pair(type, size));
-  }
-
-  return res;
-}
-
-int CustomOp::getMaxRank() {
-  if (auto maxRankAttr =
-          getOperation()->template getAttrOfType<IntegerAttr>(kMaxRankAttrName))
-    return static_cast<int>(maxRankAttr.getValue().getSExtValue());
-
-  static constexpr int defaultMaxRank = 5;
-  return defaultMaxRank;
-}
-
-std::string CustomOp::getSymbol() {
-  if (auto attr =
-          getOperation()->template getAttrOfType<StringAttr>(kSymbolAttrName))
-    return attr.str();
-  emitOpError() << "Missing implementation function name";
-  return "";
-}
-
-void CustomOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
-  if (!getNoSideEffect()) {
-    effects.emplace_back(MemoryEffects::Write::get(),
-                         SideEffects::DefaultResource::get());
-    effects.emplace_back(MemoryEffects::Read::get(),
-                         SideEffects::DefaultResource::get());
-  }
-}
-
-const DenseMap<StringRef, CustomOp::BuiltinInfo> CustomOp::kBuiltins{};
 
 //===----------------------------------------------------------------------===//
 // DebugOp

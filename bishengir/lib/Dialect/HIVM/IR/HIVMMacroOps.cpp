@@ -69,31 +69,37 @@ FailureOr<size_t> getRankFromShapedTypeValue(Value val) {
 // Utils for Conv Ops
 //===----------------------------------------------------------------------===//
 
-FailureOr<std::array<int64_t, 2>>
-getConv2DIntPairAttr(Attribute attr, StringRef attrName,
-                     function_ref<InFlightDiagnostic()> emitError) {
+template <size_t Rank>
+FailureOr<std::array<int64_t, Rank>>
+getConvIntArrayAttr(Attribute attr, StringRef attrName,
+                    function_ref<InFlightDiagnostic()> emitError) {
   auto emitInvalidAttr = [&]() {
-    emitError() << "`" << attrName
-                << "` must be an integer scalar or a 2-element integer array";
+    emitError() << "`" << attrName << "` must be an integer scalar or a "
+                << Rank << "-element integer array";
     return failure();
   };
 
   if (auto intAttr = dyn_cast<IntegerAttr>(attr)) {
     int64_t value = intAttr.getInt();
-    return std::array<int64_t, 2>{value, value};
+    std::array<int64_t, Rank> values;
+    values.fill(value);
+    return values;
   }
 
   if (auto denseAttr = dyn_cast<DenseI64ArrayAttr>(attr)) {
-    if (denseAttr.size() != 2)
+    if (denseAttr.size() != Rank)
       return emitInvalidAttr();
-    return std::array<int64_t, 2>{denseAttr[0], denseAttr[1]};
+    std::array<int64_t, Rank> values;
+    for (size_t idx = 0; idx < Rank; ++idx)
+      values[idx] = denseAttr[idx];
+    return values;
   }
 
   if (auto arrayAttr = dyn_cast<ArrayAttr>(attr)) {
-    if (arrayAttr.size() != 2)
+    if (arrayAttr.size() != Rank)
       return emitInvalidAttr();
 
-    std::array<int64_t, 2> values;
+    std::array<int64_t, Rank> values;
     for (auto [idx, element] : llvm::enumerate(arrayAttr)) {
       auto intAttr = dyn_cast<IntegerAttr>(element);
       if (!intAttr)
@@ -104,6 +110,18 @@ getConv2DIntPairAttr(Attribute attr, StringRef attrName,
   }
 
   return emitInvalidAttr();
+}
+
+FailureOr<std::array<int64_t, 2>>
+getConv2DIntPairAttr(Attribute attr, StringRef attrName,
+                     function_ref<InFlightDiagnostic()> emitError) {
+  return getConvIntArrayAttr<2>(attr, attrName, emitError);
+}
+
+FailureOr<std::array<int64_t, 3>>
+getConv3DIntTripleAttr(Attribute attr, StringRef attrName,
+                       function_ref<InFlightDiagnostic()> emitError) {
+  return getConvIntArrayAttr<3>(attr, attrName, emitError);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1042,6 +1060,12 @@ Conv2DL1Op::getLibraryCallOperands(PatternRewriter &rewriter) {
 //===----------------------------------------------------------------------===//
 // Conv3DL1Op
 //===----------------------------------------------------------------------===//
+
+LogicalResult Conv3DL1Op::verify() {
+  FailureOr<std::array<int64_t, 3>> padding = getConv3DIntTripleAttr(
+      getPaddingAttr(), "padding", [&]() { return emitOpError(); });
+  return failed(padding) ? failure() : success();
+}
 
 bool Conv3DL1Op::isInitConstant(std::optional<bool> cst) {
   return isInitConstantForLocalMmadOp<Conv3DL1Op>(this, cst);

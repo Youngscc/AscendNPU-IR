@@ -124,6 +124,16 @@ struct Conv2DL1OpInterface
   }
 };
 
+struct Conv3DL1OpInterface
+    : public DstBufferizableOpInterfaceExternalModel<Conv3DL1OpInterface,
+                                                     hivm::Conv3DL1Op> {
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const BufferizationOptions &options) const {
+    return bufferizeDestinationStyleOpInterface(
+        rewriter, cast<DestinationStyleOpInterface>(op), options);
+  }
+};
+
 struct FixpipeOpInterface
     : public DstBufferizableOpInterfaceExternalModel<FixpipeOpInterface,
                                                      hivm::FixpipeOp> {
@@ -188,9 +198,10 @@ struct NDNZConversionOpInterface
   }
 };
 
+template <typename CustomOpT>
 struct HIVMCustomOpInterface
-    : public DstBufferizableOpInterfaceExternalModel<HIVMCustomOpInterface,
-                                                     hivm::CustomOp> {
+    : public DstBufferizableOpInterfaceExternalModel<
+          HIVMCustomOpInterface<CustomOpT>, CustomOpT> {
   LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
                           const BufferizationOptions &options) const {
     return bufferizeDestinationStyleOpInterface(
@@ -562,10 +573,13 @@ void mlir::hivm::registerBufferizableOpInterfaceExternalModels(
     MmadL1Op::attachInterface<MmadL1OpInterface>(*ctx);
     Conv1DL1Op::attachInterface<Conv1DL1OpInterface>(*ctx);
     Conv2DL1Op::attachInterface<Conv2DL1OpInterface>(*ctx);
+    Conv3DL1Op::attachInterface<Conv3DL1OpInterface>(*ctx);
     ND2NZOp::attachInterface<NDNZConversionOpInterface<ND2NZOp>>(*ctx);
     NZ2NDOp::attachInterface<NDNZConversionOpInterface<NZ2NDOp>>(*ctx);
+    L12UBOp::attachInterface<HIVMCopyOrStoreOpInterface<L12UBOp>>(*ctx);
     CopyOp::attachInterface<HIVMCopyOrStoreOpInterface<hivm::CopyOp>>(*ctx);
-    CustomOp::attachInterface<HIVMCustomOpInterface>(*ctx);
+    CustomOp::attachInterface<HIVMCustomOpInterface<CustomOp>>(*ctx);
+    CustomMacroOp::attachInterface<HIVMCustomOpInterface<CustomMacroOp>>(*ctx);
     LoadOp::attachInterface<HIVMLoadOpInterface>(*ctx);
     StoreOp::attachInterface<HIVMCopyOrStoreOpInterface<hivm::StoreOp>>(*ctx);
     IndirectStoreOp::attachInterface<IndirectStoreOpInterface>(*ctx);

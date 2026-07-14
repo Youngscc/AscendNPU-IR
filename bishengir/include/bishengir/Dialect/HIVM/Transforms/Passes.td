@@ -128,7 +128,7 @@ def MarkMultiBuffer : Pass<"hivm-mark-multi-buffer", "func::FuncOp"> {
                clEnumValN(MultiBufferStrategy::CUBE_NO_L0C, "no-l0c",
                           "Disable l0c for mix auto multi buffer"))}]>,
     Option<"workspaceMultiBufferNum", "set-workspace-multibuffer", "unsigned",
-           /*default=*/"2", "Override for multibuffer number for workspace">,
+           /*default=*/"4", "Override for multibuffer number for workspace">,
   ];
 }
 
@@ -782,10 +782,22 @@ def InsertNZ2NDForDebug : Pass<"hivm-insert-nz2nd-for-debug"> {
   ];
 }
 
+def InsertL12UBForDebug : Pass<"hivm-insert-l12ub-for-debug"> {
+  let summary = "insert l12ub for debug";
+  let constructor = "mlir::hivm::createInsertL12UBForDebugPass()";
+  let dependentDialects = [
+    "hivm::HIVMDialect",
+    "bishengir::memref_ext::MemRefExtDialect",
+    "bufferization::BufferizationDialect"
+  ];
+}
+
 def CVPipelining : Pass<"cv-pipelining", "func::FuncOp"> {
   let summary = "Cube and vector core pipelining for multi-buffer'ed mix-cv ops";
   let constructor = "mlir::hivm::createCVPipeliningPass()";
-  let dependentDialects = ["hivm::HIVMDialect", "scf::SCFDialect", "mlir::scope::ScopeDialect"];
+  let dependentDialects = ["hivm::HIVMDialect", "scf::SCFDialect",
+                           "mlir::scope::ScopeDialect",
+                           "annotation::AnnotationDialect"];
   let options = [
       Option<"enableSkewMode", "enable-skew-mode", "bool",
             /*default=*/"false",
@@ -869,6 +881,12 @@ def RemoveHIVMDataLayoutAnnotation : Pass<"hivm-remove-layout-annotation", "func
   let summary = "Remove HIVM data layout annotation";
   let constructor = "mlir::hivm::createRemoveHIVMDataLayoutAnnotationPass()";
   let dependentDialects = ["annotation::AnnotationDialect"];
+}
+
+def RemoveCopyOps : Pass<"hivm-remove-copy-ops", "func::FuncOp"> {
+  let summary = "Remove redundant copy operations in VF functions";
+  let constructor = "mlir::hivm::createRemoveCopyOpsPass()";
+  let dependentDialects = ["hivm::HIVMDialect", "memref::MemRefDialect"];
 }
 
 #endif // BISHENGIR_DIALECT_HIVM_TRANSFORMS_PASSES_TD

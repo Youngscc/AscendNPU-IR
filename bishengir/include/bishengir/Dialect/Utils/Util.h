@@ -28,6 +28,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/TypeRange.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 
 #include "llvm/Support/raw_ostream.h"
 
@@ -414,6 +415,69 @@ SmallVector<Value> tracebackMemRefAllocAndAlias(Value memrefVal);
 
 void fillAncestorOfOperation(SmallPtrSet<Operation *, 3> &container,
                              Operation *op);
+
+/// Returns all operations of specified type from \p scffor. If \p withNested is false
+/// nested scf::ForOp regions are ignored.
+template <typename T>
+SmallVector<T> collectScfForBodyOperations(scf::ForOp scffor, bool withNested) {
+  SmallVector<T> ops;
+  for (Region &region : scffor->getRegions()) {
+    region.walk<WalkOrder::PreOrder>([&](Operation *op) {
+      if (auto opT = dyn_cast<T>(op)) {
+        ops.push_back(opT);
+      } else if (!withNested && isa<scf::ForOp>(op)) {
+        return WalkResult::skip();
+      }
+      return WalkResult::advance();
+    });
+  }
+  return ops;
+}
+
+/// Trace back \p value operand dependencies to \p block arguments.
+SmallVector<BlockArgument> tracebackOperandsToBlockArguments(Value value, Block* block);
+
+template <typename... StopOpTys>
+std::optional<Operation*> valueCalculatedUsingOperationInsideBlockImpl(
+  Value value, DenseSet<Value> &visited, Operation *op, Block *block) {
+
+  if (!visited.insert(value).second) {
+    return std::nullopt;
+  }
+
+  if (auto blockArg = dyn_cast<BlockArgument>(value)) {
+    if (blockArg.getParentBlock() == block) {
+      return std::nullopt;
+    }
+  }
+
+  if (auto *defOp = value.getDefiningOp()) {
+    if (defOp == op || isa<StopOpTys...>(defOp)) {
+      return defOp;
+    }
+
+    for (auto operand : defOp->getOperands()) {
+      if (auto foundOp = valueCalculatedUsingOperationInsideBlockImpl<StopOpTys...>(operand, visited, op, block)) {
+        return foundOp;
+      }
+    }
+  }
+
+  return std::nullopt;
+}
+
+/// Return true if \p value is produced by or transitively uses \p op.
+/// Block arguments in \p block are not expanded (loop-carried iter_args are
+/// treated as dependency boundaries).
+template <typename... StopOpTys>
+std::optional<Operation*> valueCalculatedUsingOperationInsideBlock(Value value, Operation *op, Block *block) {
+  if (value.getDefiningOp() == op) {
+    return op;
+  } else {
+    DenseSet<Value> visited;
+    return valueCalculatedUsingOperationInsideBlockImpl<StopOpTys...>(value, visited, op, block);
+  }
+}
 
 /// Create tmp buffer or tensor using specified element type.
 Value createTmpBufferOrTensorWithTargetType(

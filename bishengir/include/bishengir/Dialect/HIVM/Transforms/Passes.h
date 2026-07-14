@@ -238,7 +238,8 @@ std::unique_ptr<Pass> createNormalizeLoopIteratorPass();
 std::unique_ptr<Pass> createHIVMInlineOTFLoadStorePass();
 
 /// Create a pass to tile and bind sub block for mix cv function.
-std::unique_ptr<Pass> createTileAndBindSubBlockPass();
+std::unique_ptr<Pass>
+createTileAndBindSubBlockPass(const TileAndBindSubBlockOptions &options = {});
 
 /// Create a pass to bubble up extract slice for hivm ops.
 std::unique_ptr<Pass> createHIVMBubbleUpExtractSlicePass(
@@ -257,6 +258,9 @@ std::unique_ptr<Pass> createMarkSyncBlockLockWithSubblockPass();
 
 // Create a pass to insert nz2nd for debug.
 std::unique_ptr<Pass> createInsertNZ2NDForDebugPass();
+
+// Create a pass to insert l12ub for debug.
+std::unique_ptr<Pass> createInsertL12UBForDebugPass();
 
 /// Create a pass to loop on blocks when logical blocknum is larger than
 /// physical one
@@ -293,6 +297,9 @@ std::unique_ptr<Pass> createCreatePreloadPass();
 
 /// Create a pass to remove HIVM data layout annotation.
 std::unique_ptr<Pass> createRemoveHIVMDataLayoutAnnotationPass();
+
+/// Create a pass to remove redundant copy ops in VF functions.
+std::unique_ptr<Pass> createRemoveCopyOpsPass();
 
 //===----------------------------------------------------------------------===//
 // Registration

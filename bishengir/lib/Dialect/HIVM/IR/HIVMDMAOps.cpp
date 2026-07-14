@@ -51,6 +51,7 @@ ENABLE_DEFAULT_COPYOP_INTERFACE_IMPLEMENTATION(StoreOp)
 ENABLE_DEFAULT_COPYOP_INTERFACE_IMPLEMENTATION(FixpipeOp)
 ENABLE_DEFAULT_COPYOP_INTERFACE_IMPLEMENTATION(ND2NZOp)
 ENABLE_DEFAULT_COPYOP_INTERFACE_IMPLEMENTATION(NZ2NDOp)
+ENABLE_DEFAULT_COPYOP_INTERFACE_IMPLEMENTATION(L12UBOp)
 #undef ENABLE_DEFAULT_COPYOP_INTERFACE_IMPLEMENTATION
 
 //===----------------------------------------------------------------------===//
@@ -372,24 +373,6 @@ LogicalResult StoreOp::verify() {
 
   return success();
 }
-
-bool StoreOp::isAtomic() {
-  auto atomicKind = getAtomicKind();
-  return atomicKind.has_value() && atomicKind.value() != hivm::AtomicKind::NONE;
-}
-
-bool StoreOp::isHWAtomic() {
-  if (getAtomicKind().has_value()) {
-    auto atomicKind = getAtomicKind().value();
-    return (atomicKind == hivm::AtomicKind::ADD) ||
-           (atomicKind == hivm::AtomicKind::MAX) ||
-           (atomicKind == hivm::AtomicKind::MIN);
-  }
-
-  return false;
-}
-
-bool StoreOp::isSWAtomic() { return isAtomic() && (!isHWAtomic()); }
 
 //===----------------------------------------------------------------------===//
 // CopyOp

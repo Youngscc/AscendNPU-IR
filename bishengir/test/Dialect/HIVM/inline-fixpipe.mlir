@@ -73,7 +73,7 @@ func.func @matmul(%arg0: memref<?xf16> {tt.divisibility = 16 : i32}, %arg1: memr
       %33 = bufferization.to_tensor %alloc_3 restrict writable : memref<256x128xf16>
       %true = arith.constant true
       %34 = tensor.empty() : tensor<256x128xf32>
-      // CHECK: hivm.hir.mmadL1 {fixpipe_already_inserted = true}
+      // CHECK: hivm.hir.mmadL1 {fixpipe_for_result_already_inserted = true}
       %35 = hivm.hir.mmadL1 ins(%25, %33, %true, %24, %20, %28 : tensor<256x256xf16>, tensor<256x128xf16>, i1, index, index, index) outs(%34 : tensor<256x128xf32>) -> tensor<256x128xf32>
       %36 = arith.muli %15, %c128 : index
       %37 = arith.addi %36, %17 : index
@@ -106,7 +106,7 @@ func.func @test_batchMmadL1_fixpipe(%ma : tensor<2x256x128xf16>, %mb : tensor<2x
   %M = arith.constant 256 : index
   %K = arith.constant 128 : index
   %N = arith.constant 256 : index
-  // CHECK: %[[RET:.*]] = hivm.hir.batchMmadL1 {fixpipe_already_inserted = true}
+  // CHECK: %[[RET:.*]] = hivm.hir.batchMmadL1 {fixpipe_for_result_already_inserted = true}
   %ret = hivm.hir.batchMmadL1 ins(%ma, %mb, %true, %M, %K, %N: tensor<2x256x128xf16>, tensor<2x128x256xf16>, i1, index, index, index)
                               outs(%mc: tensor<2x256x256xf32>) -> tensor<2x256x256xf32>
   %mc_cast = tensor.empty() : tensor<2x256x256xf16>
@@ -257,7 +257,7 @@ module {
     %c16_5 = arith.constant 16 : index
     %c64_6 = arith.constant 64 : index
     %c32_7 = arith.constant 32 : index
-    // CHECK: hivm.hir.mmadL1 {fixpipe_already_inserted = true}
+    // CHECK: hivm.hir.mmadL1 {fixpipe_for_result_already_inserted = true}
     %13 = hivm.hir.mmadL1 ins(%9, %10, %true, %c16_5, %c64_6, %c32_7, %expanded : tensor<16x64xf16>, tensor<64x32xf16>, i1, index, index, index, tensor<1x32xf32>) outs(%12 : tensor<16x32xf32>) -> tensor<16x32xf32>
     %14 = hivm.hir.vrelu ins(%13 : tensor<16x32xf32>) outs(%13 : tensor<16x32xf32>) -> tensor<16x32xf32>
     %15 = tensor.empty() : tensor<16x32xf16>
@@ -334,7 +334,7 @@ func.func @_attn_fwd(%arg0: i64 {hacc.arg_type = #hacc.arg_type<ffts_base_addres
     %c64_18 = arith.constant 64 : index
     %c64_19 = arith.constant 64 : index
     %c32_20 = arith.constant 32 : index
-    // CHECK: hivm.hir.mmadL1 {fixpipe_already_inserted = true}
+    // CHECK: hivm.hir.mmadL1 {fixpipe_for_result_already_inserted = true}
     %45 = hivm.hir.mmadL1 ins(%22, %43, %true, %c64, %c64_18, %c32_20 : tensor<64x64xf16>, tensor<64x32xf16>, i1, index, index, index) outs(%44 : tensor<64x32xf32>) -> tensor<64x32xf32>
     // CHECK: tensor.empty
     // CHECK: hivm.hir.fixpipe
@@ -371,7 +371,7 @@ func.func @_attn_fwd(%arg0: i64 {hacc.arg_type = #hacc.arg_type<ffts_base_addres
     %c32_30 = arith.constant 32 : index
     %c32_31 = arith.constant 32 : index
     %c64_32 = arith.constant 64 : index
-    // CHECK: hivm.hir.mmadL1 {fixpipe_already_inserted = true}
+    // CHECK: hivm.hir.mmadL1 {fixpipe_for_result_already_inserted = true}
     %65 = hivm.hir.mmadL1 ins(%64, %62, %true_27, %c64_29, %c32_30, %c64_32 : tensor<64x32xf16>, tensor<32x64xf16>, i1, index, index, index) outs(%61 : tensor<64x64xf32>) -> tensor<64x64xf32>
     %66 = arith.muli %12, %c32 : index
     %67 = arith.addi %66, %arg34 : index
@@ -408,7 +408,7 @@ func.func @_attn_fwd(%arg0: i64 {hacc.arg_type = #hacc.arg_type<ffts_base_addres
     %c64_18 = arith.constant 64 : index
     %c64_19 = arith.constant 64 : index
     %c32_20 = arith.constant 32 : index
-    // CHECK: hivm.hir.mmadL1 {fixpipe_already_inserted = true}
+    // CHECK: hivm.hir.mmadL1 {fixpipe_for_result_already_inserted = true}
     %45 = hivm.hir.mmadL1 ins(%22, %43, %true, %c64, %c64_18, %c32_20 : tensor<64x64xf16>, tensor<64x32xf16>, i1, index, index, index) outs(%44 : tensor<64x32xf32>) -> tensor<64x32xf32>
     // CHECK: tensor.empty
     // CHECK: hivm.hir.fixpipe
@@ -460,7 +460,7 @@ func.func @_attn_fwd(%arg0: i64 {hacc.arg_type = #hacc.arg_type<ffts_base_addres
     %c32_33 = arith.constant 32 : index
     %c32_34 = arith.constant 32 : index
     %c64_35 = arith.constant 64 : index
-    // CHECK: hivm.hir.mmadL1 {fixpipe_already_inserted = true}
+    // CHECK: hivm.hir.mmadL1 {fixpipe_for_result_already_inserted = true}
     %77 = hivm.hir.mmadL1 ins(%76, %74, %true_30, %c64_32, %c32_33, %c64_35 : tensor<64x32xf16>, tensor<32x64xf16>, i1, index, index, index) outs(%73 : tensor<64x64xf32>) -> tensor<64x64xf32>
     %78 = arith.muli %12, %c32 : index
     %79 = arith.addi %78, %arg34 : index
@@ -576,7 +576,7 @@ module {
       %c128 = arith.constant 128 : index
       %c64 = arith.constant 64 : index
       %c16 = arith.constant 16 : index
-      // CHECK: hivm.hir.mmadL1 {fixpipe_already_inserted = true}
+      // CHECK: hivm.hir.mmadL1 {fixpipe_for_result_already_inserted = true}
       %71 = hivm.hir.mmadL1 ins(%26, %65, %true, %c128, %c64, %c16 : tensor<128x64xf16>, tensor<64x16xf16>, i1, index, index, index) outs(%70 : tensor<128x16xf32>) -> tensor<128x16xf32>
       // CHECK: tensor.empty
       // CHECK: hivm.hir.fixpipe
@@ -606,7 +606,7 @@ module {
       %c128_46 = arith.constant 128 : index
       %c16_47 = arith.constant 16 : index
       %c64_48 = arith.constant 64 : index
-      // CHECK: hivm.hir.mmadL1 {fixpipe_already_inserted = true}
+      // CHECK: hivm.hir.mmadL1 {fixpipe_for_result_already_inserted = true}
       %90 = hivm.hir.mmadL1 ins(%88, %86, %89, %c128_46, %c16_47, %c64_48 : tensor<128x16xf16>, tensor<16x64xf16>, i1, index, index, index) outs(%arg20 : tensor<128x64xf32>) -> tensor<128x64xf32>
       %reinterpret_cast_49 = memref.reinterpret_cast %arg10 to offset: [%68], sizes: [16], strides: [1] : memref<?xf32> to memref<16xf32, strided<[1], offset: ?>>
       %alloc_50 = memref.alloc() : memref<16xf32>
@@ -616,7 +616,7 @@ module {
       %c128_51 = arith.constant 128 : index
       %c64_52 = arith.constant 64 : index
       %c16_53 = arith.constant 16 : index
-      // CHECK: hivm.hir.mmadL1 {b_transpose, fixpipe_already_inserted = true}
+      // CHECK: hivm.hir.mmadL1 {b_transpose, fixpipe_for_result_already_inserted = true}
       %93 = hivm.hir.mmadL1 {b_transpose} ins(%27, %86, %true, %c128_51, %c64_52, %c16_53 : tensor<128x64xf16>, tensor<16x64xf16>, i1, index, index, index) outs(%92 : tensor<128x16xf32>) -> tensor<128x16xf32>
       // CHECK: tensor.empty
       // CHECK: hivm.hir.fixpipe
@@ -629,7 +629,7 @@ module {
       %c128_55 = arith.constant 128 : index
       %c16_56 = arith.constant 16 : index
       %c64_57 = arith.constant 64 : index
-      // CHECK: hivm.hir.mmadL1 {b_transpose, fixpipe_already_inserted = true}
+      // CHECK: hivm.hir.mmadL1 {b_transpose, fixpipe_for_result_already_inserted = true}
       %99 = hivm.hir.mmadL1 {b_transpose} ins(%97, %65, %98, %c128_55, %c16_56, %c64_57 : tensor<128x16xf16>, tensor<64x16xf16>, i1, index, index, index) outs(%arg21 : tensor<128x64xf32>) -> tensor<128x64xf32>
       %100 = arith.addi %arg22, %c16_i32 : i32
       %101 = arith.index_cast %30 : i32 to index
@@ -672,7 +672,7 @@ module {
       %c128 = arith.constant 128 : index
       %c64 = arith.constant 64 : index
       %c32 = arith.constant 32 : index
-      // CHECK: hivm.hir.mmadL1 {fixpipe_already_inserted = true}
+      // CHECK: hivm.hir.mmadL1 {fixpipe_for_result_already_inserted = true}
       %70 = hivm.hir.mmadL1 ins(%26, %65, %true, %c128, %c64, %c32 : tensor<128x64xf16>, tensor<64x32xf16>, i1, index, index, index) outs(%69 : tensor<128x32xf32>) -> tensor<128x32xf32>
       // CHECK: tensor.empty
       // CHECK: hivm.hir.fixpipe
@@ -691,7 +691,7 @@ module {
       %c128_44 = arith.constant 128 : index
       %c32_45 = arith.constant 32 : index
       %c64_46 = arith.constant 64 : index
-      // CHECK: hivm.hir.mmadL1 {fixpipe_already_inserted = true}
+      // CHECK: hivm.hir.mmadL1 {fixpipe_for_result_already_inserted = true}
       %80 = hivm.hir.mmadL1 ins(%77, %75, %78, %c128_44, %c32_45, %c64_46 : tensor<128x32xf16>, tensor<32x64xf16>, i1, index, index, index) outs(%79 : tensor<128x64xf32>) -> tensor<128x64xf32>
       // CHECK: tensor.empty
       // CHECK: hivm.hir.fixpipe
@@ -705,7 +705,7 @@ module {
       %c128_49 = arith.constant 128 : index
       %c64_50 = arith.constant 64 : index
       %c32_51 = arith.constant 32 : index
-      // CHECK: hivm.hir.mmadL1 {b_transpose, fixpipe_already_inserted = true}
+      // CHECK: hivm.hir.mmadL1 {b_transpose, fixpipe_for_result_already_inserted = true}
       %85 = hivm.hir.mmadL1 {b_transpose} ins(%27, %75, %true, %c128_49, %c64_50, %c32_51 : tensor<128x64xf16>, tensor<32x64xf16>, i1, index, index, index) outs(%84 : tensor<128x32xf32>) -> tensor<128x32xf32>
       // CHECK: tensor.empty
       // CHECK: hivm.hir.fixpipe
@@ -719,7 +719,7 @@ module {
       %c128_53 = arith.constant 128 : index
       %c32_54 = arith.constant 32 : index
       %c64_55 = arith.constant 64 : index
-      // CHECK: hivm.hir.mmadL1 {b_transpose, fixpipe_already_inserted = true}
+      // CHECK: hivm.hir.mmadL1 {b_transpose, fixpipe_for_result_already_inserted = true}
       %92 = hivm.hir.mmadL1 {b_transpose} ins(%89, %65, %90, %c128_53, %c32_54, %c64_55 : tensor<128x32xf16>, tensor<64x32xf16>, i1, index, index, index) outs(%91 : tensor<128x64xf32>) -> tensor<128x64xf32>
       // CHECK: tensor.empty
       // CHECK: hivm.hir.fixpipe
@@ -781,7 +781,7 @@ module {
       %c128 = arith.constant 128 : index
       %c64 = arith.constant 64 : index
       %c16 = arith.constant 16 : index
-      // CHECK: hivm.hir.mmadL1 {fixpipe_already_inserted = true}
+      // CHECK: hivm.hir.mmadL1 {fixpipe_for_result_already_inserted = true}
       %68 = hivm.hir.mmadL1 ins(%45, %65, %true, %c128, %c64, %c16 : tensor<128x64xf16>, tensor<64x16xf16>, i1, index, index, index) outs(%67 : tensor<128x16xf32>) -> tensor<128x16xf32>
       // CHECK: tensor.empty
       // CHECK: hivm.hir.fixpipe
@@ -805,7 +805,7 @@ module {
       %c128_43 = arith.constant 128 : index
       %c64_44 = arith.constant 64 : index
       %c16_45 = arith.constant 16 : index
-      // CHECK: hivm.hir.mmadL1 {fixpipe_already_inserted = true}
+      // CHECK: hivm.hir.mmadL1 {fixpipe_for_result_already_inserted = true}
       %84 = hivm.hir.mmadL1 ins(%46, %66, %true, %c128_43, %c64_44, %c16_45 : tensor<128x64xf16>, tensor<64x16xf16>, i1, index, index, index) outs(%83 : tensor<128x16xf32>) -> tensor<128x16xf32>
       // CHECK: tensor.empty
       // CHECK: hivm.hir.fixpipe
@@ -817,7 +817,7 @@ module {
       %c128_46 = arith.constant 128 : index
       %c16_47 = arith.constant 16 : index
       %c64_48 = arith.constant 64 : index
-      // CHECK: hivm.hir.mmadL1 {b_transpose, fixpipe_already_inserted = true}
+      // CHECK: hivm.hir.mmadL1 {b_transpose, fixpipe_for_result_already_inserted = true}
       %90 = hivm.hir.mmadL1 {b_transpose} ins(%88, %65, %89, %c128_46, %c16_47, %c64_48 : tensor<128x16xf16>, tensor<64x16xf16>, i1, index, index, index) outs(%arg20 : tensor<128x64xf32>) -> tensor<128x64xf32>
       %91 = arith.addi %arg21, %c16_i32 : i32
       %92 = arith.index_cast %30 : i32 to index
@@ -861,7 +861,7 @@ module {
       %c128 = arith.constant 128 : index
       %c64 = arith.constant 64 : index
       %c32 = arith.constant 32 : index
-      // CHECK: hivm.hir.mmadL1 {fixpipe_already_inserted = true}
+      // CHECK: hivm.hir.mmadL1 {fixpipe_for_result_already_inserted = true}
       %68 = hivm.hir.mmadL1 ins(%45, %65, %true, %c128, %c64, %c32 : tensor<128x64xf16>, tensor<64x32xf16>, i1, index, index, index) outs(%67 : tensor<128x32xf32>) -> tensor<128x32xf32>
       // CHECK: tensor.empty
       // CHECK: hivm.hir.fixpipe
@@ -872,7 +872,7 @@ module {
       %c128_41 = arith.constant 128 : index
       %c64_42 = arith.constant 64 : index
       %c32_43 = arith.constant 32 : index
-      // CHECK: hivm.hir.mmadL1 {fixpipe_already_inserted = true}
+      // CHECK: hivm.hir.mmadL1 {fixpipe_for_result_already_inserted = true}
       %73 = hivm.hir.mmadL1 ins(%46, %66, %true, %c128_41, %c64_42, %c32_43 : tensor<128x64xf16>, tensor<64x32xf16>, i1, index, index, index) outs(%72 : tensor<128x32xf32>) -> tensor<128x32xf32>
       // CHECK: tensor.empty
       // CHECK: hivm.hir.fixpipe
@@ -885,7 +885,7 @@ module {
       %c128_44 = arith.constant 128 : index
       %c32_45 = arith.constant 32 : index
       %c64_46 = arith.constant 64 : index
-      // CHECK: hivm.hir.mmadL1 {b_transpose, fixpipe_already_inserted = true}
+      // CHECK: hivm.hir.mmadL1 {b_transpose, fixpipe_for_result_already_inserted = true}
       %80 = hivm.hir.mmadL1 {b_transpose} ins(%77, %65, %78, %c128_44, %c32_45, %c64_46 : tensor<128x32xf16>, tensor<64x32xf16>, i1, index, index, index) outs(%79 : tensor<128x64xf32>) -> tensor<128x64xf32>
       // CHECK: tensor.empty
       // CHECK: hivm.hir.fixpipe
@@ -957,7 +957,7 @@ func.func @mm_with_add(%arg0: i64 {hacc.arg_type = #hacc.arg_type<ffts_base_addr
     %c29_7 = arith.constant 29 : index
     %c128_8 = arith.constant 128 : index
     %c256 = arith.constant 256 : index
-    // CHECK: hivm.hir.mmadL1 {fixpipe_already_inserted = true}
+    // CHECK: hivm.hir.mmadL1 {fixpipe_for_result_already_inserted = true}
     %22 = hivm.hir.mmadL1 ins(%11, %extracted_slice_5, %true, %c29_7, %c128_8, %c256, %extracted_slice_6 : tensor<29x128xf16>, tensor<128x256xf16>, i1, index, index, index, tensor<1x256xf32>) outs(%21 : tensor<29x256xf32>) -> tensor<29x256xf32>
     // CHECK-NOT: hivm.hir.fixpipe
     %inserted_slice = tensor.insert_slice %22 into %arg10[0, %20] [29, 256] [1, 1] : tensor<29x256xf32> into tensor<29x768xf32>
@@ -1140,7 +1140,7 @@ func.func @mmad_mmad_fixpipe_case(%arg0: i64 {hacc.arg_type = #hacc.arg_type<fft
       %c0_19 = arith.constant 0 : index
       %c32_20 = arith.constant 32 : index
       %c32_21 = arith.constant 32 : index
-      // CHECK: hivm.hir.mmadL1 {b_transpose, fixpipe_already_inserted = true}
+      // CHECK: hivm.hir.mmadL1 {b_transpose, fixpipe_for_result_already_inserted = true}
       %40 = hivm.hir.mmadL1 {b_transpose} ins(%17, %34, %true, %c32_17, %c32_18, %c32_20 : tensor<32x32xf16>, tensor<32x32xf16>, i1, index, index, index) outs(%39 : tensor<32x32xf32>) -> tensor<32x32xf32>
       // CHECK: hivm.hir.fixpipe
       %expanded = tensor.expand_shape %38 [[0, 1]] output_shape [1, 32] : tensor<32xf32> into tensor<1x32xf32>
@@ -1169,7 +1169,7 @@ func.func @mmad_mmad_fixpipe_case(%arg0: i64 {hacc.arg_type = #hacc.arg_type<fft
       %c0_30 = arith.constant 0 : index
       %c32_31 = arith.constant 32 : index
       %c32_32 = arith.constant 32 : index
-      // CHECK: hivm.hir.mmadL1 {b_transpose, fixpipe_already_inserted = true}
+      // CHECK: hivm.hir.mmadL1 {b_transpose, fixpipe_for_result_already_inserted = true}
       %53 = hivm.hir.mmadL1 {b_transpose} ins(%18, %45, %true_27, %c32_28, %c32_29, %c32_31 : tensor<32x32xf16>, tensor<32x32xf16>, i1, index, index, index) outs(%52 : tensor<32x32xf32>) -> tensor<32x32xf32>
       // CHECK: hivm.hir.fixpipe
       %expanded_33 = tensor.expand_shape %50 [[0, 1]] output_shape [1, 32] : tensor<32xf32> into tensor<1x32xf32>
@@ -1217,7 +1217,7 @@ func.func @test_mmadL1_fixpipe_no_quant(%ma : tensor<256x128xi8>, %mb : tensor<1
   %M = arith.constant 256 : index
   %K = arith.constant 128 : index
   %N = arith.constant 256 : index
-  // CHECK: hivm.hir.mmadL1 {fixpipe_already_inserted = true}
+  // CHECK: hivm.hir.mmadL1 {fixpipe_for_result_already_inserted = true}
   %ret = hivm.hir.mmadL1 ins(%ma, %mb, %true, %M, %K, %N: tensor<256x128xi8>, tensor<128x256xi8>, i1, index, index, index)
                               outs(%mc: tensor<256x256xi32>) -> tensor<256x256xi32>
   %mc_cast = tensor.empty() : tensor<256x256xf32>
@@ -1317,6 +1317,119 @@ func.func @test_mmad_accumulation_merged(%A: tensor<64x64xf16>, %B: tensor<64x64
   // CHECK: %[[EMPTY_GOOD:.*]] = tensor.empty() : tensor<64x64xf32>
   // CHECK-NEXT: %[[FIXPIPE_GOOD:.*]] = hivm.hir.fixpipe {{.*}} ins(%[[LOOP_RES]]#0 : tensor<64x64xf32>) outs(%[[EMPTY_GOOD]]
   // CHECK-NEXT: return %[[FIXPIPE_GOOD]], %[[LOOP_RES]]#1
+  return %loop_res#0, %loop_res#1 : tensor<64x64xf32>, tensor<64x64xf32>
+}
+
+// -----
+// CHECK-LABEL: func.func @test_mmad_accumulation_with_inloop_vec_consumer
+// This test verifies that when an accumulation mmadL1 has both:
+// 1. its result flowing to scf.yield (accumulation in L1), and
+// 2. a Vector consumer inside the same loop reading the raw result,
+// an in-loop fixpipe is inserted for the Vector consumer while the
+// accumulation yield stays on the raw L1 result.
+func.func @test_mmad_accumulation_with_inloop_vec_consumer(%A: tensor<64x64xf16>, %B: tensor<64x64xf16>, %C_init: tensor<64x64xf32>) -> (tensor<64x64xf32>, tensor<64x64xf32>) {
+  %c0 = arith.constant 0 : index
+  %c10 = arith.constant 10 : index
+  %c1 = arith.constant 1 : index
+  %c64 = arith.constant 64 : index
+  %true = arith.constant true
+  // CHECK: %[[LOOP_RES:.*]]:2 = scf.for
+  %loop_res:2 = scf.for %i = %c0 to %c10 step %c1
+    iter_args(%C_curr = %C_init, %V_curr = %C_init) -> (tensor<64x64xf32>, tensor<64x64xf32>) {
+    // CHECK: %[[MMAD:.*]] = hivm.hir.mmadL1
+    // CHECK-SAME: outs(%{{.*}} : tensor<64x64xf32>) -> tensor<64x64xf32>
+    %mmad = hivm.hir.mmadL1 ins(%A, %B, %true, %c64, %c64, %c64
+      : tensor<64x64xf16>, tensor<64x64xf16>, i1, index, index, index)
+      outs(%C_curr : tensor<64x64xf32>) -> tensor<64x64xf32>
+    // In-loop fixpipe inserted for the Vector consumer
+    // CHECK-NEXT: %[[INNER_INIT:.*]] = tensor.empty() : tensor<64x64xf32>
+    // CHECK-NEXT: %[[INNER_FIX:.*]] = hivm.hir.fixpipe {{.*}} ins(%[[MMAD]] : tensor<64x64xf32>) outs(%[[INNER_INIT]]
+    // Vector consumer reads the fixpipe result, not raw mmad
+    // CHECK-NEXT: %[[VADD:.*]] = hivm.hir.vadd ins(%[[INNER_FIX]], %[[INNER_FIX]]
+    %vec_use = hivm.hir.vadd ins(%mmad, %mmad : tensor<64x64xf32>, tensor<64x64xf32>)
+      outs(%V_curr : tensor<64x64xf32>) -> tensor<64x64xf32>
+    // Yield: raw mmad for accumulation (iter_arg #0), vadd result for Vector chain (iter_arg #1)
+    // CHECK: scf.yield %[[MMAD]], %[[VADD]]
+    scf.yield %mmad, %vec_use : tensor<64x64xf32>, tensor<64x64xf32>
+  }
+  // Outer fixpipe for loop result #0 (mmad accumulation path)
+  // CHECK: %[[OUTER_INIT:.*]] = tensor.empty() : tensor<64x64xf32>
+  // CHECK-NEXT: %[[OUTER_FIX:.*]] = hivm.hir.fixpipe {{.*}} ins(%[[LOOP_RES]]#0 : tensor<64x64xf32>) outs(%[[OUTER_INIT]]
+  // CHECK-NEXT: return %[[OUTER_FIX]], %[[LOOP_RES]]#1
+  return %loop_res#0, %loop_res#1 : tensor<64x64xf32>, tensor<64x64xf32>
+}
+
+// -----
+// CHECK-LABEL: func.func @test_mmad_accumulation_multi_vec_consumers
+// Boundary: multiple Vector consumers of the same accumulation mmad result
+// inside the same loop. All Vector consumers should be redirected to the
+// inner fixpipe, while the yield stays on the raw result.
+func.func @test_mmad_accumulation_multi_vec_consumers(%A: tensor<64x64xf16>, %B: tensor<64x64xf16>, %C_init: tensor<64x64xf32>) -> (tensor<64x64xf32>, tensor<64x64xf32>) {
+  %c0 = arith.constant 0 : index
+  %c10 = arith.constant 10 : index
+  %c1 = arith.constant 1 : index
+  %c64 = arith.constant 64 : index
+  %true = arith.constant true
+  // CHECK: %[[LOOP_RES:.*]]:2 = scf.for
+  %loop_res:2 = scf.for %i = %c0 to %c10 step %c1
+    iter_args(%C_curr = %C_init, %V_curr = %C_init) -> (tensor<64x64xf32>, tensor<64x64xf32>) {
+    // CHECK: %[[MMAD:.*]] = hivm.hir.mmadL1
+    // CHECK-SAME: outs(%{{.*}} : tensor<64x64xf32>) -> tensor<64x64xf32>
+    %mmad = hivm.hir.mmadL1 ins(%A, %B, %true, %c64, %c64, %c64
+      : tensor<64x64xf16>, tensor<64x64xf16>, i1, index, index, index)
+      outs(%C_curr : tensor<64x64xf32>) -> tensor<64x64xf32>
+    // One inner fixpipe for both Vector consumers
+    // CHECK-NEXT: %[[INNER_INIT:.*]] = tensor.empty() : tensor<64x64xf32>
+    // CHECK-NEXT: %[[INNER_FIX:.*]] = hivm.hir.fixpipe {{.*}} ins(%[[MMAD]] : tensor<64x64xf32>) outs(%[[INNER_INIT]]
+    // vabs (consumer #1) and vadd (consumer #2) both originally read %mmad.
+    // After inner fixpipe, vabs redirected to fixpipe result.
+    // CHECK-NEXT: %[[VABS:.*]] = hivm.hir.vabs ins(%[[INNER_FIX]]
+    // vadd's first operand (%abs_val) is also redirected.
+    // CHECK-NEXT: %[[VADD:.*]] = hivm.hir.vadd ins(%[[VABS]]
+    %abs_val = hivm.hir.vabs ins(%mmad : tensor<64x64xf32>) outs(%C_curr : tensor<64x64xf32>) -> tensor<64x64xf32>
+    %vec_use = hivm.hir.vadd ins(%abs_val, %mmad : tensor<64x64xf32>, tensor<64x64xf32>)
+      outs(%V_curr : tensor<64x64xf32>) -> tensor<64x64xf32>
+    // Yield raw mmad for accumulation
+    // CHECK: scf.yield %[[MMAD]]
+    scf.yield %mmad, %vec_use : tensor<64x64xf32>, tensor<64x64xf32>
+  }
+  // CHECK: %[[OUTER_INIT:.*]] = tensor.empty() : tensor<64x64xf32>
+  // CHECK-NEXT: %[[OUTER_FIX:.*]] = hivm.hir.fixpipe {{.*}} ins(%[[LOOP_RES]]#0 : tensor<64x64xf32>) outs(%[[OUTER_INIT]]
+  return %loop_res#0, %loop_res#1 : tensor<64x64xf32>, tensor<64x64xf32>
+}
+
+// -----
+// CHECK-LABEL: func.func @test_mmad_accumulation_nested_for_no_redirect
+// Boundary: Vector consumer inside a nested scf.for within the accumulation
+// loop. Its nearest ForOp is the nested one, not the accumulation loop,
+// so it should NOT be redirected to the inner fixpipe.
+func.func @test_mmad_accumulation_nested_for_no_redirect(%A: tensor<64x64xf16>, %B: tensor<64x64xf16>, %C_init: tensor<64x64xf32>) -> (tensor<64x64xf32>, tensor<64x64xf32>) {
+  %c0 = arith.constant 0 : index
+  %c10 = arith.constant 10 : index
+  %c1 = arith.constant 1 : index
+  %c64 = arith.constant 64 : index
+  %true = arith.constant true
+  // CHECK: %[[LOOP_RES:.*]]:2 = scf.for
+  %loop_res:2 = scf.for %i = %c0 to %c10 step %c1
+    iter_args(%C_curr = %C_init, %V_curr = %C_init) -> (tensor<64x64xf32>, tensor<64x64xf32>) {
+    // CHECK: %[[MMAD:.*]] = hivm.hir.mmadL1
+    // CHECK-SAME: outs(%{{.*}} : tensor<64x64xf32>) -> tensor<64x64xf32>
+    %mmad = hivm.hir.mmadL1 ins(%A, %B, %true, %c64, %c64, %c64
+      : tensor<64x64xf16>, tensor<64x64xf16>, i1, index, index, index)
+      outs(%C_curr : tensor<64x64xf32>) -> tensor<64x64xf32>
+    // CHECK-NOT: hivm.hir.fixpipe {{.*}} ins(%[[MMAD]]
+    // Nested scf.for with a Vector consumer — its nearest ForOp is the nested
+    // one, not the accumulation loop, so it reads raw %mmad directly.
+    %nested_res = scf.for %j = %c0 to %c1 step %c1 iter_args(%v = %V_curr) -> (tensor<64x64xf32>) {
+      // CHECK: hivm.hir.vabs ins(%[[MMAD]]
+      %inner = hivm.hir.vabs ins(%mmad : tensor<64x64xf32>) outs(%v : tensor<64x64xf32>) -> tensor<64x64xf32>
+      scf.yield %inner : tensor<64x64xf32>
+    }
+    // CHECK: scf.yield %[[MMAD]]
+    scf.yield %mmad, %nested_res : tensor<64x64xf32>, tensor<64x64xf32>
+  }
+  // CHECK: %[[OUTER_INIT:.*]] = tensor.empty() : tensor<64x64xf32>
+  // CHECK-NEXT: %[[OUTER_FIX:.*]] = hivm.hir.fixpipe {{.*}} ins(%[[LOOP_RES]]#0 : tensor<64x64xf32>) outs(%[[OUTER_INIT]]
   return %loop_res#0, %loop_res#1 : tensor<64x64xf32>, tensor<64x64xf32>
 }
 

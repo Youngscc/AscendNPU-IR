@@ -42,6 +42,7 @@
 #include <cstdint>
 #include <set>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 namespace mlir {
@@ -442,6 +443,20 @@ class NZ2NDOpToLibraryCallPattern : public OpRewritePattern<hivm::NZ2NDOp> {
   LogicalResult matchAndRewrite(hivm::NZ2NDOp op,
                                 PatternRewriter &rewriter) const final {
     // TODO: merge this with ND2NZOpToLibraryCallPattern
+    replaceWithLibCall(rewriter, op,
+                       cast<OpWithLibraryFunction>(op.getOperation())
+                           .getOpLibraryCallName(/*isOpsAligned=*/std::nullopt),
+                       op->getOperands(), {});
+    return success();
+  }
+};
+
+class L12UBOpToLibraryCallPattern : public OpRewritePattern<hivm::L12UBOp> {
+  using OpRewritePattern<hivm::L12UBOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(hivm::L12UBOp op,
+                                PatternRewriter &rewriter) const final {
+    // TODO: merge this with L12UBOpToLibraryCallPattern
     replaceWithLibCall(rewriter, op,
                        cast<OpWithLibraryFunction>(op.getOperation())
                            .getOpLibraryCallName(/*isOpsAligned=*/std::nullopt),
@@ -1626,15 +1641,22 @@ class DebugOpToLibraryCallPattern : public OpRewritePattern<hivm::DebugOp> {
   }
 };
 
-class CustomOpToLibraryCallPattern : public OpRewritePattern<hivm::CustomOp> {
-  using OpRewritePattern<hivm::CustomOp>::OpRewritePattern;
+template <typename CustomOpT>
+class CustomOpToLibraryCallPattern : public OpRewritePattern<CustomOpT> {
+  using OpRewritePattern<CustomOpT>::OpRewritePattern;
 
-  LogicalResult matchAndRewrite(hivm::CustomOp op,
+  LogicalResult matchAndRewrite(CustomOpT op,
                                 PatternRewriter &rewriter) const final {
+    SmallVector<Value> libParams;
+    if constexpr (std::is_same_v<CustomOpT, hivm::CustomMacroOp>) {
+      libParams = op.getLibraryCallOperands(rewriter);
+    } else {
+      libParams.assign(op.getOperands().begin(), op.getOperands().end());
+    }
     replaceWithLibCall(rewriter, op,
                        cast<OpWithLibraryFunction>(op.getOperation())
                            .getOpLibraryCallName(/*isOpsAligned=*/std::nullopt),
-                       op.getOperands(), op.getResultTypes());
+                       libParams, op.getResultTypes());
     return success();
   }
 };
@@ -1803,6 +1825,7 @@ void mlir::hivm::populateHIVMToStandardConversionPatterns(
                Conv2DL1OpToLibraryCallPattern,
                ND2NZOpToLibraryCallPattern,
                NZ2NDOpToLibraryCallPattern,
+               L12UBOpToLibraryCallPattern,
                FixpipeOpToLibraryCallPattern,
                MatmulOpToLibraryCallPattern,
                MixMatmulOpToLibraryCallPattern,
@@ -1844,7 +1867,8 @@ void mlir::hivm::populateHIVMToStandardConversionPatterns(
                CumOpToLibraryCallPattern<hivm::VCumprodOp>,
                TransposeOpToLibraryCallPattern,
                DebugOpToLibraryCallPattern,
-               CustomOpToLibraryCallPattern,
+               CustomOpToLibraryCallPattern<hivm::CustomOp>,
+               CustomOpToLibraryCallPattern<hivm::CustomMacroOp>,
                VInterleaveOpToLibraryCallPattern,
                PlainOpToLibraryCallPattern<hivm::InitDebugOp>,
                PlainOpToLibraryCallPattern<hivm::FinishDebugOp>,
@@ -1888,6 +1912,7 @@ void ConvertHIVMToStandardPass::runOnOperation() {
                       hivm::MatmulOp,
                       hivm::CopyOp,
                       hivm::CustomOp,
+                      hivm::CustomMacroOp,
                       hivm::LoadOp,
                       hivm::StoreOp,
                       hivm::IndirectStoreOp,

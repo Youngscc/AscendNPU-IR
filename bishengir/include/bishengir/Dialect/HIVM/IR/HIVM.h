@@ -19,6 +19,7 @@
 #define BISHENGIR_DIALECT_HIVM_IR_HIVM_H
 
 #include "bishengir/Interfaces/AggregatedOpInterface.h"
+#include "bishengir/Interfaces/CopyOpInterface.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/Math/IR/Math.h"

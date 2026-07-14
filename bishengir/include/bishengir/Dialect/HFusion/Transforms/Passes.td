@@ -481,6 +481,14 @@ def EliminateDuplicateFuncs : Pass<"hfusion-eliminate-duplicate-funcs", "ModuleO
   let constructor = "mlir::hfusion::createEliminateDuplicateFuncsPass()";
 }
 
+def RemoveCacheIO
+    : Pass<"hfusion-remove-cache-io", "func::FuncOp"> {
+  let summary = "remove cache io";
+  let constructor = "::mlir::hfusion::createRemoveCacheIO()";
+  let dependentDialects = ["linalg::LinalgDialect", "hfusion::HFusionDialect",
+                           "mlir::tensor::TensorDialect"];
+}
+
 def Decompose : Pass<"hfusion-decompose", "func::FuncOp">{
   let summary = "Decompose ops that implemented AggregatedOpInterface.";
   let constructor = "mlir::hfusion::createDecomposePass()";
@@ -497,6 +505,18 @@ def Decompose : Pass<"hfusion-decompose", "func::FuncOp">{
                    "decompose before convert linalg to loops")
     )}]>,
   ];
+}
+
+def UpliftWhileToFor : Pass<"hfusion-uplift-while-to-for", "func::FuncOp"> {
+  let summary = "Uplift scf.while loops to scf.for when possible";
+  let constructor = "mlir::hfusion::createUpliftWhileToForPass()";
+  let dependentDialects = ["scf::SCFDialect", "arith::ArithDialect"];
+}
+
+def HFusionGeneralizePass : Pass<"hfusion-generalize", "func::FuncOp"> {
+  let summary = "Generalize named ops to generic ops";
+  let constructor = "mlir::hfusion::createHFusionGeneralizePass()";
+  let dependentDialects = ["linalg::LinalgDialect", "hfusion::HFusionDialect"];
 }
 
 #endif // BISHENGIR_DIALECT_HFUSION_TRANSFORMS_PASSES
