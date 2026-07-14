@@ -21,8 +21,10 @@
 #include "bishengir/Interfaces/AggregatedOpInterface.h"
 #include "bishengir/Interfaces/CopyOpInterface.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/DeviceMappingInterface.h"
 #include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
@@ -79,6 +81,7 @@
 
 #define GET_OP_CLASSES
 #include "bishengir/Dialect/HIVM/IR/HIVMSynchronizationOps.h.inc"
+
 
 namespace mlir {
 class TypeConverter;
