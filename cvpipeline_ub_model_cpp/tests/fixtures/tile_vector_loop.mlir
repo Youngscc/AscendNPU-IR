@@ -19,4 +19,4 @@
     %unrelated = "tensor.empty"() {case = "unrelated"} : () -> tensor<1x128xf16>
     "func.return"() : () -> ()
   }) {hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<MIX>} : () -> ()
-}) : () -> ()
+}) {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #hacc.target_device_spec<#dlti.dl_entry<"L0C_SIZE", 1048576 : i32>, #dlti.dl_entry<"UB_ALIGN_SIZE", 256 : i32>>>} : () -> ()

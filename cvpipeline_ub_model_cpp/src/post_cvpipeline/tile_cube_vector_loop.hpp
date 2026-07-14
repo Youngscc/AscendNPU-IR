@@ -11,7 +11,6 @@
 #include <regex>
 #include <set>
 #include <string>
-#include <utility>
 #include <vector>
 
 namespace cvub {
@@ -25,17 +24,33 @@ struct ShapedType {
   std::string tail;
 };
 
+struct TargetSpec {
+  int64_t l0cSizeBits = 0;
+  int64_t ubAlignBits = 0;
+};
+
+struct LoopPlan {
+  int loopId = -1;
+  LoopKind kind = LoopKind::Vector;
+  int64_t extent = 0;
+  unsigned tripCount = 1;
+  bool skip = false;
+  std::map<int, size_t> valueAxes;
+};
+
 inline std::optional<ShapedType> ParseStaticShapedType(const std::string &type) {
   static const std::regex shaped(
       R"(^(tensor|memref)<([0-9]+(?:x[0-9]+)*)x(.+)>$)");
   std::smatch match;
   if (!std::regex_match(type, match, shaped))
     return std::nullopt;
-  ShapedType result;
-  result.kind = match[1].str();
-  result.tail = match[3].str();
-  for (const std::string &dimension : splitTopLevel(match[2].str(), 'x'))
-    result.shape.push_back(std::stoll(dimension));
+  ShapedType result{match[1].str(), {}, match[3].str()};
+  try {
+    for (const std::string &dimension : splitTopLevel(match[2].str(), 'x'))
+      result.shape.push_back(std::stoll(dimension));
+  } catch (const std::exception &) {
+    return std::nullopt;
+  }
   return result;
 }
 
@@ -51,29 +66,45 @@ inline unsigned ElementBitWidth(const std::string &tail) {
   std::smatch match;
   if (!std::regex_match(tail, match, element))
     return 0;
-  return static_cast<unsigned>(std::stoul(match[1].str()));
+  try {
+    const unsigned long width = std::stoul(match[1].str());
+    return width <= std::numeric_limits<unsigned>::max()
+               ? static_cast<unsigned>(width)
+               : 0U;
+  } catch (const std::exception &) {
+    return 0;
+  }
 }
 
 inline bool CheckedMultiply(int64_t &value, int64_t factor) {
-  if (factor < 0 ||
+  if (value < 0 || factor < 0 ||
       (factor != 0 && value > std::numeric_limits<int64_t>::max() / factor))
     return false;
   value *= factor;
   return true;
 }
 
-inline int64_t CeilDiv(int64_t extent, unsigned divisor) {
-  const int64_t signedDivisor = static_cast<int64_t>(divisor);
-  return extent / signedDivisor + (extent % signedDivisor == 0 ? 0 : 1);
+inline std::optional<int64_t> StaticSizeBits(const ShapedType &type) {
+  int64_t bits = static_cast<int64_t>(ElementBitWidth(type.tail));
+  if (bits == 0)
+    return std::nullopt;
+  for (int64_t dimension : type.shape)
+    if (!CheckedMultiply(bits, dimension))
+      return std::nullopt;
+  return bits;
 }
 
 inline std::vector<int64_t> ParseIntegerArray(const std::string &text) {
   if (text.size() < 2 || text.front() != '[' || text.back() != ']')
     return {};
   std::vector<int64_t> result;
-  for (const std::string &item :
-       splitTopLevel(text.substr(1, text.size() - 2)))
-    result.push_back(std::stoll(item));
+  try {
+    for (const std::string &item :
+         splitTopLevel(text.substr(1, text.size() - 2)))
+      result.push_back(std::stoll(item));
+  } catch (const std::exception &) {
+    return {};
+  }
   return result;
 }
 
@@ -87,8 +118,32 @@ inline std::string PrintIntegerArray(const std::vector<int64_t> &values) {
   return result + "]";
 }
 
-inline std::optional<LoopKind>
-CoreLoopKind(const GenericOperation &operation) {
+inline std::optional<int64_t> ParseSpecEntry(const std::string &text,
+                                             const std::string &name) {
+  const std::regex entry("\\\"" + name +
+                         "\\\"[[:space:]]*,[[:space:]]*([0-9]+)");
+  std::smatch match;
+  if (!std::regex_search(text, match, entry))
+    return std::nullopt;
+  try {
+    return std::stoll(match[1].str());
+  } catch (const std::exception &) {
+    return std::nullopt;
+  }
+}
+
+inline std::optional<TargetSpec> ReadTargetSpec(const GenericModule &module) {
+  if (module.operations.empty())
+    return std::nullopt;
+  const std::string &attributes = module.operations.front().attributes;
+  const auto l0c = ParseSpecEntry(attributes, "L0C_SIZE");
+  const auto ubAlign = ParseSpecEntry(attributes, "UB_ALIGN_SIZE");
+  if (!l0c || !ubAlign || *l0c <= 0 || *ubAlign <= 0)
+    return std::nullopt;
+  return TargetSpec{*l0c, *ubAlign};
+}
+
+inline std::optional<LoopKind> CoreLoopKind(const GenericOperation &operation) {
   const std::string core =
       IRDictionaryValue(operation.attributes, "hivm.loop_core_type");
   if (core == "#hivm.tcore_type<VECTOR>")
@@ -96,6 +151,11 @@ CoreLoopKind(const GenericOperation &operation) {
   if (core == "#hivm.tcore_type<CUBE>")
     return LoopKind::Cube;
   return std::nullopt;
+}
+
+inline bool HasLoopCoreAttribute(const GenericOperation &operation) {
+  return !IRDictionaryValue(operation.attributes, "hivm.loop_core_type")
+              .empty();
 }
 
 inline std::vector<int> DirectChildren(const GenericModule &module,
@@ -118,179 +178,363 @@ inline const GenericOperation *Definition(const GenericModule &module,
   return nullptr;
 }
 
-inline std::optional<int64_t>
-CandidateExtent(const GenericModule &module, const GenericOperation &loop,
-                LoopKind kind) {
-  const std::string anchor =
-      kind == LoopKind::Vector ? "hivm.hir.store" : "hivm.hir.fixpipe";
-  for (int child : DirectChildren(module, loop)) {
-    const GenericOperation &operation =
-        module.operations.at(static_cast<size_t>(child));
-    if (operation.name != anchor || operation.operandTypes.empty())
-      continue;
-    const auto type = ParseStaticShapedType(operation.operandTypes.front());
-    if (!type || type->shape.empty())
-      return std::nullopt;
-    return type->shape.back();
-  }
-  return int64_t{0};
+inline std::vector<const GenericOperation *>
+Users(const GenericModule &module, int value) {
+  std::vector<const GenericOperation *> users;
+  for (const GenericOperation &operation : module.operations)
+    if (std::find(operation.operands.begin(), operation.operands.end(), value) !=
+        operation.operands.end())
+      users.push_back(&operation);
+  return users;
 }
 
-inline bool IsKnownVectorRollback(const GenericModule &module,
-                                  const GenericOperation &loop,
-                                  int64_t extent, unsigned tripCount) {
-  const int64_t tile = CeilDiv(extent, tripCount);
-  for (int child : DirectChildren(module, loop)) {
-    const GenericOperation &operation =
-        module.operations.at(static_cast<size_t>(child));
-    for (const std::string &typeText : operation.resultTypes) {
-      const auto type = ParseStaticShapedType(typeText);
-      if (!type || std::find(type->shape.begin(), type->shape.end(), extent) ==
-                       type->shape.end())
-        continue;
-      const unsigned bitWidth = ElementBitWidth(type->tail);
-      if (bitWidth == 0)
-        return false;
-      int64_t bits = static_cast<int64_t>(bitWidth);
-      for (int64_t dimension : type->shape)
-        if (!CheckedMultiply(bits, dimension == extent ? tile : dimension))
-          return false;
-      const int64_t alignment = bitWidth == 1 ? 8 : 256;
-      if (bits % alignment != 0)
-        return true;
-    }
+inline bool HasUnmodeledLiftPattern(const GenericModule &module) {
+  for (const GenericOperation &operation : module.operations) {
+    if (operation.name == "hivm.hir.load" && operation.operandTypes.size() > 1 &&
+        operation.operandTypes.back().rfind("memref<", 0) == 0)
+      return true;
+    if (operation.name != "memref.alloc" || operation.results.size() != 1)
+      continue;
+    const auto users = Users(module, operation.results.front());
+    if (users.size() == 1 && users.front()->name == "bufferization.to_tensor")
+      return true;
   }
   return false;
 }
 
-inline bool PhysicalSizesAreChecked(const GenericModule &module,
-                                    const GenericOperation &loop,
-                                    int64_t extent, unsigned tripCount) {
-  const int64_t tile = CeilDiv(extent, tripCount);
-  for (int child : DirectChildren(module, loop)) {
-    const GenericOperation &operation =
-        module.operations.at(static_cast<size_t>(child));
-    for (const std::string &typeText : operation.resultTypes) {
-      const auto type = ParseStaticShapedType(typeText);
-      if (!type || std::find(type->shape.begin(), type->shape.end(), extent) ==
-                       type->shape.end())
-        continue;
-      int64_t bits = static_cast<int64_t>(ElementBitWidth(type->tail));
-      if (bits == 0)
-        return false;
-      for (int64_t dimension : type->shape)
-        if (!CheckedMultiply(bits, dimension == extent ? tile : dimension))
-          return false;
-    }
+inline bool IsAncestor(const GenericModule &module, int possibleAncestor,
+                       int operationId) {
+  int parent = module.operations.at(static_cast<size_t>(operationId)).parentId;
+  while (parent >= 0) {
+    if (parent == possibleAncestor)
+      return true;
+    parent = module.operations.at(static_cast<size_t>(parent)).parentId;
   }
-  return true;
+  return false;
 }
 
-inline bool IsKnownCubeSkip(const GenericModule &module,
-                            const GenericOperation &loop, int64_t extent) {
-  constexpr int64_t l0cSizeBits = 1048576LL * 8LL;
+inline std::optional<unsigned> ParseCubeOverride(const GenericModule &module,
+                                                 const GenericOperation &loop,
+                                                 std::string &reason) {
+  std::optional<unsigned> result;
+  static const std::regex integer(R"(^([0-9]+)(?:[[:space:]]*:[[:space:]]*i[0-9]+)?$)");
   for (int child : DirectChildren(module, loop)) {
     const GenericOperation &operation =
         module.operations.at(static_cast<size_t>(child));
-    if (operation.name == "hivm.hir.mmadL1" && operation.operands.size() > 2) {
-      const GenericOperation *flag = Definition(module, operation.operands[2]);
-      if (flag == nullptr || flag->name != "arith.constant")
-        return true;
-    }
-    if (operation.name != "hivm.hir.fixpipe" ||
-        operation.operandTypes.empty())
+    if (operation.name != "hivm.hir.mmadL1")
       continue;
-    const auto type = ParseStaticShapedType(operation.operandTypes.front());
-    if (!type)
-      return false;
-    const unsigned bitWidth = ElementBitWidth(type->tail);
-    if (bitWidth == 0)
-      return false;
-    int64_t bits = static_cast<int64_t>(bitWidth);
-    for (int64_t dimension : type->shape)
-      bits *= dimension;
-    return bits <= l0cSizeBits && extent > 0;
+    const std::string value =
+        IRDictionaryValue(operation.attributes, "hivm.tile_mix_cube_num");
+    if (value.empty())
+      continue;
+    std::smatch match;
+    if (!std::regex_match(value, match, integer)) {
+      reason = "tile_mix_cube_num is not a positive integer";
+      return 0U;
+    }
+    unsigned long parsed = 0;
+    try {
+      parsed = std::stoul(match[1].str());
+    } catch (const std::exception &) {
+      reason = "tile_mix_cube_num overflows";
+      return 0U;
+    }
+    if (parsed == 0 || parsed > std::numeric_limits<unsigned>::max()) {
+      reason = "tile_mix_cube_num is outside the supported range";
+      return 0U;
+    }
+    const unsigned current = static_cast<unsigned>(parsed);
+    if (result && *result != current) {
+      reason = "conflicting tile_mix_cube_num values";
+      return 0U;
+    }
+    result = current;
   }
-  return true;
+  return result;
 }
 
-inline bool IsSupportedBodyOperation(const std::string &name,
-                                     LoopKind kind) {
+inline bool IsAllowedBodyOperation(const GenericOperation &operation,
+                                   LoopKind kind) {
   static const std::set<std::string> common = {
       "tensor.empty", "tensor.extract_slice", "memref.subview",
-      "hivm.hir.load", "hivm.hir.store"};
-  if (common.count(name) != 0)
-    return true;
+      "scf.yield"};
+  if (!operation.regions.empty() || common.count(operation.name) != 0)
+    return operation.regions.empty();
   if (kind == LoopKind::Vector)
-    return name == "hivm.hir.vadd";
-  return name == "hivm.hir.mmadL1" || name == "hivm.hir.fixpipe";
+    return operation.name == "hivm.hir.load" ||
+           operation.name == "hivm.hir.vadd" ||
+           operation.name == "hivm.hir.store";
+  return operation.name == "hivm.hir.mmadL1" ||
+         operation.name == "hivm.hir.fixpipe";
 }
 
-inline std::optional<std::string>
-UnsupportedReason(const GenericModule &module, const GenericOperation &loop,
-                  LoopKind kind, int64_t extent) {
-  if (loop.name != "scf.for")
-    return "scope.scope tiling is a real successful pattern but is not modeled";
+inline bool HasUnitIterationDomain(const GenericModule &module,
+                                   const GenericOperation &loop) {
+  if (loop.operands.size() != 3)
+    return false;
+  const GenericOperation *lower = Definition(module, loop.operands[0]);
+  const GenericOperation *upper = Definition(module, loop.operands[1]);
+  const GenericOperation *step = Definition(module, loop.operands[2]);
+  return lower != nullptr && upper != nullptr && step != nullptr &&
+         lower->name == "arith.constant" && upper->name == "arith.constant" &&
+         step->name == "arith.constant" &&
+         IRDictionaryValue(lower->attributes, "value") == "0 : index" &&
+         IRDictionaryValue(upper->attributes, "value") == "1 : index" &&
+         IRDictionaryValue(step->attributes, "value") == "1 : index";
+}
+
+inline bool RecordValueAxis(const GenericModule &module, LoopPlan &plan,
+                            int value, const std::string &typeText, size_t axis,
+                            int64_t extent, std::string &reason) {
+  const auto type = ParseStaticShapedType(typeText);
+  if (!type || axis >= type->shape.size() || type->shape[axis] != extent) {
+    reason = "producer dependency has no provable tiling dimension";
+    return false;
+  }
+  for (size_t index = 0; index < type->shape.size(); ++index)
+    if (index != axis && type->shape[index] == extent) {
+      reason = "producer dependency has repeated equal-size dimensions";
+      return false;
+    }
+  const auto existing = plan.valueAxes.find(value);
+  if (existing != plan.valueAxes.end() && existing->second != axis) {
+    reason = "producer dependency maps one value to conflicting axes";
+    return false;
+  }
+  plan.valueAxes[value] = axis;
+  const GenericOperation *definition = Definition(module, value);
+  if (definition != nullptr && definition->results.size() == 1 &&
+      definition->resultTypes.size() == 1) {
+    const auto defType = ParseStaticShapedType(definition->resultTypes.front());
+    if (!defType || axis >= defType->shape.size() ||
+        defType->shape[axis] != extent) {
+      reason = "producer result type disagrees with its consumer axis";
+      return false;
+    }
+    plan.valueAxes[definition->results.front()] = axis;
+  }
+  return true;
+}
+
+inline bool TypeUsesAxisExactly(const ShapedType &type, int64_t extent,
+                                size_t axis) {
+  size_t occurrences = 0;
+  for (size_t index = 0; index < type.shape.size(); ++index)
+    if (type.shape[index] == extent) {
+      ++occurrences;
+      if (index != axis)
+        return false;
+    }
+  return occurrences == 1;
+}
+
+inline bool CheckVectorValueTypes(const GenericModule &module,
+                                  const GenericOperation &loop,
+                                  int64_t extent, unsigned tripCount,
+                                  int64_t alignBits, std::string &reason,
+                                  bool &alignmentRollback) {
+  alignmentRollback = false;
+  for (int child : DirectChildren(module, loop)) {
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(child));
+    if (operation.name == "scf.yield")
+      continue;
+    for (const std::string *typeText :
+         [&]() {
+           std::vector<const std::string *> types;
+           for (const auto &type : operation.resultTypes) types.push_back(&type);
+           for (const auto &type : operation.operandTypes) types.push_back(&type);
+           return types;
+         }()) {
+      const auto type = ParseStaticShapedType(*typeText);
+      if (!type)
+        continue;
+      if (type->shape.size() != 2 || !TypeUsesAxisExactly(*type, extent, 1)) {
+        reason = "DimensionAnalyzer axis/producer dependency is ambiguous";
+        return false;
+      }
+      ShapedType tiled = *type;
+      tiled.shape[1] = extent / static_cast<int64_t>(tripCount);
+      const auto bits = StaticSizeBits(tiled);
+      if (!bits) {
+        reason = "physical size overflows or has unknown element width";
+        return false;
+      }
+      const int64_t actualAlign = ElementBitWidth(tiled.tail) == 1 ? 8 : alignBits;
+      if (*bits % actualAlign != 0)
+        alignmentRollback = true;
+    }
+  }
+  return true;
+}
+
+inline bool AnalyzeLoop(const GenericModule &module,
+                        const GenericOperation &loop, const TargetSpec &spec,
+                        unsigned vectorTripCount, unsigned cubeTripCount,
+                        LoopPlan &plan, std::string &reason) {
+  const auto kind = CoreLoopKind(loop);
+  if (!kind) {
+    reason = "unrecognized hivm.loop_core_type";
+    return false;
+  }
+  if (loop.name != "scf.for") {
+    reason = "only the proven scf.for tiling form is modeled";
+    return false;
+  }
+  if (!HasUnitIterationDomain(module, loop)) {
+    reason = "the narrow exact model requires the compiler unit-trip wrapper";
+    return false;
+  }
   const std::vector<int> children = DirectChildren(module, loop);
-  if (children.empty())
-    return "loop does not have one supported region and block";
+  if (children.empty()) {
+    reason = "candidate loop must have one region and one block";
+    return false;
+  }
   const GenericOperation &terminator =
       module.operations.at(static_cast<size_t>(children.back()));
   if (terminator.name != "scf.yield" || !terminator.operands.empty() ||
-      !loop.results.empty())
-    return "result-carrying tiled loops are not modeled";
-  if (extent <= 0)
-    return "no statically shaped tiling anchor was found";
-  for (size_t index = 0; index + 1 < children.size(); ++index) {
-    const GenericOperation &operation =
-        module.operations.at(static_cast<size_t>(children[index]));
-    if (!operation.regions.empty())
-      return "nested region producer tiling is not modeled";
-    if (!IsSupportedBodyOperation(operation.name, kind))
-      return "successful producer pattern is not modeled: " + operation.name;
+      !loop.results.empty()) {
+    reason = "result-carrying or malformed candidate loops are not modeled";
+    return false;
   }
-  return std::nullopt;
+  for (int child : children)
+    if (!IsAllowedBodyOperation(module.operations.at(static_cast<size_t>(child)),
+                                *kind)) {
+      reason = "body contains an operation whose tiling effect is not modeled";
+      return false;
+    }
+
+  plan.loopId = loop.id;
+  plan.kind = *kind;
+  plan.tripCount = *kind == LoopKind::Vector ? vectorTripCount : cubeTripCount;
+  bool hasCubeOverride = false;
+  if (*kind == LoopKind::Cube) {
+    const auto override = ParseCubeOverride(module, loop, reason);
+    if (!reason.empty())
+      return false;
+    if (override) {
+      plan.tripCount = *override;
+      hasCubeOverride = true;
+    }
+  }
+  if (plan.tripCount == 1) {
+    plan.skip = true;
+    return true;
+  }
+
+  const std::string anchorName =
+      *kind == LoopKind::Vector ? "hivm.hir.store" : "hivm.hir.fixpipe";
+  std::vector<const GenericOperation *> anchors;
+  for (int child : children) {
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(child));
+    if (operation.name == anchorName)
+      anchors.push_back(&operation);
+  }
+  if (anchors.size() != 1) {
+    if (*kind == LoopKind::Cube && anchors.empty()) {
+      plan.skip = true;
+      return true;
+    }
+    reason = "exactly one tiling anchor is required by the narrow exact model";
+    return false;
+  }
+  if (anchors.front()->operandTypes.empty()) {
+    reason = "tiling anchor has no shaped source";
+    return false;
+  }
+  const auto anchorType = ParseStaticShapedType(anchors.front()->operandTypes.front());
+  if (!anchorType || anchorType->shape.size() != 2 ||
+      anchorType->shape[0] == anchorType->shape[1] ||
+      anchorType->shape[0] <= 0 || anchorType->shape[1] <= 0) {
+    reason = "DimensionAnalyzer tiling axis is not uniquely provable";
+    return false;
+  }
+  plan.extent = anchorType->shape[1];
+  if (plan.extent % static_cast<int64_t>(plan.tripCount) != 0) {
+    reason = "non-divisible tiling requires a dynamic remainder model";
+    return false;
+  }
+
+  if (*kind == LoopKind::Vector) {
+    bool alignmentRollback = false;
+    if (!CheckVectorValueTypes(module, loop, plan.extent, plan.tripCount,
+                               spec.ubAlignBits, reason, alignmentRollback))
+      return false;
+    if (alignmentRollback) {
+      plan.skip = true;
+      return true;
+    }
+    for (int child : children) {
+      const GenericOperation &operation =
+          module.operations.at(static_cast<size_t>(child));
+      for (size_t index = 0; index < operation.results.size(); ++index)
+        if (ParseStaticShapedType(operation.resultTypes[index]) &&
+            !RecordValueAxis(module, plan, operation.results[index],
+                             operation.resultTypes[index], 1, plan.extent,
+                             reason))
+          return false;
+      for (size_t index = 0; index < operation.operands.size(); ++index)
+        if (ParseStaticShapedType(operation.operandTypes[index]) &&
+            !RecordValueAxis(module, plan, operation.operands[index],
+                             operation.operandTypes[index], 1, plan.extent,
+                             reason))
+          return false;
+    }
+  } else {
+    const GenericOperation *mmad =
+        Definition(module, anchors.front()->operands.front());
+    if (mmad == nullptr || !IsAncestor(module, loop.id, mmad->id)) {
+      reason = "fixpipe branch has no in-loop MmadL1 producer";
+      return false;
+    }
+    if (mmad->name != "hivm.hir.mmadL1" || mmad->operands.size() <= 2) {
+      reason = "fixpipe branch has no supported MmadL1 producer";
+      return false;
+    }
+    const GenericOperation *accumulate = Definition(module, mmad->operands[2]);
+    if (accumulate == nullptr || accumulate->name != "arith.constant") {
+      plan.skip = true;
+      return true;
+    }
+    if (mmad->results.size() != 1 || mmad->resultTypes.size() != 1 ||
+        mmad->operands.size() != 4 || mmad->operandTypes.size() != 4 ||
+        anchors.front()->operands.size() < 2 ||
+        anchors.front()->operandTypes.size() < 2) {
+      reason = "MmadL1/fixpipe branch arity is outside the exact model";
+      return false;
+    }
+    if (!RecordValueAxis(module, plan, mmad->results[0], mmad->resultTypes[0], 1,
+                         plan.extent, reason) ||
+        !RecordValueAxis(module, plan, mmad->operands[1], mmad->operandTypes[1],
+                         0, plan.extent, reason) ||
+        !RecordValueAxis(module, plan, mmad->operands[3], mmad->operandTypes[3],
+                         1, plan.extent, reason) ||
+        !RecordValueAxis(module, plan, anchors.front()->operands[1],
+                         anchors.front()->operandTypes[1], 1, plan.extent,
+                         reason))
+      return false;
+    const auto bits = StaticSizeBits(*anchorType);
+    if (!bits) {
+      reason = "L0C branch size overflows or has unknown element width";
+      return false;
+    }
+    if (!hasCubeOverride && *bits <= spec.l0cSizeBits) {
+      plan.skip = true;
+      return true;
+    }
+  }
+  return true;
 }
 
 inline bool RewriteType(std::string &typeText, int64_t extent,
-                        int64_t tileSize) {
+                        int64_t tileSize, size_t axis) {
   auto type = ParseStaticShapedType(typeText);
-  if (!type)
+  if (!type || axis >= type->shape.size() || type->shape[axis] != extent)
     return false;
-  bool changed = false;
-  for (int64_t &dimension : type->shape)
-    if (dimension == extent) {
-      dimension = tileSize;
-      changed = true;
-    }
-  if (changed)
-    typeText = PrintShapedType(*type);
-  return changed;
-}
-
-inline bool HasSingleEligibleSubviewUser(const GenericModule &module,
-                                         int allocationValue) {
-  const GenericOperation *user = nullptr;
-  for (const GenericOperation &operation : module.operations) {
-    const auto uses = static_cast<size_t>(std::count(
-        operation.operands.begin(), operation.operands.end(), allocationValue));
-    if (uses == 0)
-      continue;
-    if (uses != 1 || user != nullptr)
-      return false;
-    user = &operation;
-  }
-  if (user == nullptr || user->name != "memref.subview")
-    return false;
-  const std::vector<int64_t> offsets = ParseIntegerArray(
-      IRDictionaryValue(user->attributes, "static_offsets"));
-  const std::vector<int64_t> strides = ParseIntegerArray(
-      IRDictionaryValue(user->attributes, "static_strides"));
-  return !offsets.empty() && !strides.empty() &&
-         std::all_of(offsets.begin(), offsets.end(),
-                     [](int64_t value) { return value == 0; }) &&
-         std::all_of(strides.begin(), strides.end(),
-                     [](int64_t value) { return value == 1; });
+  type->shape[axis] = tileSize;
+  typeText = PrintShapedType(*type);
+  return true;
 }
 
 inline std::set<int> AffectedOperations(const GenericModule &module,
@@ -298,11 +542,9 @@ inline std::set<int> AffectedOperations(const GenericModule &module,
   std::set<int> affected(children.begin(), children.end() - 1);
   std::vector<int> worklist(affected.begin(), affected.end());
   while (!worklist.empty()) {
-    const int operationId = worklist.back();
+    const int id = worklist.back();
     worklist.pop_back();
-    const GenericOperation &operation =
-        module.operations.at(static_cast<size_t>(operationId));
-    for (int operand : operation.operands) {
+    for (int operand : module.operations.at(static_cast<size_t>(id)).operands) {
       const GenericOperation *definition = Definition(module, operand);
       if (definition == nullptr ||
           (definition->name != "tensor.empty" &&
@@ -316,61 +558,12 @@ inline std::set<int> AffectedOperations(const GenericModule &module,
   return affected;
 }
 
-inline void RewriteTypes(GenericModule &module, const std::set<int> &affected,
-                         int64_t extent, int64_t tileSize) {
-  for (GenericOperation &operation : module.operations) {
-    if (affected.count(operation.id) == 0)
-      continue;
-    const bool eligibleAllocation =
-        operation.name != "memref.alloc" || operation.results.size() != 1 ||
-        HasSingleEligibleSubviewUser(module, operation.results.front());
-    if (eligibleAllocation)
-      for (std::string &type : operation.resultTypes)
-        RewriteType(type, extent, tileSize);
-    for (std::string &type : operation.operandTypes)
-      RewriteType(type, extent, tileSize);
-  }
-}
-
-inline void RewriteSlices(GenericModule &module, const std::set<int> &affected,
-                          int64_t extent, int64_t tileSize,
-                          int dynamicOffset) {
-  constexpr int64_t dynamic = std::numeric_limits<int64_t>::min();
-  for (GenericOperation &operation : module.operations) {
-    if (affected.count(operation.id) == 0)
-      continue;
-    if (operation.name != "tensor.extract_slice" &&
-        operation.name != "memref.subview")
-      continue;
-    std::vector<int64_t> sizes = ParseIntegerArray(
-        IRDictionaryValue(operation.attributes, "static_sizes"));
-    std::vector<int64_t> offsets = ParseIntegerArray(
-        IRDictionaryValue(operation.attributes, "static_offsets"));
-    if (sizes.empty() || offsets.size() != sizes.size())
-      continue;
-    for (size_t index = 0; index < sizes.size(); ++index) {
-      if (sizes[index] != extent)
-        continue;
-      sizes[index] = tileSize;
-      if (operation.name == "tensor.extract_slice") {
-        offsets[index] = dynamic;
-        operation.operands.push_back(dynamicOffset);
-        operation.operandTypes.push_back("index");
-      }
-    }
-    operation.attributes = SetDictionaryValue(
-        operation.attributes, "static_sizes", PrintIntegerArray(sizes));
-    operation.attributes = SetDictionaryValue(
-        operation.attributes, "static_offsets", PrintIntegerArray(offsets));
-  }
-}
-
-inline void ApplyTiling(GenericModule &module, int loopId, int64_t extent,
-                        unsigned tripCount) {
-  const GenericOperation loopSnapshot =
-      module.operations.at(static_cast<size_t>(loopId));
-  const int64_t tileSize = CeilDiv(extent, tripCount);
-  const int outerRegion = loopSnapshot.regions.front();
+inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
+  const GenericOperation snapshot =
+      module.operations.at(static_cast<size_t>(plan.loopId));
+  const int64_t tileSize =
+      plan.extent / static_cast<int64_t>(plan.tripCount);
+  const int outerRegion = snapshot.regions.front();
   const int outerBlock =
       module.regions.at(static_cast<size_t>(outerRegion)).blocks.front();
   const std::vector<int> children =
@@ -380,16 +573,16 @@ inline void ApplyTiling(GenericModule &module, int loopId, int64_t extent,
 
   GenericRewriter rewriter(module);
   const int zero = rewriter.createOperation(
-      loopId, outerRegion, outerBlock, "arith.constant", {"index"}, {}, {},
+      plan.loopId, outerRegion, outerBlock, "arith.constant", {"index"}, {}, {},
       "", "{value = 0 : index}");
   const int upper = rewriter.createOperation(
-      loopId, outerRegion, outerBlock, "arith.constant", {"index"}, {}, {},
-      "", "{value = " + std::to_string(tripCount) + " : index}");
+      plan.loopId, outerRegion, outerBlock, "arith.constant", {"index"}, {}, {},
+      "", "{value = " + std::to_string(plan.tripCount) + " : index}");
   const int step = rewriter.createOperation(
-      loopId, outerRegion, outerBlock, "arith.constant", {"index"}, {}, {},
+      plan.loopId, outerRegion, outerBlock, "arith.constant", {"index"}, {}, {},
       "", "{value = 1 : index}");
   const int innerLoop = rewriter.createOperation(
-      loopId, outerRegion, outerBlock, "scf.for", {},
+      plan.loopId, outerRegion, outerBlock, "scf.for", {},
       {module.operations.at(static_cast<size_t>(zero)).results.front(),
        module.operations.at(static_cast<size_t>(upper)).results.front(),
        module.operations.at(static_cast<size_t>(step)).results.front()},
@@ -399,9 +592,9 @@ inline void ApplyTiling(GenericModule &module, int loopId, int64_t extent,
   const int innerIV =
       module.blocks.at(static_cast<size_t>(innerBlock)).arguments.front();
   const int offset = rewriter.createOperation(
-      innerLoop, innerRegion, innerBlock, "affine.apply", {"index"},
-      {innerIV}, {"index"}, "",
-      "{map = affine_map<(d0) -> (d0 * " + std::to_string(tileSize) + ")>}");
+      innerLoop, innerRegion, innerBlock, "affine.apply", {"index"}, {innerIV},
+      {"index"}, "", "{map = affine_map<(d0) -> (d0 * " +
+                              std::to_string(tileSize) + ")>}");
   rewriter.appendToBlock(innerBlock, offset);
 
   for (size_t index = 0; index + 1 < children.size(); ++index) {
@@ -417,30 +610,119 @@ inline void ApplyTiling(GenericModule &module, int loopId, int64_t extent,
       innerLoop, innerRegion, innerBlock, "scf.yield", {});
   rewriter.appendToBlock(innerBlock, innerYield);
 
-  const auto terminatorPosition = [&]() {
-    const auto &operations =
-        module.blocks.at(static_cast<size_t>(outerBlock)).operations;
-    return static_cast<size_t>(std::distance(
-        operations.begin(),
-        std::find(operations.begin(), operations.end(), terminator)));
-  };
-  size_t position = terminatorPosition();
+  const auto &outerOperations =
+      module.blocks.at(static_cast<size_t>(outerBlock)).operations;
+  const auto found =
+      std::find(outerOperations.begin(), outerOperations.end(), terminator);
+  size_t position =
+      static_cast<size_t>(std::distance(outerOperations.begin(), found));
   rewriter.insertToBlock(outerBlock, position++, zero);
   rewriter.insertToBlock(outerBlock, position++, upper);
   rewriter.insertToBlock(outerBlock, position++, step);
   rewriter.insertToBlock(outerBlock, position, innerLoop);
 
-  RewriteTypes(module, affected, extent, tileSize);
-  RewriteSlices(
-      module, affected, extent, tileSize,
-      module.operations.at(static_cast<size_t>(offset)).results.front());
+  for (GenericOperation &operation : module.operations) {
+    if (affected.count(operation.id) == 0)
+      continue;
+    for (size_t index = 0; index < operation.resultTypes.size(); ++index) {
+      const auto axis = plan.valueAxes.find(operation.results[index]);
+      if (axis != plan.valueAxes.end())
+        RewriteType(operation.resultTypes[index], plan.extent, tileSize,
+                    axis->second);
+    }
+    for (size_t index = 0; index < operation.operandTypes.size(); ++index) {
+      const auto axis = plan.valueAxes.find(operation.operands[index]);
+      if (axis != plan.valueAxes.end())
+        RewriteType(operation.operandTypes[index], plan.extent, tileSize,
+                    axis->second);
+    }
+    if (operation.name != "tensor.extract_slice" &&
+        operation.name != "memref.subview")
+      continue;
+    auto sizes = ParseIntegerArray(
+        IRDictionaryValue(operation.attributes, "static_sizes"));
+    auto offsets = ParseIntegerArray(
+        IRDictionaryValue(operation.attributes, "static_offsets"));
+    auto strides = ParseIntegerArray(
+        IRDictionaryValue(operation.attributes, "static_strides"));
+    if (operation.results.empty())
+      throw std::runtime_error("slice/subview has no result");
+    const auto axisEntry = plan.valueAxes.find(operation.results.front());
+    if (axisEntry == plan.valueAxes.end())
+      continue;
+    const size_t axis = axisEntry->second;
+    if (sizes.size() != offsets.size() || offsets.size() != strides.size() ||
+        axis >= sizes.size() || sizes[axis] != plan.extent ||
+        offsets[axis] != 0 || strides[axis] != 1)
+      throw std::runtime_error("slice/subview does not match proven static form");
+    sizes[axis] = tileSize;
+    if (operation.name == "tensor.extract_slice") {
+      offsets[axis] = std::numeric_limits<int64_t>::min();
+      operation.operands.push_back(
+          module.operations.at(static_cast<size_t>(offset)).results.front());
+      operation.operandTypes.push_back("index");
+    }
+    operation.attributes = SetDictionaryValue(
+        operation.attributes, "static_sizes", PrintIntegerArray(sizes));
+    operation.attributes = SetDictionaryValue(
+        operation.attributes, "static_offsets", PrintIntegerArray(offsets));
+  }
 }
 
-inline void AddDiagnostic(StageResult &result, const GenericOperation &loop,
+inline bool IsZeroUnitSubview(const GenericOperation &subview) {
+  const auto offsets =
+      ParseIntegerArray(IRDictionaryValue(subview.attributes, "static_offsets"));
+  const auto strides =
+      ParseIntegerArray(IRDictionaryValue(subview.attributes, "static_strides"));
+  return !offsets.empty() && offsets.size() == strides.size() &&
+         std::all_of(offsets.begin(), offsets.end(),
+                     [](int64_t value) { return value == 0; }) &&
+         std::all_of(strides.begin(), strides.end(),
+                     [](int64_t value) { return value == 1; });
+}
+
+inline void ShrinkAllocWholeModule(GenericModule &module) {
+  std::vector<int> erase;
+  for (GenericOperation &alloc : module.operations) {
+    if (alloc.name != "memref.alloc" || alloc.results.size() != 1 ||
+        alloc.resultTypes.size() != 1)
+      continue;
+    const auto users = Users(module, alloc.results.front());
+    if (users.size() != 1 || users.front()->name != "memref.subview" ||
+        users.front()->results.size() != 1 ||
+        users.front()->resultTypes.size() != 1 ||
+        !alloc.operands.empty() || !IsZeroUnitSubview(*users.front()))
+      continue;
+    const auto sizes = ParseIntegerArray(
+        IRDictionaryValue(users.front()->attributes, "static_sizes"));
+    if (sizes.empty() ||
+        std::any_of(sizes.begin(), sizes.end(),
+                    [](int64_t value) { return value < 0; }))
+      continue;
+    const int replacement = alloc.results.front();
+    const int oldSubview = users.front()->results.front();
+    const int subviewId = users.front()->id;
+    const int parentId = users.front()->parentId;
+    const int regionId = users.front()->regionId;
+    const int blockId = users.front()->blockId;
+    alloc.resultTypes.front() = users.front()->resultTypes.front();
+    ReplaceAllUses(module, oldSubview, replacement);
+    MoveOperationBefore(module, alloc.id, subviewId);
+    alloc.parentId = parentId;
+    alloc.regionId = regionId;
+    alloc.blockId = blockId;
+    erase.push_back(subviewId);
+  }
+  for (int operation : erase)
+    EraseOperationTree(module, operation);
+}
+
+inline void AddDiagnostic(StageResult &result, int operationId,
+                          const std::string &operation,
                           const std::string &reason) {
   result.precision = Precision::Incomplete;
-  result.diagnostics.push_back({"TileCubeVectorLoop", "", loop.id,
-                                loop.name, reason});
+  result.diagnostics.push_back(
+      {"TileCubeVectorLoop", "", operationId, operation, reason});
 }
 
 } // namespace tile_cube_vector_loop_detail
@@ -450,73 +732,65 @@ inline StageResult RunTileCubeVectorLoop(GenericModule module,
                                          unsigned cubeTripCount) {
   using namespace tile_cube_vector_loop_detail;
   StageResult result;
-  result.module = std::move(module);
+  result.module = module;
   if (vectorTripCount == 0 || cubeTripCount == 0) {
-    result.precision = Precision::Incomplete;
-    result.diagnostics.push_back({"TileCubeVectorLoop", "", -1, "",
-                                  "trip count must be greater than zero"});
+    AddDiagnostic(result, -1, "", "trip count must be greater than zero");
     return result;
   }
-
-  const size_t originalOperationCount = result.module.operations.size();
-  bool transformed = false;
-  for (size_t index = 0; index < originalOperationCount; ++index) {
-    const GenericOperation snapshot = result.module.operations[index];
-    const auto kind = CoreLoopKind(snapshot);
-    if (!kind)
-      continue;
-    const unsigned tripCount = *kind == LoopKind::Vector ? vectorTripCount
-                                                         : cubeTripCount;
-    if (tripCount == 1)
-      continue;
-    try {
-      const auto extent = CandidateExtent(result.module, snapshot, *kind);
-      if (!extent) {
-        AddDiagnostic(result, snapshot,
-                      "dynamic or non-static tiling anchor is not modeled");
-        continue;
-      }
-      if (*extent > 0 && !PhysicalSizesAreChecked(
-                             result.module, snapshot, *extent, tripCount)) {
-        AddDiagnostic(result, snapshot,
-                      "physical size is unresolved or overflows int64");
-        continue;
-      }
-      if (*kind == LoopKind::Vector && *extent > 0 &&
-          IsKnownVectorRollback(result.module, snapshot, *extent, tripCount))
-        continue;
-      if (*kind == LoopKind::Cube &&
-          IsKnownCubeSkip(result.module, snapshot, *extent))
-        continue;
-      if (const auto reason =
-              UnsupportedReason(result.module, snapshot, *kind, *extent)) {
-        AddDiagnostic(result, snapshot, *reason);
-        continue;
-      }
-
-      GenericModule candidate = result.module;
-      ApplyTiling(candidate, snapshot.id, *extent, tripCount);
-      ValidateGenericModule(candidate);
-      result.module = std::move(candidate);
-      transformed = true;
-    } catch (const std::exception &error) {
-      AddDiagnostic(result, snapshot,
-                    "analysis or transactional rewrite was not modeled exactly: " +
-                        std::string(error.what()));
-    }
+  const auto spec = ReadTargetSpec(module);
+  if (!spec) {
+    AddDiagnostic(result, -1, "", "required NPU target spec is missing");
+    return result;
   }
-  if (transformed) {
-    try {
-      GenericModule compacted = CompactGenericModule(result.module);
-      ValidateGenericModule(compacted);
-      result.module = std::move(compacted);
-    } catch (const std::exception &error) {
-      result.precision = Precision::Incomplete;
-      result.diagnostics.push_back(
-          {"TileCubeVectorLoop", "", -1, "",
-           "final compaction was not modeled exactly: " +
-               std::string(error.what())});
+  std::vector<int> candidates;
+  for (const GenericOperation &operation : module.operations)
+    if (HasLoopCoreAttribute(operation))
+      candidates.push_back(operation.id);
+  if (candidates.empty())
+    return result;
+  if (HasUnmodeledLiftPattern(module)) {
+    AddDiagnostic(result, -1, "",
+                  "liftMemRefLoadsInLoop preprocessing would change the module");
+    return result;
+  }
+  for (size_t left = 0; left < candidates.size(); ++left)
+    for (size_t right = left + 1; right < candidates.size(); ++right)
+      if (IsAncestor(module, candidates[left], candidates[right]) ||
+          IsAncestor(module, candidates[right], candidates[left])) {
+        AddDiagnostic(result, candidates[right],
+                      module.operations.at(static_cast<size_t>(candidates[right]))
+                          .name,
+                      "nested marked candidate loops are not modeled");
+        return result;
+      }
+
+  std::vector<LoopPlan> plans;
+  for (int candidate : candidates) {
+    const GenericOperation &loop =
+        module.operations.at(static_cast<size_t>(candidate));
+    LoopPlan plan;
+    std::string reason;
+    if (!AnalyzeLoop(module, loop, *spec, vectorTripCount, cubeTripCount, plan,
+                     reason)) {
+      AddDiagnostic(result, loop.id, loop.name, reason);
+      return result;
     }
+    plans.push_back(plan);
+  }
+
+  try {
+    GenericModule transformed = module;
+    for (const LoopPlan &plan : plans)
+      if (!plan.skip)
+        ApplyTiling(transformed, plan);
+    ShrinkAllocWholeModule(transformed);
+    transformed = CompactGenericModule(std::move(transformed));
+    ValidateGenericModule(transformed);
+    result.module = std::move(transformed);
+  } catch (const std::exception &error) {
+    result.module = std::move(module);
+    AddDiagnostic(result, -1, "",
+                  "transactional modeling failed: " + std::string(error.what()));
   }
   return result;
 }

@@ -117,6 +117,45 @@ size_t OperationCount(const cvub::GenericModule &module,
       }));
 }
 
+cvub::GenericOperation &MutableOperationNamed(cvub::GenericModule &module,
+                                              const std::string &name,
+                                              size_t occurrence = 0) {
+  for (cvub::GenericOperation &operation : module.operations)
+    if (operation.name == name && occurrence-- == 0)
+      return operation;
+  throw std::runtime_error("missing mutable operation: " + name);
+}
+
+void ExpectTileIncompleteAndUnchanged(const cvub::GenericModule &module,
+                                      unsigned vectorTrips = 2,
+                                      unsigned cubeTrips = 2) {
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result =
+      cvub::RunTileCubeVectorLoop(module, vectorTrips, cubeTrips);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+  CVUB_CHECK(!result.diagnostics.empty());
+}
+
+void DuplicateAnchorBeforeYield(cvub::GenericModule &module,
+                                const std::string &anchorName) {
+  const cvub::GenericOperation anchor =
+      MutableOperationNamed(module, anchorName);
+  const cvub::GenericOperation yield = MutableOperationNamed(module, "scf.yield");
+  cvub::GenericRewriter rewriter(module);
+  const int duplicate = rewriter.createOperation(
+      anchor.parentId, anchor.regionId, anchor.blockId, anchor.name, {},
+      anchor.operands, anchor.operandTypes, anchor.properties,
+      anchor.attributes);
+  const auto &operations =
+      module.blocks.at(static_cast<size_t>(anchor.blockId)).operations;
+  const auto position = static_cast<size_t>(std::distance(
+      operations.begin(),
+      std::find(operations.begin(), operations.end(), yield.id)));
+  rewriter.insertToBlock(anchor.blockId, position, duplicate);
+  cvub::ValidateGenericModule(module);
+}
+
 bool HasMarkOfCase(const cvub::GenericModule &module,
                    const std::string &caseName) {
   const int source = OperationWithCase(module, caseName).results.front();
@@ -177,13 +216,16 @@ CVUB_TEST(default_cube_tiling_uses_ceil_div_and_fuses_mmad) {
   CVUB_CHECK_EQ(OperationNamed(result.module, "hivm.hir.mmadL1").resultTypes,
                 std::vector<std::string>({"tensor<128x2048xf32>"}));
   const auto &mmad = OperationNamed(result.module, "hivm.hir.mmadL1");
+  const auto &rhs = DefinitionOf(result.module, mmad.operands[1]);
+  CVUB_CHECK_EQ(rhs.resultTypes,
+                std::vector<std::string>({"tensor<2048x64xf16>"}));
   CVUB_CHECK_EQ(result.module.operations.at(static_cast<size_t>(mmad.parentId))
                     .name,
                 "scf.for");
   cvub::ValidateGenericModule(result.module);
 }
 
-CVUB_TEST(vector_alignment_rollback_is_byte_equivalent) {
+CVUB_TEST(vector_alignment_rollback_still_runs_global_shrink) {
   auto module = cvub::test::ParseFixture("tile_vector_loop.mlir");
   for (cvub::GenericOperation &operation : module.operations) {
     for (std::string &type : operation.resultTypes)
@@ -192,11 +234,16 @@ CVUB_TEST(vector_alignment_rollback_is_byte_equivalent) {
     for (std::string &type : operation.operandTypes)
       if (type == "tensor<1x128xf16>")
         type = "tensor<1x130xf16>";
+      else if (type == "memref<1x128xf16>")
+        type = "memref<1x130xf16>";
+    for (std::string &type : operation.resultTypes)
+      if (type == "memref<1x128xf16>")
+        type = "memref<1x130xf16>";
   }
-  const std::string before = cvub::SerializeGenericModule(module);
   const auto result = cvub::RunTileCubeVectorLoop(module, 2, 2);
   CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
-  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+  CVUB_CHECK_EQ(OperationCount(result.module, "scf.for"), 1U);
+  CVUB_CHECK_EQ(OperationCount(result.module, "memref.subview"), 0U);
 }
 
 CVUB_TEST(unimplemented_successful_loop_pattern_is_incomplete_and_unchanged) {
@@ -218,6 +265,174 @@ CVUB_TEST(unimplemented_successful_loop_pattern_is_incomplete_and_unchanged) {
   CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
   CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
   CVUB_CHECK(!result.diagnostics.empty());
+}
+
+CVUB_TEST(tile_model_fails_closed_for_ambiguous_axis_and_branch_shapes) {
+  auto nonLast = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  for (auto &operation : nonLast.operations) {
+    for (std::string &type : operation.resultTypes)
+      if (type == "tensor<1x128xf16>") type = "tensor<128x1xf16>";
+    for (std::string &type : operation.operandTypes)
+      if (type == "tensor<1x128xf16>") type = "tensor<128x1xf16>";
+  }
+  ExpectTileIncompleteAndUnchanged(nonLast);
+
+  auto repeated = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  for (auto &operation : repeated.operations) {
+    for (std::string &type : operation.resultTypes)
+      if (type == "tensor<1x128xf16>") type = "tensor<128x128xf16>";
+    for (std::string &type : operation.operandTypes)
+      if (type == "tensor<1x128xf16>") type = "tensor<128x128xf16>";
+  }
+  ExpectTileIncompleteAndUnchanged(repeated);
+}
+
+CVUB_TEST(tile_model_fails_closed_for_multiple_anchors_and_unknown_body_ops) {
+  auto multiStore = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  DuplicateAnchorBeforeYield(multiStore, "hivm.hir.store");
+  ExpectTileIncompleteAndUnchanged(multiStore);
+
+  auto unknown = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  MutableOperationNamed(unknown, "hivm.hir.vadd").name = "test.unrelated";
+  ExpectTileIncompleteAndUnchanged(unknown);
+
+  auto multiFixpipe = cvub::test::ParseFixture("tile_cube_loop.mlir");
+  DuplicateAnchorBeforeYield(multiFixpipe, "hivm.hir.fixpipe");
+  ExpectTileIncompleteAndUnchanged(multiFixpipe);
+}
+
+CVUB_TEST(tile_model_fails_closed_for_remainder_alignment_and_overflow) {
+  auto remainder = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  for (auto &operation : remainder.operations) {
+    for (std::string &type : operation.resultTypes)
+      if (type == "tensor<1x128xf16>") type = "tensor<1x129xf16>";
+    for (std::string &type : operation.operandTypes)
+      if (type == "tensor<1x128xf16>") type = "tensor<1x129xf16>";
+  }
+  ExpectTileIncompleteAndUnchanged(remainder);
+
+  auto operandAlignment = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  auto &vadd = MutableOperationNamed(operandAlignment, "hivm.hir.vadd");
+  vadd.operandTypes.front() = "tensor<1x2xi8>";
+  ExpectTileIncompleteAndUnchanged(operandAlignment);
+
+  auto overflow = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  auto &sum = MutableOperationNamed(overflow, "hivm.hir.vadd");
+  sum.resultTypes.front() = "tensor<9223372036854775807x128xf16>";
+  ExpectTileIncompleteAndUnchanged(overflow);
+}
+
+CVUB_TEST(tile_model_handles_trip_one_and_global_shrink_after_skip) {
+  auto module = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  const auto result = cvub::RunTileCubeVectorLoop(module, 1, 1);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(OperationCount(result.module, "memref.subview"), 0U);
+  CVUB_CHECK_EQ(OperationNamed(result.module, "memref.alloc").resultTypes,
+                std::vector<std::string>({"memref<1x128xf16>"}));
+}
+
+CVUB_TEST(tile_model_without_candidates_matches_real_early_return) {
+  auto module = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  auto &loop = MutableOperationNamed(module, "scf.for");
+  loop.attributes = "{}";
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result = cvub::RunTileCubeVectorLoop(module, 2, 2);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+}
+
+CVUB_TEST(tile_model_fails_closed_for_lift_nested_and_missing_spec) {
+  auto lift = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  auto &load = MutableOperationNamed(lift, "hivm.hir.load");
+  load.operandTypes.back() = "memref<1x128xf16>";
+  ExpectTileIncompleteAndUnchanged(lift);
+
+  auto nested = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  auto &innerCandidate = MutableOperationNamed(nested, "hivm.hir.vadd");
+  innerCandidate.attributes = cvub::SetDictionaryValue(
+      innerCandidate.attributes, "hivm.loop_core_type",
+      "#hivm.tcore_type<VECTOR>");
+  ExpectTileIncompleteAndUnchanged(nested);
+
+  auto missingSpec = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  missingSpec.operations.front().attributes = "{}";
+  ExpectTileIncompleteAndUnchanged(missingSpec);
+}
+
+CVUB_TEST(tile_model_isolates_and_tiles_multiple_functions) {
+  const auto result = cvub::RunTileCubeVectorLoop(
+      cvub::test::ParseFixture("tile_two_functions.mlir"), 2, 2);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(OperationCount(result.module, "scf.for"), 4U);
+  CVUB_CHECK_EQ(cvub::FunctionSymbolNames(result.module),
+                std::vector<std::string>({"first", "second"}));
+  cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(tile_model_handles_cube_no_branch_l0c_skip_and_override) {
+  auto noBranch = cvub::test::ParseFixture("tile_cube_no_branch.mlir");
+  const auto noBranchResult = cvub::RunTileCubeVectorLoop(noBranch, 2, 2);
+  CVUB_CHECK_EQ(noBranchResult.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(OperationCount(noBranchResult.module, "scf.for"), 1U);
+
+  auto l0cSkip = cvub::test::ParseFixture("tile_cube_loop.mlir");
+  for (auto &operation : l0cSkip.operations) {
+    for (std::string &type : operation.resultTypes) {
+      if (type == "tensor<128x64xf16>") type = "tensor<64x64xf16>";
+      if (type == "tensor<128x4096xf32>") type = "tensor<64x128xf32>";
+      if (type == "memref<128x4096xf32>") type = "memref<64x128xf32>";
+      if (type == "tensor<4096x64xf16>") type = "tensor<128x64xf16>";
+    }
+    for (std::string &type : operation.operandTypes) {
+      if (type == "tensor<128x64xf16>") type = "tensor<64x64xf16>";
+      if (type == "tensor<128x4096xf32>") type = "tensor<64x128xf32>";
+      if (type == "memref<128x4096xf32>") type = "memref<64x128xf32>";
+      if (type == "tensor<4096x64xf16>") type = "tensor<128x64xf16>";
+    }
+  }
+  auto &smallSubview = MutableOperationNamed(l0cSkip, "memref.subview");
+  smallSubview.attributes = cvub::SetDictionaryValue(
+      smallSubview.attributes, "static_sizes", "[64, 128]");
+  const auto skipResult = cvub::RunTileCubeVectorLoop(l0cSkip, 2, 2);
+  CVUB_CHECK_EQ(skipResult.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(OperationCount(skipResult.module, "scf.for"), 1U);
+
+  auto overrideModule = l0cSkip;
+  auto &overrideMmad = MutableOperationNamed(overrideModule, "hivm.hir.mmadL1");
+  overrideMmad.attributes = cvub::SetDictionaryValue(
+      overrideMmad.attributes, "hivm.tile_mix_cube_num", "2 : i64");
+  const auto overrideResult =
+      cvub::RunTileCubeVectorLoop(overrideModule, 2, 7);
+  CVUB_CHECK_EQ(overrideResult.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(OperationCount(overrideResult.module, "scf.for"), 2U);
+}
+
+CVUB_TEST(tile_model_rejects_dynamic_subview_transactionally) {
+  auto module = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  auto &subview = MutableOperationNamed(module, "memref.subview");
+  subview.attributes = cvub::SetDictionaryValue(
+      subview.attributes, "static_offsets", "[0, -9223372036854775808]");
+  ExpectTileIncompleteAndUnchanged(module);
+}
+
+CVUB_TEST(tile_model_fails_closed_for_bad_cube_override_and_misplaced_marker) {
+  auto badOverride = cvub::test::ParseFixture("tile_cube_loop.mlir");
+  auto &mmad = MutableOperationNamed(badOverride, "hivm.hir.mmadL1");
+  mmad.attributes = cvub::SetDictionaryValue(
+      mmad.attributes, "hivm.tile_mix_cube_num", "0 : i64");
+  ExpectTileIncompleteAndUnchanged(badOverride);
+
+  auto misplacedMarker = cvub::test::ParseFixture("tile_vector_loop.mlir");
+  MutableOperationNamed(misplacedMarker, "func.return").attributes =
+      cvub::SetDictionaryValue(MutableOperationNamed(misplacedMarker,
+                                                     "func.return").attributes,
+                               "test.second_function_boundary", "true");
+  MutableOperationNamed(misplacedMarker, "func.return").attributes =
+      cvub::SetDictionaryValue(MutableOperationNamed(misplacedMarker,
+                                                     "func.return").attributes,
+                               "hivm.loop_core_type",
+                               "#hivm.tcore_type<VECTOR>");
+  ExpectTileIncompleteAndUnchanged(misplacedMarker);
 }
 
 CVUB_TEST(split_mix_keeps_vector_and_workspace_boundary) {
