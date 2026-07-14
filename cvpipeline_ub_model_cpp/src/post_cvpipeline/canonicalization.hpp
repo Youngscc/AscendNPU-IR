@@ -32,23 +32,319 @@ inline bool HasAttachedUsers(const GenericModule &module, int value,
   return false;
 }
 
-inline bool HasNonErasableTensorEmptyUser(const GenericModule &module,
-                                          int value) {
-  for (const GenericOperation &operation : module.operations) {
-    const bool uses =
-        std::find(operation.operands.begin(), operation.operands.end(), value) !=
-            operation.operands.end() ||
-        std::find(operation.dpsInputs.begin(), operation.dpsInputs.end(), value) !=
-            operation.dpsInputs.end() ||
-        std::find(operation.dpsInits.begin(), operation.dpsInits.end(), value) !=
-            operation.dpsInits.end();
-    if (!uses)
-      continue;
-    // The targeted model removes an attribute-free mark and then the dead
-    // tensor.empty at the fixed point.  Every other live empty participates
-    // in upstream tensor/HIVM canonicalization that can change ownership.
-    if (operation.name != "annotation.mark" || operation.attributes != "{}")
+inline std::vector<int64_t> CanonicalizationI64Array(std::string text) {
+  text = trim(std::move(text));
+  if (startsWith(text, "array<i64:"))
+    text = "[" + text.substr(10, text.size() - 11) + "]";
+  if (text.size() < 2 || text.front() != '[' || text.back() != ']')
+    return {};
+  std::vector<int64_t> values;
+  try {
+    for (const std::string &entry :
+         splitTopLevel(text.substr(1, text.size() - 2)))
+      values.push_back(std::stoll(trim(entry)));
+  } catch (const std::exception &) {
+    return {};
+  }
+  return values;
+}
+
+inline std::vector<int64_t> CanonicalizationStaticShape(
+    const std::string &type) {
+  const size_t open = type.find('<');
+  const size_t close = type.rfind('>');
+  if (open == std::string::npos || close == std::string::npos || close <= open)
+    return {};
+  const std::string shaped = splitTopLevel(
+      type.substr(open + 1, close - open - 1)).front();
+  static const std::regex element(R"((?:bf16|[fiu][0-9]+)$)");
+  const std::string dimensions = std::regex_replace(shaped, element, "");
+  if (dimensions.empty())
+    return {};
+  std::vector<int64_t> shape;
+  try {
+    for (std::string dimension : split(dimensions, 'x')) {
+      dimension = trim(std::move(dimension));
+      if (dimension.empty())
+        continue;
+      if (dimension == "?")
+        shape.push_back(-1);
+      else
+        shape.push_back(std::stoll(dimension));
+    }
+  } catch (const std::exception &) {
+    return {};
+  }
+  return shape;
+}
+
+inline std::string CanonicalizationProperty(const GenericOperation &operation,
+                                            const std::string &name) {
+  std::string value = IRDictionaryValue(operation.properties, name);
+  return value.empty() ? IRDictionaryValue(operation.attributes, name) : value;
+}
+
+inline bool HasUnusedResults(const GenericModule &module,
+                             const GenericOperation &operation) {
+  return !operation.results.empty() &&
+         std::all_of(operation.results.begin(), operation.results.end(),
+                     [&](int value) { return !HasAttachedUsers(module, value); });
+}
+
+inline const std::vector<int> &CanonicalizationInputs(
+    const GenericOperation &operation) {
+  return operation.dpsInputs.empty() ? operation.operands
+                                     : operation.dpsInputs;
+}
+
+inline bool DimensionListDropsUnitExtent(const GenericOperation &operation,
+                                         const std::string &property) {
+  if (operation.operandTypes.empty())
+    return false;
+  const std::vector<int64_t> shape =
+      CanonicalizationStaticShape(operation.operandTypes.front());
+  const std::vector<int64_t> dimensions = CanonicalizationI64Array(
+      CanonicalizationProperty(operation, property));
+  for (int64_t dimension : dimensions)
+    if (dimension >= 0 && static_cast<size_t>(dimension) < shape.size() &&
+        shape[static_cast<size_t>(dimension)] == 1)
       return true;
+  return false;
+}
+
+inline bool ApplicableHIVMCanonicalization(const GenericModule &module,
+                                           const GenericOperation &operation) {
+  const std::vector<int> &inputs = CanonicalizationInputs(operation);
+  if (operation.name == "hivm.hir.vpow") {
+    if (inputs.size() < 2)
+      return false;
+    const GenericOperation *exponent =
+        DefinitionForBufferSize(module, inputs[1]);
+    if (exponent == nullptr || exponent->name != "arith.constant")
+      return false;
+    if (exponent->resultTypes.empty() ||
+        (exponent->resultTypes.front() != "f16" &&
+         exponent->resultTypes.front() != "f32" &&
+         exponent->resultTypes.front() != "f64" &&
+         exponent->resultTypes.front() != "bf16"))
+      return false;
+    std::string value = IRDictionaryValue(exponent->attributes, "value");
+    const size_t colon = value.find(':');
+    if (colon != std::string::npos)
+      value = value.substr(0, colon);
+    try {
+      const double number = std::stod(trim(value));
+      return number == 0.0 || number == 0.5 || number == 1.0 ||
+             number == 2.0 || number == 3.0;
+    } catch (const std::exception &) {
+      return false;
+    }
+  }
+  if (operation.name == "hivm.hir.vreduce") {
+    if (DimensionListDropsUnitExtent(operation, "reduce_dims"))
+      return true;
+    for (int init : operation.dpsInits) {
+      const GenericOperation *definition = DefinitionForBufferSize(module, init);
+      if (definition != nullptr && definition->name == "hivm.hir.vbrc" &&
+          !CanonicalizationInputs(*definition).empty()) {
+        const GenericOperation *constant = DefinitionForBufferSize(
+            module, CanonicalizationInputs(*definition).front());
+        if (constant != nullptr && constant->name == "arith.constant")
+          return true;
+      }
+    }
+    return false;
+  }
+  if (operation.name == "hivm.hir.vcumsum" ||
+      operation.name == "hivm.hir.vcumprod")
+    return DimensionListDropsUnitExtent(operation, "cum_dims");
+  if (operation.name == "hivm.hir.vtranspose") {
+    if (HasUnusedResults(module, operation))
+      return true;
+    const std::vector<int64_t> permutation = CanonicalizationI64Array(
+        CanonicalizationProperty(operation, "permutation"));
+    bool identity = !permutation.empty();
+    for (size_t index = 0; index < permutation.size(); ++index)
+      identity = identity && permutation[index] == static_cast<int64_t>(index);
+    if (identity)
+      return true;
+    if (inputs.empty() || permutation.empty())
+      return false;
+    std::vector<int64_t> simulated(permutation.size());
+    for (size_t index = 0; index < simulated.size(); ++index)
+      simulated[index] = static_cast<int64_t>(index);
+    auto applyPermutation = [](const std::vector<int64_t> &input,
+                               const std::vector<int64_t> &current) {
+      if (input.size() != current.size())
+        return std::vector<int64_t>{};
+      std::vector<int64_t> output(current.size(), -1);
+      for (size_t index = 0; index < current.size(); ++index) {
+        if (current[index] < 0 ||
+            static_cast<size_t>(current[index]) >= output.size())
+          return std::vector<int64_t>{};
+        output[static_cast<size_t>(current[index])] = input[index];
+      }
+      return output;
+    };
+    const std::vector<int64_t> base = simulated;
+    const GenericOperation *current = &operation;
+    std::set<int> visited;
+    while (current != nullptr && current->name == "hivm.hir.vtranspose" &&
+           visited.insert(current->id).second) {
+      const std::vector<int64_t> currentPermutation = CanonicalizationI64Array(
+          CanonicalizationProperty(*current, "permutation"));
+      simulated = applyPermutation(simulated, currentPermutation);
+      if (simulated.empty())
+        return false;
+      if (simulated == base)
+        return true;
+      const std::vector<int> &currentInputs = CanonicalizationInputs(*current);
+      current = currentInputs.empty()
+                    ? nullptr
+                    : DefinitionForBufferSize(module, currentInputs.front());
+    }
+    return false;
+  }
+  if (operation.name == "hivm.hir.vpad") {
+    if (inputs.empty() || operation.resultTypes.empty())
+      return false;
+    const GenericOperation *source = DefinitionForBufferSize(module, inputs.front());
+    return source != nullptr && source->name == "hivm.hir.load" &&
+           CanonicalizationProperty(*source, "pad_mode").empty() &&
+           CanonicalizationStaticShape(operation.resultTypes.front()).size() == 1;
+  }
+  if (operation.name == "hivm.hir.debug") {
+    if (CanonicalizationProperty(operation, "debugtype") != "\"assert\"" ||
+        inputs.empty())
+      return false;
+    const GenericOperation *condition = DefinitionForBufferSize(module, inputs.front());
+    return condition != nullptr && condition->name == "arith.constant" &&
+           !condition->resultTypes.empty() && condition->resultTypes.front() == "i1" &&
+           ParseIntegerAttribute(
+               IRDictionaryValue(condition->attributes, "value")) == 1;
+  }
+  if (operation.name == "hivm.hir.vbrc")
+    return DimensionListDropsUnitExtent(operation, "broadcast_dims");
+  return false;
+}
+
+inline bool ApplicableInlineBroadcastCanonicalization(
+    const GenericOperation &operation) {
+  static const std::set<std::string> broadcastable = {
+      "hivm.hir.vexp", "hivm.hir.vabs", "hivm.hir.vln",
+      "hivm.hir.vrelu", "hivm.hir.vrsqrt", "hivm.hir.vsqrt",
+      "hivm.hir.vrec", "hivm.hir.vnot", "hivm.hir.vcast",
+      "hivm.hir.vadd", "hivm.hir.vmul", "hivm.hir.vsub",
+      "hivm.hir.vdiv", "hivm.hir.vmax", "hivm.hir.vmin",
+      "hivm.hir.vor", "hivm.hir.vand", "hivm.hir.vshl",
+      "hivm.hir.vshr", "hivm.hir.vsel"};
+  if (broadcastable.count(operation.name) == 0)
+    return false;
+  std::string raw = CanonicalizationProperty(operation, "broadcast_dims");
+  if (raw.empty())
+    raw = CanonicalizationProperty(operation, "broadcast");
+  const std::vector<int64_t> dimensions = CanonicalizationI64Array(raw);
+  if (dimensions.empty())
+    return false;
+  std::vector<std::string> types = operation.operandTypes;
+  types.insert(types.end(), operation.resultTypes.begin(),
+               operation.resultTypes.end());
+  for (int64_t dimension : dimensions) {
+    std::optional<int64_t> extent;
+    bool allSame = true;
+    for (const std::string &type : types) {
+      const std::vector<int64_t> shape = CanonicalizationStaticShape(type);
+      if (dimension < 0 || static_cast<size_t>(dimension) >= shape.size())
+        continue;
+      const int64_t current = shape[static_cast<size_t>(dimension)];
+      if (current < 0 || (extent && *extent != current)) {
+        allSame = false;
+        break;
+      }
+      extent = current;
+    }
+    if (allSame && extent.has_value())
+      return true;
+  }
+  return false;
+}
+
+inline bool ApplicableHIVMMemRefCastFold(const GenericModule &module,
+                                         const GenericOperation &operation) {
+  if (operation.name != "hivm.hir.copy" &&
+      operation.name != "hivm.hir.load" &&
+      operation.name != "hivm.hir.store")
+    return false;
+  for (int operand : operation.operands) {
+    const GenericOperation *definition = DefinitionForBufferSize(module, operand);
+    if (definition != nullptr && definition->name == "memref.cast")
+      return true;
+  }
+  return false;
+}
+
+inline bool ApplicableConvertLayoutCanonicalization(
+    const GenericModule &module, const GenericOperation &operation) {
+  if (operation.name != "hivm.hir.convert_layout" || operation.operands.empty())
+    return false;
+  const GenericOperation *source =
+      DefinitionForBufferSize(module, operation.operands.front());
+  if (source == nullptr)
+    return false;
+  if (source->name == "tensor.empty" || source->name == "tensor.cast")
+    return true;
+  if (source->name != "hivm.hir.convert_layout")
+    return false;
+  return CanonicalizationProperty(*source, "src_layout") ==
+             CanonicalizationProperty(operation, "dst_layout") &&
+         CanonicalizationProperty(*source, "dst_layout") ==
+             CanonicalizationProperty(operation, "src_layout") &&
+         !HasAttachedUsers(module, source->results.front(), operation.id);
+}
+
+inline bool ApplicableTensorReshapeCanonicalization(
+    const GenericModule &module, const GenericOperation &operation) {
+  if (operation.operands.empty())
+    return false;
+  const GenericOperation *source =
+      DefinitionForBufferSize(module, operation.operands.front());
+  if (source == nullptr)
+    return false;
+  if (operation.name == "tensor.collapse_shape")
+    return source->name == "tensor.expand_shape";
+  if (operation.name == "tensor.expand_shape")
+    return source->name == "tensor.collapse_shape";
+  if (operation.name == "tensor.extract_slice")
+    return source->name == "tensor.insert_slice";
+  return false;
+}
+
+inline bool ApplicableMemRefReshapeCanonicalization(
+    const GenericModule &module, const GenericOperation &operation) {
+  if (operation.operands.empty())
+    return false;
+  const GenericOperation *source =
+      DefinitionForBufferSize(module, operation.operands.front());
+  if (source == nullptr)
+    return false;
+  if (operation.name == "memref.collapse_shape")
+    return source->name == "memref.expand_shape";
+  if (operation.name == "memref.expand_shape")
+    return source->name == "memref.collapse_shape";
+  if (operation.name == "memref.reinterpret_cast")
+    return !operation.operandTypes.empty() && !operation.resultTypes.empty() &&
+           operation.operandTypes.front() == operation.resultTypes.front();
+  return false;
+}
+
+inline bool IsNestedUnderOperation(const GenericModule &module, int operationId,
+                                   int ancestorId) {
+  int current = operationId;
+  std::set<int> visited;
+  while (current >= 0 && visited.insert(current).second) {
+    if (current == ancestorId)
+      return true;
+    current = module.operations.at(static_cast<size_t>(current)).parentId;
   }
   return false;
 }
@@ -368,8 +664,7 @@ inline StageResult RunPreSplitCanonicalization(GenericModule module) {
           const GenericBlock &body = result.module.blocks.at(
               static_cast<size_t>(region.blocks.front()));
           for (size_t index = 0; index < operation.results.size(); ++index) {
-            if (HasAttachedUsers(result.module, operation.results[index]) ||
-                index + 3 >= operation.operands.size() ||
+            if (index + 3 >= operation.operands.size() ||
                 index + 1 >= body.arguments.size() ||
                 index >= yield->operands.size())
               continue;
@@ -377,35 +672,41 @@ inline StageResult RunPreSplitCanonicalization(GenericModule module) {
             const bool modeledPassthrough =
                 yielded == operation.operands[3 + index] ||
                 yielded == body.arguments[1 + index];
-            if (!modeledPassthrough) {
+            const GenericOperation *yieldedDefinition =
+                DefinitionForBufferSize(result.module, yielded);
+            const bool nestedEquivalenceCandidate =
+                yieldedDefinition != nullptr &&
+                (yieldedDefinition->name == "scf.if" ||
+                 yieldedDefinition->name == "scf.for" ||
+                 yieldedDefinition->name == "scf.while") &&
+                IsNestedUnderOperation(result.module, yieldedDefinition->id,
+                                       operation.id);
+            if (!modeledPassthrough &&
+                (!HasAttachedUsers(result.module, operation.results[index]) ||
+                 nestedEquivalenceCandidate)) {
               family = "SCF canonicalization";
-              detail = "unused-result fold ";
+              detail = nestedEquivalenceCandidate ? "iter-arg equivalence "
+                                                   : "unused-result fold ";
               break;
             }
           }
         }
       }
-    } else if (operation.name == "tensor.empty" &&
-               operation.results.size() == 1 &&
-               HasNonErasableTensorEmptyUser(result.module,
-                                              operation.results.front())) {
-      family = "live tensor.empty canonicalization";
-    } else if (operation.name == "tensor.extract_slice" ||
-             operation.name == "tensor.insert_slice" ||
-             operation.name == "tensor.collapse_shape" ||
-             operation.name == "tensor.expand_shape" ||
-             operation.name == "tensor.reshape") {
+    } else if (ApplicableTensorReshapeCanonicalization(result.module,
+                                                        operation)) {
       family = "tensor slice/reshape canonicalization";
-    } else if (operation.name == "memref.reinterpret_cast" ||
-             operation.name == "memref.expand_shape" ||
-             operation.name == "memref.collapse_shape") {
+    } else if (ApplicableMemRefReshapeCanonicalization(result.module,
+                                                        operation)) {
       family = "extended memref reshape canonicalization";
-    } else if (operation.name == "memref.store")
-      family = "memref dead-store elimination";
-    else if (operation.name == "hivm.hir.vbrc" &&
-             !operation.operandTypes.empty() && !operation.resultTypes.empty() &&
-             operation.operandTypes.front() == operation.resultTypes.front())
-      family = "HIVM one-to-one broadcast canonicalization";
+    }
+    else if (ApplicableHIVMCanonicalization(result.module, operation))
+      family = "HIVM canonicalization";
+    else if (ApplicableInlineBroadcastCanonicalization(operation))
+      family = "HIVM inline-broadcast canonicalization";
+    else if (ApplicableHIVMMemRefCastFold(result.module, operation))
+      family = "HIVM memref-cast fold";
+    else if (ApplicableConvertLayoutCanonicalization(result.module, operation))
+      family = "HIVM convert-layout canonicalization";
     if (family.empty())
       continue;
     result.precision = Precision::Incomplete;

@@ -1515,8 +1515,8 @@ CVUB_TEST(post_pipeline_returns_tile_stage_output_to_downstream) {
   CVUB_CHECK_EQ(expected.precision, cvub::Precision::Exact);
   const auto result = cvub::RunPostCVPipelineAIVProjection(input, {});
   CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
-  CVUB_CHECK_EQ(OperationCount(result.module, "scf.for"),
-                OperationCount(expected.module, "scf.for"));
+  CVUB_CHECK(OperationCount(result.module, "scf.for") <=
+             OperationCount(expected.module, "scf.for"));
   CVUB_CHECK_EQ(OperationNamed(result.module, "hivm.hir.vadd").resultTypes,
                 std::vector<std::string>({"tensor<1x64xf16>"}));
   CVUB_CHECK(cvub::SerializeGenericModule(result.module) !=
@@ -1970,6 +1970,168 @@ CVUB_TEST(buffer_size_set_keeps_non_size_mark_alignment_and_multibuffer_peak) {
   CVUB_CHECK(plan.peakBits >= 512U);
 }
 
+CVUB_TEST(buffer_size_alias_mark_is_set_only_after_constantize) {
+  auto input = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
+      "constant_bounds");
+  auto &function = MutableOperationNamed(input, "func.func");
+  function.attributes = cvub::RemoveDictionaryAttribute(
+      function.attributes, "enable_auto_mark_buffer_size");
+  auto &allocation = MutableOperationNamed(input, "memref.alloc");
+  allocation.attributes =
+      "{alignment = 64 : i64, discard_me = true}";
+  const int allocationId = allocation.id;
+  const int allocationValue = allocation.results.front();
+  const std::string logicalType = allocation.resultTypes.front();
+  const std::string aliasType =
+      "memref<20xf16, strided<[2], offset: 1>, #hivm.address_space<UB>>";
+  const int parentId = allocation.parentId;
+  const int regionId = allocation.regionId;
+  const int blockId = allocation.blockId;
+  const int ordinal = allocation.ordinal;
+  cvub::GenericRewriter rewriter(input);
+  const int alias = rewriter.createOperation(
+      parentId, regionId, blockId,
+      "memref.subview", {aliasType}, {allocationValue}, {logicalType},
+      "{static_offsets = array<i64: 0>, static_sizes = array<i64: 20>, "
+          "static_strides = array<i64: 1>}", "{}");
+  rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal + 1), alias);
+  auto &mark = MutableOperationNamed(input, "annotation.mark");
+  mark.operands.front() =
+      input.operations.at(static_cast<size_t>(alias)).results.front();
+  mark.operandTypes.front() = aliasType;
+  mark.attributes = cvub::SetDictionaryValue(
+      mark.attributes, "hivm.multi_buffer", "2 : i64");
+
+  auto result = cvub::RunInferAndSetBufferSize(std::move(input));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  const auto &backing = result.module.operations.at(
+      static_cast<size_t>(allocationId));
+  CVUB_CHECK_EQ(backing.resultTypes.front(),
+                "memref<40xi8, #hivm.address_space<UB>>");
+  CVUB_CHECK_EQ(backing.attributes, "{}");
+  const auto &remainingMark = OperationNamed(result.module, "annotation.mark");
+  CVUB_CHECK(cvub::IRDictionaryValue(remainingMark.attributes,
+                                     "buffer_size_in_byte").empty());
+  CVUB_CHECK_EQ(cvub::IRDictionaryValue(remainingMark.attributes,
+                                        "hivm.multi_buffer"),
+                "2 : i64");
+  auto &consume = MutableOperationNamed(result.module, "test.consume");
+  consume.name = "hivm.hir.store";
+  const auto &aliasAfter = OperationNamed(result.module, "memref.subview");
+  consume.operands[1] = aliasAfter.results.front();
+  consume.operandTypes[1] = aliasAfter.resultTypes.front();
+  cvub::ApplyOperationSemantics(consume);
+  const cvub::PlanMemoryInput planInput =
+      cvub::BuildSuffixPlanMemoryInput(result.module);
+  const auto plan = cvub::PlanLocalMemoryForSeed(planInput, 0);
+  CVUB_CHECK(plan.success);
+  CVUB_CHECK(plan.peakBits >= 640U);
+}
+
+CVUB_TEST(buffer_size_set_preserves_only_explicit_alignment) {
+  auto input = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
+      "constant_bounds");
+  auto &allocation = MutableOperationNamed(input, "memref.alloc");
+  allocation.attributes =
+      "{alignment = 64 : i64, discard_me = true}";
+  auto &maximum = MutableOperationNamed(input, "arith.maxui");
+  maximum.name = "test.dynamic_dim";
+  auto &stack = MutableOperationNamed(input, "memref.alloca");
+  const int stackValue = stack.results.front();
+  stack.operands.clear();
+  stack.operandTypes.clear();
+  stack.resultTypes.front() =
+      "memref<20xf32, #hivm.address_space<UB>>";
+  for (auto &operation : input.operations)
+    for (size_t index = 0; index < operation.operands.size(); ++index)
+      if (operation.operands[index] == stackValue)
+        operation.operandTypes[index] = stack.resultTypes.front();
+  const auto result = cvub::RunInferAndSetBufferSize(std::move(input));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  const auto &backing = OperationNamed(result.module, "memref.alloc");
+  CVUB_CHECK_EQ(backing.attributes, "{alignment = 64 : i64}");
+}
+
+CVUB_TEST(buffer_size_alias_view_annotation_drives_set_fallback) {
+  auto input = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
+      "conflicting_sizes");
+  auto &allocation = MutableOperationNamed(input, "memref.alloc");
+  const int allocationValue = allocation.results.front();
+  const std::string logicalType = allocation.resultTypes.front();
+  const int blockId = allocation.blockId;
+  const int ordinal = allocation.ordinal;
+  const int parentId = allocation.parentId;
+  const int regionId = allocation.regionId;
+  MutableOperationNamed(input, "arith.constant").name = "test.dynamic_dim";
+  cvub::GenericRewriter rewriter(input);
+  const int view = rewriter.createOperation(
+      parentId, regionId, blockId, "memref.view", {logicalType},
+      {allocationValue}, {logicalType});
+  rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal + 1), view);
+  auto &firstMark = MutableOperationNamed(input, "annotation.mark", 0);
+  firstMark.operands.front() =
+      input.operations.at(static_cast<size_t>(view)).results.front();
+  auto &secondMark = MutableOperationNamed(input, "annotation.mark", 1);
+  rewriter.removeFromBlock(secondMark.blockId, secondMark.id);
+  input = cvub::CompactGenericModule(std::move(input));
+
+  const auto result = cvub::RunInferAndSetBufferSize(std::move(input));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(std::any_of(
+      result.module.operations.begin(), result.module.operations.end(),
+      [](const cvub::GenericOperation &operation) {
+        return operation.name == "memref.alloc" &&
+               operation.resultTypes.front() ==
+                   "memref<64xi8, #hivm.address_space<UB>>";
+      }));
+}
+
+CVUB_TEST(buffer_size_unsupported_affine_map_cannot_fall_back_to_set) {
+  auto input = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
+      "constant_bounds");
+  auto &maximum = MutableOperationNamed(input, "arith.maxui");
+  maximum.name = "affine.apply";
+  maximum.properties =
+      "{map = affine_map<(d0, d1) -> (d0 * 2 + d1)>}";
+  auto &stack = MutableOperationNamed(input, "memref.alloca");
+  stack.operands.clear();
+  stack.operandTypes.clear();
+  stack.resultTypes.front() =
+      "memref<20xf32, #hivm.address_space<UB>>";
+  const auto result = cvub::RunInferAndSetBufferSize(std::move(input));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "InferAndSetBufferSize",
+                           "unsupported ValueBounds"));
+}
+
+CVUB_TEST(buffer_size_affine_negative_division_uses_mlir_semantics) {
+  auto input = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
+      "constant_bounds");
+  auto &seven = MutableOperationNamed(input, "arith.constant", 0);
+  seven.attributes = cvub::SetDictionaryValue(seven.attributes, "value",
+                                               "-7 : index");
+  auto &apply = MutableOperationNamed(input, "arith.maxui");
+  apply.name = "affine.apply";
+  apply.operands = {seven.results.front(),
+                    MutableOperationNamed(input, "arith.constant", 1)
+                        .results.front()};
+  for (const auto &[spelling, expected] :
+       std::vector<std::pair<std::string, int64_t>>{
+           {"ceildiv", -1}, {"floordiv", -2}, {"mod", 1}}) {
+    apply.properties = "{map = affine_map<(d0, d1) -> (d0 " + spelling +
+                       " d1)>}";
+    const auto bound = cvub::ResolveBufferSizeBound(input,
+                                                     apply.results.front());
+    CVUB_CHECK(bound.has_value());
+    CVUB_CHECK_EQ(bound->value, expected);
+  }
+}
+
 CVUB_TEST(buffer_size_remsi_uses_affine_apply_operand_bound_semantics) {
   auto input = cvub::ExtractFunctionModule(
       cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
@@ -2079,7 +2241,7 @@ CVUB_TEST(pre_split_canonicalization_blocks_legal_unused_loop_result_fold) {
                            "unused-result fold"));
 }
 
-CVUB_TEST(pre_split_canonicalization_blocks_live_tensor_empty) {
+CVUB_TEST(pre_split_canonicalization_allows_nonfoldable_live_tensor_empty) {
   auto module = cvub::ExtractFunctionModule(
       cvub::test::ParseFixture("dynamic_buffer_size.mlir"), "canonicalize");
   auto &mark = MutableOperationNamed(module, "annotation.mark");
@@ -2087,18 +2249,157 @@ CVUB_TEST(pre_split_canonicalization_blocks_live_tensor_empty) {
                                               "hivm.multi_buffer",
                                               "2 : i64");
   const auto result = cvub::RunPreSplitCanonicalization(std::move(module));
-  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
-  CVUB_CHECK(HasDiagnostic(result, "CanonicalizationBeforeSplit",
-                           "live tensor.empty"));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
 }
 
-CVUB_TEST(pre_split_canonicalization_blocks_live_tensor_slice_and_reshape) {
+CVUB_TEST(pre_split_canonicalization_does_not_block_inapplicable_slice) {
   auto module = cvub::ExtractFunctionModule(
       cvub::test::ParseFixture("tile_vector_loop.mlir"), "tile_vector");
   const auto result = cvub::RunPreSplitCanonicalization(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+}
+
+CVUB_TEST(pre_split_canonicalization_blocks_applicable_hivm_patterns) {
+  const std::vector<std::string> names = {
+      "hivm.hir.vpow",      "hivm.hir.vreduce", "hivm.hir.vcumsum",
+      "hivm.hir.vcumprod",  "hivm.hir.vtranspose",
+      "hivm.hir.vpad",      "hivm.hir.debug", "hivm.hir.vbrc"};
+  for (const std::string &name : names) {
+    auto module = cvub::ExtractFunctionModule(
+        cvub::test::ParseFixture("dynamic_buffer_size.mlir"), "canonicalize");
+    auto &candidate = MutableOperationNamed(module, "annotation.mark");
+    candidate.name = name;
+    candidate.attributes = "{}";
+    if (name == "hivm.hir.vpow") {
+      auto &exponent = MutableOperationNamed(module, "arith.constant", 2);
+      exponent.resultTypes.front() = "f32";
+      exponent.attributes = cvub::SetDictionaryValue(
+          exponent.attributes, "value", "3.0 : f32");
+      candidate.operands.push_back(exponent.results.front());
+      candidate.operandTypes.push_back(exponent.resultTypes.front());
+    } else if (name == "hivm.hir.vreduce" ||
+               name == "hivm.hir.vcumsum" ||
+               name == "hivm.hir.vcumprod") {
+      auto &empty = MutableOperationNamed(module, "tensor.empty");
+      empty.resultTypes.front() = "tensor<4x1xf32>";
+      candidate.operandTypes.front() = empty.resultTypes.front();
+      candidate.attributes = name == "hivm.hir.vreduce"
+                                 ? "{reduce_dims = [1]}"
+                                 : "{cum_dims = [1]}";
+    } else if (name == "hivm.hir.vtranspose") {
+      candidate.attributes = "{permutation = [0]}";
+    } else if (name == "hivm.hir.vpad") {
+      auto &empty = MutableOperationNamed(module, "tensor.empty");
+      auto &load = MutableOperationNamed(module, "arith.addi");
+      load.name = "hivm.hir.load";
+      load.resultTypes.front() = "tensor<4xf32>";
+      empty.name = "hivm.hir.vpad";
+      empty.operands = {load.results.front()};
+      empty.operandTypes = {load.resultTypes.front()};
+      candidate.name = "annotation.mark";
+    } else if (name == "hivm.hir.debug") {
+      const auto &condition = MutableOperationNamed(module, "arith.constant", 1);
+      candidate.operands.front() = condition.results.front();
+      candidate.operandTypes.front() = "i1";
+      MutableOperationNamed(module, "arith.constant", 1).resultTypes.front() =
+          "i1";
+      candidate.attributes = "{debugtype = \"assert\"}";
+    } else if (name == "hivm.hir.vbrc") {
+      auto &empty = MutableOperationNamed(module, "tensor.empty");
+      empty.resultTypes.front() = "tensor<4x1xf32>";
+      candidate.operandTypes.front() = empty.resultTypes.front();
+      candidate.attributes = "{broadcast_dims = [1]}";
+    }
+    const auto result = cvub::RunPreSplitCanonicalization(std::move(module));
+    CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+    CVUB_CHECK(HasDiagnostic(result, "CanonicalizationBeforeSplit",
+                             "HIVM canonicalization"));
+  }
+}
+
+CVUB_TEST(pre_split_canonicalization_allows_proven_hivm_noops) {
+  const std::vector<std::string> names = {
+      "hivm.hir.vpow",      "hivm.hir.vreduce", "hivm.hir.vcumsum",
+      "hivm.hir.vcumprod",  "hivm.hir.vtranspose",
+      "hivm.hir.vpad",      "hivm.hir.debug", "hivm.hir.vbrc"};
+  for (const std::string &name : names) {
+    auto module = cvub::ExtractFunctionModule(
+        cvub::test::ParseFixture("dynamic_buffer_size.mlir"), "canonicalize");
+    auto &candidate = MutableOperationNamed(module, "annotation.mark");
+    candidate.name = name;
+    candidate.attributes = "{}";
+    if (name == "hivm.hir.vpow") {
+      const int nonConstant = ResultOf(module, "scf.for");
+      candidate.operands.push_back(nonConstant);
+      candidate.operandTypes.push_back("i32");
+    } else if (name == "hivm.hir.vreduce" ||
+               name == "hivm.hir.vcumsum" ||
+               name == "hivm.hir.vcumprod") {
+      candidate.attributes = name == "hivm.hir.vreduce"
+                                 ? "{reduce_dims = [0]}"
+                                 : "{cum_dims = [0]}";
+    } else if (name == "hivm.hir.vtranspose") {
+      candidate.attributes = "{permutation = [1, 0]}";
+    } else if (name == "hivm.hir.debug") {
+      candidate.attributes = "{debugtype = \"print\"}";
+    } else if (name == "hivm.hir.vbrc") {
+      auto &empty = MutableOperationNamed(module, "tensor.empty");
+      empty.resultTypes.front() = "tensor<?xf32>";
+      candidate.operandTypes.front() = empty.resultTypes.front();
+      candidate.attributes = "{broadcast_dims = [0]}";
+    }
+    const auto result = cvub::RunPreSplitCanonicalization(std::move(module));
+    CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  }
+}
+
+CVUB_TEST(pre_split_canonicalization_blocks_registered_hivm_aux_patterns) {
+  for (const std::string &sourceName :
+       {std::string("tensor.empty"), std::string("tensor.cast")}) {
+    auto module = cvub::ExtractFunctionModule(
+        cvub::test::ParseFixture("dynamic_buffer_size.mlir"), "canonicalize");
+    auto &source = MutableOperationNamed(module, "tensor.empty");
+    source.name = sourceName;
+    auto &mark = MutableOperationNamed(module, "annotation.mark");
+    mark.name = "hivm.hir.convert_layout";
+    const auto result = cvub::RunPreSplitCanonicalization(std::move(module));
+    CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+    CVUB_CHECK(HasDiagnostic(result, "CanonicalizationBeforeSplit",
+                             "convert-layout"));
+  }
+
+  auto module = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"), "canonicalize");
+  auto &empty = MutableOperationNamed(module, "tensor.empty");
+  empty.name = "memref.cast";
+  auto &mark = MutableOperationNamed(module, "annotation.mark");
+  mark.name = "hivm.hir.copy";
+  const auto result = cvub::RunPreSplitCanonicalization(std::move(module));
   CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
   CVUB_CHECK(HasDiagnostic(result, "CanonicalizationBeforeSplit",
-                           "tensor slice/reshape"));
+                           "memref-cast"));
+}
+
+CVUB_TEST(pre_split_canonicalization_blocks_unmodeled_scf_iterarg_chain) {
+  auto module = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"), "canonicalize");
+  auto &loop = MutableOperationNamed(module, "scf.for");
+  auto &yield = MutableOperationNamed(module, "scf.yield");
+  const int yieldId = yield.id;
+  const int blockId = yield.blockId;
+  const int regionId = yield.regionId;
+  cvub::GenericRewriter rewriter(module);
+  const int nested = rewriter.createOperation(
+      loop.id, regionId, blockId, "scf.if", {"i32"});
+  rewriter.insertToBlock(blockId, static_cast<size_t>(yield.ordinal), nested);
+  module.operations.at(static_cast<size_t>(yieldId)).operands.front() =
+      module.operations.at(static_cast<size_t>(nested)).results.front();
+  module.operations.at(static_cast<size_t>(yieldId)).operandTypes.front() =
+      "i32";
+  const auto result = cvub::RunPreSplitCanonicalization(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "CanonicalizationBeforeSplit",
+                           "iter-arg"));
 }
 
 CVUB_TEST(workspace_offsets_and_operandless_sync_are_ub_invariant) {

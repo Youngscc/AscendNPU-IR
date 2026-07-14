@@ -106,6 +106,12 @@ inline std::string RemoveDictionaryAttribute(const std::string &dictionary,
   return result + "}";
 }
 
+inline std::string KeepOnlyDictionaryAttribute(const std::string &dictionary,
+                                               const std::string &name) {
+  const std::string value = IRDictionaryValue(dictionary, name);
+  return value.empty() ? "{}" : "{" + name + " = " + value + "}";
+}
+
 struct BufferSizeBound {
   int64_t value = 0;
   bool exact = false;
@@ -232,12 +238,18 @@ ResolveBufferSizeBound(const GenericModule &module, int value,
         valid = !__builtin_mul_overflow(lhs, rhs, &result);
       else if (rhs <= 0)
         valid = false;
-      else if (op == "ceildiv")
-        result = lhs / rhs + (lhs % rhs != 0);
-      else if (op == "floordiv")
-        result = lhs / rhs;
-      else
-        result = lhs % rhs;
+      else if (op == "ceildiv") {
+        const int64_t quotient = lhs / rhs;
+        const int64_t remainder = lhs % rhs;
+        result = quotient + (remainder > 0 ? 1 : 0);
+      } else if (op == "floordiv") {
+        const int64_t quotient = lhs / rhs;
+        const int64_t remainder = lhs % rhs;
+        result = quotient - (remainder < 0 ? 1 : 0);
+      } else {
+        const int64_t remainder = lhs % rhs;
+        result = remainder < 0 ? remainder + rhs : remainder;
+      }
       if (valid)
         return done(BufferSizeBound{result, allExact});
     }
@@ -373,9 +385,13 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
   StageResult result;
   result.module = std::move(module);
   const GenericModule original = result.module;
+  // Direct annotations participate in AutoInfer/Constantize. SetBufferSize
+  // traces both direct and aliased annotations to the root allocation.
   std::map<int, int64_t> annotatedSizes;
+  std::map<int, int64_t> setAnnotatedSizes;
   std::map<int, int64_t> functionElements;
   std::map<int, std::vector<int>> allocationMarks;
+  std::set<int> directAllocationMarks;
 
   // AutoInferBufferSize: derive the shared element count from the first mark.
   for (const GenericOperation &mark : result.module.operations) {
@@ -405,8 +421,25 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
     allocationMarks[allocation].push_back(mark.id);
     const GenericOperation &root = result.module.operations.at(
         static_cast<size_t>(allocation));
-    if (root.resultTypes.size() == 1 && IsDynamicMemRef(root.resultTypes[0])) {
+    // AutoInfer's isAnnotatedWithSize and Constantize's annotation lookup only
+    // inspect direct users of the alloc result.  SetBufferSize alone traces
+    // aliases such as subview/view back to their root allocation.
+    const bool direct = !root.results.empty() &&
+                        mark.operands.front() == root.results.front();
+    if (direct)
+      directAllocationMarks.insert(mark.id);
+    if (direct && root.resultTypes.size() == 1 &&
+        IsDynamicMemRef(root.resultTypes[0])) {
       const auto inserted = annotatedSizes.emplace(allocation, *bytes);
+      if (!inserted.second && inserted.first->second != *bytes) {
+        result.precision = Precision::Incomplete;
+        result.diagnostics.push_back(BufferSizeDiagnostic(
+            result.module, mark,
+            "conflicting buffer size annotation on the same alloc"));
+      }
+    }
+    if (root.resultTypes.size() == 1 && IsDynamicMemRef(root.resultTypes[0])) {
+      const auto inserted = setAnnotatedSizes.emplace(allocation, *bytes);
       if (!inserted.second && inserted.first->second != *bytes) {
         result.precision = Precision::Incomplete;
         result.diagnostics.push_back(BufferSizeDiagnostic(
@@ -466,6 +499,7 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
     }
     annotatedSizes[allocation.id] =
         elements * static_cast<int64_t>(*bits / 8U);
+    setAnnotatedSizes[allocation.id] = annotatedSizes[allocation.id];
   }
   if (result.precision == Precision::Incomplete) {
     result.module = original;
@@ -476,6 +510,7 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
   // upper bound before SetBufferSize consumes any remaining annotation.
   std::map<int, int64_t> physicalSizes;
   std::set<int> constantized;
+  std::set<int> unsupportedAffineBounds;
   for (const GenericOperation &allocation : result.module.operations) {
     if ((allocation.name != "memref.alloc" && allocation.name != "memref.alloca") ||
         allocation.resultTypes.size() != 1 || !IsDynamicMemRef(allocation.resultTypes[0]) ||
@@ -486,6 +521,10 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
     for (int dimension : allocation.operands) {
       const auto bound = ResolveBufferSizeBound(result.module, dimension);
       if (!bound || bound->value < 0) {
+        const GenericOperation *producer =
+            DefinitionForBufferSize(result.module, dimension);
+        if (producer != nullptr && producer->name == "affine.apply")
+          unsupportedAffineBounds.insert(allocation.id);
         resolved = false;
         break;
       }
@@ -517,9 +556,22 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
     return result;
   }
 
+  for (int allocationId : unsupportedAffineBounds) {
+    const GenericOperation &allocation = result.module.operations.at(
+        static_cast<size_t>(allocationId));
+    result.precision = Precision::Incomplete;
+    result.diagnostics.push_back(BufferSizeDiagnostic(
+        result.module, allocation,
+        "unsupported ValueBounds expression for dynamic local alloc"));
+  }
+  if (result.precision == Precision::Incomplete) {
+    result.module = original;
+    return result;
+  }
+
   // SetBufferSize applies only to allocations that Constantize did not
   // rewrite.  Remaining annotations determine their physical byte capacity.
-  for (const auto &[allocationId, bytes] : annotatedSizes)
+  for (const auto &[allocationId, bytes] : setAnnotatedSizes)
     if (constantized.count(allocationId) == 0)
       physicalSizes[allocationId] = bytes;
 
@@ -596,9 +648,13 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
     updatedAllocation.resultTypes.front() = physicalType;
     updatedAllocation.operands.clear();
     updatedAllocation.operandTypes.clear();
-    if (constantized.count(allocationId) != 0)
-      updatedAllocation.attributes = RemoveDictionaryAttribute(
-          updatedAllocation.attributes, "alignment");
+    // Constantize creates a fresh attr-less alloc. Set uses the helper that
+    // explicitly forwards alignment and no other allocation attributes.
+    updatedAllocation.attributes =
+        constantized.count(allocationId) != 0
+            ? "{}"
+            : KeepOnlyDictionaryAttribute(updatedAllocation.attributes,
+                                          "alignment");
     ApplyOperationSemantics(updatedAllocation);
     rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal + 1), zero);
     rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal + 2), view);
@@ -613,7 +669,8 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
           static_cast<size_t>(markId));
       if (mark.blockId < 0)
         continue;
-      if (constantized.count(allocationId) != 0) {
+      if (constantized.count(allocationId) != 0 &&
+          directAllocationMarks.count(markId) != 0) {
         GenericRewriter(result.module).removeFromBlock(mark.blockId, mark.id);
         continue;
       }
