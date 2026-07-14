@@ -97,6 +97,15 @@ static constexpr llvm::StringLiteral kNormalizeMatmulCounterAttr =
 // The amount of data processed by the VBITSORT instruction in one repeat.
 constexpr const int VBITSORT_NUM_PER_REPEAT = 32;
 
+// CTRL[48] is for saturation control of FP8/Hif8/FP16/BF16 computation in
+// CUBE/FIXPIPE/VECTOR/SCALAR /AIPP/WAIPP.
+static constexpr unsigned int SaturationControlBit = 48;
+static constexpr unsigned int MaskControlBit = 56;
+
+// CTRL[60] is the control bit to override saturation behavior for Vector Thread
+// Extension Instructions SIMD.VCVTFI, SIMD.VCVTII, SIMD.VCVTFF and SIMT.F2F.
+static constexpr unsigned int OverrideSaturationBit = 60;
+
 const std::set<hivm::AddressSpace> LocalBufferSpace{
     hivm::AddressSpace::UB, hivm::AddressSpace::L1, hivm::AddressSpace::L0C};
 
