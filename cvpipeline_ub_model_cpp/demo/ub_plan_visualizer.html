@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CVPipeline UB Plan Visualizer</title>
+  <title>CVPipeline UB Plan Visualizer v2</title>
   <style>
     :root {
       --bg: #f6f7f9;
@@ -604,18 +604,49 @@
       svg.innerHTML = "";
       const width = Math.max(760, svg.clientWidth || 920);
       const height = 480;
-      const margin = { top: 24, right: 28, bottom: 46, left: 70 };
+      const margin = { top: 24, right: 65, bottom: 46, left: 70 };
       svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
 
       const minTime = Math.min(...plan.map(buffer => buffer.allocTime));
       const maxTime = Math.max(...plan.map(buffer => buffer.freeTime), minTime + 1);
       const maxEndByte = Math.max(...plan.map(buffer => buffer.offsetBytes + bitsToBytes(buffer.extentBits)));
       const requiredBits = Number(result.required_bits ?? result.requiredBits ?? maxEndByte * 8);
+
+      const allTimes = [...new Set([
+        minTime,
+        ...plan.map(b => b.allocTime),
+        ...plan.map(b => b.freeTime),
+        maxTime
+      ])].sort((a, b) => a - b);
+
+      const utilPoints = [];
+      for (let i = 0; i < allTimes.length - 1; i++) {
+        const tStart = allTimes[i];
+        let maxEnd = 0;
+        plan.forEach(buffer => {
+          if (buffer.allocTime <= tStart && buffer.freeTime > tStart) {
+            const endByte = buffer.offsetBytes + bitsToBytes(buffer.extentBits);
+            if (endByte > maxEnd) {
+              maxEnd = endByte;
+            }
+          }
+        });
+        utilPoints.push({ time: tStart, bytes: maxEnd });
+        utilPoints.push({ time: allTimes[i + 1], bytes: maxEnd });
+      }
+
+      const maxUtil = Math.max(...utilPoints.map(p => p.bytes), 1);
       const yMax = Math.max(maxEndByte, bitsToBytes(requiredBits), 1);
+
+      const capacityBits = Number(result.capacity_bits ?? result.capacityBits ?? 0);
+      const capacityBytes = bitsToBytes(capacityBits);
+      const utilToPercent = bytes => (bytes / capacityBytes) * 100;
+
       const innerWidth = width - margin.left - margin.right;
       const innerHeight = height - margin.top - margin.bottom;
       const x = time => margin.left + ((time - minTime) / Math.max(1, maxTime - minTime)) * innerWidth;
       const y = byte => margin.top + innerHeight - (byte / yMax) * innerHeight;
+      const y2 = percent => margin.top + innerHeight - (percent / 100) * innerHeight;
 
       const group = element("g", {});
       svg.append(group);
@@ -708,6 +739,81 @@
         }
       });
 
+      if (utilPoints.length > 1 && capacityBytes > 0) {
+        const pathD = utilPoints.map((p, i) => {
+          const cmd = i === 0 ? "M" : "L";
+          return `${cmd} ${x(p.time)} ${y2(utilToPercent(p.bytes))}`;
+        }).join(" ");
+
+        const lastPoint = utilPoints[utilPoints.length - 1];
+        const firstPoint = utilPoints[0];
+        const areaD = `${pathD} L ${x(lastPoint.time)} ${y2(0)} L ${x(firstPoint.time)} ${y2(0)} Z`;
+        group.append(element("path", {
+          class: "util-area",
+          d: areaD,
+          fill: "rgba(255,99,71,0.15)"
+        }));
+
+        group.append(element("path", {
+          class: "util-line",
+          d: pathD,
+          fill: "none",
+          stroke: "rgba(255,99,71,0.85)",
+          "stroke-width": "2.5",
+          "stroke-linecap": "round",
+          "stroke-linejoin": "round"
+        }));
+
+        for (let i = 0; i <= 4; ++i) {
+          const percent = (100 / 4) * i;
+          group.append(element("line", {
+            class: "util-gridline",
+            x1: width - margin.right,
+            y1: y2(percent),
+            x2: width - margin.right + 8,
+            y2: y2(percent),
+            stroke: "rgba(255,99,71,0.4)",
+            "stroke-width": 1
+          }));
+          const label = element("text", {
+            x: width - margin.right + 12,
+            y: y2(percent) + 4,
+            "text-anchor": "start",
+            fill: "rgba(255,99,71,0.7)",
+            "font-size": 11
+          });
+          label.textContent = `${Math.round(percent)}%`;
+          group.append(label);
+        }
+
+        const peakUtil = Math.max(...utilPoints.map(p => p.bytes));
+        const avgUtil = utilPoints.reduce((sum, p) => sum + p.bytes, 0) / utilPoints.length;
+        const peakPercent = utilToPercent(peakUtil);
+        const avgPercent = utilToPercent(avgUtil);
+        const peakLabel = element("text", {
+          class: "util-label",
+          x: width - margin.right - 4,
+          y: y2(peakPercent) - 6,
+          "text-anchor": "end",
+          fill: "rgba(255,99,71,0.85)",
+          "font-size": 12,
+          "font-weight": "bold"
+        });
+        peakLabel.textContent = `${peakPercent.toFixed(1)}% peak`;
+        group.append(peakLabel);
+
+        const avgLabel = element("text", {
+          class: "util-label",
+          x: width - margin.right - 4,
+          y: y2(peakPercent) + 16,
+          "text-anchor": "end",
+          fill: "rgba(255,99,71,0.6)",
+          "font-size": 11
+        });
+        avgLabel.textContent = `${avgPercent.toFixed(1)}% avg`;
+        group.append(avgLabel);
+      }
+
       const peakByte = bitsToBytes(requiredBits);
       group.append(element("line", {
         class: "peak-line",
@@ -716,14 +822,14 @@
         x2: width - margin.right,
         y2: y(peakByte)
       }));
-      const peakLabel = element("text", {
+      const requiredLabel = element("text", {
         class: "peak-label",
         x: width - margin.right - 4,
         y: y(peakByte) - 6,
         "text-anchor": "end"
       });
-      peakLabel.textContent = `required ${formatBits(requiredBits)}`;
-      group.append(peakLabel);
+      requiredLabel.textContent = `required ${formatBits(requiredBits)}`;
+      group.append(requiredLabel);
 
       const legend = document.getElementById("legend");
       legend.innerHTML = "";
