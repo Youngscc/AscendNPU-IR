@@ -148,13 +148,13 @@ inline PostCVPipelineResult RunPostCVPipelineAIVProjection(
 
   MergeStageResult(result,
                    RunInferAndSetBufferSize(std::move(result.module)));
-  const GenericModule beforeWorkspace = result.module;
-  MergeStageResult(result, VerifyWorkspaceUBInvariant(
-                               beforeWorkspace, std::move(result.module)));
+  MergeStageResult(result,
+                   ProveWorkspacePlanningUBInvariant(std::move(result.module)));
   MergeStageResult(result,
                    RunPreSplitCanonicalization(std::move(result.module)));
   MergeStageResult(result,
-                   VerifyCrossCoreSyncUBInvariant(std::move(result.module)));
+                   ProveCrossCoreSyncPipelineUBInvariant(
+                       std::move(result.module)));
 
   PostCVPipelineResult split = ProjectMixFunctionsToAIV(result.module);
   if (split.precision == Precision::Incomplete)

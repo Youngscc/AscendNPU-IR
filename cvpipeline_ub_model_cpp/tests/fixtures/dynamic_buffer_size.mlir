@@ -35,4 +35,17 @@
     "test.consume"(%sum0, %loop) : (i32, i32) -> ()
     "func.return"() : () -> ()
   }) {hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<AIV>, mix_mode = "aiv"} : () -> ()
+  "func.func"() <{function_type = () -> (), sym_name = "constant_bounds"}> ({
+  ^bb0:
+    %seven = "arith.constant"() {value = 7 : index} : () -> index
+    %four = "arith.constant"() {value = 4 : index} : () -> index
+    %two = "arith.constant"() {value = 20 : index} : () -> index
+    %ceil = "arith.ceildivui"(%seven, %four) : (index, index) -> index
+    %max = "arith.maxui"(%ceil, %two) : (index, index) -> index
+    %alloc = "memref.alloc"(%max) : (index) -> memref<?xf16, strided<[2], offset: 1>, #hivm.address_space<UB>>
+    "annotation.mark"(%alloc) {buffer_size_in_byte = 32 : i64, multi_buffer = 2 : i64} : (memref<?xf16, strided<[2], offset: 1>, #hivm.address_space<UB>>) -> ()
+    %stack = "memref.alloca"(%max) : (index) -> memref<?xf32, #hivm.address_space<UB>>
+    "test.consume"(%alloc, %stack) : (memref<?xf16, strided<[2], offset: 1>, #hivm.address_space<UB>>, memref<?xf32, #hivm.address_space<UB>>) -> ()
+    "func.return"() : () -> ()
+  }) {enable_auto_mark_buffer_size, hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<AIV>, mix_mode = "aiv"} : () -> ()
 }) : () -> ()

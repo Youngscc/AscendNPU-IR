@@ -319,6 +319,28 @@ inline bool RunOneCanonicalizationIteration(GenericModule &module) {
 inline StageResult RunPreSplitCanonicalization(GenericModule module) {
   StageResult result;
   result.module = std::move(module);
+  // These passes are larger than the targeted model below.  Fail closed when
+  // a real canonicalization family can successfully change UB-observable IR
+  // and no equivalent rewrite is implemented here.
+  for (const GenericOperation &operation : result.module.operations) {
+    std::string family;
+    if (operation.name == "scf.if" || operation.name == "scf.while")
+      family = "SCF canonicalization";
+    else if (operation.name == "memref.store")
+      family = "memref dead-store elimination";
+    else if (operation.name == "hivm.hir.vbrc" &&
+             !operation.operandTypes.empty() && !operation.resultTypes.empty() &&
+             operation.operandTypes.front() == operation.resultTypes.front())
+      family = "HIVM one-to-one broadcast canonicalization";
+    if (family.empty())
+      continue;
+    result.precision = Precision::Incomplete;
+    result.diagnostics.push_back(
+        {"CanonicalizationBeforeSplit", "", operation.id, operation.name,
+         "unmodeled applicable " + family + " pattern"});
+  }
+  if (result.precision == Precision::Incomplete)
+    return result;
   constexpr size_t kMaxIterations = 10000;
   size_t iterations = 0;
   while (RunOneCanonicalizationIteration(result.module)) {

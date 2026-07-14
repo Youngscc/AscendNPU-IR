@@ -1786,6 +1786,49 @@ CVUB_TEST(buffer_size_inference_materializes_physical_views) {
   cvub::ValidateGenericModule(result.module);
 }
 
+CVUB_TEST(buffer_size_pipeline_constantizes_bounds_before_setting_annotations) {
+  auto input = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
+      "constant_bounds");
+  const auto result = cvub::RunInferAndSetBufferSize(std::move(input));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(OperationCount(result.module, "memref.view"), 2U);
+  std::vector<std::string> backingTypes;
+  for (const auto &operation : result.module.operations)
+    if (operation.name == "memref.alloc" || operation.name == "memref.alloca")
+      backingTypes.push_back(operation.resultTypes.front());
+  CVUB_CHECK(std::find(backingTypes.begin(), backingTypes.end(),
+                       "memref<32xi8, #hivm.address_space<UB>>") !=
+             backingTypes.end());
+  CVUB_CHECK(std::find(backingTypes.begin(), backingTypes.end(),
+                       "memref<80xi8, #hivm.address_space<UB>>") !=
+             backingTypes.end());
+  const auto &mark = OperationNamed(result.module, "annotation.mark");
+  CVUB_CHECK(cvub::IRDictionaryValue(mark.attributes,
+                                     "buffer_size_in_byte").empty());
+  CVUB_CHECK_EQ(cvub::IRDictionaryValue(mark.attributes, "multi_buffer"),
+                "2 : i64");
+  cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(auto_infer_buffer_size_does_not_mark_dynamic_alloca) {
+  auto input = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"), "dynamic_sizes");
+  for (auto &operation : input.operations)
+    if (operation.name == "memref.alloc" &&
+        operation.resultTypes.front().find("f32") != std::string::npos)
+      operation.name = "memref.alloca";
+  const auto result = cvub::RunInferAndSetBufferSize(std::move(input));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  bool constantizedAllocaWithoutAutoMark = false;
+  for (const auto &operation : result.module.operations)
+    if (operation.name == "memref.alloca" &&
+        operation.resultTypes.front() ==
+            "memref<32xi8, #hivm.address_space<UB>>")
+      constantizedAllocaWithoutAutoMark = true;
+  CVUB_CHECK(constantizedAllocaWithoutAutoMark);
+}
+
 CVUB_TEST(buffer_size_conflict_is_operation_level_incomplete) {
   auto input = cvub::ExtractFunctionModule(
       cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
@@ -1806,10 +1849,60 @@ CVUB_TEST(unresolved_dynamic_local_size_is_incomplete) {
       cvub::GenericRewriter(input).removeFromBlock(operation.blockId,
                                                    operation.id);
   input = cvub::CompactGenericModule(std::move(input));
+  MutableOperationNamed(input, "arith.constant").name = "test.dynamic_dim";
   const auto result = cvub::RunInferAndSetBufferSize(std::move(input));
   CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
   CVUB_CHECK(HasDiagnostic(result, "InferAndSetBufferSize",
-                           "unresolved physical size"));
+                           "unsupported ValueBounds"));
+}
+
+CVUB_TEST(buffer_size_constantize_accepts_conservative_min_upper_bound) {
+  auto input = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
+      "constant_bounds");
+  MutableOperationNamed(input, "arith.ceildivui").name = "test.dynamic_dim";
+  MutableOperationNamed(input, "arith.maxui").name = "arith.minui";
+  for (auto &operation : input.operations)
+    if (operation.name == "annotation.mark")
+      operation.attributes = cvub::RemoveDictionaryAttribute(
+          operation.attributes, "buffer_size_in_byte");
+  const auto result = cvub::RunInferAndSetBufferSize(std::move(input));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  bool sawUpperBoundBacking = false;
+  for (const auto &operation : result.module.operations)
+    if (operation.name == "memref.alloca" &&
+        operation.resultTypes.front() ==
+            "memref<80xi8, #hivm.address_space<UB>>")
+      sawUpperBoundBacking = true;
+  CVUB_CHECK(sawUpperBoundBacking);
+}
+
+CVUB_TEST(buffer_size_constantize_supports_affine_division_expression) {
+  auto input = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
+      "constant_bounds");
+  auto &maximum = MutableOperationNamed(input, "arith.maxui");
+  maximum.name = "affine.apply";
+  maximum.properties =
+      "{map = affine_map<(d0, d1) -> (d0 ceildiv d1)>}";
+  const auto result = cvub::RunInferAndSetBufferSize(std::move(input));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(OperationCount(result.module, "memref.view"), 2U);
+}
+
+CVUB_TEST(buffer_size_unknown_value_bounds_pattern_fails_closed) {
+  auto input = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
+      "constant_bounds");
+  MutableOperationNamed(input, "arith.maxui").name = "arith.shli";
+  for (auto &operation : input.operations)
+    if (operation.name == "annotation.mark")
+      operation.attributes = cvub::RemoveDictionaryAttribute(
+          operation.attributes, "buffer_size_in_byte");
+  const auto result = cvub::RunInferAndSetBufferSize(std::move(input));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "InferAndSetBufferSize",
+                           "unsupported ValueBounds"));
 }
 
 CVUB_TEST(pre_split_canonicalization_reaches_fixed_point) {
@@ -1827,6 +1920,18 @@ CVUB_TEST(pre_split_canonicalization_reaches_fixed_point) {
   cvub::ValidateGenericModule(result.module);
 }
 
+CVUB_TEST(pre_split_canonicalization_blocks_unmodeled_real_pass_patterns) {
+  auto module = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("workspace_sync_invariant.mlir"),
+      "workspace_sync");
+  auto &load = MutableOperationNamed(module, "hivm.hir.load");
+  load.name = "scf.if";
+  const auto result = cvub::RunPreSplitCanonicalization(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "CanonicalizationBeforeSplit",
+                           "unmodeled applicable"));
+}
+
 CVUB_TEST(workspace_offsets_and_operandless_sync_are_ub_invariant) {
   const auto baseline =
       cvub::test::ParseFixture("workspace_sync_invariant.mlir");
@@ -1841,6 +1946,18 @@ CVUB_TEST(workspace_offsets_and_operandless_sync_are_ub_invariant) {
   auto syncResult =
       cvub::VerifyCrossCoreSyncUBInvariant(std::move(workspaceResult.module));
   CVUB_CHECK_EQ(syncResult.precision, cvub::Precision::Exact);
+}
+
+CVUB_TEST(workspace_pass_uses_structural_proof_not_self_comparison) {
+  auto module = cvub::test::ParseFixture("workspace_sync_invariant.mlir");
+  auto exact = cvub::ProveWorkspacePlanningUBInvariant(module);
+  CVUB_CHECK_EQ(exact.precision, cvub::Precision::Exact);
+  MutableOperationNamed(module, "memref_ext.alloc_workspace")
+      .resultTypes.front() = "memref<256xi8, #hivm.address_space<UB>>";
+  auto blocked = cvub::ProveWorkspacePlanningUBInvariant(std::move(module));
+  CVUB_CHECK_EQ(blocked.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(blocked, "WorkspaceSemanticProjection",
+                           "cannot prove"));
 }
 
 CVUB_TEST(workspace_and_sync_invariants_fail_closed) {
@@ -1864,6 +1981,83 @@ CVUB_TEST(workspace_and_sync_invariants_fail_closed) {
   CVUB_CHECK_EQ(syncResult.precision, cvub::Precision::Incomplete);
   CVUB_CHECK(HasDiagnostic(syncResult, "CrossCoreSyncInvariant",
                            "local buffer"));
+}
+
+CVUB_TEST(workspace_invariant_matching_is_independent_of_ids_cases_and_order) {
+  auto baseline = cvub::test::ParseFixture("workspace_sync_invariant.mlir");
+  auto changed = baseline;
+  for (auto &operation : changed.operations)
+    if (!cvub::IRDictionaryValue(operation.attributes, "case").empty())
+      operation.attributes = cvub::SetDictionaryValue(
+          operation.attributes, "case", "\"renamed_case_" +
+                                                std::to_string(operation.id) +
+                                                "\"");
+  auto &block = changed.blocks.at(1);
+  std::swap(block.operations[0], block.operations[1]);
+  for (size_t index = 0; index < block.operations.size(); ++index)
+    changed.operations.at(static_cast<size_t>(block.operations[index])).ordinal =
+        static_cast<int>(index);
+  const auto &anchor = changed.operations.at(
+      static_cast<size_t>(changed.blocks.at(1).operations.front()));
+  const int anchorParent = anchor.parentId;
+  const int anchorRegion = anchor.regionId;
+  const int anchorBlock = anchor.blockId;
+  cvub::GenericRewriter rewriter(changed);
+  const int extra = rewriter.createOperation(
+      anchorParent, anchorRegion, anchorBlock, "arith.constant",
+      {"index"}, {}, {}, "", "{value = 0 : index}");
+  rewriter.insertToBlock(anchorBlock, 0, extra);
+  changed = cvub::CompactGenericModule(std::move(changed));
+  auto result = cvub::VerifyWorkspaceUBInvariant(baseline, std::move(changed));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+}
+
+CVUB_TEST(workspace_invariant_detects_add_remove_alias_and_local_shape_changes) {
+  const auto baseline = cvub::test::ParseFixture("workspace_sync_invariant.mlir");
+  auto aliasChanged = baseline;
+  auto &workspace = MutableOperationNamed(aliasChanged,
+                                          "memref_ext.alloc_workspace");
+  workspace.attributes = cvub::SetDictionaryValue(workspace.attributes,
+                                                   "alias_source", "\"arg1\"");
+  auto alias = cvub::VerifyWorkspaceUBInvariant(baseline,
+                                                std::move(aliasChanged));
+  CVUB_CHECK_EQ(alias.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(alias, "WorkspaceSemanticProjection",
+                           "alias source"));
+
+  auto localChanged = baseline;
+  auto &load = MutableOperationNamed(localChanged, "hivm.hir.load");
+  load.resultTypes.front() = "tensor<32xf32>";
+  auto local = cvub::VerifyWorkspaceUBInvariant(baseline,
+                                                std::move(localChanged));
+  CVUB_CHECK_EQ(local.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(local, "WorkspaceSemanticProjection",
+                           "AIV load result shape"));
+
+  auto removedModule = baseline;
+  MutableOperationNamed(removedModule, "hivm.hir.load").name = "test.removed";
+  auto removed = cvub::VerifyWorkspaceUBInvariant(baseline,
+                                                  std::move(removedModule));
+  CVUB_CHECK_EQ(removed.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(removed, "WorkspaceSemanticProjection", "removed"));
+
+  auto addedModule = baseline;
+  const auto &loadAnchor = OperationNamed(addedModule, "hivm.hir.load");
+  const int loadParent = loadAnchor.parentId;
+  const int loadRegion = loadAnchor.regionId;
+  const int loadBlock = loadAnchor.blockId;
+  const int loadOrdinal = loadAnchor.ordinal;
+  cvub::GenericRewriter addedRewriter(addedModule);
+  const int addedAlloc = addedRewriter.createOperation(
+      loadParent, loadRegion, loadBlock,
+      "memref.alloc", {"memref<16xi8, #hivm.address_space<UB>>"});
+  addedRewriter.insertToBlock(loadBlock,
+                              static_cast<size_t>(loadOrdinal),
+                              addedAlloc);
+  auto added = cvub::VerifyWorkspaceUBInvariant(baseline,
+                                                std::move(addedModule));
+  CVUB_CHECK_EQ(added.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(added, "WorkspaceSemanticProjection", "added"));
 }
 
 } // namespace

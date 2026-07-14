@@ -5,6 +5,7 @@
 #include "types.hpp"
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <optional>
 #include <regex>
@@ -67,9 +68,220 @@ inline std::string PhysicalByteMemRef(const std::string &logical,
   const std::vector<std::string> fields =
       splitTopLevel(logical.substr(open + 1, close - open - 1));
   std::string result = "memref<" + std::to_string(bytes) + "xi8";
-  for (size_t index = 1; index < fields.size(); ++index)
-    result += ", " + fields[index];
+  // createAllocWithSettingBufferSize and ConstantizeBufferSize both create an
+  // identity-layout byte allocation.  The original layout belongs only to the
+  // logical memref.view result; copying it to the i8 backing changes its byte
+  // capacity and is not compiler-equivalent.
+  if (fields.size() > 1) {
+    const std::string &memorySpace = fields.back();
+    if (memorySpace.find("address_space") != std::string::npos)
+      result += ", " + memorySpace;
+  }
   return result + ">";
+}
+
+inline std::string RemoveDictionaryAttribute(const std::string &dictionary,
+                                             const std::string &name) {
+  if (dictionary.size() < 2 || dictionary.front() != '{' ||
+      dictionary.back() != '}')
+    return dictionary;
+  std::vector<std::string> kept;
+  for (const std::string &entry :
+       splitTopLevel(dictionary.substr(1, dictionary.size() - 2))) {
+    const size_t equal = entry.find('=');
+    const std::string key =
+        trim(entry.substr(0, equal == std::string::npos ? entry.size() : equal));
+    if (key != name && !trim(entry).empty())
+      kept.push_back(trim(entry));
+  }
+  std::string result = "{";
+  for (size_t index = 0; index < kept.size(); ++index) {
+    if (index != 0)
+      result += ", ";
+    result += kept[index];
+  }
+  return result + "}";
+}
+
+struct BufferSizeBound {
+  int64_t value = 0;
+  bool exact = false;
+};
+
+inline const GenericOperation *DefinitionForBufferSize(
+    const GenericModule &module, int value);
+
+inline std::optional<BufferSizeBound>
+ResolveBufferSizeBound(const GenericModule &module, int value,
+                       std::set<int> &visiting) {
+  if (!visiting.insert(value).second)
+    return std::nullopt;
+  const GenericOperation *definition = DefinitionForBufferSize(module, value);
+  if (definition == nullptr) {
+    visiting.erase(value);
+    return std::nullopt;
+  }
+  const auto done = [&](std::optional<BufferSizeBound> result) {
+    visiting.erase(value);
+    return result;
+  };
+  if (definition->name == "arith.constant") {
+    const auto parsed = ParseIntegerAttribute(
+        IRDictionaryValue(definition->attributes, "value"));
+    return done(parsed ? std::optional<BufferSizeBound>{{*parsed, true}}
+                       : std::nullopt);
+  }
+  if (definition->name == "arith.index_cast" &&
+      definition->operands.size() == 1)
+    return done(ResolveBufferSizeBound(module, definition->operands[0],
+                                       visiting));
+
+  std::vector<std::optional<BufferSizeBound>> operands;
+  for (int operand : definition->operands)
+    operands.push_back(ResolveBufferSizeBound(module, operand, visiting));
+  auto both = [&]() {
+    return operands.size() == 2 && operands[0].has_value() &&
+           operands[1].has_value();
+  };
+  int64_t result = 0;
+  if (both()) {
+    const int64_t lhs = operands[0]->value;
+    const int64_t rhs = operands[1]->value;
+    bool valid = true;
+    if (definition->name == "arith.addi")
+      valid = !__builtin_add_overflow(lhs, rhs, &result);
+    else if (definition->name == "arith.subi")
+      valid = operands[1]->exact && rhs >= 0 &&
+              !__builtin_sub_overflow(lhs, rhs, &result);
+    else if (definition->name == "arith.muli")
+      valid = lhs >= 0 && rhs >= 0 &&
+              !__builtin_mul_overflow(lhs, rhs, &result);
+    else if (definition->name == "arith.ceildivui" ||
+             definition->name == "arith.ceildivsi") {
+      valid = lhs >= 0 && rhs > 0;
+      if (valid)
+        result = lhs / rhs + (lhs % rhs != 0);
+    } else if (definition->name == "arith.divui" ||
+               definition->name == "arith.divsi") {
+      valid = lhs >= 0 && rhs > 0;
+      if (valid)
+        result = lhs / rhs;
+    } else if (definition->name == "arith.remui" ||
+               definition->name == "arith.remsi") {
+      valid = lhs >= 0 && rhs > 0;
+      if (valid)
+        result = operands[0]->exact ? lhs % rhs : rhs - 1;
+    } else if (definition->name == "arith.minui" ||
+               definition->name == "arith.minsi")
+      result = std::min(lhs, rhs);
+    else if (definition->name == "arith.maxui" ||
+             definition->name == "arith.maxsi")
+      result = std::max(lhs, rhs);
+    else
+      valid = false;
+    if (valid)
+      return done(BufferSizeBound{
+          result, operands[0]->exact && operands[1]->exact});
+  }
+  if ((definition->name == "arith.minui" ||
+       definition->name == "arith.minsi") &&
+      operands.size() == 2 && (operands[0] || operands[1])) {
+    const BufferSizeBound bound = operands[0] ? *operands[0] : *operands[1];
+    return done(BufferSizeBound{bound.value, false});
+  }
+
+  if (definition->name == "affine.apply" && definition->results.size() == 1) {
+    // Generic IR keeps the affine map spelling.  Constant operands are the
+    // exact and common ArithToAffine case.  Support the affine operators used
+    // by size expressions without claiming bounds for non-monotone maps.
+    bool allExact = operands.size() == definition->operands.size();
+    for (const auto &operand : operands)
+      allExact = allExact && operand && operand->exact;
+    std::string expression = IRDictionaryValue(definition->properties, "map");
+    if (expression.empty())
+      expression = IRDictionaryValue(definition->attributes, "map");
+    static const std::regex constantMap(
+        R"(^affine_map<\(\) -> \((-?[0-9]+)\)>$)");
+    std::smatch match;
+    const std::string spelling = trim(expression);
+    if (std::regex_match(spelling, match, constantMap))
+      return done(BufferSizeBound{std::stoll(match[1].str()), true});
+    static const std::regex binaryMap(
+        R"(^affine_map<\(d0, d1\) -> \(d0\s*(\+|-|\*|ceildiv|floordiv|mod)\s*d1\)>$)");
+    if (allExact && operands.size() == 2 &&
+        std::regex_match(spelling, match, binaryMap)) {
+      const int64_t lhs = operands[0]->value;
+      const int64_t rhs = operands[1]->value;
+      const std::string op = match[1].str();
+      bool valid = true;
+      if (op == "+")
+        valid = !__builtin_add_overflow(lhs, rhs, &result);
+      else if (op == "-")
+        valid = !__builtin_sub_overflow(lhs, rhs, &result);
+      else if (op == "*")
+        valid = !__builtin_mul_overflow(lhs, rhs, &result);
+      else if (rhs <= 0)
+        valid = false;
+      else if (op == "ceildiv")
+        result = lhs / rhs + (lhs % rhs != 0);
+      else if (op == "floordiv")
+        result = lhs / rhs;
+      else
+        result = lhs % rhs;
+      if (valid)
+        return done(BufferSizeBound{result, true});
+    }
+  }
+  return done(std::nullopt);
+}
+
+inline std::optional<BufferSizeBound>
+ResolveBufferSizeBound(const GenericModule &module, int value) {
+  std::set<int> visiting;
+  return ResolveBufferSizeBound(module, value, visiting);
+}
+
+inline std::optional<int64_t>
+LogicalMemRefBytes(const std::string &type,
+                   const std::vector<BufferSizeBound> &dynamicBounds) {
+  if (!startsWith(trim(type), "memref<"))
+    return std::nullopt;
+  const size_t open = type.find('<');
+  const size_t close = type.rfind('>');
+  const auto fields = splitTopLevel(type.substr(open + 1, close - open - 1));
+  if (fields.empty())
+    return std::nullopt;
+  const auto bits = ShapedElementBits(type);
+  if (!bits || *bits == 0)
+    return std::nullopt;
+  std::string shaped = fields.front();
+  const size_t element = shaped.rfind('x');
+  if (element == std::string::npos)
+    return std::nullopt;
+  const std::vector<std::string> dimensions = split(shaped.substr(0, element), 'x');
+  int64_t elements = 1;
+  size_t dynamicIndex = 0;
+  for (const std::string &dimension : dimensions) {
+    int64_t extent = 0;
+    if (trim(dimension) == "?") {
+      if (dynamicIndex >= dynamicBounds.size())
+        return std::nullopt;
+      extent = dynamicBounds[dynamicIndex++].value;
+    } else {
+      try {
+        extent = std::stoll(trim(dimension));
+      } catch (const std::exception &) {
+        return std::nullopt;
+      }
+    }
+    if (extent < 0 || __builtin_mul_overflow(elements, extent, &elements))
+      return std::nullopt;
+  }
+  int64_t totalBits = 0;
+  if (__builtin_mul_overflow(elements, static_cast<int64_t>(*bits), &totalBits) ||
+      totalBits > std::numeric_limits<int64_t>::max() - 7)
+    return std::nullopt;
+  return (totalBits + 7) / 8;
 }
 
 inline int EnclosingFunctionId(const GenericModule &module,
@@ -150,10 +362,12 @@ inline void ReplaceExistingUsesWithView(GenericModule &module, int oldValue,
 inline StageResult RunInferAndSetBufferSize(GenericModule module) {
   StageResult result;
   result.module = std::move(module);
-  std::map<int, int64_t> allocationSizes;
+  const GenericModule original = result.module;
+  std::map<int, int64_t> annotatedSizes;
   std::map<int, int64_t> functionElements;
-  std::vector<int> sizeMarks;
+  std::map<int, std::vector<int>> allocationMarks;
 
+  // AutoInferBufferSize: derive the shared element count from the first mark.
   for (const GenericOperation &mark : result.module.operations) {
     if (mark.name != "annotation.mark")
       continue;
@@ -163,7 +377,6 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
         IRDictionaryValue(mark.attributes, "buffer_size_in_byte");
     if (raw.empty())
       continue;
-    sizeMarks.push_back(mark.id);
     const std::optional<int64_t> bytes = ParseIntegerAttribute(raw);
     if (!bytes || *bytes <= 0 || mark.operands.size() != 1 ||
         mark.operandTypes.size() != 1) {
@@ -179,10 +392,11 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
           result.module, mark, "cannot trace annotation to a local alloc"));
       continue;
     }
-    const GenericOperation &root =
-        result.module.operations.at(static_cast<size_t>(allocation));
+    allocationMarks[allocation].push_back(mark.id);
+    const GenericOperation &root = result.module.operations.at(
+        static_cast<size_t>(allocation));
     if (root.resultTypes.size() == 1 && IsDynamicMemRef(root.resultTypes[0])) {
-      const auto inserted = allocationSizes.emplace(allocation, *bytes);
+      const auto inserted = annotatedSizes.emplace(allocation, *bytes);
       if (!inserted.second && inserted.first->second != *bytes) {
         result.precision = Precision::Incomplete;
         result.diagnostics.push_back(BufferSizeDiagnostic(
@@ -199,16 +413,19 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
       (void)functionElements.emplace(functionId, elements);
     }
   }
-  if (result.precision == Precision::Incomplete)
+  if (result.precision == Precision::Incomplete) {
+    result.module = original;
     return result;
+  }
 
+  // The real AutoInferBufferSize pass walks memref.alloc only.  Alloca is
+  // handled by Constantize/Set, but never receives a synthesized mark.
   for (const GenericOperation &allocation : result.module.operations) {
-    if ((allocation.name != "memref.alloc" &&
-         allocation.name != "memref.alloca") ||
+    if (allocation.name != "memref.alloc" ||
         allocation.results.size() != 1 || allocation.resultTypes.size() != 1 ||
         !IsDynamicMemRef(allocation.resultTypes[0]) ||
         !IsAIVReachableBufferOperation(result.module, allocation) ||
-        allocationSizes.count(allocation.id) != 0)
+        annotatedSizes.count(allocation.id) != 0)
       continue;
     const int functionId = EnclosingFunctionId(result.module, allocation);
     if (functionId < 0 || functionElements.count(functionId) == 0)
@@ -232,30 +449,90 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
           result.module, allocation, "auto-inferred buffer size overflows"));
       continue;
     }
-    allocationSizes[allocation.id] =
+    annotatedSizes[allocation.id] =
         elements * static_cast<int64_t>(*bits / 8U);
   }
-  if (result.precision == Precision::Incomplete)
+  if (result.precision == Precision::Incomplete) {
+    result.module = original;
     return result;
+  }
+
+  // ConstantizeBufferSize: resolve every dimension to a constant or closed
+  // upper bound before SetBufferSize consumes any remaining annotation.
+  std::map<int, int64_t> physicalSizes;
+  std::set<int> constantized;
+  for (const GenericOperation &allocation : result.module.operations) {
+    if ((allocation.name != "memref.alloc" && allocation.name != "memref.alloca") ||
+        allocation.resultTypes.size() != 1 || !IsDynamicMemRef(allocation.resultTypes[0]) ||
+        !IsAIVReachableBufferOperation(result.module, allocation))
+      continue;
+    std::vector<BufferSizeBound> bounds;
+    bool resolved = allocation.operands.size() == allocation.operandTypes.size();
+    for (int dimension : allocation.operands) {
+      const auto bound = ResolveBufferSizeBound(result.module, dimension);
+      if (!bound || bound->value < 0) {
+        resolved = false;
+        break;
+      }
+      bounds.push_back(*bound);
+    }
+    if (!resolved)
+      continue;
+    const auto logicalBytes = LogicalMemRefBytes(allocation.resultTypes[0], bounds);
+    if (!logicalBytes) {
+      result.precision = Precision::Incomplete;
+      result.diagnostics.push_back(BufferSizeDiagnostic(
+          result.module, allocation,
+          "constantized logical buffer size overflows or is unsupported"));
+      continue;
+    }
+    // ConstantizeBufferSize compares getStaticTotalSizeInBits with the raw
+    // annotation integer.  Preserve that observable implementation behavior,
+    // including the unit mismatch, so the model follows the compiler exactly.
+    const auto annotated = annotatedSizes.find(allocation.id);
+    if (annotated != annotatedSizes.end() &&
+        (*logicalBytes > std::numeric_limits<int64_t>::max() / 8 ||
+         *logicalBytes * 8 > annotated->second))
+      continue;
+    physicalSizes[allocation.id] = *logicalBytes;
+    constantized.insert(allocation.id);
+  }
+  if (result.precision == Precision::Incomplete) {
+    result.module = original;
+    return result;
+  }
+
+  // SetBufferSize applies only to allocations that Constantize did not
+  // rewrite.  Remaining annotations determine their physical byte capacity.
+  for (const auto &[allocationId, bytes] : annotatedSizes)
+    if (constantized.count(allocationId) == 0)
+      physicalSizes[allocationId] = bytes;
 
   for (const GenericOperation &allocation : result.module.operations) {
-    if ((allocation.name != "memref.alloc" &&
-         allocation.name != "memref.alloca") ||
-        allocation.resultTypes.size() != 1 ||
-        !IsDynamicMemRef(allocation.resultTypes[0]) ||
+    if ((allocation.name != "memref.alloc" && allocation.name != "memref.alloca") ||
+        allocation.resultTypes.size() != 1 || !IsDynamicMemRef(allocation.resultTypes[0]) ||
         !IsAIVReachableBufferOperation(result.module, allocation) ||
         HIVMAddressSpace(allocation.resultTypes[0]) != "UB" ||
-        allocationSizes.count(allocation.id) != 0)
+        physicalSizes.count(allocation.id) != 0)
       continue;
     result.precision = Precision::Incomplete;
+    const GenericOperation *producer = allocation.operands.empty()
+                                           ? nullptr
+                                           : DefinitionForBufferSize(
+                                                 result.module,
+                                                 allocation.operands.front());
     result.diagnostics.push_back(BufferSizeDiagnostic(
         result.module, allocation,
-        "unresolved physical size for dynamic local alloc"));
+        producer && producer->name != "func.func"
+            ? "unsupported ValueBounds expression for dynamic local alloc"
+            : "unresolved physical size for dynamic local alloc"));
   }
-  if (result.precision == Precision::Incomplete)
+  if (result.precision == Precision::Incomplete) {
+    result.module = original;
     return result;
+  }
 
-  for (const auto &[allocationId, bytes] : allocationSizes) {
+  for (const auto &[allocationId, bytes] : physicalSizes) {
     GenericOperation &allocation =
         result.module.operations.at(static_cast<size_t>(allocationId));
     if (!IsDynamicMemRef(allocation.resultTypes.front()))
@@ -309,22 +586,22 @@ inline StageResult RunInferAndSetBufferSize(GenericModule module) {
     rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal + 2), view);
   }
 
-  for (int markId : sizeMarks) {
-    GenericOperation &mark =
-        result.module.operations.at(static_cast<size_t>(markId));
-    if (mark.blockId >= 0)
-      GenericRewriter(result.module).removeFromBlock(mark.blockId, mark.id);
+  // Both real passes remove only the buffer_size_in_byte attribute.  Marks
+  // carrying e.g. multi-buffer metadata must survive.
+  for (const auto &[allocationId, markIds] : allocationMarks) {
+    (void)allocationId;
+    for (int markId : markIds) {
+      GenericOperation &mark = result.module.operations.at(
+          static_cast<size_t>(markId));
+      mark.attributes = RemoveDictionaryAttribute(mark.attributes,
+                                                  "buffer_size_in_byte");
+      if (mark.attributes == "{}" && mark.blockId >= 0)
+        GenericRewriter(result.module).removeFromBlock(mark.blockId, mark.id);
+    }
   }
   result.module = CompactGenericModule(std::move(result.module));
   ValidateGenericModule(result.module);
   return result;
-}
-
-inline std::string StableInvariantKey(const GenericOperation &operation) {
-  std::string key = UnquoteIRString(IRDictionaryValue(operation.attributes, "case"));
-  if (key.empty())
-    key = operation.name + "#" + std::to_string(operation.id);
-  return key;
 }
 
 inline bool IsWorkspaceOperation(const GenericOperation &operation) {
@@ -338,46 +615,94 @@ inline bool IsAIVLoad(const GenericModule &module,
          ClassifyCoreDetailed(module, operation).kind == CoreKind::Vector;
 }
 
+inline bool IsLocalBufferType(const std::string &type);
+
+inline std::string InvariantFunctionName(const GenericModule &module,
+                                         const GenericOperation &operation) {
+  const int function = EnclosingFunctionId(module, operation);
+  return function < 0
+             ? ""
+             : FunctionSymbolName(module.operations.at(static_cast<size_t>(function)));
+}
+
+inline std::string InvariantValueOrigin(const GenericModule &module, int value) {
+  for (const GenericBlock &block : module.blocks) {
+    const auto found = std::find(block.arguments.begin(), block.arguments.end(), value);
+    if (found != block.arguments.end())
+      return "arg:" + std::to_string(std::distance(block.arguments.begin(), found));
+  }
+  const GenericOperation *definition = DefinitionForBufferSize(module, value);
+  if (definition == nullptr)
+    return "external";
+  const auto found = std::find(definition->results.begin(), definition->results.end(), value);
+  return definition->name + ":" +
+         std::to_string(std::distance(definition->results.begin(), found));
+}
+
+inline std::string StableInvariantKey(const GenericModule &module,
+                                      const GenericOperation &operation) {
+  // A semantic role key: independent of parser ids, test-only `case` attrs,
+  // block order and workspace offsets.  Fields verified below are omitted so
+  // a mutation pairs with its original and receives a precise diagnostic.
+  std::string attributes = RemoveDictionaryAttribute(operation.attributes, "case");
+  attributes = RemoveDictionaryAttribute(attributes, "workspace_offset");
+  attributes = RemoveDictionaryAttribute(attributes, "alias_source");
+  std::string key = InvariantFunctionName(module, operation) + "|" +
+                    operation.name + "|" + operation.properties + "|" +
+                    attributes + "|" +
+                    std::to_string(operation.operands.size());
+  for (int operand : operation.operands)
+    key += "|" + InvariantValueOrigin(module, operand);
+  return key;
+}
+
+inline bool IsWorkspaceUBRelevant(const GenericModule &module,
+                                  const GenericOperation &operation) {
+  if (IsWorkspaceOperation(operation) || IsAIVLoad(module, operation))
+    return true;
+  return std::any_of(operation.operandTypes.begin(), operation.operandTypes.end(),
+                     IsLocalBufferType) ||
+         std::any_of(operation.resultTypes.begin(), operation.resultTypes.end(),
+                     IsLocalBufferType);
+}
+
 inline StageResult VerifyWorkspaceUBInvariant(const GenericModule &before,
                                               GenericModule after) {
   StageResult result;
   result.module = std::move(after);
-  std::map<std::string, const GenericOperation *> oldOps;
+  std::map<std::string, std::vector<const GenericOperation *>> oldOps;
   for (const GenericOperation &operation : before.operations)
-    if (IsWorkspaceOperation(operation) || IsAIVLoad(before, operation) ||
-        std::any_of(operation.resultTypes.begin(), operation.resultTypes.end(),
-                    [](const std::string &type) {
-                      return HIVMAddressSpace(type) == "UB";
-                    }))
-      oldOps[StableInvariantKey(operation)] = &operation;
+    if (IsWorkspaceUBRelevant(before, operation))
+      oldOps[StableInvariantKey(before, operation)].push_back(&operation);
 
   for (const GenericOperation &operation : result.module.operations) {
-    const bool relevant =
-        IsWorkspaceOperation(operation) || IsAIVLoad(result.module, operation) ||
-        std::any_of(operation.resultTypes.begin(), operation.resultTypes.end(),
-                    [](const std::string &type) {
-                      return HIVMAddressSpace(type) == "UB";
-                    });
-    if (!relevant)
+    if (!IsWorkspaceUBRelevant(result.module, operation))
       continue;
-    const auto found = oldOps.find(StableInvariantKey(operation));
+    const std::string key = StableInvariantKey(result.module, operation);
+    auto found = oldOps.find(key);
     std::string reason;
-    if (found == oldOps.end())
+    const GenericOperation *old =
+        found == oldOps.end() || found->second.empty() ? nullptr
+                                                       : found->second.back();
+    if (old == nullptr)
       reason = "workspace rewrite added a UB-relevant operation";
-    else if (operation.resultTypes != found->second->resultTypes)
+    else if (operation.resultTypes != old->resultTypes)
       reason = IsAIVLoad(result.module, operation)
                    ? "workspace rewrite changes AIV load result shape"
                    : "workspace rewrite changes local result type";
+    else if (operation.operandTypes != old->operandTypes)
+      reason = "workspace rewrite changes local operand type";
     else if (IsWorkspaceOperation(operation)) {
       const std::string oldAlias =
-          IRDictionaryValue(found->second->attributes, "alias_source");
+          IRDictionaryValue(old->attributes, "alias_source");
       const std::string newAlias =
           IRDictionaryValue(operation.attributes, "alias_source");
       if (oldAlias != newAlias ||
           (oldAlias.empty() &&
-           ((operation.operands.empty() != found->second->operands.empty()) ||
+           ((operation.operands.empty() != old->operands.empty()) ||
             (!operation.operands.empty() &&
-             operation.operands.front() != found->second->operands.front()))))
+             InvariantValueOrigin(result.module, operation.operands.front()) !=
+                 InvariantValueOrigin(before, old->operands.front())))))
         reason = "workspace rewrite changes alias source";
     }
     if (!reason.empty()) {
@@ -386,15 +711,51 @@ inline StageResult VerifyWorkspaceUBInvariant(const GenericModule &before,
           {"WorkspaceSemanticProjection", "", operation.id, operation.name,
            reason});
     }
-    oldOps.erase(StableInvariantKey(operation));
+    if (old != nullptr) {
+      found->second.pop_back();
+      if (found->second.empty())
+        oldOps.erase(found);
+    }
   }
-  for (const auto &[key, operation] : oldOps) {
+  for (const auto &[key, operations] : oldOps) {
     (void)key;
+    for (const GenericOperation *operation : operations) {
+      result.precision = Precision::Incomplete;
+      result.diagnostics.push_back(
+          {"WorkspaceSemanticProjection", "", operation->id, operation->name,
+           "workspace rewrite removed a UB-relevant operation"});
+    }
+  }
+  return result;
+}
+
+inline StageResult ProveWorkspacePlanningUBInvariant(GenericModule module) {
+  StageResult result;
+  result.module = std::move(module);
+  for (const GenericOperation &operation : result.module.operations) {
+    if (!IsWorkspaceOperation(operation))
+      continue;
+    const bool allResultsGM =
+        !operation.resultTypes.empty() &&
+        std::all_of(operation.resultTypes.begin(), operation.resultTypes.end(),
+                    [](const std::string &type) {
+                      return HIVMAddressSpace(type) == "GM";
+                    });
+    const bool noLocalOperand =
+        std::none_of(operation.operandTypes.begin(), operation.operandTypes.end(),
+                     IsLocalBufferType);
+    if (allResultsGM && noLocalOperand)
+      continue;
     result.precision = Precision::Incomplete;
     result.diagnostics.push_back(
-        {"WorkspaceSemanticProjection", "", operation->id, operation->name,
-         "workspace rewrite removed a UB-relevant operation"});
+        {"WorkspaceSemanticProjection", InvariantFunctionName(result.module, operation),
+         operation.id, operation.name,
+         "cannot prove global workspace planning is UB invariant for a local workspace value"});
   }
+  // GLOBAL_WORKSPACE_PLAN only assigns/reuses GM workspace offsets.  Loads
+  // remain the same operations with the same tensor result types, and local
+  // allocations are not planned in this mode.  The checks above establish the
+  // pass precondition instead of comparing an artifact with itself.
   return result;
 }
 
@@ -429,6 +790,15 @@ inline StageResult VerifyCrossCoreSyncUBInvariant(GenericModule module) {
          "sync operation carries a local buffer operand or result"});
   }
   return result;
+}
+
+inline StageResult ProveCrossCoreSyncPipelineUBInvariant(GenericModule module) {
+  // InjectBlockSync/CrossCoreGSS materialize only sync_block, sync_block_set,
+  // sync_block_wait and pipe-barrier operations.  Their optional SSA operands
+  // are scalar flag/base-address values and they have no memref results.  A
+  // full scan also protects already-present sync operations and fails closed
+  // if the artifact violates that real op-schema boundary.
+  return VerifyCrossCoreSyncUBInvariant(std::move(module));
 }
 
 } // namespace cvub
