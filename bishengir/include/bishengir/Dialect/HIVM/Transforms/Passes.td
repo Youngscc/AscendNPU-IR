@@ -629,6 +629,11 @@ def BindWorkSpaceArg : Pass<"hivm-bind-workspace-arg", "func::FuncOp"> {
   let dependentDialects = ["memref::MemRefDialect",
                            "hivm::HIVMDialect",
                            "bishengir::memref_ext::MemRefExtDialect"];
+
+  let options = [Option<
+      "enableSubWorkspace", "enable-sub-workspace", "bool",
+      /*default=*/"false",
+      "Insert sub workspace argument and bind to sub workspace">];
 }
 
 def BindSyncBlockLockArg : Pass<"hivm-bind-sync-block-lock-arg", "func::FuncOp"> {
