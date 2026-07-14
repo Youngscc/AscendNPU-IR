@@ -4,7 +4,7 @@ order	stage	disposition
 3	WorkspaceSemanticProjection	unsupported
 4	CanonicalizationBeforeSplit	unsupported
 5	CrossCoreSyncInvariant	unsupported
-6	SplitMixKernelAIVProjection	unsupported
+6	SplitMixKernelAIVProjection	modeled
 7	InlineScope	unsupported
 8	TileAndBindSubBlock	unsupported
 9	FoldTensorEmpty	unsupported

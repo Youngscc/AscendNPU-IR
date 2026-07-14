@@ -1,6 +1,7 @@
 #include "test_support.hpp"
 #include "../src/post_cvpipeline/ir_utils.hpp"
 #include "../src/post_cvpipeline/pipeline.hpp"
+#include "../src/post_cvpipeline/split_mix_aiv.hpp"
 
 #include <fstream>
 #include <string>
@@ -44,6 +45,31 @@ int OperationId(const cvub::GenericModule &module,
   throw std::runtime_error("missing operation: " + operation);
 }
 
+bool HasOperation(const cvub::GenericModule &module,
+                  const std::string &operation) {
+  return std::any_of(module.operations.begin(), module.operations.end(),
+                     [&](const cvub::GenericOperation &candidate) {
+                       return candidate.name == operation;
+                     });
+}
+
+const cvub::GenericOperation &OperationWithCase(
+    const cvub::GenericModule &module, const std::string &caseName) {
+  for (const cvub::GenericOperation &operation : module.operations)
+    if (cvub::UnquoteIRString(
+            cvub::IRDictionaryValue(operation.attributes, "case")) == caseName)
+      return operation;
+  throw std::runtime_error("missing operation case: " + caseName);
+}
+
+const cvub::ProjectedAIVModule &ProjectedFunction(
+    const cvub::PostCVPipelineResult &result, const std::string &source) {
+  for (const auto &function : result.functions)
+    if (function.sourceFunction == source)
+      return function;
+  throw std::runtime_error("missing projected function: " + source);
+}
+
 CVUB_TEST(post_pipeline_defaults_match_compiler) {
   const cvub::PostCVPipelineOptions options;
   CVUB_CHECK_EQ(options.tileMixVectorLoop, 2U);
@@ -51,6 +77,124 @@ CVUB_TEST(post_pipeline_defaults_match_compiler) {
   CVUB_CHECK(options.enableAutoBindSubBlock);
   CVUB_CHECK(options.enableCodeMotion);
   CVUB_CHECK(!options.enableUbufSaving);
+}
+
+CVUB_TEST(split_mix_keeps_vector_and_workspace_boundary) {
+  auto module = cvub::test::ParseFixture("simple_mix_before_split.mlir");
+  auto &cube = module.operations.at(
+      static_cast<size_t>(OperationId(module, "hivm.hir.mmadL1")));
+  cube.dpsInits = {cube.operands.back()};
+
+  auto result = cvub::ProjectMixFunctionsToAIV(std::move(module));
+
+  CVUB_CHECK_EQ(result.functions.size(), 1U);
+  const auto &projected = result.functions.front();
+  CVUB_CHECK_EQ(projected.projectedFunction, "kernel_mix_aiv");
+  CVUB_CHECK(!HasOperation(projected.module, "hivm.hir.mmadL1"));
+  CVUB_CHECK(!HasOperation(projected.module, "hivm.hir.fixpipe"));
+  CVUB_CHECK(HasOperation(projected.module, "memref_ext.alloc_workspace"));
+  CVUB_CHECK(HasOperation(projected.module, "hivm.hir.load"));
+  CVUB_CHECK(HasOperation(projected.module, "hivm.hir.vadd"));
+  cvub::ValidateGenericModule(projected.module);
+}
+
+CVUB_TEST(core_classification_honors_precedence_and_known_registries) {
+  const auto module =
+      cvub::test::ParseFixture("control_flow_mix_before_split.mlir");
+  CVUB_CHECK_EQ(cvub::ClassifyCore(
+                    module, module.operations.at(static_cast<size_t>(
+                                OperationId(module, "scf.for")))),
+                cvub::CoreKind::Cube);
+  CVUB_CHECK_EQ(cvub::ClassifyCore(
+                    module, module.operations.at(static_cast<size_t>(
+                                OperationId(module, "hivm.hir.mmadL1")))),
+                cvub::CoreKind::Cube);
+  CVUB_CHECK_EQ(cvub::ClassifyCore(
+                    module, module.operations.at(static_cast<size_t>(
+                                OperationId(module, "hivm.hir.vsub")))),
+                cvub::CoreKind::Vector);
+  CVUB_CHECK_EQ(cvub::ClassifyCore(
+                    module, module.operations.at(static_cast<size_t>(
+                                OperationId(module, "tensor.empty")))),
+                cvub::CoreKind::Neutral);
+  CVUB_CHECK_EQ(cvub::ClassifyCore(
+                    module, module.operations.at(static_cast<size_t>(
+                                OperationId(module, "hivm.hir.custom")))),
+                cvub::CoreKind::Unknown);
+}
+
+CVUB_TEST(core_classification_rejects_non_enum_substring_matches) {
+  auto module =
+      cvub::test::ParseFixture("control_flow_mix_before_split.mlir");
+  auto &custom = module.operations.at(
+      static_cast<size_t>(OperationId(module, "hivm.hir.custom")));
+  custom.attributes = cvub::SetDictionaryValue(
+      custom.attributes, "tcoretype", "#hivm.tcore_type<NOT_VECTOR>");
+  CVUB_CHECK_EQ(cvub::ClassifyCore(module, custom), cvub::CoreKind::Unknown);
+}
+
+CVUB_TEST(split_mix_replaces_dps_loop_if_and_scope_results) {
+  auto module =
+      cvub::test::ParseFixture("control_flow_mix_before_split.mlir");
+  auto &cube = module.operations.at(
+      static_cast<size_t>(OperationId(module, "hivm.hir.mmadL1")));
+  const int base = cube.operands.back();
+  cube.dpsInits = {base};
+
+  const auto result = cvub::ProjectMixFunctionsToAIV(std::move(module));
+  const auto &projected = ProjectedFunction(result, "control").module;
+  for (const std::string caseName : {"dps", "loop", "if", "scope"})
+    CVUB_CHECK_EQ(OperationWithCase(projected, caseName).operands.front(),
+                  ResultOf(projected, "tensor.empty"));
+  CVUB_CHECK(!HasOperation(projected, "hivm.hir.mmadL1"));
+  CVUB_CHECK(!HasOperation(projected, "scf.for"));
+  CVUB_CHECK(!HasOperation(projected, "scf.if"));
+  CVUB_CHECK(!HasOperation(projected, "scope.scope"));
+  CVUB_CHECK(!HasOperation(projected, "annotation.mark"));
+  cvub::ValidateGenericModule(projected);
+}
+
+CVUB_TEST(split_mix_unknown_op_preserves_closure_and_reports_incomplete) {
+  auto module =
+      cvub::test::ParseFixture("control_flow_mix_before_split.mlir");
+  auto &cube = module.operations.at(
+      static_cast<size_t>(OperationId(module, "hivm.hir.mmadL1")));
+  cube.dpsInits = {cube.operands.back()};
+
+  const auto result = cvub::ProjectMixFunctionsToAIV(std::move(module));
+  const auto &projected = ProjectedFunction(result, "control").module;
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "SplitMixKernelAIVProjection",
+                           "no compiler core classification"));
+  CVUB_CHECK(HasOperation(projected, "hivm.hir.custom"));
+  CVUB_CHECK(HasOperation(projected, "hivm.hir.vadd"));
+  cvub::ValidateGenericModule(projected);
+}
+
+CVUB_TEST(split_mix_isolates_each_mix_function) {
+  auto module =
+      cvub::test::ParseFixture("control_flow_mix_before_split.mlir");
+  auto &cube = module.operations.at(
+      static_cast<size_t>(OperationId(module, "hivm.hir.mmadL1")));
+  cube.dpsInits = {cube.operands.back()};
+  const auto result = cvub::ProjectMixFunctionsToAIV(std::move(module));
+  CVUB_CHECK_EQ(result.functions.size(), 2U);
+  CVUB_CHECK_EQ(cvub::DeviceFunctionNames(ProjectedFunction(result, "control").module),
+                std::vector<std::string>({"control_mix_aiv"}));
+  CVUB_CHECK_EQ(cvub::DeviceFunctionNames(ProjectedFunction(result, "second").module),
+                std::vector<std::string>({"second_mix_aiv"}));
+}
+
+CVUB_TEST(split_mix_passes_already_aiv_function_through_in_isolation) {
+  auto result = cvub::ProjectMixFunctionsToAIV(
+      cvub::test::ParseFixture("minimal_aiv.mlir"));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(result.functions.size(), 1U);
+  CVUB_CHECK_EQ(result.functions.front().sourceFunction, "minimal_aiv");
+  CVUB_CHECK_EQ(result.functions.front().projectedFunction, "minimal_aiv");
+  CVUB_CHECK_EQ(cvub::DeviceFunctionNames(result.functions.front().module),
+                std::vector<std::string>({"minimal_aiv"}));
+  cvub::ValidateGenericModule(result.functions.front().module);
 }
 
 CVUB_TEST(post_pipeline_manifest_has_real_order) {
@@ -67,7 +211,10 @@ CVUB_TEST(post_pipeline_manifest_has_real_order) {
                     "LoopInvariantSubsetHoisting", "CloneTensorEmpty",
                     "InlineOTFLoadStore"}));
   for (const cvub::StageCoverage &stage : stages)
-    CVUB_CHECK_EQ(stage.disposition, cvub::CoverageDisposition::Unsupported);
+    CVUB_CHECK_EQ(stage.disposition,
+                  stage.stage == "SplitMixKernelAIVProjection"
+                      ? cvub::CoverageDisposition::Modeled
+                      : cvub::CoverageDisposition::Unsupported);
 }
 
 CVUB_TEST(ub_saving_configuration_is_reported_incomplete) {
