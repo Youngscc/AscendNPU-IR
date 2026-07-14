@@ -2,8 +2,10 @@
 #include "../src/post_cvpipeline/ir_utils.hpp"
 #include "../src/post_cvpipeline/buffer_size.hpp"
 #include "../src/post_cvpipeline/canonicalization.hpp"
+#include "../src/post_cvpipeline/inline_scope.hpp"
 #include "../src/post_cvpipeline/pipeline.hpp"
 #include "../src/post_cvpipeline/split_mix_aiv.hpp"
+#include "../src/post_cvpipeline/tensor_empty.hpp"
 #include "../src/post_cvpipeline/tile_cube_vector_loop.hpp"
 #include "../src/suffix/suffix_pipeline.hpp"
 
@@ -110,6 +112,16 @@ const cvub::GenericOperation &OperationWithCase(
             cvub::IRDictionaryValue(operation.attributes, "case")) == caseName)
       return operation;
   throw std::runtime_error("missing operation case: " + caseName);
+}
+
+std::vector<const cvub::GenericOperation *> OperationsWithCase(
+    const cvub::GenericModule &module, const std::string &caseName) {
+  std::vector<const cvub::GenericOperation *> operations;
+  for (const cvub::GenericOperation &operation : module.operations)
+    if (cvub::UnquoteIRString(
+            cvub::IRDictionaryValue(operation.attributes, "case")) == caseName)
+      operations.push_back(&operation);
+  return operations;
 }
 
 const cvub::GenericOperation &OperationNamed(
@@ -1444,7 +1456,11 @@ CVUB_TEST(post_pipeline_manifest_has_real_order) {
                     stage.stage == "TileCubeVectorLoop" ||
                             stage.stage == "InferAndSetBufferSize" ||
                             stage.stage == "CanonicalizationBeforeSplit" ||
-                            stage.stage == "SplitMixKernelAIVProjection"
+                            stage.stage == "SplitMixKernelAIVProjection" ||
+                            stage.stage == "InlineScope" ||
+                            stage.stage == "FoldTensorEmpty" ||
+                            stage.stage == "CanonicalizationAfterSplit" ||
+                            stage.stage == "CloneTensorEmpty"
                         ? cvub::CoverageDisposition::Modeled
                         : cvub::CoverageDisposition::Unsupported);
 }
@@ -1494,7 +1510,7 @@ CVUB_TEST(unsupported_stages_make_projection_incomplete) {
                 cvub::CoverageDisposition::Modeled);
   CVUB_CHECK(!HasDiagnostic(result, "TileCubeVectorLoop", "unsupported"));
   CVUB_CHECK(!HasDiagnostic(result, "InferAndSetBufferSize", "unsupported"));
-  CVUB_CHECK(HasDiagnostic(result, "InlineScope", "unsupported"));
+  CVUB_CHECK(HasDiagnostic(result, "TileAndBindSubBlock", "unsupported"));
 }
 
 CVUB_TEST(post_pipeline_passes_size_and_canonicalization_output_to_split) {
@@ -2864,6 +2880,122 @@ CVUB_TEST(workspace_invariant_detects_add_remove_alias_and_local_shape_changes) 
                                                 std::move(addedModule));
   CVUB_CHECK_EQ(added.precision, cvub::Precision::Incomplete);
   CVUB_CHECK(HasDiagnostic(added, "WorkspaceSemanticProjection", "added"));
+}
+
+CVUB_TEST(inline_scope_moves_one_block_body_in_order_and_maps_all_results) {
+  const auto result = cvub::RunInlineScope(
+      cvub::test::ParseFixture("scope_tensor_empty.mlir"));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(!HasOperationCase(result.module, "inline_scope"));
+  CVUB_CHECK_EQ(OperationsWithCase(result.module, "kept_scope").size(), 1U);
+  const auto &first = OperationWithCase(result.module, "scope_first");
+  const auto &second = OperationWithCase(result.module, "scope_second");
+  const auto &user = OperationWithCase(result.module, "scope_user");
+  CVUB_CHECK_EQ(first.blockId, user.blockId);
+  CVUB_CHECK_EQ(second.blockId, user.blockId);
+  CVUB_CHECK(first.ordinal < second.ordinal);
+  CVUB_CHECK(second.ordinal < user.ordinal);
+  CVUB_CHECK_EQ(user.operands[0], first.results.front());
+  CVUB_CHECK_EQ(user.operands[1], second.results.front());
+  CVUB_CHECK_EQ(user.operands[2], first.results.front());
+  cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(inline_scope_fail_closes_and_preserves_unsupported_region_shape) {
+  auto module = cvub::test::ParseFixture("scope_tensor_empty.mlir");
+  const cvub::GenericOperation scope =
+      MutableOperationNamed(module, "scope.scope");
+  const int region = scope.regions.front();
+  cvub::GenericRewriter rewriter(module);
+  const int extraBlock = rewriter.createBlock(region, {});
+  const int firstEmpty = rewriter.createOperation(
+      scope.id, region, extraBlock, "tensor.empty", {scope.resultTypes[0]});
+  rewriter.appendToBlock(extraBlock, firstEmpty);
+  const int secondEmpty = rewriter.createOperation(
+      scope.id, region, extraBlock, "tensor.empty", {scope.resultTypes[1]});
+  rewriter.appendToBlock(extraBlock, secondEmpty);
+  const std::vector<int> yielded = {
+      module.operations.at(static_cast<size_t>(firstEmpty)).results.front(),
+      module.operations.at(static_cast<size_t>(secondEmpty)).results.front()};
+  const int terminator = rewriter.createOperation(
+      scope.id, region, extraBlock, "scope.return", {},
+      yielded, scope.resultTypes);
+  rewriter.appendToBlock(extraBlock, terminator);
+  cvub::ValidateGenericModule(module);
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result = cvub::RunInlineScope(module);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "InlineScope", "single-block"));
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+}
+
+CVUB_TEST(fold_tensor_empty_replaces_empty_source_insert_slice_with_destination) {
+  const auto result = cvub::RunFoldTensorEmpty(
+      cvub::test::ParseFixture("scope_tensor_empty.mlir"));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(!HasOperationCase(result.module, "fold_insert_slice"));
+  CVUB_CHECK(!HasOperationCase(result.module, "fold_source"));
+  const auto &destination =
+      OperationWithCase(result.module, "fold_destination");
+  const auto &user = OperationWithCase(result.module, "fold_user");
+  CVUB_CHECK_EQ(user.operands.front(), destination.results.front());
+  cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(clone_tensor_empty_gives_every_destination_owner_distinct_storage) {
+  auto module = cvub::test::ParseFixture("scope_tensor_empty.mlir");
+  // Exercise the semantic metadata path used by product parsing as well as
+  // the raw generic fixture's operand-segment path.
+  auto &metadataOwner = MutableOperationNamed(module, "hivm.hir.vadd", 1);
+  cvub::ApplyOperationSemantics(metadataOwner);
+  const auto result = cvub::RunCloneTensorEmpty(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  const auto &original =
+      OperationWithCase(result.module, "shared_destination");
+  std::vector<int> destinations;
+  for (const std::string ownerCase : {"owner_zero", "owner_one"}) {
+    const auto &owner = OperationWithCase(result.module, ownerCase);
+    CVUB_CHECK_EQ(owner.operands.size(), 3U);
+    destinations.push_back(owner.operands[2]);
+    const auto &clone = DefinitionOf(result.module, owner.operands[2]);
+    CVUB_CHECK_EQ(clone.name, "tensor.empty");
+    CVUB_CHECK_EQ(clone.blockId, owner.blockId);
+    CVUB_CHECK(clone.ordinal < owner.ordinal);
+  }
+  const auto &forOwner = OperationWithCase(result.module, "for_owner");
+  const auto &whileOwner = OperationWithCase(result.module, "while_owner");
+  const auto &insertOwner = OperationWithCase(result.module, "insert_owner");
+  destinations.push_back(forOwner.operands[3]);
+  destinations.push_back(whileOwner.operands[0]);
+  destinations.push_back(insertOwner.operands[1]);
+  CVUB_CHECK_EQ(std::set<int>(destinations.begin(), destinations.end()).size(),
+                destinations.size());
+  for (int destination : destinations) {
+    CVUB_CHECK(destination != original.results.front());
+    CVUB_CHECK_EQ(DefinitionOf(result.module, destination).name,
+                  "tensor.empty");
+  }
+  CVUB_CHECK_EQ(OperationsWithCase(result.module, "size_mark").size(), 3U);
+  CVUB_CHECK_EQ(OperationsWithCase(result.module, "other_mark").size(), 1U);
+  CVUB_CHECK_EQ(OperationsWithCase(result.module, "scope_first").size(), 1U);
+  CVUB_CHECK_EQ(OperationWithCase(result.module, "owner_zero").dpsInits,
+                std::vector<int>{destinations.front()});
+  cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(post_split_scope_empty_stages_are_ordered_and_propagated) {
+  const auto result = cvub::RunPostCVPipelineAIVProjection(
+      cvub::test::ParseFixture("minimal_aiv.mlir"), {});
+  CVUB_CHECK_EQ(result.coverage[6].disposition,
+                cvub::CoverageDisposition::Modeled);
+  CVUB_CHECK_EQ(result.coverage[8].disposition,
+                cvub::CoverageDisposition::Modeled);
+  CVUB_CHECK_EQ(result.coverage[9].disposition,
+                cvub::CoverageDisposition::Modeled);
+  CVUB_CHECK_EQ(result.coverage[12].disposition,
+                cvub::CoverageDisposition::Modeled);
+  CVUB_CHECK(!result.functions.empty());
+  cvub::ValidateGenericModule(result.functions.front().module);
 }
 
 } // namespace

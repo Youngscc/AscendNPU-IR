@@ -4,7 +4,9 @@
 #include "types.hpp"
 #include "buffer_size.hpp"
 #include "canonicalization.hpp"
+#include "inline_scope.hpp"
 #include "split_mix_aiv.hpp"
+#include "tensor_empty.hpp"
 #include "tile_cube_vector_loop.hpp"
 
 #include <array>
@@ -125,6 +127,10 @@ inline std::vector<StageCoverage> CompiledPostCVPipelineCoverage() {
   stages[3].disposition = CoverageDisposition::Modeled;
   stages[4].disposition = CoverageDisposition::UBInvariant;
   stages[5].disposition = CoverageDisposition::Modeled;
+  stages[6].disposition = CoverageDisposition::Modeled;
+  stages[8].disposition = CoverageDisposition::Modeled;
+  stages[9].disposition = CoverageDisposition::Modeled;
+  stages[12].disposition = CoverageDisposition::Modeled;
   return stages;
 }
 
@@ -162,6 +168,30 @@ inline PostCVPipelineResult RunPostCVPipelineAIVProjection(
   result.diagnostics.insert(result.diagnostics.end(), split.diagnostics.begin(),
                             split.diagnostics.end());
   result.functions = std::move(split.functions);
+
+  const auto applyProjectedStage = [&](ProjectedAIVModule &function,
+                                       StageResult stage) {
+    if (stage.precision == Precision::Incomplete)
+      result.precision = Precision::Incomplete;
+    for (PostCVPipelineDiagnostic &diagnostic : stage.diagnostics) {
+      if (diagnostic.function.empty())
+        diagnostic.function = function.projectedFunction;
+      result.diagnostics.push_back(std::move(diagnostic));
+    }
+    function.module = std::move(stage.module);
+  };
+  for (ProjectedAIVModule &function : result.functions) {
+    applyProjectedStage(function, RunInlineScope(std::move(function.module)));
+    // TileAndBindSubBlock is inserted here by Task 7.  Keeping the subsequent
+    // stages in their real relative order makes unsupported coverage explicit.
+    applyProjectedStage(function,
+                        RunFoldTensorEmpty(std::move(function.module)));
+    applyProjectedStage(
+        function, RunPostSplitCanonicalization(std::move(function.module)));
+    // Code-motion stages are inserted here by Task 8.
+    applyProjectedStage(function,
+                        RunCloneTensorEmpty(std::move(function.module)));
+  }
 
   if (options.enableUbufSaving) {
     result.precision = Precision::Incomplete;

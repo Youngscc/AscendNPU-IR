@@ -5,11 +5,11 @@ order	stage	disposition
 4	CanonicalizationBeforeSplit	modeled
 5	CrossCoreSyncInvariant	ub-invariant
 6	SplitMixKernelAIVProjection	modeled
-7	InlineScope	unsupported
+7	InlineScope	modeled
 8	TileAndBindSubBlock	unsupported
-9	FoldTensorEmpty	unsupported
-10	CanonicalizationAfterSplit	unsupported
+9	FoldTensorEmpty	modeled
+10	CanonicalizationAfterSplit	modeled
 11	LoopInvariantCodeMotion	unsupported
 12	LoopInvariantSubsetHoisting	unsupported
-13	CloneTensorEmpty	unsupported
+13	CloneTensorEmpty	modeled
 14	InlineOTFLoadStore	unsupported
