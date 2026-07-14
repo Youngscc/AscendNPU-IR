@@ -46,6 +46,7 @@ struct StageResult {
 
 struct PostCVPipelineResult {
   Precision precision = Precision::Exact;
+  GenericModule module;
   std::vector<ProjectedAIVModule> functions;
   std::vector<StageCoverage> coverage;
   std::vector<PostCVPipelineDiagnostic> diagnostics;

@@ -36,6 +36,7 @@ struct LoopPlan {
   unsigned tripCount = 1;
   bool skip = false;
   std::map<int, size_t> valueAxes;
+  std::set<int> producerClosure;
 };
 
 inline std::optional<ShapedType> ParseStaticShapedType(const std::string &type) {
@@ -265,7 +266,91 @@ inline bool IsAllowedBodyOperation(const GenericOperation &operation,
            operation.name == "hivm.hir.vadd" ||
            operation.name == "hivm.hir.store";
   return operation.name == "hivm.hir.mmadL1" ||
+         operation.name == "hivm.hir.load" ||
          operation.name == "hivm.hir.fixpipe";
+}
+
+inline bool IsSupportedProducer(const GenericOperation &operation,
+                                LoopKind kind) {
+  if (!operation.regions.empty())
+    return false;
+  if (operation.name == "tensor.empty" ||
+      operation.name == "tensor.extract_slice" ||
+      operation.name == "memref.subview" || operation.name == "hivm.hir.load")
+    return true;
+  if (kind == LoopKind::Vector)
+    return operation.name == "hivm.hir.vadd";
+  return operation.name == "hivm.hir.mmadL1";
+}
+
+inline bool CollectProducerClosure(const GenericModule &module,
+                                   const GenericOperation &loop, int value,
+                                   LoopKind kind, std::set<int> &closure,
+                                   std::string &reason) {
+  const GenericOperation *definition = Definition(module, value);
+  if (definition == nullptr || !IsAncestor(module, loop.id, definition->id))
+    return true;
+  if (!IsSupportedProducer(*definition, kind)) {
+    reason = "anchor dependency contains an operation whose axis semantics "
+             "are not modeled";
+    return false;
+  }
+  if (!closure.insert(definition->id).second)
+    return true;
+  for (int operand : definition->operands)
+    if (!CollectProducerClosure(module, loop, operand, kind, closure, reason))
+      return false;
+  return true;
+}
+
+inline std::optional<size_t> UniqueParallelAxis(const ShapedType &type) {
+  std::optional<size_t> axis;
+  for (size_t index = 0; index < type.shape.size(); ++index) {
+    if (type.shape[index] <= 1)
+      continue;
+    if (axis)
+      return std::nullopt;
+    axis = index;
+  }
+  return axis;
+}
+
+inline bool HasInLoopLoadDependency(const GenericModule &module,
+                                    const GenericOperation &loop, int value) {
+  std::set<int> visited;
+  std::vector<int> worklist{value};
+  while (!worklist.empty()) {
+    const GenericOperation *definition = Definition(module, worklist.back());
+    worklist.pop_back();
+    if (definition == nullptr || !IsAncestor(module, loop.id, definition->id) ||
+        !visited.insert(definition->id).second)
+      continue;
+    if (definition->name == "hivm.hir.load")
+      return true;
+    worklist.insert(worklist.end(), definition->operands.begin(),
+                    definition->operands.end());
+  }
+  return false;
+}
+
+inline bool HasStaticBoundaryView(const GenericModule &module, int value) {
+  const GenericOperation *definition = Definition(module, value);
+  if (definition == nullptr || definition->name != "memref.subview")
+    return true;
+  const auto offsets = ParseIntegerArray(
+      IRDictionaryValue(definition->attributes, "static_offsets"));
+  const auto sizes = ParseIntegerArray(
+      IRDictionaryValue(definition->attributes, "static_sizes"));
+  const auto strides = ParseIntegerArray(
+      IRDictionaryValue(definition->attributes, "static_strides"));
+  return !offsets.empty() && offsets.size() == sizes.size() &&
+         sizes.size() == strides.size() &&
+         std::none_of(offsets.begin(), offsets.end(),
+                      [](int64_t value) { return value < 0; }) &&
+         std::none_of(sizes.begin(), sizes.end(),
+                      [](int64_t value) { return value < 0; }) &&
+         std::all_of(strides.begin(), strides.end(),
+                     [](int64_t value) { return value == 1; });
 }
 
 inline bool HasUnitIterationDomain(const GenericModule &module,
@@ -288,7 +373,9 @@ inline bool RecordValueAxis(const GenericModule &module, LoopPlan &plan,
                             int64_t extent, std::string &reason) {
   const auto type = ParseStaticShapedType(typeText);
   if (!type || axis >= type->shape.size() || type->shape[axis] != extent) {
-    reason = "producer dependency has no provable tiling dimension";
+    reason = "producer dependency has no provable tiling dimension for value " +
+             std::to_string(value) + " type " + typeText + " axis " +
+             std::to_string(axis);
     return false;
   }
   for (size_t index = 0; index < type->shape.size(); ++index)
@@ -328,33 +415,56 @@ inline bool TypeUsesAxisExactly(const ShapedType &type, int64_t extent,
   return occurrences == 1;
 }
 
-inline bool CheckVectorValueTypes(const GenericModule &module,
-                                  const GenericOperation &loop,
-                                  int64_t extent, unsigned tripCount,
-                                  int64_t alignBits, std::string &reason,
-                                  bool &alignmentRollback) {
+inline bool RecordIdentityDependencyAxis(const GenericModule &module,
+                                         const GenericOperation &loop,
+                                         LoopPlan &plan, int value,
+                                         const std::string &typeText,
+                                         size_t axis, int64_t extent,
+                                         std::string &reason) {
+  if (!RecordValueAxis(module, plan, value, typeText, axis, extent, reason))
+    return false;
+  const GenericOperation *definition = Definition(module, value);
+  if (definition == nullptr || !IsAncestor(module, loop.id, definition->id) ||
+      definition->name == "tensor.empty")
+    return true;
+  if (definition->name != "tensor.extract_slice" &&
+      definition->name != "memref.subview" &&
+      definition->name != "hivm.hir.load" &&
+      definition->name != "hivm.hir.vadd") {
+    reason = "dependency axis equivalence is not explicitly modeled";
+    return false;
+  }
+  for (size_t index = 0; index < definition->operands.size(); ++index) {
+    if (!ParseStaticShapedType(definition->operandTypes[index]))
+      continue;
+    if (!RecordIdentityDependencyAxis(module, loop, plan,
+                                      definition->operands[index],
+                                      definition->operandTypes[index], axis,
+                                      extent, reason))
+      return false;
+  }
+  return true;
+}
+
+inline bool CheckProvenVectorAlignment(const GenericModule &module,
+                                       const LoopPlan &plan,
+                                       unsigned tripCount, int64_t alignBits,
+                                       std::string &reason,
+                                       bool &alignmentRollback) {
   alignmentRollback = false;
-  for (int child : DirectChildren(module, loop)) {
+  for (int child : plan.producerClosure) {
     const GenericOperation &operation =
         module.operations.at(static_cast<size_t>(child));
-    if (operation.name == "scf.yield")
-      continue;
-    for (const std::string *typeText :
-         [&]() {
-           std::vector<const std::string *> types;
-           for (const auto &type : operation.resultTypes) types.push_back(&type);
-           for (const auto &type : operation.operandTypes) types.push_back(&type);
-           return types;
-         }()) {
-      const auto type = ParseStaticShapedType(*typeText);
-      if (!type)
+    for (size_t index = 0; index < operation.results.size(); ++index) {
+      const auto axis = plan.valueAxes.find(operation.results[index]);
+      if (axis == plan.valueAxes.end())
         continue;
-      if (type->shape.size() != 2 || !TypeUsesAxisExactly(*type, extent, 1)) {
-        reason = "DimensionAnalyzer axis/producer dependency is ambiguous";
+      const std::string *typeText = &operation.resultTypes[index];
+      const auto type = ParseStaticShapedType(*typeText);
+      if (!type || axis->second >= type->shape.size())
         return false;
-      }
       ShapedType tiled = *type;
-      tiled.shape[1] = extent / static_cast<int64_t>(tripCount);
+      tiled.shape[axis->second] /= static_cast<int64_t>(tripCount);
       const auto bits = StaticSizeBits(tiled);
       if (!bits) {
         reason = "physical size overflows or has unknown element width";
@@ -397,13 +507,6 @@ inline bool AnalyzeLoop(const GenericModule &module,
     reason = "result-carrying or malformed candidate loops are not modeled";
     return false;
   }
-  for (int child : children)
-    if (!IsAllowedBodyOperation(module.operations.at(static_cast<size_t>(child)),
-                                *kind)) {
-      reason = "body contains an operation whose tiling effect is not modeled";
-      return false;
-    }
-
   plan.loopId = loop.id;
   plan.kind = *kind;
   plan.tripCount = *kind == LoopKind::Vector ? vectorTripCount : cubeTripCount;
@@ -443,43 +546,50 @@ inline bool AnalyzeLoop(const GenericModule &module,
     reason = "tiling anchor has no shaped source";
     return false;
   }
-  const auto anchorType = ParseStaticShapedType(anchors.front()->operandTypes.front());
-  if (!anchorType || anchorType->shape.size() != 2 ||
-      anchorType->shape[0] == anchorType->shape[1] ||
-      anchorType->shape[0] <= 0 || anchorType->shape[1] <= 0) {
+  const auto sourceType =
+      ParseStaticShapedType(anchors.front()->operandTypes.front());
+  if (!sourceType || sourceType->shape.size() != 2) {
     reason = "DimensionAnalyzer tiling axis is not uniquely provable";
-    return false;
-  }
-  plan.extent = anchorType->shape[1];
-  if (plan.extent % static_cast<int64_t>(plan.tripCount) != 0) {
-    reason = "non-divisible tiling requires a dynamic remainder model";
     return false;
   }
 
   if (*kind == LoopKind::Vector) {
+    const auto axis = UniqueParallelAxis(*sourceType);
+    if (!axis) {
+      reason = "DimensionAnalyzer has no unique parallel store-source axis";
+      return false;
+    }
+    plan.extent = sourceType->shape[*axis];
+    if (plan.extent % static_cast<int64_t>(plan.tripCount) != 0) {
+      reason = "non-divisible tiling requires a dynamic remainder model";
+      return false;
+    }
+    if (!CollectProducerClosure(module, loop, anchors.front()->operands.front(),
+                                *kind, plan.producerClosure, reason))
+      return false;
+    plan.producerClosure.insert(anchors.front()->id);
+    if (!RecordIdentityDependencyAxis(
+            module, loop, plan, anchors.front()->operands.front(),
+            anchors.front()->operandTypes.front(), *axis, plan.extent, reason))
+      return false;
+    if (anchors.front()->operands.size() < 2 ||
+        anchors.front()->operandTypes.size() < 2 ||
+        !HasStaticBoundaryView(module, anchors.front()->operands[1]) ||
+        !RecordValueAxis(module, plan, anchors.front()->operands[1],
+                         anchors.front()->operandTypes[1], *axis, plan.extent,
+                         reason)) {
+      if (reason.empty())
+        reason = "store destination axis is not equivalent";
+      return false;
+    }
     bool alignmentRollback = false;
-    if (!CheckVectorValueTypes(module, loop, plan.extent, plan.tripCount,
-                               spec.ubAlignBits, reason, alignmentRollback))
+    if (!CheckProvenVectorAlignment(module, plan, plan.tripCount,
+                                    spec.ubAlignBits, reason,
+                                    alignmentRollback))
       return false;
     if (alignmentRollback) {
       plan.skip = true;
       return true;
-    }
-    for (int child : children) {
-      const GenericOperation &operation =
-          module.operations.at(static_cast<size_t>(child));
-      for (size_t index = 0; index < operation.results.size(); ++index)
-        if (ParseStaticShapedType(operation.resultTypes[index]) &&
-            !RecordValueAxis(module, plan, operation.results[index],
-                             operation.resultTypes[index], 1, plan.extent,
-                             reason))
-          return false;
-      for (size_t index = 0; index < operation.operands.size(); ++index)
-        if (ParseStaticShapedType(operation.operandTypes[index]) &&
-            !RecordValueAxis(module, plan, operation.operands[index],
-                             operation.operandTypes[index], 1, plan.extent,
-                             reason))
-          return false;
     }
   } else {
     const GenericOperation *mmad =
@@ -504,17 +614,51 @@ inline bool AnalyzeLoop(const GenericModule &module,
       reason = "MmadL1/fixpipe branch arity is outside the exact model";
       return false;
     }
-    if (!RecordValueAxis(module, plan, mmad->results[0], mmad->resultTypes[0], 1,
-                         plan.extent, reason) ||
-        !RecordValueAxis(module, plan, mmad->operands[1], mmad->operandTypes[1],
-                         0, plan.extent, reason) ||
-        !RecordValueAxis(module, plan, mmad->operands[3], mmad->operandTypes[3],
-                         1, plan.extent, reason) ||
+    const auto destinationType =
+        ParseStaticShapedType(anchors.front()->operandTypes[1]);
+    if (!destinationType || destinationType->shape.size() != 2 ||
+        destinationType->shape != sourceType->shape ||
+        !HasStaticBoundaryView(module, anchors.front()->operands[1]) ||
+        mmad->attributes.find("transpose") != std::string::npos) {
+      reason = "fixpipe source and destination axes are not equivalent";
+      return false;
+    }
+    const bool aInside =
+        HasInLoopLoadDependency(module, loop, mmad->operands[0]);
+    const bool bInside =
+        HasInLoopLoadDependency(module, loop, mmad->operands[1]);
+    std::optional<size_t> axis;
+    if (aInside != bInside)
+      axis = aInside ? 0U : 1U;
+    else if (!aInside)
+      axis = UniqueParallelAxis(*sourceType);
+    if (!axis) {
+      reason = "Cube M/N axis lacks unique DimensionAnalyzer load evidence";
+      return false;
+    }
+    plan.extent = sourceType->shape[*axis];
+    if (plan.extent % static_cast<int64_t>(plan.tripCount) != 0) {
+      reason = "non-divisible tiling requires a dynamic remainder model";
+      return false;
+    }
+    if (!CollectProducerClosure(module, loop, anchors.front()->operands.front(),
+                                *kind, plan.producerClosure, reason))
+      return false;
+    plan.producerClosure.insert(anchors.front()->id);
+    if (!RecordValueAxis(module, plan, mmad->results[0], mmad->resultTypes[0],
+                         *axis, plan.extent, reason) ||
+        !RecordValueAxis(module, plan, mmad->operands[3],
+                         mmad->operandTypes[3], *axis, plan.extent, reason) ||
         !RecordValueAxis(module, plan, anchors.front()->operands[1],
-                         anchors.front()->operandTypes[1], 1, plan.extent,
+                         anchors.front()->operandTypes[1], *axis, plan.extent,
                          reason))
       return false;
-    const auto bits = StaticSizeBits(*anchorType);
+    const size_t matrixOperand = *axis == 0 ? 0 : 1;
+    if (!RecordIdentityDependencyAxis(
+            module, loop, plan, mmad->operands[matrixOperand],
+            mmad->operandTypes[matrixOperand], *axis, plan.extent, reason))
+      return false;
+    const auto bits = StaticSizeBits(*destinationType);
     if (!bits) {
       reason = "L0C branch size overflows or has unknown element width";
       return false;
@@ -537,27 +681,6 @@ inline bool RewriteType(std::string &typeText, int64_t extent,
   return true;
 }
 
-inline std::set<int> AffectedOperations(const GenericModule &module,
-                                        const std::vector<int> &children) {
-  std::set<int> affected(children.begin(), children.end() - 1);
-  std::vector<int> worklist(affected.begin(), affected.end());
-  while (!worklist.empty()) {
-    const int id = worklist.back();
-    worklist.pop_back();
-    for (int operand : module.operations.at(static_cast<size_t>(id)).operands) {
-      const GenericOperation *definition = Definition(module, operand);
-      if (definition == nullptr ||
-          (definition->name != "tensor.empty" &&
-           definition->name != "memref.alloc" &&
-           definition->name != "memref.subview"))
-        continue;
-      if (affected.insert(definition->id).second)
-        worklist.push_back(definition->id);
-    }
-  }
-  return affected;
-}
-
 inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
   const GenericOperation snapshot =
       module.operations.at(static_cast<size_t>(plan.loopId));
@@ -568,7 +691,7 @@ inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
       module.regions.at(static_cast<size_t>(outerRegion)).blocks.front();
   const std::vector<int> children =
       module.blocks.at(static_cast<size_t>(outerBlock)).operations;
-  const std::set<int> affected = AffectedOperations(module, children);
+  const std::set<int> &affected = plan.producerClosure;
   const int terminator = children.back();
 
   GenericRewriter rewriter(module);
@@ -598,6 +721,8 @@ inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
   rewriter.appendToBlock(innerBlock, offset);
 
   for (size_t index = 0; index + 1 < children.size(); ++index) {
+    if (affected.count(children[index]) == 0)
+      continue;
     rewriter.removeFromBlock(outerBlock, children[index]);
     rewriter.appendToBlock(innerBlock, children[index]);
     GenericOperation &moved =
@@ -621,6 +746,71 @@ inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
   rewriter.insertToBlock(outerBlock, position++, step);
   rewriter.insertToBlock(outerBlock, position, innerLoop);
 
+  std::map<int, int> boundaryTiles;
+  for (int operationId : affected) {
+    GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(operationId));
+    if (operation.blockId != innerBlock ||
+        operation.name == "tensor.extract_slice" ||
+        operation.name == "memref.subview")
+      continue;
+    const std::vector<int> originalOperands = operation.operands;
+    const std::vector<std::string> originalOperandTypes = operation.operandTypes;
+    for (size_t index = 0; index < originalOperands.size(); ++index) {
+      const int original = originalOperands[index];
+      const std::string originalType = originalOperandTypes[index];
+      const auto axisEntry = plan.valueAxes.find(original);
+      if (axisEntry == plan.valueAxes.end())
+        continue;
+      const GenericOperation *definition = Definition(module, original);
+      if (definition != nullptr && affected.count(definition->id) != 0)
+        continue;
+      int tiledValue = -1;
+      const auto cached = boundaryTiles.find(original);
+      if (cached != boundaryTiles.end()) {
+        tiledValue = cached->second;
+      } else {
+        auto type = ParseStaticShapedType(originalType);
+        if (!type || axisEntry->second >= type->shape.size())
+          throw std::runtime_error("boundary value has no proven static axis");
+        std::vector<int64_t> offsets(type->shape.size(), 0);
+        std::vector<int64_t> sizes = type->shape;
+        std::vector<int64_t> strides(type->shape.size(), 1);
+        offsets[axisEntry->second] = std::numeric_limits<int64_t>::min();
+        sizes[axisEntry->second] = tileSize;
+        ShapedType tiledType = *type;
+        tiledType.shape[axisEntry->second] = tileSize;
+        const std::string resultType = PrintShapedType(tiledType);
+        const std::string sliceName =
+            type->kind == "memref" ? "memref.subview" : "tensor.extract_slice";
+        const int slice = rewriter.createOperation(
+            innerLoop, innerRegion, innerBlock, sliceName, {resultType},
+            {original,
+             module.operations.at(static_cast<size_t>(offset)).results.front()},
+            {originalType, "index"}, "",
+            "{static_offsets = " + PrintIntegerArray(offsets) +
+                ", static_sizes = " + PrintIntegerArray(sizes) +
+                ", static_strides = " + PrintIntegerArray(strides) + "}");
+        const auto &innerOperations =
+            module.blocks.at(static_cast<size_t>(innerBlock)).operations;
+        const auto before =
+            std::find(innerOperations.begin(), innerOperations.end(), operationId);
+        rewriter.insertToBlock(
+            innerBlock,
+            static_cast<size_t>(std::distance(innerOperations.begin(), before)),
+            slice);
+        tiledValue =
+            module.operations.at(static_cast<size_t>(slice)).results.front();
+        boundaryTiles[original] = tiledValue;
+      }
+      GenericOperation &updated =
+          module.operations.at(static_cast<size_t>(operationId));
+      updated.operands[index] = tiledValue;
+      RewriteType(updated.operandTypes[index], plan.extent, tileSize,
+                  axisEntry->second);
+    }
+  }
+
   for (GenericOperation &operation : module.operations) {
     if (affected.count(operation.id) == 0)
       continue;
@@ -631,6 +821,9 @@ inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
                     axis->second);
     }
     for (size_t index = 0; index < operation.operandTypes.size(); ++index) {
+      if (index == 0 && (operation.name == "tensor.extract_slice" ||
+                         operation.name == "memref.subview"))
+        continue;
       const auto axis = plan.valueAxes.find(operation.operands[index]);
       if (axis != plan.valueAxes.end())
         RewriteType(operation.operandTypes[index], plan.extent, tileSize,
@@ -656,12 +849,10 @@ inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
         offsets[axis] != 0 || strides[axis] != 1)
       throw std::runtime_error("slice/subview does not match proven static form");
     sizes[axis] = tileSize;
-    if (operation.name == "tensor.extract_slice") {
-      offsets[axis] = std::numeric_limits<int64_t>::min();
-      operation.operands.push_back(
-          module.operations.at(static_cast<size_t>(offset)).results.front());
-      operation.operandTypes.push_back("index");
-    }
+    offsets[axis] = std::numeric_limits<int64_t>::min();
+    operation.operands.push_back(
+        module.operations.at(static_cast<size_t>(offset)).results.front());
+    operation.operandTypes.push_back("index");
     operation.attributes = SetDictionaryValue(
         operation.attributes, "static_sizes", PrintIntegerArray(sizes));
     operation.attributes = SetDictionaryValue(
@@ -679,6 +870,26 @@ inline bool IsZeroUnitSubview(const GenericOperation &subview) {
                      [](int64_t value) { return value == 0; }) &&
          std::all_of(strides.begin(), strides.end(),
                      [](int64_t value) { return value == 1; });
+}
+
+inline bool HasUnmodeledDynamicShrink(const GenericModule &module) {
+  for (const GenericOperation &alloc : module.operations) {
+    if (alloc.name != "memref.alloc" || alloc.results.size() != 1 ||
+        alloc.resultTypes.size() != 1)
+      continue;
+    const auto users = Users(module, alloc.results.front());
+    if (users.size() != 1 || users.front()->name != "memref.subview" ||
+        !IsZeroUnitSubview(*users.front()))
+      continue;
+    const auto sizes = ParseIntegerArray(
+        IRDictionaryValue(users.front()->attributes, "static_sizes"));
+    if (!alloc.operands.empty() || !ParseStaticShapedType(alloc.resultTypes[0]) ||
+        sizes.empty() ||
+        std::any_of(sizes.begin(), sizes.end(),
+                    [](int64_t value) { return value < 0; }))
+      return true;
+  }
+  return false;
 }
 
 inline void ShrinkAllocWholeModule(GenericModule &module) {
@@ -751,6 +962,11 @@ inline StageResult RunTileCubeVectorLoop(GenericModule module,
   if (HasUnmodeledLiftPattern(module)) {
     AddDiagnostic(result, -1, "",
                   "liftMemRefLoadsInLoop preprocessing would change the module");
+    return result;
+  }
+  if (HasUnmodeledDynamicShrink(module)) {
+    AddDiagnostic(result, -1, "",
+                  "dynamic mixed-size shrinkAlloc is not modeled exactly");
     return result;
   }
   for (size_t left = 0; left < candidates.size(); ++left)

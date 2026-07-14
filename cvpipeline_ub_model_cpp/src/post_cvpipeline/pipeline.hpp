@@ -132,6 +132,7 @@ inline PostCVPipelineResult RunPostCVPipelineAIVProjection(
   result.diagnostics.insert(result.diagnostics.end(),
                             tiled.diagnostics.begin(),
                             tiled.diagnostics.end());
+  result.module = std::move(tiled.module);
 
   if (options.enableUbufSaving) {
     result.precision = Precision::Incomplete;
