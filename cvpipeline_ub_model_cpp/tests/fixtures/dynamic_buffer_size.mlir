@@ -48,4 +48,20 @@
     "test.consume"(%alloc, %stack) : (memref<?xf16, strided<[2], offset: 1>, #hivm.address_space<UB>>, memref<?xf32, #hivm.address_space<UB>>) -> ()
     "func.return"() : () -> ()
   }) {enable_auto_mark_buffer_size, hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<AIV>, mix_mode = "aiv"} : () -> ()
+  "func.func"() <{function_type = () -> (), sym_name = "affine_loop_vreduce"}> ({
+  ^bb0:
+    %lb = "arith.constant"() {value = 0 : index} : () -> index
+    %ub = "arith.constant"() {value = 4 : index} : () -> index
+    %zero = "arith.constant"() {value = 0.0 : f32} : () -> f32
+    %src = "tensor.empty"() : () -> tensor<4xf32>
+    %init_empty = "tensor.empty"() : () -> tensor<1xf32>
+    %filled = "hivm.hir.vbrc"(%zero, %init_empty) <{operandSegmentSizes = array<i32: 1, 1, 0>, broadcast_dims = array<i64>}> : (f32, tensor<1xf32>) -> tensor<1xf32>
+    %loop = "affine.for"(%lb, %ub, %filled) <{lowerBoundMap = affine_map<(d0) -> (d0)>, upperBoundMap = affine_map<(d0) -> (d0)>, step = 1 : i64, operandSegmentSizes = array<i32: 1, 1, 1>}> ({
+    ^bb0(%iv: index, %iter: tensor<1xf32>):
+      %reduced = "hivm.hir.vreduce"(%src, %iter) <{operandSegmentSizes = array<i32: 1, 1, 0, 0>, reduce_dims = array<i64: 0>, arith = #hivm.reduce_op<sum>}> : (tensor<4xf32>, tensor<1xf32>) -> tensor<1xf32>
+      "affine.yield"(%iter) : (tensor<1xf32>) -> ()
+    }) : (index, index, tensor<1xf32>) -> tensor<1xf32>
+    "test.consume"(%loop) : (tensor<1xf32>) -> ()
+    "func.return"() : () -> ()
+  }) {hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<AIV>, mix_mode = "aiv"} : () -> ()
 }) : () -> ()

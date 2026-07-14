@@ -1848,6 +1848,66 @@ CVUB_TEST(buffer_size_conflict_is_operation_level_incomplete) {
   CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
 }
 
+CVUB_TEST(buffer_size_constantize_erases_direct_alias_conflict_before_set) {
+  auto input = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
+      "constant_bounds");
+  auto &function = MutableOperationNamed(input, "func.func");
+  function.attributes = cvub::RemoveDictionaryAttribute(
+      function.attributes, "enable_auto_mark_buffer_size");
+  auto &allocation = MutableOperationNamed(input, "memref.alloc");
+  const int allocationId = allocation.id;
+  const int allocationValue = allocation.results.front();
+  const std::string logicalType = allocation.resultTypes.front();
+  const int blockId = allocation.blockId;
+  const int parentId = allocation.parentId;
+  const int regionId = allocation.regionId;
+  const int ordinal = allocation.ordinal;
+  auto &directMark = MutableOperationNamed(input, "annotation.mark");
+  directMark.attributes = "{buffer_size_in_byte = 512 : i64}";
+
+  cvub::GenericRewriter rewriter(input);
+  const int alias = rewriter.createOperation(
+      parentId, regionId, blockId, "memref.subview",
+      {"memref<20xf16, strided<[2], offset: 1>, #hivm.address_space<UB>>"},
+      {allocationValue}, {logicalType},
+      "{static_offsets = array<i64: 0>, static_sizes = array<i64: 20>, "
+      "static_strides = array<i64: 1>}");
+  rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal + 1), alias);
+  const auto &aliasOp = input.operations.at(static_cast<size_t>(alias));
+  const int aliasMark = rewriter.createOperation(
+      parentId, regionId, blockId, "annotation.mark", {},
+      {aliasOp.results.front()}, {aliasOp.resultTypes.front()}, "",
+      "{buffer_size_in_byte = 640 : i64, hivm.multi_buffer = 2 : i64}");
+  cvub::ApplyOperationSemantics(
+      input.operations.at(static_cast<size_t>(aliasMark)));
+  rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal + 2), aliasMark);
+  cvub::ValidateGenericModule(input);
+
+  auto result = cvub::RunInferAndSetBufferSize(std::move(input));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(result.module.operations.at(static_cast<size_t>(allocationId))
+                    .resultTypes.front(),
+                "memref<40xi8, #hivm.address_space<UB>>");
+  CVUB_CHECK_EQ(OperationCount(result.module, "annotation.mark"), 1U);
+  const auto &remainingMark = OperationNamed(result.module, "annotation.mark");
+  CVUB_CHECK(cvub::IRDictionaryValue(remainingMark.attributes,
+                                     "buffer_size_in_byte").empty());
+  CVUB_CHECK_EQ(cvub::IRDictionaryValue(remainingMark.attributes,
+                                        "hivm.multi_buffer"),
+                "2 : i64");
+  auto &consume = MutableOperationNamed(result.module, "test.consume");
+  consume.name = "hivm.hir.store";
+  const auto &aliasAfter = OperationNamed(result.module, "memref.subview");
+  consume.operands[1] = aliasAfter.results.front();
+  consume.operandTypes[1] = aliasAfter.resultTypes.front();
+  cvub::ApplyOperationSemantics(consume);
+  const auto plan = cvub::PlanLocalMemoryForSeed(
+      cvub::BuildSuffixPlanMemoryInput(result.module), 0);
+  CVUB_CHECK(plan.success);
+  CVUB_CHECK(plan.peakBits >= 640U);
+}
+
 CVUB_TEST(unresolved_dynamic_local_size_is_incomplete) {
   auto input = cvub::ExtractFunctionModule(
       cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
@@ -2500,14 +2560,12 @@ CVUB_TEST(pre_split_canonicalization_replaces_live_external_tensor_yield) {
   CVUB_CHECK(replacement.id != OperationNamed(result.module, "scf.for").id);
 }
 
-CVUB_TEST(pre_split_canonicalization_uses_vbrc_destination_unit_dimension) {
+CVUB_TEST(pre_split_canonicalization_uses_shaped_vbrc_unit_destination) {
   auto module = cvub::ExtractFunctionModule(
       cvub::test::ParseFixture("dynamic_buffer_size.mlir"), "canonicalize");
-  const auto &scalar = MutableOperationNamed(module, "arith.constant", 2);
-  auto &destination = MutableOperationNamed(module, "tensor.empty");
-  destination.resultTypes.front() = "tensor<4x1xi32>";
-  const int scalarValue = scalar.results.front();
-  const int destinationValue = destination.results.front();
+  auto &source = MutableOperationNamed(module, "tensor.empty");
+  source.resultTypes.front() = "tensor<4x1xi32>";
+  const int sourceValue = source.results.front();
   const auto &mark = MutableOperationNamed(module, "annotation.mark");
   const int markId = mark.id;
   const int markBlockId = mark.blockId;
@@ -2516,14 +2574,20 @@ CVUB_TEST(pre_split_canonicalization_uses_vbrc_destination_unit_dimension) {
   const int regionId = mark.regionId;
   const int ordinal = mark.ordinal;
   cvub::GenericRewriter rewriter(module);
+  const int destination = rewriter.createOperation(
+      parentId, regionId, blockId, "tensor.empty", {"tensor<4x1xi32>"});
+  rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal), destination);
+  const int destinationValue =
+      module.operations.at(static_cast<size_t>(destination)).results.front();
   const int vbrc = rewriter.createOperation(
       parentId, regionId, blockId, "hivm.hir.vbrc", {"tensor<4x1xi32>"},
-      {scalarValue, destinationValue},
-      {"i32", "tensor<4x1xi32>"},
-      "{broadcast_dims = array<i64: 1>}");
+      {sourceValue, destinationValue},
+      {"tensor<4x1xi32>", "tensor<4x1xi32>"},
+      "{operandSegmentSizes = array<i32: 1, 1, 0>, "
+      "broadcast_dims = array<i64: 1>}");
   cvub::ApplyOperationSemantics(
       module.operations.at(static_cast<size_t>(vbrc)));
-  rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal), vbrc);
+  rewriter.insertToBlock(blockId, static_cast<size_t>(ordinal + 1), vbrc);
   rewriter.removeFromBlock(markBlockId, markId);
   module = cvub::CompactGenericModule(std::move(module));
   cvub::ValidateGenericModule(module);
@@ -2532,6 +2596,52 @@ CVUB_TEST(pre_split_canonicalization_uses_vbrc_destination_unit_dimension) {
   CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
   CVUB_CHECK(HasDiagnostic(result, "CanonicalizationBeforeSplit",
                            "HIVM canonicalization"));
+}
+
+CVUB_TEST(pre_split_canonicalization_traces_vreduce_init_through_affine_for) {
+  auto module = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
+      "affine_loop_vreduce");
+  cvub::ValidateGenericModule(module);
+  auto &reduce = MutableOperationNamed(module, "hivm.hir.vreduce");
+  cvub::ApplyOperationSemantics(reduce);
+  CVUB_CHECK(!reduce.dpsInits.empty());
+  CVUB_CHECK(cvub::TracesToVReduceConstantFill(
+      module, reduce.dpsInits.front(), reduce, true));
+  const auto result = cvub::RunPreSplitCanonicalization(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "CanonicalizationBeforeSplit",
+                           "HIVM canonicalization"));
+}
+
+CVUB_TEST(pre_split_canonicalization_proves_scf_forall_output_init_schema) {
+  auto module = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
+      "affine_loop_vreduce");
+  auto &loop = MutableOperationNamed(module, "affine.for");
+  loop.name = "scf.forall";
+  loop.properties =
+      "{operandSegmentSizes = array<i32: 1, 1, 0, 1>, "
+      "staticLowerBound = array<i64: -1>, "
+      "staticUpperBound = array<i64: -1>, staticStep = array<i64: 1>}";
+  auto &reduce = MutableOperationNamed(module, "hivm.hir.vreduce");
+  cvub::ApplyOperationSemantics(reduce);
+  CVUB_CHECK(!reduce.dpsInits.empty());
+  CVUB_CHECK(cvub::TracesToVReduceConstantFill(
+      module, reduce.dpsInits.front(), reduce, true));
+}
+
+CVUB_TEST(pre_split_canonicalization_blocks_unproven_loop_init_trace) {
+  auto module = cvub::ExtractFunctionModule(
+      cvub::test::ParseFixture("dynamic_buffer_size.mlir"),
+      "affine_loop_vreduce");
+  MutableOperationNamed(module, "affine.for").name = "scf.parallel";
+  cvub::ApplyOperationSemantics(
+      MutableOperationNamed(module, "hivm.hir.vreduce"));
+  const auto result = cvub::RunPreSplitCanonicalization(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "CanonicalizationBeforeSplit",
+                           "cannot prove loop init mapping"));
 }
 
 CVUB_TEST(pre_split_canonicalization_traces_vreduce_init_through_reshape) {

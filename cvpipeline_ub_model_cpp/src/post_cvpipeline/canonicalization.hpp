@@ -175,13 +175,64 @@ inline bool ConstantMatchesVReduceIdentity(const GenericOperation &reduce,
   return false;
 }
 
-inline bool TracesToVReduceConstantFill(const GenericModule &module, int value,
-                                        const GenericOperation &reduce,
-                                        bool valueInit,
-                                        std::set<int> &visiting) {
+enum class VReduceInitTrace { NotFill, ConstantFill, UnprovenLoop };
+
+inline bool IsKnownLoopLikeOperation(const std::string &name) {
+  return name == "scf.for" || name == "scf.forall" ||
+         name == "scf.parallel" || name == "scf.while" ||
+         name == "affine.for" || name == "affine.parallel";
+}
+
+inline std::optional<int> ProvenLoopInitForBlockArgument(
+    const GenericModule &module, const GenericOperation &parent,
+    const GenericBlock &block, size_t argument) {
+  if (parent.regions.size() != 1 ||
+      module.regions.at(static_cast<size_t>(parent.regions.front())).blocks.size() !=
+          1 ||
+      module.regions.at(static_cast<size_t>(parent.regions.front()))
+              .blocks.front() != block.id)
+    return std::nullopt;
+  if (parent.name == "scf.for") {
+    if (argument == 0 || block.arguments.size() != parent.results.size() + 1 ||
+        parent.operands.size() != parent.results.size() + 3)
+      return std::nullopt;
+    return parent.operands[argument + 2];
+  }
+  std::vector<size_t> segments;
+  try {
+    segments = OperandSegmentSizes(parent.properties);
+  } catch (const std::exception &) {
+    return std::nullopt;
+  }
+  if (parent.name == "affine.for") {
+    if (segments.size() != 3 || argument == 0 ||
+        block.arguments.size() != segments[2] + 1 ||
+        parent.operands.size() != segments[0] + segments[1] + segments[2] ||
+        argument - 1 >= segments[2])
+      return std::nullopt;
+    return parent.operands[segments[0] + segments[1] + argument - 1];
+  }
+  if (parent.name == "scf.forall") {
+    if (segments.size() != 4 || block.arguments.size() < segments[3] ||
+        parent.operands.size() !=
+            segments[0] + segments[1] + segments[2] + segments[3])
+      return std::nullopt;
+    const size_t inductionArguments = block.arguments.size() - segments[3];
+    if (argument < inductionArguments ||
+        argument - inductionArguments >= segments[3])
+      return std::nullopt;
+    return parent.operands[segments[0] + segments[1] + segments[2] +
+                           argument - inductionArguments];
+  }
+  return std::nullopt;
+}
+
+inline VReduceInitTrace TracesToVReduceConstantFillState(
+    const GenericModule &module, int value, const GenericOperation &reduce,
+    bool valueInit, std::set<int> &visiting) {
   if (!visiting.insert(value).second)
-    return false;
-  const auto done = [&](bool result) {
+    return VReduceInitTrace::NotFill;
+  const auto done = [&](VReduceInitTrace result) {
     visiting.erase(value);
     return result;
   };
@@ -190,19 +241,21 @@ inline bool TracesToVReduceConstantFill(const GenericModule &module, int value,
     if (definition->name == "hivm.hir.vbrc") {
       const std::vector<int> &inputs = CanonicalizationInputs(*definition);
       if (inputs.empty())
-        return done(false);
+        return done(VReduceInitTrace::NotFill);
       const GenericOperation *constant =
           DefinitionForBufferSize(module, inputs.front());
       return done(constant != nullptr && constant->name == "arith.constant" &&
-                  ConstantMatchesVReduceIdentity(reduce, *constant,
-                                                 valueInit));
+                          ConstantMatchesVReduceIdentity(reduce, *constant,
+                                                         valueInit)
+                      ? VReduceInitTrace::ConstantFill
+                      : VReduceInitTrace::NotFill);
     }
     if ((definition->name == "tensor.expand_shape" ||
          definition->name == "tensor.collapse_shape") &&
         !definition->operands.empty())
-      return done(TracesToVReduceConstantFill(
+      return done(TracesToVReduceConstantFillState(
           module, definition->operands.front(), reduce, valueInit, visiting));
-    return done(false);
+    return done(VReduceInitTrace::NotFill);
   }
 
   for (const GenericBlock &block : module.blocks) {
@@ -216,21 +269,43 @@ inline bool TracesToVReduceConstantFill(const GenericModule &module, int value,
         module.regions.at(static_cast<size_t>(block.regionId));
     const GenericOperation &parent = module.operations.at(
         static_cast<size_t>(region.parentOperation));
-    if (parent.name != "scf.for" || argument == 0 ||
-        argument + 2 >= parent.operands.size())
-      return done(false);
-    return done(TracesToVReduceConstantFill(
-        module, parent.operands[argument + 2], reduce, valueInit, visiting));
+    const std::optional<int> init =
+        ProvenLoopInitForBlockArgument(module, parent, block, argument);
+    if (init)
+      return done(TracesToVReduceConstantFillState(
+          module, *init, reduce, valueInit, visiting));
+    if (IsKnownLoopLikeOperation(parent.name))
+      return done(VReduceInitTrace::UnprovenLoop);
+    return done(VReduceInitTrace::NotFill);
   }
-  return done(false);
+  return done(VReduceInitTrace::NotFill);
+}
+
+inline VReduceInitTrace TracesToVReduceConstantFillState(
+    const GenericModule &module, int value, const GenericOperation &reduce,
+    bool valueInit) {
+  std::set<int> visiting;
+  return TracesToVReduceConstantFillState(module, value, reduce, valueInit,
+                                          visiting);
 }
 
 inline bool TracesToVReduceConstantFill(const GenericModule &module, int value,
                                         const GenericOperation &reduce,
                                         bool valueInit) {
-  std::set<int> visiting;
-  return TracesToVReduceConstantFill(module, value, reduce, valueInit,
-                                     visiting);
+  return TracesToVReduceConstantFillState(module, value, reduce, valueInit) ==
+         VReduceInitTrace::ConstantFill;
+}
+
+inline bool HasUnprovenVReduceLoopInit(const GenericModule &module,
+                                       const GenericOperation &operation) {
+  if (operation.name != "hivm.hir.vreduce")
+    return false;
+  for (size_t index = 0; index < operation.dpsInits.size(); ++index)
+    if (TracesToVReduceConstantFillState(
+            module, operation.dpsInits[index], operation, index == 0) ==
+        VReduceInitTrace::UnprovenLoop)
+      return true;
+  return false;
 }
 
 inline bool ApplicableHIVMCanonicalization(const GenericModule &module,
@@ -836,6 +911,9 @@ inline StageResult RunPreSplitCanonicalization(GenericModule module) {
           }
         }
       }
+    } else if (HasUnprovenVReduceLoopInit(result.module, operation)) {
+      family = "HIVM canonicalization";
+      detail = "cannot prove loop init mapping for ";
     } else if (ApplicableTensorReshapeCanonicalization(result.module,
                                                         operation)) {
       family = "tensor slice/reshape canonicalization";
