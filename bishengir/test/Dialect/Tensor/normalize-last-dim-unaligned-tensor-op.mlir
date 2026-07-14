@@ -184,3 +184,20 @@ func.func @test_dynamic_concat_fully_static_no_annotation(%arg0: tensor<16x31xf3
   %concat = tensor.concat dim(1) %arg0, %arg1 : (tensor<16x31xf32>, tensor<16x63xf32>) -> tensor<16x94xf32>
   return %concat : tensor<16x94xf32>
 }
+
+// -----
+
+// CHECK-LABEL: test_reg_based_concat_unchanged
+// CHECK-NOT: linalg.transpose
+// CHECK: tensor.concat dim(1)
+// CHECK-NOT: linalg.transpose
+// CHECK: return
+module attributes {hacc.target = #hacc.target<"Ascend950PR_950z">} {
+  func.func @test_reg_based_concat_unchanged(
+      %arg0: tensor<16x31xf32>, %arg1: tensor<16x63xf32>)
+      -> tensor<16x94xf32> {
+    %concat = tensor.concat dim(1) %arg0, %arg1
+        : (tensor<16x31xf32>, tensor<16x63xf32>) -> tensor<16x94xf32>
+    return %concat : tensor<16x94xf32>
+  }
+}

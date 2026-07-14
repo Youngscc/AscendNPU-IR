@@ -26,6 +26,7 @@
 #include "bishengir/Dialect/HFusion/Utils/Utils.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Dialect/Tensor/Transforms/Passes.h"
+#include "bishengir/Dialect/Tensor/Transforms/PropagateReshape/PropagatableOp.h"
 #include "bishengir/Dialect/Tensor/Transforms/PropagateReshape/Utils.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -1135,6 +1136,38 @@ LogicalResult handleHIVMStoreOp(tensor::CollapseShapeOp collapseOp,
   return success();
 }
 
+LogicalResult
+handleMaterializeInDestinationOp(tensor::CollapseShapeOp collapseOp,
+                                 PatternRewriter &rewriter, Operation *userOp) {
+  auto materializeOp = cast<bufferization::MaterializeInDestinationOp>(userOp);
+  auto destinationType =
+      dyn_cast<MemRefType>(materializeOp.getDest().getType());
+  if (!destinationType)
+    return rewriter.notifyMatchFailure(materializeOp,
+                                       "destination is not a memref");
+
+  auto expandedDestinationType = memref::ExpandShapeOp::computeExpandedType(
+      destinationType, utils::getShape(collapseOp.getSrc().getType()),
+      collapseOp.getReassociationIndices());
+  if (failed(expandedDestinationType))
+    return rewriter.notifyMatchFailure(materializeOp,
+                                       "could not expand destination");
+
+  rewriter.setInsertionPoint(materializeOp);
+  auto expandedDestination = rewriter.create<memref::ExpandShapeOp>(
+      materializeOp.getLoc(), *expandedDestinationType, materializeOp.getDest(),
+      collapseOp.getReassociationIndices());
+  // Memref destinations imply zero results (see MaterializeInDestination
+  // verify), so only operands need updating — no result type to fix.
+  rewriter.modifyOpInPlace(materializeOp, [&] {
+    materializeOp->setOperands(
+        {collapseOp.getSrc(), expandedDestination.getResult()});
+  });
+  if (collapseOp.getResult().use_empty())
+    rewriter.eraseOp(collapseOp);
+  return success();
+}
+
 } // namespace
 
 LogicalResult
@@ -1157,6 +1190,18 @@ PropagateCollapseDown::matchAndRewrite(tensor::CollapseShapeOp collapseOp,
       continue;
     if (isa<hivm::StoreOp>(userOp)) {
       return handleHIVMStoreOp(collapseOp, rewriter, userOp);
+    }
+    if (options.forRegbased &&
+        isa<bufferization::MaterializeInDestinationOp>(userOp)) {
+      return handleMaterializeInDestinationOp(collapseOp, rewriter, userOp);
+    }
+    if (isa<hfusion::MulExtOp>(userOp)) {
+      PropagatableMulExt propagater;
+      return propagater.matchAndRewriteCollapse(rewriter, userOp, collapseOp);
+    }
+    if (isa<annotation::MarkOp>(userOp)) {
+      PropagatableAnnotationMark propagater;
+      return propagater.matchAndRewriteCollapse(rewriter, userOp, collapseOp);
     }
     auto dsiOp = dyn_cast<DestinationStyleOpInterface>(userOp);
     if (dsiOp && !dsiOp.hasPureTensorSemantics()) {

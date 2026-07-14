@@ -1,6 +1,6 @@
 //===- NormalizeLastDimUnalignedTensorOp.cpp ------------------------------===//
 //
-// Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+// Copyright (c) Huawei Technologies Co., Ltd. 2025~2026. All rights reserved.
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,6 +15,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "bishengir/Dialect/HACC/Utils/Utils.h"
 #include "bishengir/Dialect/Tensor/Transforms/Passes.h"
 #include "bishengir/Dialect/Tensor/Transforms/PropagateReshape/Utils.h"
 
@@ -155,8 +156,8 @@ SmallVector<int64_t> getPermutation(size_t rank, size_t dim) {
   return perm;
 }
 
-LogicalResult normalizeUnalignLastDimPad(tensor::PadOp padOp,
-                                         PatternRewriter &rewriter) {
+LogicalResult normalizeUnalignedLastDimPad(tensor::PadOp padOp,
+                                           PatternRewriter &rewriter) {
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPoint(padOp);
 
@@ -253,9 +254,6 @@ public:
     SmallVector<Value> newInputs = transposeInputs(concatOp, perm, rewriter);
 
     // Create new concat op with concat dim being 0.
-    auto oldSizes = tensor::getMixedSizes(rewriter, concatOp.getLoc(),
-                                          concatOp->getResult(0));
-    auto newSizes = transposeMixedSizes(oldSizes, perm);
     auto oldConcatType = concatOp.getResultType();
     auto newConcatType = transposeTensorType(oldConcatType, perm);
     auto newConcatOp = rewriter.create<tensor::ConcatOp>(
@@ -394,7 +392,7 @@ public:
       // inserted before and after
       padOp = extendOneDimPad(padOp, rewriter);
     }
-    return normalizeUnalignLastDimPad(padOp, rewriter);
+    return normalizeUnalignedLastDimPad(padOp, rewriter);
   }
 };
 
@@ -416,7 +414,10 @@ void NormalizeLastDimUnalignedTensorOpPass::runOnOperation() {
   MLIRContext *context = &getContext();
 
   RewritePatternSet patterns(context);
-  patterns.add<NormalizePadOp, NormalizeConcatOp>(context);
+  patterns.add<NormalizePadOp>(context);
+  // Register-based architectures can handle unaligned concat directly.
+  if (!hacc::utils::isRegBasedArch(f->getParentOfType<ModuleOp>()))
+    patterns.add<NormalizeConcatOp>(context);
   if (failed(applyPatternsGreedily(f, std::move(patterns)))) {
     signalPassFailure();
   }

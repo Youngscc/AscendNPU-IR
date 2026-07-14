@@ -24,6 +24,8 @@
 
 #include "llvm/ADT/SmallPtrSet.h"
 
+#include <cassert>
+
 #define DEBUG_TYPE "bubble-pad-up"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define DBGSNL() (llvm::dbgs() << "\n")
@@ -78,6 +80,7 @@ BubblePadElementwise::matchAndRewrite(tensor::PadOp padOp,
   auto mixHighPad = padOp.getMixedHighPad();
   auto staticHighPad = padOp.getStaticHigh();
   SmallVector<Value> newOperands;
+  assert(srcOp != nullptr);
   for (auto opr : srcOp->getOperands()) {
     // Pad this
     if (isa<RankedTensorType>(opr.getType()) &&

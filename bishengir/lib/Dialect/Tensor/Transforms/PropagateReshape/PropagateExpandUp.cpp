@@ -1198,6 +1198,10 @@ PropagateExpandUp::matchAndRewrite(tensor::ExpandShapeOp expandOp,
   if (auto bitcastOp = dyn_cast<hivm::BitcastOp>(definingOp)) {
     return handleBitcastOp(expandOp, rewriter, bitcastOp);
   }
+  if (isa<hfusion::MulExtOp>(definingOp)) {
+    PropagatableMulExt propagater;
+    return propagater.matchAndRewriteExpand(rewriter, definingOp, expandOp);
+  }
   if (isa<scf::ForOp>(definingOp)) {
     PropagatableScfFor propagater;
     return propagater.matchAndRewriteExpand(rewriter, definingOp, expandOp);

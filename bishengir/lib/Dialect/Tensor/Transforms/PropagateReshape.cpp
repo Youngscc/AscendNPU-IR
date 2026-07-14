@@ -24,6 +24,7 @@
 #include "bishengir/Dialect/Annotation/IR/Annotation.h"
 #include "bishengir/Dialect/HFusion/IR/HFusion.h"
 #include "bishengir/Dialect/HFusion/Utils/Utils.h"
+#include "bishengir/Dialect/HIVM/IR/HIVMImpl.h"
 #include "bishengir/Dialect/Tensor/Transforms/Passes.h"
 #include "bishengir/Dialect/Tensor/Transforms/PropagateReshape/PropagateCollapseDown.h"
 #include "bishengir/Dialect/Tensor/Transforms/PropagateReshape/PropagateExpandUp.h"
@@ -50,20 +51,43 @@ public:
   void runOnOperation() final;
 };
 
+static bool hasScopeOperation(func::FuncOp function) {
+  return function
+      .walk([](Operation *op) {
+        return op->getName().getStringRef() == "scope.scope"
+                   ? WalkResult::interrupt()
+                   : WalkResult::advance();
+      })
+      .wasInterrupted();
+}
+
 void PropagateReshapePass::runOnOperation() {
   func::FuncOp f = getOperation();
   MLIRContext *context = &getContext();
 
+  PropagateReshapeOptions options;
+  options.forHIVM = forHIVM;
+  options.forRegbased = forRegbased;
+  options.skipScope = skipScope;
+
+  if (auto coreType = mlir::hivm::queryFuncCoreType(f);
+      coreType && *coreType == mlir::hivm::TFuncCoreType::AIC)
+    return;
+
+  if (options.forRegbased && options.skipScope && hasScopeOperation(f))
+    return;
+
   RewritePatternSet patterns(context);
   patterns.add<PropagateCollapseDownToI1Cast>(context);
-  patterns.add<PropagateNearEndExpandDown>(context);
+  if (!options.forRegbased)
+    patterns.add<PropagateNearEndExpandDown>(context);
   tensor::CollapseShapeOp::getCanonicalizationPatterns(patterns, context);
   tensor::ExpandShapeOp::getCanonicalizationPatterns(patterns, context);
   memref::CollapseShapeOp::getCanonicalizationPatterns(patterns, context);
   memref::ExpandShapeOp::getCanonicalizationPatterns(patterns, context);
   patterns.add<SwapCollapseExpand>(context);
-  patterns.add<PropagateExpandUp>(context, forHIVM);
-  patterns.add<PropagateCollapseDown>(context, forHIVM);
+  patterns.add<PropagateExpandUp>(context, options);
+  patterns.add<PropagateCollapseDown>(context, options);
   patterns.add<memref::SwapMemrefCollapseExpand>(context);
   patterns.add<memref::PropagateMemrefExpandUp>(context);
   patterns.add<memref::PropagateMemrefCollapseDown>(context);

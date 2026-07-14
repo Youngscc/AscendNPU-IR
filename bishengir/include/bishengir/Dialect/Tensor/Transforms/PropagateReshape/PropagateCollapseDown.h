@@ -37,10 +37,10 @@ namespace tensor {
 class PropagateCollapseDown
     : public mlir::OpRewritePattern<tensor::CollapseShapeOp> {
 public:
-  explicit PropagateCollapseDown(MLIRContext *context, bool forHIVM)
-      : OpRewritePattern<tensor::CollapseShapeOp>(context, /*benefit=*/1) {
-    options.forHIVM = forHIVM;
-  }
+  explicit PropagateCollapseDown(MLIRContext *context,
+                                 PropagateReshapeOptions options)
+      : OpRewritePattern<tensor::CollapseShapeOp>(context, /*benefit=*/1),
+        options(options) {}
 
   LogicalResult matchAndRewrite(tensor::CollapseShapeOp collapseOp,
                                 PatternRewriter &rewriter) const override;
