@@ -20,6 +20,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "bishengir/Dialect/Annotation/IR/Annotation.h"
+#include "bishengir/Dialect/HACC/Utils/Utils.h"
 #include "bishengir/Dialect/HFusion/Transforms/Passes.h"
 #include "bishengir/Dialect/Tensor/Transforms/Passes.h"
 #include "bishengir/Dialect/Utils/Util.h"
@@ -37,6 +38,8 @@ namespace hfusion {
 
 #define GEN_PASS_DEF_NORMALIZESLICEOPS
 #include "bishengir/Dialect/HFusion/Transforms/Passes.h.inc"
+
+static thread_local bool archIsRegbased{false};
 
 /// Compute the dropped dimensions of a rank-reducing tensor.extract_slice op or
 /// rank-extending tensor.insert_slice op.
@@ -209,6 +212,49 @@ private:
   }
 };
 
+// When ExtractSlice Op is rank reduce, like `<Ax2> -> <A>`, refine the slice
+// output to `<Ax1>`, then add `<Ax1> -> <A>` collapse for compatibility.
+class NormalizeExtractSliceOp
+    : public OpRewritePattern<tensor::ExtractSliceOp> {
+public:
+  using OpRewritePattern<tensor::ExtractSliceOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(tensor::ExtractSliceOp sliceOp,
+                                PatternRewriter &rewriter) const override {
+    // If not rank reduce, skip
+    llvm::SmallBitVector reducedRankRecord = getDroppedDimsForInterleave(
+        sliceOp.getResultType().getShape(), sliceOp.getMixedSizes());
+    if (!reducedRankRecord.any()) {
+      return rewriter.notifyMatchFailure(
+          sliceOp,
+          "slice layout doen't satisfy condition for NormalizeExtractSliceOp.");
+    }
+    // Refine Output Shape
+    SmallVector<int64_t> refinedShape(sliceOp.getResultType().getShape());
+    for (size_t i = 0; i < reducedRankRecord.size(); ++i) {
+      if (reducedRankRecord[i]) {
+        refinedShape.insert(refinedShape.begin() + i, {1});
+      }
+    }
+    ShapedType refinedType = RankedTensorType::get(
+        refinedShape, sliceOp.getResultType().getElementType());
+    auto newExtractSliceOp = rewriter.create<tensor::ExtractSliceOp>(
+        sliceOp.getLoc(),
+        RankedTensorType::get(refinedShape,
+                              sliceOp.getResultType().getElementType()),
+        sliceOp.getSource(), sliceOp.getMixedOffsets(), sliceOp.getMixedSizes(),
+        sliceOp.getMixedStrides());
+    // collapse from `<Ax1> -> <A>`
+    auto reassociation = getReassociationIndicesForCollapse(
+        refinedType.getShape(), sliceOp.getResultType().getShape());
+    assert(reassociation.has_value());
+    auto collapseOp = rewriter.create<tensor::CollapseShapeOp>(
+        newExtractSliceOp.getLoc(), newExtractSliceOp.getResult(),
+        reassociation.value());
+    rewriter.replaceOp(sliceOp, collapseOp);
+    return success();
+  }
+};
+
 // %tmp = tensor.insert_slice src0 into %tmpbuffer[0] [64] [2] :
 // tensor<64xf16> into tensor<128xf16> %dst = tensor.insert_slice %src1 into
 // %tmp[1] [64] [2] : tensor<64xf16> into tensor<128xf16>
@@ -291,6 +337,7 @@ struct NormalizeInsertSliceOpToInterleaveOp
     llvm::SmallBitVector extendedRankRecord =
         getDroppedDimsForInterleave(insertSliceOp.getSourceType().getShape(),
                                     insertSliceOp.getMixedSizes());
+    tensor::ExpandShapeOp expandOp = nullptr;
     if (extendedRankRecord.any()) {
       if (extendedRankRecord.find_first() !=
           static_cast<int>(extendedRankRecord.size()) - 1)
@@ -306,6 +353,9 @@ struct NormalizeInsertSliceOpToInterleaveOp
             "size of extended rank axis should equal channel num");
 
       auto originType = llvm::dyn_cast<RankedTensorType>(curSrc.getType());
+      if (!originType) {
+        return failure();
+      }
       SmallVector<int64_t> shape(originType.getShape());
 
       // Here represents last dimension which is only extended rank
@@ -317,20 +367,27 @@ struct NormalizeInsertSliceOpToInterleaveOp
           getReassociationIndicesForReshape(originType, newType);
       assert(reassociation.has_value());
 
-      auto expandOp = rewriter.create<tensor::ExpandShapeOp>(
+      expandOp = rewriter.create<tensor::ExpandShapeOp>(
           insertSliceOp.getLoc(), newType, curSrc, reassociation.value());
       curSrc = expandOp.getResult();
     }
 
     if (!isInterLeavePartialPattern(insertSliceOp, curSrc,
-                                    interLeaveChannelNums))
+                                    interLeaveChannelNums)) {
+      if (archIsRegbased && expandOp) {
+        rewriter.eraseOp(expandOp);
+      }
       return rewriter.notifyMatchFailure(
           insertSliceOp,
           "current tensor::InsertSliceOp layout doen't satisfy condition "
           "to be converted to hfusion::InterleaveOp");
+    }
 
     auto channelIdxMaybe = getInterLeaveChannelIdx(insertSliceOp);
     if (!channelIdxMaybe.has_value()) {
+      if (archIsRegbased && expandOp) {
+        rewriter.eraseOp(expandOp);
+      }
       return failure();
     }
     int channelIdx = channelIdxMaybe.value();
@@ -348,13 +405,22 @@ struct NormalizeInsertSliceOpToInterleaveOp
     auto dstDefiningOp =
         insertSliceOp->getOperand(1).getDefiningOp<tensor::InsertSliceOp>();
     if (!dstDefiningOp) {
+      if (archIsRegbased && expandOp) {
+        rewriter.eraseOp(expandOp);
+      }
       return rewriter.notifyMatchFailure(
           insertSliceOp,
           "tensor::InsertSliceOp chain from current op can't reach "
           "interLeave channel num");
     }
-    return traceInterLeavePattern(dstDefiningOp, findChannels, inputs,
-                                  interLeaveChannelNums, rewriter);
+    if (failed(traceInterLeavePattern(dstDefiningOp, findChannels, inputs,
+                                      interLeaveChannelNums, rewriter))) {
+      if (archIsRegbased && expandOp) {
+        rewriter.eraseOp(expandOp);
+      }
+      return failure();
+    }
+    return success();
   }
 
   LogicalResult matchAndRewrite(tensor::InsertSliceOp insertSliceOp,
@@ -585,11 +651,16 @@ public:
       : skipAlignedSlice(skipAlignedSlice) {}
 
   void runOnOperation() final {
+    ModuleOp moduleOp = getOperation()->getParentOfType<ModuleOp>();
+    archIsRegbased = moduleOp && hacc::utils::isRegBasedArch(moduleOp);
     RewritePatternSet patterns(&getContext());
     patterns.add<NormalizeExtractSliceToDeinterleaveOp>(patterns.getContext());
     patterns.add<NormalizeInsertSliceOpToInterleaveOp>(patterns.getContext());
     patterns.add<FoldInsertSliceToConcat>(patterns.getContext(),
                                           this->skipAlignedSlice);
+    if (!archIsRegbased) {
+      patterns.add<NormalizeExtractSliceOp>(patterns.getContext());
+    }
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       signalPassFailure();
     }
