@@ -622,17 +622,32 @@
       const utilPoints = [];
       for (let i = 0; i < allTimes.length - 1; i++) {
         const tStart = allTimes[i];
-        let maxEnd = 0;
+        const ranges = [];
         plan.forEach(buffer => {
           if (buffer.allocTime <= tStart && buffer.freeTime > tStart) {
-            const endByte = buffer.offsetBytes + bitsToBytes(buffer.extentBits);
-            if (endByte > maxEnd) {
-              maxEnd = endByte;
-            }
+            const start = buffer.offsetBytes;
+            const end = buffer.offsetBytes + bitsToBytes(buffer.extentBits);
+            ranges.push({ start, end });
+          } else if (buffer.allocTime === tStart && buffer.freeTime === tStart) {
+            const start = buffer.offsetBytes;
+            const end = buffer.offsetBytes + bitsToBytes(buffer.extentBits);
+            ranges.push({ start, end });
           }
         });
-        utilPoints.push({ time: tStart, bytes: maxEnd });
-        utilPoints.push({ time: allTimes[i + 1], bytes: maxEnd });
+        ranges.sort((a, b) => a.start - b.start);
+        let totalBytes = 0;
+        let lastEnd = 0;
+        for (const range of ranges) {
+          if (range.start >= lastEnd) {
+            totalBytes += range.end - range.start;
+            lastEnd = range.end;
+          } else if (range.end > lastEnd) {
+            totalBytes += range.end - lastEnd;
+            lastEnd = range.end;
+          }
+        }
+        utilPoints.push({ time: tStart, bytes: totalBytes });
+        utilPoints.push({ time: allTimes[i + 1], bytes: totalBytes });
       }
 
       const maxUtil = Math.max(...utilPoints.map(p => p.bytes), 1);
