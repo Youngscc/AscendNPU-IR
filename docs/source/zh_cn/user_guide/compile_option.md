@@ -1,6 +1,6 @@
 # 编译选项
 
-## BiShengIR 功能控制选项
+## BiShengIR功能控制选项
 
 | 选项名 | 描述 | 类型 | 默认值 |
 |--------|------|------|--------|
@@ -18,7 +18,7 @@
 | --disable-hivm-auto-inject-sync | 禁用核内自动注入同步操作 | bool | false |
 | --disable-hivm-tensor-compile | 禁用BiShengHIR HIVM张量编译功能 | bool | false |
 
-## BiShengIR 通用优化选项
+## BiShengIR通用优化选项
 
 | 选项名 | 描述 | 类型 | 默认值 |
 |--------|------|------|--------|
@@ -27,7 +27,7 @@
 | --enable-tuning-mode | 启用调优模式，内存规划失败时不会重试多次编译 | bool | false |
 | --block-dim=\<uint> | 指定使用的块数量 | unsigned | 1 |
 
-## BiShengIR HFusion 优化选项
+## BiShengIR HFusion优化选项
 
 | 选项名 | 描述 | 类型 | 默认值 |
 |--------|------|------|--------|
@@ -38,7 +38,7 @@
 | --cube-tiling-tuning=\<long> | HFusion自动调度中的Cube分块尺寸调优参数 | list int64_t | "" |
 | --enable-hfusion-count-buffer-dma-opt | 开启后，DMA操作使用的缓冲区不会被向量运算复用 | bool | false |
 
-## BiShengIR 目标平台选项
+## BiShengIR目标平台选项
 
 编译选项格式为`--target=Ascend<Name>`，用于指定MLIR编译的目标硬件平台。其中`<Name>`为占位符，需根据实际AI处理器型号，通过对应的查询命令获取具体取值。
 
@@ -48,10 +48,10 @@ AI处理器型号及对应查询方式如下：
 
 **适用产品**：
 
-- `Atlas A2`训练系列产品 / `Atlas A2`推理系列产品
-- `Atlas 200I/500 A2`推理产品
-- `Atlas`推理系列产品
-- `Atlas`训练系列产品
+- Atlas A2训练系列产品 / Atlas A2推理系列产品
+- Atlas 200I/500 A2推理产品
+- Atlas推理系列产品
+- Atlas训练系列产品
 
 在安装AI处理器的服务器上执行该命令，查询得到`<Name>`的对应取值，完整配置值为`Ascend<Name>`。示例：若`<Name>`取值为`xxx`，则配置值为`Ascendxxx`。
 
@@ -59,8 +59,8 @@ AI处理器型号及对应查询方式如下：
 
 **适用产品**：
 
-- `Atlas 350`加速卡
-- `Atlas A3`训练系列产品 / `Atlas A3`推理系列产品
+- Atlas 350加速卡
+- Atlas A3训练系列产品 / Atlas A3推理系列产品
 
 在安装AI处理器的服务器上执行该命令，获取**Chip Name**和**NPU Name**信息，实际配置值为`<Chip Name>_<NPU Name>`。示例：若Chip Name为`Ascendxxx`、NPU Name为`yyy`，则配置值为`Ascendxxx_yyy`。
 

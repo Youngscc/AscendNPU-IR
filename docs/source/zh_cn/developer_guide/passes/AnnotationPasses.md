@@ -1,5 +1,5 @@
-# annotation 方言 Passes
+# annotation方言Passes
 
-## `-annotation-lowering`
+## -annotation-lowering
 
 将annotation方言降级。
