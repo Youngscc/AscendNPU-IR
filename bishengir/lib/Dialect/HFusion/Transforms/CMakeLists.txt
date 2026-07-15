@@ -55,6 +55,7 @@ add_bishengir_dialect_library(BiShengIRHFusionTransforms
   SimplifyOps.cpp
   TensorResToOutParams.cpp
   TilingInterfaceImpl.cpp
+  TreeReduceV2.cpp
   UnfoldSymbolicDim.cpp
   UpliftWhileToFor.cpp
   LegalizeScalar.cpp
@@ -82,6 +83,7 @@ add_bishengir_dialect_library(BiShengIRHFusionTransforms
   BiShengIRHFusionAnalysis
   BiShengIRMathExtDialect
   BiShengIRAnnotationDialect
+  BiShengIRScopeDialect
   BiShengIRScopeUtils
   MLIRAffineDialect
   MLIRArithDialect

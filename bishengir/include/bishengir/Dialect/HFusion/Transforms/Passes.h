@@ -109,6 +109,9 @@ std::unique_ptr<Pass> createGenericUnrollerPass();
 /// Create an auto vectorize verifier pass.
 std::unique_ptr<Pass> createAutoVectorizeVerifierPass();
 
+/// Register Tree Reduce v2 pass
+std::unique_ptr<Pass> createTreeReduceV2Pass(const TreeReduceV2Options &options = {});
+
 /// Create a pass to execute auto schedule sequence for the target kernel.
 std::unique_ptr<Pass>
 createAutoScheduleInterpreterPass(const std::string &kernelName,

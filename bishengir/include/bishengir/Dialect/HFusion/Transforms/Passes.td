@@ -113,6 +113,20 @@ def AutoVectorizeVerifier
   ];
 }
 
+def TreeReduceV2 : Pass<"tree-reduce-v2", "ModuleOp"> {
+ 	   let summary = "tree-reduce-v2";
+ 	   let constructor = "mlir::hfusion::createTreeReduceV2Pass()";
+ 	   let dependentDialects = ["linalg::LinalgDialect",
+ 	   "arith::ArithDialect",
+ 	   "vector::VectorDialect"];
+ 	   let options = [
+ 	     Option<"enableRA", "enable-ra", "bool", "true",
+ 	            "Enable RA (reduction along dim 0) in TreeReduceV2.">,
+ 	     Option<"enableAR", "enable-ar", "bool", "false",
+ 	            "Enable AR (reduction along dim 1) in TreeReduceV2.">,
+ 	   ];
+ 	 }
+
 def AddFFTSAddr : Pass<"hfusion-add-ffts-addr", "ModuleOp"> {
   let summary = "Add ffts base address to func param and annotation";
   let constructor = "mlir::hfusion::createAddFFTSAddrPass()";
