@@ -18,6 +18,13 @@
 #include "bishengir/Dialect/MathExt/IR/MathExt.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/CommonFolders.h"
+#if defined(__LLVM_MAJOR_VERSION_20_COMPATIBLE__) ||                           \
+    defined(__LLVM_MAJOR_VERSION_21_COMPATIBLE__) ||                           \
+    defined(__LLVM_MAJOR_VERSION_22_COMPATIBLE__)
+#include "mlir/Dialect/Quant/IR/Quant.h"
+#else
+#include "mlir/Dialect/Quant/QuantOps.h"
+#endif
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -75,6 +82,20 @@ OpFoldResult mathExt::LdexpOp::fold(FoldAdaptor adaptor) {
               ldexpf(a.convertToFloat(), static_cast<int>(b.convertToFloat())));
 
         return {};
+      });
+}
+
+//===----------------------------------------------------------------------===//
+// DivFHPOp folder
+//===----------------------------------------------------------------------===//
+OpFoldResult mathExt::DivFHPOp::fold(FoldAdaptor adaptor) {
+  return constFoldBinaryOpConditional<FloatAttr>(
+      adaptor.getOperands(),
+      /*calculate=*/
+      [](const APFloat &a, const APFloat &b) -> std::optional<APFloat> {
+        APFloat out = a; // IMPORTANT: make a mutable copy
+        out.divide(b, APFloat::rmNearestTiesToEven); // divide mutates 'out'
+        return out;
       });
 }
 

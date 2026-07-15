@@ -33,6 +33,8 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   ConvertLayout/ShapeConversion/ConvertLayoutToFractalsUtils.cpp
   ConvertLayout/ShapeConversion/ConvertLayoutFromFractalsUtils.cpp
   ConvertLayout/ShapeConversion/ConvertLayoutOffsetUtils.cpp
+  ConvertLayout/CombineOptimizedConvertLayout.cpp
+  ConvertLayout/ConvertLayoutToTranspose.cpp
   ConvertLayout/ConvertLayoutUtils.cpp
   ConvertLayout/HoistConvertLayout.cpp
   ConvertLayout/InsertConvertLayout.cpp
@@ -71,6 +73,7 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   InsertLoadStoreForMixCV.cpp
   InsertLoadStoreForScalar.cpp
   InsertNZ2NDForDebug.cpp
+  InsertL12UBForDebug.cpp
   InsertWorkSpaceForMixCV.cpp
   LiftLowestStride.cpp
   LiftZeroRank.cpp

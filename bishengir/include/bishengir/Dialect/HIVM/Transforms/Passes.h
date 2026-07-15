@@ -204,7 +204,8 @@ std::unique_ptr<Pass> createInsertLoadStoreForScalarPass();
 std::unique_ptr<Pass> createInsertInferWorkSpaceSizeFuncPass();
 
 // Create a pass to bind func augument with hacc.workspace to AllocWorkspaceOp
-std::unique_ptr<Pass> createBindWorkSpaceArgPass();
+std::unique_ptr<Pass>
+createBindWorkSpaceArgPass(const BindWorkSpaceArgOptions &options = {});
 
 // Create a pass to bind func augument with hacc.syncblocklock to
 // CreateSyncBlockLockOp.
@@ -259,6 +260,9 @@ std::unique_ptr<Pass> createMarkSyncBlockLockWithSubblockPass();
 // Create a pass to insert nz2nd for debug.
 std::unique_ptr<Pass> createInsertNZ2NDForDebugPass();
 
+// Create a pass to insert l12ub for debug.
+std::unique_ptr<Pass> createInsertL12UBForDebugPass();
+
 /// Create a pass to loop on blocks when logical blocknum is larger than
 /// physical one
 std::unique_ptr<Pass> createAutoBlockifyParallelLoopPass();
@@ -285,6 +289,10 @@ std::unique_ptr<Pass> createPropagateConvertLayoutPass(
 
 /// Create a pass to insert convert layout operations for matmul ops
 std::unique_ptr<Pass> createInsertConvertLayoutPass();
+
+std::unique_ptr<Pass> createConvertLayoutToTransposePass();
+
+std::unique_ptr<Pass> createCombineOptimizedConvertLayoutPass();
 
 /// Create a pass to normalize conv1d operation.
 std::unique_ptr<Pass> createNormalizeConvOpsPass();

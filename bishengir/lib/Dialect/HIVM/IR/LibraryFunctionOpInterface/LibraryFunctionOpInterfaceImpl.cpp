@@ -1,8 +1,17 @@
 //===- LibraryFunctionOpInterfaceImpl.cpp - library function op impls -----===//
 //
-// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
-// See https://llvm.org/LICENSE.txt for license information.
-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 //
 //===----------------------------------------------------------------------===//
 
@@ -230,6 +239,30 @@ std::string getNZ2NDOpLibraryCallName(NZ2NDOp concreteOp,
   Type dstType = concreteOp.getDst().getType();
   AddressSpace dstScope = getHIVMAddressSpace(dstType);
   assert(dstScope == AddressSpace::GM && "dst scope should be GM");
+#endif
+  // get dimensions
+  MemRefType srcMemref = cast<MemRefType>(concreteOp.getSrcOperandType());
+  std::string srcRankStr = std::to_string(srcMemref.getRank()) + "d";
+  MemRefType dstMemref = cast<MemRefType>(concreteOp.getDstOperandType());
+  std::string dstRankStr = std::to_string(dstMemref.getRank()) + "d";
+  // get data type
+  std::string dataTypeStr =
+      getTypeName(concreteOp.getLoc(), getElementTypeOrSelf(srcType));
+  // make library function name
+  return concreteOp.getOpName().str() + "_" + srcRankStr + "_to_" + dstRankStr +
+         "_" + dataTypeStr;
+}
+
+std::string getL12UBOpLibraryCallName(L12UBOp concreteOp,
+                                      std::optional<bool> /*isOpsAligned*/) {
+  // check address space
+  Type srcType = concreteOp.getSrc().getType();
+#ifndef NDEBUG
+  AddressSpace srcScope = getHIVMAddressSpace(srcType);
+  assert(srcScope == AddressSpace::L1 && "src scope should be L1");
+  Type dstType = concreteOp.getDst().getType();
+  AddressSpace dstScope = getHIVMAddressSpace(dstType);
+  assert(dstScope == AddressSpace::UB && "dst scope should be UB");
 #endif
   // get dimensions
   MemRefType srcMemref = cast<MemRefType>(concreteOp.getSrcOperandType());

@@ -233,12 +233,21 @@
       background: #fbfcfd;
     }
 
-    svg {
+    svg#chart {
       display: block;
       min-width: 760px;
       width: 100%;
       height: 480px;
     }
+
+    /* Utilization chart: taller, grows with its own width attribute. */
+    svg#utilChart {
+      display: block;
+      width: 100%;
+      height: 550px;
+    }
+
+    .util-label { font-size: 12px; font-weight: bold; }
 
     .axis text {
       fill: var(--muted);
@@ -373,6 +382,15 @@
             </div>
             <div class="chart-wrap">
               <svg id="chart" role="img" aria-label="UB memory plan chart"></svg>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" style="margin-top: 16px;">
+          <h2>UB Utilization</h2>
+          <div class="viz">
+            <div class="chart-wrap">
+              <svg id="utilChart" role="img" aria-label="UB utilization chart"></svg>
             </div>
           </div>
         </section>
@@ -622,6 +640,7 @@
       renderSummary(model);
       renderFunctionSelector(model);
       renderChart(model, selectedFunction);
+      renderUtilChart(model, selectedFunction);
       renderTable(model);
       inputText.value = JSON.stringify(data, null, 2);
       const totalBuffers = model.functions.reduce((n, fn) => n + fn.buffers.length, 0);
@@ -648,7 +667,10 @@
 
     document.getElementById("functionSelector").addEventListener("change", () => {
       selectedFunction = document.getElementById("functionSelector").value;
-      if (currentModel) renderChart(currentModel, selectedFunction);
+      if (currentModel) {
+        renderChart(currentModel, selectedFunction);
+        renderUtilChart(currentModel, selectedFunction);
+      }
     });
 
     function clearView() {
@@ -660,6 +682,8 @@
       document.getElementById("planTable").innerHTML = "";
       document.getElementById("capacityFill").style.width = "0%";
       document.getElementById("chart").innerHTML = "";
+      const utilChart = document.getElementById("utilChart");
+      if (utilChart) utilChart.innerHTML = "";
       const wrap = document.getElementById("functionSelectorWrap");
       if (wrap) wrap.style.display = "none";
       currentModel = null;
@@ -869,6 +893,169 @@
         more.textContent = `+${plan.length - 24} more`;
         legend.append(more);
       }
+    }
+
+    // UB utilization over PlanMemory time: high-water mark of active buffer
+    // end-bytes for the selected function, expressed as % of UB capacity.
+    // Ported from the remote branch and adapted to the per-function contract:
+    // the sweep runs over the selected function's buffers (consistent with the
+    // main chart), while the denominator is the module UB capacity.
+    function renderUtilChart(model, functionName) {
+      const chart = document.getElementById("utilChart");
+      if (!chart) return;
+      chart.innerHTML = "";
+
+      const fn = model.functions.find(f => f.name === functionName) || model.functions[0];
+      const plan = fn ? fn.buffers : [];
+      if (plan.length === 0) return;
+
+      const containerWidth = chart.parentElement.clientWidth || 920;
+      const width = Math.max(760, containerWidth);
+      const height = 550;
+      const margin = { top: 30, right: 45, bottom: 50, left: 70 };
+      const innerWidth = width - margin.left - margin.right;
+      const innerHeight = height - margin.top - margin.bottom;
+
+      const minTime = Math.min(...plan.map(b => b.allocTime));
+      const maxTime = Math.max(...plan.map(b => b.freeTime), minTime + 1);
+
+      // Event sweep: alloc adds an active range, free removes it; the running
+      // max of active end-bytes is the instantaneous high-water mark.
+      const events = [];
+      plan.forEach(buffer => {
+        const extentBytes = bitsToBytes(buffer.extentBits);
+        events.push({ time: buffer.allocTime, type: "alloc",
+                      start: buffer.offsetBytes, end: buffer.offsetBytes + extentBytes });
+        events.push({ time: buffer.freeTime, type: "free",
+                      start: buffer.offsetBytes, end: buffer.offsetBytes + extentBytes });
+      });
+      events.sort((a, b) => a.time - b.time || (a.type === "alloc" ? -1 : 1));
+
+      const activeRanges = [];
+      const utilPoints = [];
+      const maxEndByteAtTime = () =>
+        activeRanges.length === 0 ? 0 : Math.max(...activeRanges.map(r => r.end));
+
+      let currentTime = minTime;
+      let i = 0;
+      while (i < events.length) {
+        const evt = events[i];
+        if (evt.time > currentTime) {
+          utilPoints.push({ time: currentTime, bytes: maxEndByteAtTime() });
+          currentTime = evt.time;
+        }
+        const sameTimeEvts = [];
+        while (i < events.length && events[i].time === currentTime) {
+          sameTimeEvts.push(events[i]);
+          i++;
+        }
+        sameTimeEvts.filter(e => e.type === "alloc")
+          .forEach(e => activeRanges.push({ start: e.start, end: e.end }));
+        utilPoints.push({ time: currentTime, bytes: maxEndByteAtTime() });
+        sameTimeEvts.filter(e => e.type === "free").forEach(e => {
+          const idx = activeRanges.findIndex(r => r.start === e.start && r.end === e.end);
+          if (idx !== -1) activeRanges.splice(idx, 1);
+        });
+      }
+      utilPoints.push({ time: maxTime, bytes: 0 });
+
+      const capacityBytes = bitsToBytes(model.capacityBits || 0);
+      if (capacityBytes <= 0) return; // cannot scale without a capacity
+      const utilToPercent = bytes => (bytes / capacityBytes) * 100;
+
+      const peakBytes = Math.max(...utilPoints.map(p => p.bytes));
+      const avgBytes = utilPoints.reduce((sum, p) => sum + p.bytes, 0) / utilPoints.length;
+      const peakPercent = utilToPercent(peakBytes);
+      const avgPercent = utilToPercent(avgBytes);
+
+      // Y axis: zoom around the peak but never exceed 100%.
+      const targetYMax = Math.max(peakPercent * 2, Math.ceil(peakPercent / 5) * 5);
+      const yMax = Math.min(100, Math.max(10, targetYMax));
+
+      chart.setAttribute("width", width);
+      chart.setAttribute("height", height);
+      chart.setAttribute("viewBox", `0 0 ${width} ${height}`);
+
+      const x = time => margin.left + ((time - minTime) / Math.max(1, maxTime - minTime)) * innerWidth;
+      const y = percent => margin.top + innerHeight - (percent / yMax) * innerHeight;
+
+      const group = element("g", {});
+
+      const numTicks = Math.min(Math.max(Math.ceil(yMax / 5), 2), 5);
+      for (let t = 0; t <= numTicks; ++t) {
+        const percent = (yMax / numTicks) * t;
+        group.append(element("line", {
+          x1: margin.left, y1: y(percent), x2: width - margin.right, y2: y(percent),
+          stroke: "#e5e5e5", "stroke-width": 1, "stroke-dasharray": "4,4"
+        }));
+        const label = element("text", {
+          x: margin.left - 8, y: y(percent) + 4, "text-anchor": "end",
+          fill: "#666", "font-size": 11
+        });
+        label.textContent = `${Math.round(percent)}%`;
+        group.append(label);
+      }
+
+      for (const tick of [minTime, Math.round((minTime + maxTime) / 2), maxTime]) {
+        group.append(element("line", {
+          x1: x(tick), y1: margin.top, x2: x(tick), y2: height - margin.bottom,
+          stroke: "#e5e5e5", "stroke-width": 1, "stroke-dasharray": "4,4"
+        }));
+        const label = element("text", {
+          x: x(tick), y: height - margin.bottom + 20, "text-anchor": "middle",
+          fill: "#666", "font-size": 11
+        });
+        label.textContent = tick;
+        group.append(label);
+      }
+
+      if (utilPoints.length > 1) {
+        const pathD = [];
+        for (let p = 0; p < utilPoints.length - 1; p++) {
+          const p1 = utilPoints[p];
+          const p2 = utilPoints[p + 1];
+          pathD.push(`${p === 0 ? "M" : "L"} ${x(p1.time)} ${y(utilToPercent(p1.bytes))}`);
+          pathD.push(`L ${x(p2.time)} ${y(utilToPercent(p1.bytes))}`);
+        }
+        const lastP = utilPoints[utilPoints.length - 1];
+        const firstP = utilPoints[0];
+        const areaD = `${pathD.join(" ")} L ${x(lastP.time)} ${y(0)} L ${x(firstP.time)} ${y(0)} Z`;
+        group.append(element("path", { d: areaD, fill: "rgba(255,99,71,0.15)" }));
+        group.append(element("path", {
+          d: pathD.join(" "), fill: "none",
+          stroke: "rgba(255,99,71,0.85)", "stroke-width": "2.5",
+          "stroke-linecap": "round", "stroke-linejoin": "round"
+        }));
+
+        const peakLabel = element("text", {
+          class: "util-label", x: width - margin.right - 8, y: margin.top + 18,
+          "text-anchor": "end", fill: "rgba(255,99,71,0.85)"
+        });
+        peakLabel.textContent = `${peakPercent.toFixed(1)}% peak`;
+        group.append(peakLabel);
+
+        const avgLabel = element("text", {
+          x: width - margin.right - 8, y: margin.top + 36,
+          "text-anchor": "end", fill: "rgba(255,99,71,0.6)", "font-size": 11
+        });
+        avgLabel.textContent = `${avgPercent.toFixed(1)}% avg`;
+        group.append(avgLabel);
+      }
+
+      const yAxisLabel = element("text", {
+        x: 8, y: height / 2, "text-anchor": "middle", fill: "#333", "font-size": 12,
+        transform: `rotate(-90, 8, ${height / 2})`
+      });
+      yAxisLabel.textContent = `UB utilization (${fn.name})`;
+      group.append(yAxisLabel);
+
+      const xAxisLabel = element("text", {
+        x: width / 2, y: height - 8, "text-anchor": "middle", fill: "#333", "font-size": 12
+      });
+      xAxisLabel.textContent = "PlanMemory operation time";
+      group.append(xAxisLabel);
+
+      chart.append(group);
     }
 
     function renderTable(model) {

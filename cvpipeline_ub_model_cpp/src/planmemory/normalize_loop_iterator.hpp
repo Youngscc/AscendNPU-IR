@@ -118,7 +118,7 @@ inline std::vector<OperationRecord> NormalizeIterUseAfterYieldInit(
     std::vector<std::string> values;
     if (IsDestinationStyleOp(operation.opName)) {
       values = extractGroupSSAs(operation.text, "outs");
-      for (const std::string &group : {"temp_buffer", "tmps"}) {
+      for (const char *group : {"temp_buffer", "tmps"}) {
         std::vector<std::string> extra =
             extractGroupSSAs(operation.text, group);
         values.insert(values.end(), extra.begin(), extra.end());

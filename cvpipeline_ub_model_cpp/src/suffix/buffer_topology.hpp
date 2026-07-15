@@ -45,8 +45,8 @@ inline std::string FindDictionaryValue(const std::string &dictionary,
 
 class SuffixBufferTopologyBuilder {
 public:
-  explicit SuffixBufferTopologyBuilder(const GenericModule &module)
-      : module(module) {
+  explicit SuffixBufferTopologyBuilder(const GenericModule &inputModule)
+      : module(inputModule) {
     indexValues();
   }
 

@@ -137,9 +137,9 @@ getConv3DIntTripleAttr(Attribute attr, StringRef attrName,
 using RegionBuilderFn = llvm::function_ref<void(ImplicitLocOpBuilder &, Block &,
                                                 ArrayRef<NamedAttribute>)>;
 #else
-using RegionBuilderFn = llvm::function_ref<void(ImplicitLocOpBuilder &, Block &,
-                                                ArrayRef<NamedAttribute>,
-                                                function_ref<InFlightDiagnostic()>)>;
+using RegionBuilderFn = llvm::function_ref<void(
+    ImplicitLocOpBuilder &, Block &, ArrayRef<NamedAttribute>,
+    function_ref<InFlightDiagnostic()>)>;
 #endif
 
 /// Fills the region of a structured operation using the provided
@@ -177,9 +177,8 @@ static void fillStructuredOpRegion(OpBuilder &opBuilder, Region &region,
 #ifndef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
   regionBuilder(b, *body, attrs);
 #else
-  regionBuilder(b, *body, attrs, [&]() {
-    return mlir::emitError(opBuilder.getUnknownLoc());
-  });
+  regionBuilder(b, *body, attrs,
+                [&]() { return mlir::emitError(opBuilder.getUnknownLoc()); });
 #endif
 
   // indexing_maps is an auto-generated method.
@@ -718,16 +717,56 @@ public:
   }
 
   // Build the type functions defined by OpDSL.
-  Value buildRoundMode(TypeFn castSign, RoundMode round, Type toType,
-                       Value operand) {
+  Value buildRoundMode(TypeFn cast, RoundMode round, UnsignedMode unsignedMode,
+                       Type toType, Value operand) {
     bool isUnsignedCast = false;
-    if ((castSign == TypeFn::cast_unsigned) ||
+    if ((cast == TypeFn::cast_unsigned) ||
         (operand.getType().isInteger(1) &&
          toType.getIntOrFloatBitWidth() > 1)) {
       // TODO: general support for unsigned cast
       isUnsignedCast = true;
     }
-    return cast(toType, operand, isUnsignedCast);
+
+    Value castedOp = castRound(toType, operand, isUnsignedCast);
+    Operation *defOp = castedOp.getDefiningOp();
+    OpBuilder builder = getBuilder();
+
+    if (!defOp) {
+      return castedOp;
+    }
+    auto roundingAttr = builder.getAttr<hfusion::RoundModeAttr>(round);
+    auto unsignedAttr =
+        builder.getAttr<hfusion::UnsignedModeAttr>(unsignedMode);
+
+    if (!roundingAttr) {
+      llvm::report_fatal_error("Round type not supported");
+    }
+    if (!unsignedAttr) {
+      llvm::report_fatal_error("Unsigned mode not supported");
+    }
+
+    defOp->setAttr("round_mode", roundingAttr);
+    // TODO: Temporarily disable default-valued attributes so the printed IR
+    // stays backward-compatible.
+    if (unsignedMode != UnsignedMode::SI2SI)
+      defOp->setAttr("unsigned_mode", unsignedAttr);
+    return castedOp;
+  }
+
+  // Build the enable_saturate attr defined by OpDSL.
+  // TODO: Temporarily disable default-valued attributes so the printed IR stays
+  // backward-compatible.
+  void buildEnableSaturate(bool enable_saturateVal, Value operand) {
+    if (!enable_saturateVal)
+      return;
+    Operation *defOp = operand.getDefiningOp();
+    OpBuilder builder = getBuilder();
+
+    if (!defOp) {
+      return;
+    }
+
+    defOp->setAttr("enable_saturate", builder.getBoolAttr(enable_saturateVal));
   }
 
   // Build the type functions defined by OpDSL.
@@ -761,6 +800,17 @@ public:
   Type getFloat64Type() { return Float64Type::get(context); }
 
 private:
+  // Cast with rounding: applies math::RoundOp when operand is already the
+  // target float type, otherwise delegates to convertScalarToDtype.
+  Value castRound(Type toType, Value operand, bool isUnsignedCast) {
+    OpBuilder builder = getBuilder();
+    auto loc = operand.getLoc();
+    if (operand.getType() == toType && dyn_cast<FloatType>(toType)) {
+      return builder.create<math::RoundOp>(loc, operand);
+    }
+    return convertScalarToDtype(builder, loc, operand, toType, isUnsignedCast);
+  }
+
   // Generates operations to cast the given operand to a specified type.
   // If the cast cannot be performed, a warning will be issued and the
   // operand returned as-is (which will presumably yield a verification
@@ -893,8 +943,418 @@ void printHFusionDeinterleave(OpAsmPrinter &printer, Operation *op,
   s << ">";
 }
 
+static LogicalResult appendMangledType(llvm::raw_string_ostream &ss, Type t) {
+  if (auto memref = llvm::dyn_cast<MemRefType>(t)) {
+    ss << "view";
+    for (auto size : memref.getShape())
+      if (size < 0)
+        ss << "sx";
+      else
+        ss << size << "x";
+    if (failed(appendMangledType(ss, memref.getElementType())))
+      return failure();
+    if (auto as = memref.getMemorySpace()) {
+      if (auto attr = llvm::dyn_cast<IntegerAttr>(as))
+        ss << "as" << attr.getInt();
+      else
+        return failure();
+    }
+    return success();
+  }
+  if (auto vec = llvm::dyn_cast<VectorType>(t)) {
+    ss << "vector";
+    llvm::interleave(
+        vec.getShape(), [&](int64_t i) { ss << i; }, [&]() { ss << "x"; });
+    if (failed(appendMangledType(ss, vec.getElementType())))
+      return failure();
+    return success();
+  }
+  if (t.isSignlessIntOrIndexOrFloat()) {
+    ss << t;
+    return success();
+  }
+  return failure();
+}
+
+std::string generateLibraryCallName(Operation *op) {
+  assert(isa<linalg::LinalgOp>(op));
+  std::string name(op->getName().getStringRef().str());
+  std::string fun = "";
+  for (NamedAttribute kv : op->getAttrs()) {
+    if (UnaryFnAttr ufa = llvm::dyn_cast<UnaryFnAttr>(kv.getValue())) {
+      fun = stringifyEnum(ufa.getValue()).str() + "_";
+    } else if (BinaryFnAttr bfa = llvm::dyn_cast<BinaryFnAttr>(kv.getValue())) {
+      fun = stringifyEnum(bfa.getValue()).str() + "_";
+    }
+  }
+  name.reserve(128);
+  std::replace(name.begin(), name.end(), '.', '_');
+  llvm::raw_string_ostream ss(name);
+  ss << "_" << fun;
+  for (Type t : op->getOperandTypes()) {
+    if (failed(appendMangledType(ss, t)))
+      return std::string();
+    ss << "_";
+  }
+  std::string res = ss.str();
+  res.pop_back();
+  return res;
+}
+
 } // namespace hfusion
 } // namespace mlir
+
+//===----------------------------------------------------------------------===//
+// CummaxOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult CummaxOp::verify() { return verifyCumOp(*this); }
+
+//===----------------------------------------------------------------------===//
+// CumminOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult CumminOp::verify() { return verifyCumOp(*this); }
+
+//===----------------------------------------------------------------------===//
+// EmbeddingGatherOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult EmbeddingGatherOp::verify() { return success(); }
+
+void EmbeddingGatherOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get(), &getSrcMutable(),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Read::get(), &getIndexMutable(),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Write::get(), &getDstMutable(),
+                       SideEffects::DefaultResource::get());
+}
+
+//===----------------------------------------------------------------------===//
+// IndirectLoadOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult IndirectLoadOp::verify() {
+  auto srcType = getSrc().getType();
+  auto offsetsType = getOffsets().getType();
+  auto offsetsTensorType = mlir::cast<TensorType>(offsetsType);
+  if (!offsetsTensorType)
+    return emitOpError("offsets must be a tensor type");
+  auto dstType = getDst().getType();
+  auto dstTensorType = mlir::cast<TensorType>(dstType);
+  if (!dstTensorType)
+    return emitOpError("dst must be a tensor type");
+  auto srcMemrefType = mlir::cast<MemRefType>(srcType);
+  if (!srcMemrefType)
+    return emitOpError("src must be a memref type");
+
+  auto srcElementType = srcMemrefType.getElementType();
+  auto dstElementType = dstTensorType.getElementType();
+  if (dstElementType != srcElementType) {
+    return emitOpError("dst of hfusion::IndirectLoadOp must have the same "
+                       "element type as src");
+  }
+
+  if (dstTensorType.getShape() != offsetsTensorType.getShape()) {
+    return emitOpError(
+        "dst of hfusion::IndirectLoadOp must have the same shape as offsets");
+  }
+
+  auto mask = getMask();
+  auto maskType = mask.getType();
+  auto maskTensorType = mlir::cast<TensorType>(maskType);
+  if (!maskTensorType)
+    return emitOpError("mask must be a tensor type");
+
+  if (maskTensorType.getShape() != offsetsTensorType.getShape()) {
+    return emitOpError("mask of hfusion::IndirectLoadOp must have the same "
+                       "shape and rank as offsets");
+  }
+
+  auto other = getOther();
+  auto otherType = other.getType();
+  auto otherTensorType = mlir::cast<TensorType>(otherType);
+  if (!otherTensorType)
+    return emitOpError("other must be a tensor type");
+
+  if (otherTensorType.getShape() != offsetsTensorType.getShape()) {
+    return emitOpError("other of hfusion::IndirectLoadOp must have the same "
+                       "shape and rank as offsets");
+  }
+
+  auto otherElementType = otherTensorType.getElementType();
+  if (srcElementType != otherElementType) {
+    return emitOpError("other of hfusion::IndirectLoadOp must have the same "
+                       "element type as src");
+  }
+
+  return success();
+}
+
+void IndirectLoadOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get(), &getSrcMutable(),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Read::get(), &getOffsetsMutable(),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Write::get(), &getDstMutable(),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Read::get(), &getMaskMutable()),
+      SideEffects::DefaultResource::get();
+  effects.emplace_back(MemoryEffects::Read::get(), &getOtherMutable()),
+      SideEffects::DefaultResource::get();
+}
+
+//===----------------------------------------------------------------------===//
+// StrideLoadOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult StrideLoadOp::verify() {
+  auto srcMemrefType = dyn_cast<MemRefType>(getSrc().getType());
+  auto dstTensorType = dyn_cast<TensorType>(getDst().getType());
+
+  if (!srcMemrefType)
+    return emitOpError("src must be a memref type");
+  if (!dstTensorType)
+    return emitOpError("dst must be a tensor type");
+
+  int64_t rank = dstTensorType.getRank();
+  if (rank < 1 || rank > 3)
+    return emitOpError("only support 1-3D");
+
+  if (static_cast<int64_t>(getStride().size()) != rank ||
+      static_cast<int64_t>(getNumel().size()) != rank) {
+    return emitOpError("stride and numel operand counts must match dst rank");
+  }
+
+  auto getIndexType = [&](ValueRange values,
+                          StringRef name) -> FailureOr<Type> {
+    if (values.empty())
+      return emitOpError() << name << " operands must not be empty";
+    Type type = values.front().getType();
+    for (Value value : values) {
+      if (value.getType() != type)
+        return emitOpError() << name << " operands must have the same type";
+    }
+    return type;
+  };
+
+  Type indexType = getOffset().getType();
+  FailureOr<Type> strideType = getIndexType(getStride(), "stride");
+  FailureOr<Type> numelType = getIndexType(getNumel(), "numel");
+  if (failed(strideType) || failed(numelType))
+    return failure();
+  if (indexType != *strideType || indexType != *numelType)
+    return emitOpError(
+        "offset, stride and numel operands must have the same type");
+
+  if (dstTensorType.getElementType() != srcMemrefType.getElementType()) {
+    return emitOpError(
+        "dst of hfusion::StrideLoadOp must have the same element type as src");
+  }
+  if (getOther().getType() != srcMemrefType.getElementType())
+    return emitOpError("other must have the same element type as src");
+
+  if (getResult() && getResult().getType() != getDst().getType())
+    return emitOpError("result must have the same type as dst");
+
+  return success();
+}
+
+void StrideLoadOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get(), &getSrcMutable(),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Write::get(), &getDstMutable(),
+                       SideEffects::DefaultResource::get());
+}
+
+//===----------------------------------------------------------------------===//
+// StrideStoreOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult StrideStoreOp::verify() {
+  auto dstMemrefType = dyn_cast<MemRefType>(getDst().getType());
+  auto srcTensorType = dyn_cast<TensorType>(getSrc().getType());
+
+  if (!dstMemrefType)
+    return emitOpError("dst must be a memref type");
+  if (!srcTensorType)
+    return emitOpError("src must be a tensor type");
+
+  int64_t rank = srcTensorType.getRank();
+  if (rank < 1 || rank > 3)
+    return emitOpError("only support 1-3D");
+
+  if (static_cast<int64_t>(getStride().size()) != rank ||
+      static_cast<int64_t>(getNumel().size()) != rank) {
+    return emitOpError("stride and numel operand counts must match src rank");
+  }
+
+  auto getIndexType = [&](ValueRange values,
+                          StringRef name) -> FailureOr<Type> {
+    if (values.empty())
+      return emitOpError() << name << " operands must not be empty";
+    Type type = values.front().getType();
+    for (Value value : values) {
+      if (value.getType() != type)
+        return emitOpError() << name << " operands must have the same type";
+    }
+    return type;
+  };
+
+  Type indexType = getOffset().getType();
+  FailureOr<Type> strideType = getIndexType(getStride(), "stride");
+  FailureOr<Type> numelType = getIndexType(getNumel(), "numel");
+  if (failed(strideType) || failed(numelType))
+    return failure();
+  if (indexType != *strideType || indexType != *numelType)
+    return emitOpError(
+        "offset, stride and numel operands must have the same type");
+
+  if (srcTensorType.getElementType() != dstMemrefType.getElementType()) {
+    return emitOpError(
+        "src of hfusion::StrideStoreOp must have the same element type as dst");
+  }
+
+  return success();
+}
+
+void StrideStoreOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get(), &getSrcMutable(),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Write::get(), &getDstMutable(),
+                       SideEffects::DefaultResource::get());
+}
+
+//===----------------------------------------------------------------------===//
+// IndirectStoreOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult IndirectStoreOp::verify() {
+  auto dstType = getDst().getType();
+  auto dstMemrefType = mlir::cast<MemRefType>(dstType);
+  if (!dstMemrefType)
+    return emitOpError("dst must be a memref type");
+  auto dstElementType = dstMemrefType.getElementType();
+  auto srcType = getSrc().getType();
+  auto srcTensorType = mlir::cast<TensorType>(srcType);
+  if (!srcTensorType)
+    return emitOpError("src must be a tensor type");
+  auto srcElementType = srcTensorType.getElementType();
+  if (dstElementType != srcElementType) {
+    return emitOpError("src of hfusion::IndirectStoreOp must have the same "
+                       "element type as dst");
+  }
+
+  auto offsetsType = getOffsets().getType();
+  auto offsetsTensorType = mlir::cast<TensorType>(offsetsType);
+  if (!offsetsTensorType)
+    return emitOpError("offsets must be a tensor type");
+  if (offsetsTensorType.getShape() != srcTensorType.getShape()) {
+    return emitOpError("offsets of hfusion::IndirectStoreOp must have the same "
+                       "shape and rank as src");
+  }
+
+  auto mask = getMask();
+  if (mask) {
+    auto maskType = mask.getType();
+    auto maskTensorType = mlir::cast<TensorType>(maskType);
+    if (!maskTensorType)
+      return emitOpError("mask must be a tensor type");
+    if (maskTensorType.getShape() != offsetsTensorType.getShape()) {
+      return emitOpError("mask of hfusion::IndirectStoreOp must have the same "
+                         "shape and rank as offsets");
+    }
+  }
+
+  return success();
+}
+
+void IndirectStoreOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Write::get(), &getDstMutable(),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Read::get(), &getOffsetsMutable(),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Read::get(), &getSrcMutable(),
+                       SideEffects::DefaultResource::get());
+
+  if (getMask()) {
+    effects.emplace_back(
+        MemoryEffects::Read::get(),
+        &getOperation()->getOpOperand(getODSOperandIndexAndLength(3).first),
+        SideEffects::DefaultResource::get());
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// GatherTOp
+//===----------------------------------------------------------------------===//
+
+void GatherTOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get(), &getSrcMutable(),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Read::get(), &getIndexMutable(),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Write::get(), &getDstMutable(),
+                       SideEffects::DefaultResource::get());
+}
+
+//===----------------------------------------------------------------------===//
+// IndexPutOp
+//===----------------------------------------------------------------------===//
+
+void IndexPutOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Write::get(), &getDstMutable(),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Read::get(), &getIndexMutable(),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Read::get(), &getValueMutable(),
+                       SideEffects::DefaultResource::get());
+}
+
+//===----------------------------------------------------------------------===//
+// ScatterTOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult ScatterTOp::verify() {
+  auto valueType = getValue().getType();
+  auto valueTensorType = mlir::cast<TensorType>(valueType);
+  if (!valueTensorType) {
+    return emitOpError("value must be a tensor type");
+  }
+  auto indexTileType = getIndexTile().getType();
+  auto indexTileTensorType = mlir::cast<TensorType>(indexTileType);
+  if (!indexTileTensorType) {
+    return emitOpError("index_tile must be a tensor type");
+  }
+  if (valueTensorType.getShape() != indexTileTensorType.getShape()) {
+    return emitOpError("tensor of value and index_tile of hfusion::ScatterTOp "
+                       "must have the same shape");
+  }
+
+  return success();
+}
+
+void ScatterTOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Write::get(), &getDstMutable(),
+                       SideEffects::DefaultResource::get());
+}
 
 #define GET_OP_CLASSES
 #include "bishengir/Dialect/HFusion/IR/HFusionNamedStructuredOps.yamlgen.cpp.inc"
@@ -937,6 +1397,10 @@ void ReduceWithIndexOp::build(OpBuilder &odsBuilder, OperationState &odsState,
                         odsBuilder.getDenseI64ArrayAttr(dimensions));
   buildStructuredOp(odsBuilder, odsState, types, inputs, inits, {},
                     ReduceWithIndexOp::getRegionBuilder());
+}
+
+std::string ReduceWithIndexOp::getLibraryCallName() {
+  return generateLibraryCallName(getOperation());
 }
 
 MutableOperandRange ReduceWithIndexOp::getDpsInitsMutable() {
@@ -1115,16 +1579,17 @@ void codeGenWithIndexDispatch(OpBuilder &builder, Block &block, Type elemType,
 #ifndef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
 std::function<void(ImplicitLocOpBuilder &, Block &, ArrayRef<NamedAttribute>)>
 #else
-std::function<void(ImplicitLocOpBuilder &, Block &, ArrayRef<NamedAttribute>, 
+std::function<void(ImplicitLocOpBuilder &, Block &, ArrayRef<NamedAttribute>,
                    function_ref<InFlightDiagnostic()>)>
 #endif
 ReduceWithIndexOp::getRegionBuilder() {
   return [](ImplicitLocOpBuilder &b, Block &block,
             ArrayRef<NamedAttribute> attrs
 #ifdef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
-            , function_ref<InFlightDiagnostic()> emitError
+            ,
+            function_ref<InFlightDiagnostic()> emitError
 #endif
-  ) {
+         ) {
     // check numArgs
     constexpr int kNumArgsWithoutIndex = 3;
     auto numArgs = block.getNumArguments();
@@ -1931,12 +2396,15 @@ ParseResult ArangeOp::parse(OpAsmParser &parser, OperationState &result) {
 #ifndef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
   getRegionBuilder()(builder, block, result.attributes.getAttrs());
 #else
-  getRegionBuilder()(builder, block, result.attributes.getAttrs(), [&]() {
-    return mlir::emitError(builder.getLoc());
-  });
+  getRegionBuilder()(builder, block, result.attributes.getAttrs(),
+                     [&]() { return mlir::emitError(builder.getLoc()); });
 #endif
 
   return success();
+}
+
+std::string ArangeOp::getLibraryCallName() {
+  return generateLibraryCallName(getOperation());
 }
 
 MutableOperandRange ArangeOp::getDpsInitsMutable() { return getInitMutable(); }
@@ -1969,9 +2437,10 @@ ArangeOp::getRegionBuilder() {
   return [](ImplicitLocOpBuilder &builder, Block &block,
             ArrayRef<NamedAttribute> attrs
 #ifdef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
-            , function_ref<InFlightDiagnostic()> emitError
+            ,
+            function_ref<InFlightDiagnostic()> emitError
 #endif
-  ) {
+         ) {
     OpBuilder::InsertionGuard guard(builder);
 
     auto segmentSizes = cast_or_null<DenseI32ArrayAttr>(
@@ -2077,6 +2546,70 @@ FailureOr<SmallVector<Value>> IsFiniteOp::decomposeOperation(OpBuilder &b) {
 // GatherOp
 //===----------------------------------------------------------------------===//
 
+struct GatherUnitDimCanonicalization : public OpRewritePattern<GatherOp> {
+  using OpRewritePattern<GatherOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(GatherOp gatherOp,
+                                PatternRewriter &rewriter) const override {
+    Value src = gatherOp.getDpsInputs()[0];
+    Value index = gatherOp.getDpsInputs()[1];
+    Value output = gatherOp.getDpsInits()[0];
+    int64_t gatherAxis = (int64_t)gatherOp.getAxis();
+    auto srcShape = utils::getShape(src.getType());
+    auto indexShape = utils::getShape(index.getType());
+    auto outShape = utils::getShape(output.getType());
+
+    if (srcShape.size() == 1) {
+      return failure();
+    }
+    if (srcShape[gatherAxis] != 1) {
+      return failure();
+    }
+    if (indexShape[gatherAxis] == 1) {
+      rewriter.replaceOp(gatherOp, src);
+      return success();
+    }
+    SmallVector<ReassociationIndices> reassociation;
+    if (gatherAxis > 0) {
+      for (int64_t i = 0; i < gatherAxis - 1; ++i)
+        reassociation.push_back({i});
+      reassociation.push_back({gatherAxis - 1, gatherAxis});
+      for (int64_t i = gatherAxis + 1; i < (int)srcShape.size(); ++i)
+        reassociation.push_back({i});
+    } else {
+      reassociation.push_back({0, 1});
+      for (int64_t i = 2; i < (int)srcShape.size(); ++i)
+        reassociation.push_back({i});
+    }
+    SmallVector<int64_t> newShape;
+    for (int64_t i = 0; i < (int)srcShape.size(); ++i) {
+      if (i == gatherAxis)
+        continue;
+      newShape.push_back(srcShape[i]);
+    }
+    RankedTensorType collapsedType =
+        RankedTensorType::get(newShape, getElementTypeOrSelf(src));
+    auto collapseOp = rewriter.create<tensor::CollapseShapeOp>(
+        src.getLoc(), collapsedType, src, reassociation);
+    rewriter.setInsertionPointAfter(gatherOp);
+    auto broadcastOp = rewriter.create<linalg::BroadcastOp>(
+        gatherOp->getLoc(), collapseOp.getResult(), output, gatherAxis);
+    rewriter.replaceAllUsesWith(gatherOp.getResults(),
+                                broadcastOp->getResults());
+    rewriter.eraseOp(gatherOp);
+    return success();
+  }
+};
+
+void GatherOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                           MLIRContext *context) {
+  results.add<GatherUnitDimCanonicalization>(context);
+}
+
+std::string GatherOp::getLibraryCallName() {
+  return generateLibraryCallName(getOperation());
+}
+
 MutableOperandRange GatherOp::getDpsInitsMutable() { return getInitMutable(); }
 
 SmallVector<utils::IteratorType> GatherOp::getIteratorTypesArray() {
@@ -2165,9 +2698,10 @@ GatherOp::getRegionBuilder() {
   return [](ImplicitLocOpBuilder &builder, Block &block,
             ArrayRef<NamedAttribute> attrs
 #ifdef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
-            , function_ref<InFlightDiagnostic()> emitError
+            ,
+            function_ref<InFlightDiagnostic()> emitError
 #endif
-  ) {
+         ) {
     assert(block.getNumArguments() == 3 &&
            "GatherOp expecting 3 block arguments");
     Value srcVal = block.getArgument(0);
@@ -2395,14 +2929,17 @@ ArrayAttr GatherMaskOp::getIndexingMaps() {
   AffineMap identityMap = AffineMap::getMultiDimIdentityMap(numIters, ctx);
   AffineMapAttr identityMapAttr = AffineMapAttr::get(identityMap);
 
-  AffineMap scalarMap = AffineMap::get(1, 0, getAffineConstantExpr(0, ctx), ctx); 
+  AffineMap scalarMap =
+      AffineMap::get(1, 0, getAffineConstantExpr(0, ctx), ctx);
   AffineMapAttr scalarMapAttr = AffineMapAttr::get(scalarMap);
 
-  return ArrayAttr::get(ctx, {identityMapAttr, identityMapAttr, identityMapAttr, scalarMapAttr});
+  return ArrayAttr::get(
+      ctx, {identityMapAttr, identityMapAttr, identityMapAttr, scalarMapAttr});
 }
 
 void GatherMaskOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
   getGenericEffectsImpl(effects, cast<linalg::LinalgOp>(getOperation()));
 }
 
@@ -2412,7 +2949,7 @@ void GatherMaskOp::build(OpBuilder &odsBuilder, OperationState &odsState,
   for (Value initVal : init) {
     resultTys.push_back(initVal.getType());
   }
-  
+
   buildStructuredOp(odsBuilder, odsState, resultTys, {src, mask}, init, {},
                     getRegionBuilder());
 }
@@ -2427,31 +2964,31 @@ GatherMaskOp::getRegionBuilder() {
   return [](ImplicitLocOpBuilder &builder, Block &block,
             ArrayRef<NamedAttribute> attrs
 #ifdef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
-            , function_ref<InFlightDiagnostic()> emitError
+            ,
+            function_ref<InFlightDiagnostic()> emitError
 #endif
-  ) {
+         ) {
     Value srcVal = block.getArgument(0);
     Value maskVal = block.getArgument(1);
     ValueRange initArgs = block.getArguments().drop_front(2);
 
     Type i1Type = builder.getI1Type();
     if (maskVal.getType() != i1Type) {
-      maskVal = builder.create<arith::TruncIOp>(builder.getLoc(), i1Type, maskVal);
+      maskVal =
+          builder.create<arith::TruncIOp>(builder.getLoc(), i1Type, maskVal);
     }
 
     SmallVector<Value, 2> yieldVals;
     for (size_t i = 0; i < initArgs.size(); ++i) {
       Value initVal = initArgs[i];
       if (i == 0) {
-        yieldVals.push_back(builder.create<arith::SelectOp>(maskVal, srcVal, initVal));
+        yieldVals.push_back(
+            builder.create<arith::SelectOp>(maskVal, srcVal, initVal));
       } else {
         yieldVals.push_back(builder.create<arith::ConstantOp>(
-            builder.getLoc(),
-            builder.getI32IntegerAttr(0)
-        ));
+            builder.getLoc(), builder.getI32IntegerAttr(0)));
       }
     }
-
 
     builder.create<linalg::YieldOp>(builder.getLoc(), yieldVals);
   };
@@ -2491,12 +3028,15 @@ LogicalResult GatherMaskOp::verify() {
   bool isMemrefSemantic = hasPureBufferSemantics();
   // Check: must be pure tensor or pure memref semantics, cannot mix
   if (!isTensorSemantic && !isMemrefSemantic) {
-    return emitOpError("must have pure tensor or pure memref semantics (cannot mix tensor/memref operands)");
+    return emitOpError("must have pure tensor or pure memref semantics (cannot "
+                       "mix tensor/memref operands)");
   }
 
   if (isTensorSemantic) {
     if (getNumResults() != 2) {
-      return emitOpError("expecting exactly 2 result for tensor semantics, but got ") << getNumResults();
+      return emitOpError(
+                 "expecting exactly 2 result for tensor semantics, but got ")
+             << getNumResults();
     }
     Value resultValue = getResult()[0];
     Type resultType = resultValue.getType();
@@ -2507,18 +3047,22 @@ LogicalResult GatherMaskOp::verify() {
     }
   }
 
-  // Memref semantics: no result allowed (memref is in-place write, no return value)
+  // Memref semantics: no result allowed (memref is in-place write, no return
+  // value)
   if (isMemrefSemantic) {
     if (getNumResults() != 0) {
-      return emitOpError("expecting 0 results for memref semantics, but got ") << getNumResults();
+      return emitOpError("expecting 0 results for memref semantics, but got ")
+             << getNumResults();
     }
   }
 
   Value mask = getMask();
   Type maskElementType = getElementTypeOrSelf(mask);
-  // Check: mask must be I1 or I8 (compatible with any shape, only check element type)
+  // Check: mask must be I1 or I8 (compatible with any shape, only check element
+  // type)
   if (!maskElementType.isInteger(1) && !maskElementType.isInteger(8)) {
-    return emitOpError("mask element type must be i1 or i8, but got ") << maskElementType;
+    return emitOpError("mask element type must be i1 or i8, but got ")
+           << maskElementType;
   }
 
   auto getRank = [&](Value value) -> std::optional<int64_t> {
@@ -2536,11 +3080,12 @@ LogicalResult GatherMaskOp::verify() {
   std::optional<int64_t> maskRank = getRank(getMask());
   std::optional<int64_t> initRank = getRank(getInit()[0]);
 
-  // Check: ranks must match for ranked types; skip for unranked types (adapt to any shape)
+  // Check: ranks must match for ranked types; skip for unranked types (adapt to
+  // any shape)
   if (srcRank != -1 && maskRank != -1 && initRank != -1) {
     if (srcRank != maskRank || srcRank != initRank) {
-      return emitOpError("src rank (") << srcRank.value()
-             << "), mask rank (" << maskRank.value()
+      return emitOpError("src rank (")
+             << srcRank.value() << "), mask rank (" << maskRank.value()
              << "), init rank (" << initRank.value()
              << ") must be the same (for ranked types)";
     }
@@ -2549,8 +3094,9 @@ LogicalResult GatherMaskOp::verify() {
   Type srcElementType = getElementTypeOrSelf(getSrc());
   Type initElementType = getElementTypeOrSelf(getInit()[0]);
   if (srcElementType != initElementType) {
-    return emitOpError("src element type (") << srcElementType
-           << ") must match init element type (" << initElementType << ")";
+    return emitOpError("src element type (")
+           << srcElementType << ") must match init element type ("
+           << initElementType << ")";
   }
   return success();
 }
@@ -2813,61 +3359,6 @@ FailureOr<SmallVector<Value>> HistogramOp::decomposeOperation(OpBuilder &b) {
   return SmallVector<Value>{finalHist};
 }
 
-Value hfusion::castTo(OpBuilder &builder, Value src, Type targetElemType,
-                      hfusion::RoundMode roundMode, std::optional<Value> dst,
-                      bool enableOverflow, hfusion::TypeFn castIntegerType) {
-  Location loc = src.getLoc();
-  if (!isa<TensorType>(src.getType())) {
-    assert(src.getType().isIntOrIndexOrFloat());
-    bool isUnsignedCast = (hfusion::TypeFn::cast_unsigned == castIntegerType);
-    return convertScalarToDtype(builder, loc, src, targetElemType,
-                                isUnsignedCast);
-  }
-
-  Value targetTensor;
-  if (dst.has_value()) {
-    targetTensor = dst.value();
-  } else {
-    targetTensor = utils::createEmptyOpWithTargetElemType(builder, loc, src,
-                                                          targetElemType);
-  }
-
-  auto roundingAttr = builder.getAttr<hfusion::RoundModeAttr>(roundMode);
-  auto enableOverflowVal = builder.getBoolAttr(enableOverflow);
-  auto castAttr = builder.getAttr<hfusion::TypeFnAttr>(castIntegerType);
-  auto vcastOp = builder.create<hfusion::CastOp>(
-      loc, SmallVector<Type>{targetTensor.getType()}, src, targetTensor,
-      roundingAttr, enableOverflowVal, castAttr);
-  return vcastOp->getResult(0);
-}
-
-Value hfusion::castTo(OpBuilder &builder, Value src, Type targetElemType,
-                      hfusion::TypeFn castIntegerType) {
-  Type srcElemType = getElementTypeOrSelf(src.getType());
-  hfusion::RoundMode rounding =
-      mlir::utils::selectRoundMode<hfusion::RoundMode>(srcElemType,
-                                                       targetElemType);
-  return hfusion::castTo(builder, src, targetElemType, rounding, std::nullopt,
-                         /*enableOverflow=*/true, castIntegerType);
-}
-
-Value hfusion::castTo(OpBuilder &builder, Value src, Type targetElemType,
-                      hfusion::RoundMode roundMode,
-                      hfusion::TypeFn castIntegerType) {
-  return hfusion::castTo(builder, src, targetElemType, roundMode, std::nullopt,
-                         /*enableOverflow=*/true, castIntegerType);
-}
-
-Value hfusion::castTo(OpBuilder &builder, Value src, Type targetElemType,
-                      bool enableOverflow, hfusion::TypeFn castIntegerType) {
-  Type srcElemType = getElementTypeOrSelf(src.getType());
-  hfusion::RoundMode rounding =
-      mlir::utils::selectRoundMode<hfusion::RoundMode>(srcElemType,
-                                                       targetElemType);
-  return hfusion::castTo(builder, src, targetElemType, rounding, std::nullopt,
-                         /*enableOverflow=*/enableOverflow, castIntegerType);
-}
-
 LogicalResult MatMulMxOp::verify() {
   auto inputATy = mlir::cast<ShapedType>(getInputA().getType());
   auto inputBTy = mlir::cast<ShapedType>(getInputB().getType());
@@ -2886,7 +3377,8 @@ LogicalResult MatMulMxOp::verify() {
   static constexpr int dim0 = 0;
   static constexpr int dim1 = 1;
   if (inputATy.getDimSize(dim1) != inputBTy.getDimSize(dim0))
-    return emitOpError() << "requires inner dimension of matmul matrix to match";
+    return emitOpError()
+           << "requires inner dimension of matmul matrix to match";
 
   if (resultTy.getDimSize(dim0) != inputATy.getDimSize(dim0) ||
       resultTy.getDimSize(dim1) != inputBTy.getDimSize(dim1))
@@ -2907,14 +3399,197 @@ LogicalResult MatMulMxOp::verify() {
   return success();
 }
 
+FailureOr<SmallVector<Value>>
+MatMulMxOp::decomposeOperation(OpBuilder &builder) {
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPoint(getOperation());
+  Location location = getLoc();
+
+  Value a = getInputA();
+  Value b = getInputB();
+  Value c = getAcc();
+  Value scaleA = getScaleA();
+  Value scaleB = getScaleB();
+
+  auto aType = cast<RankedTensorType>(a.getType());
+  auto bType = cast<RankedTensorType>(b.getType());
+
+  // Software emulation only used to support K = 32
+  auto K = aType.getShape()[1];
+  if (K != 32)
+    return failure();
+
+  auto scaleAType = cast<RankedTensorType>(scaleA.getType());
+  auto scaleBType = cast<RankedTensorType>(scaleB.getType());
+  auto shapeScaleA = scaleAType.getShape();
+  auto shapeScaleB = scaleBType.getShape();
+
+  // Cast scale to u16 (unsigned)
+  auto modeAttr = builder.getNamedAttr(
+      hfusion::RoundModeAttr::getMnemonic(),
+      builder.getAttr<hfusion::RoundModeAttr>(hfusion::RoundMode::RINT));
+  const Type i16Ty = builder.getI16Type();
+  Value scaleAI16 =
+      castTo(builder, scaleA, i16Ty, hfusion::TypeFn::cast_unsigned,
+             hfusion::UnsignedMode::UI2UI);
+  Value scaleBI16 =
+      castTo(builder, scaleB, i16Ty, hfusion::TypeFn::cast_unsigned,
+             hfusion::UnsignedMode::UI2UI);
+
+  // scale <<= 7
+  auto shlFnAttr = builder.getNamedAttr(
+      "fun", builder.getAttr<hfusion::BinaryFnAttr>(hfusion::BinaryFn::shli));
+  Value const7 =
+      builder.create<arith::ConstantIntOp>(location, 7, builder.getI16Type());
+
+  Value emptyScaleAI16 = builder.create<tensor::EmptyOp>(
+      location, RankedTensorType::get(shapeScaleA, i16Ty), ValueRange{});
+  Value sevenA =
+      builder.create<linalg::FillOp>(location, const7, emptyScaleAI16)
+          .getResult(0);
+  Value scaleAShl = builder
+                        .create<hfusion::ElemwiseBinaryOp>(
+                            location, ValueRange{scaleAI16, sevenA},
+                            ValueRange{emptyScaleAI16}, shlFnAttr)
+                        ->getResult(0);
+
+  Value emptyScaleBI16 = builder.create<tensor::EmptyOp>(
+      location, RankedTensorType::get(shapeScaleB, i16Ty), ValueRange{});
+  Value sevenB =
+      builder.create<linalg::FillOp>(location, const7, emptyScaleBI16)
+          .getResult(0);
+  Value scaleBShl = builder
+                        .create<hfusion::ElemwiseBinaryOp>(
+                            location, ValueRange{scaleBI16, sevenB},
+                            ValueRange{emptyScaleBI16}, shlFnAttr)
+                        ->getResult(0);
+
+  // Bitcast to bf16
+  const Type bf16Ty = builder.getBF16Type();
+  Value emptyScaleABF16 = builder.create<tensor::EmptyOp>(
+      location, RankedTensorType::get(shapeScaleA, bf16Ty), ValueRange{});
+  Value scaleABF16 = builder
+                         .create<hfusion::BitcastOp>(
+                             location, TypeRange{emptyScaleABF16.getType()},
+                             ValueRange{scaleAShl}, ValueRange{emptyScaleABF16})
+                         .getResult(0);
+  Value emptyScaleBBF16 = builder.create<tensor::EmptyOp>(
+      location, RankedTensorType::get(shapeScaleB, bf16Ty), ValueRange{});
+  Value scaleBBF16 = builder
+                         .create<hfusion::BitcastOp>(
+                             location, TypeRange{emptyScaleBBF16.getType()},
+                             ValueRange{scaleBShl}, ValueRange{emptyScaleBBF16})
+                         .getResult(0);
+
+  // Cast scale to f32
+  const Type f32Ty = builder.getF32Type();
+  Value scaleAF32 = castTo(builder, scaleABF16, f32Ty);
+  Value scaleBF32 = castTo(builder, scaleBBF16, f32Ty);
+
+  // If input is fp8, cast to fp16
+  const Type f16Ty = builder.getF16Type();
+  if (isFP8(aType.getElementType(), builder)) {
+    Value emptyAF16 = builder.create<tensor::EmptyOp>(
+        location, RankedTensorType::get(aType.getShape(), f16Ty), ValueRange{});
+    a = builder
+            .create<hfusion::CastOp>(location, ValueRange{a},
+                                     ValueRange{emptyAF16}, modeAttr)
+            .getResult(0);
+    aType = RankedTensorType::get(aType.getShape(), f16Ty);
+  }
+  if (isFP8(bType.getElementType(), builder)) {
+    Value emptyBF16 = builder.create<tensor::EmptyOp>(
+        location, RankedTensorType::get(bType.getShape(), f16Ty), ValueRange{});
+    b = builder
+            .create<hfusion::CastOp>(location, ValueRange{b},
+                                     ValueRange{emptyBF16}, modeAttr)
+            .getResult(0);
+    bType = RankedTensorType::get(bType.getShape(), f16Ty);
+  }
+
+  // Cast scale to input type
+  Value scaleAFinal = castTo(builder, scaleAF32, aType.getElementType());
+  Value scaleBFinal = castTo(builder, scaleBF32, bType.getElementType());
+
+  // Broadcast scale
+  static constexpr int TILE_SIZE = 32;
+  Value emptyScaleABroadcasted = builder.create<tensor::EmptyOp>(
+      location,
+      RankedTensorType::get({shapeScaleA[0], shapeScaleA[1], TILE_SIZE},
+                            aType.getElementType()),
+      ValueRange{});
+  Value scaleABroadcasted =
+      builder
+          .create<linalg::BroadcastOp>(location, scaleAFinal,
+                                       emptyScaleABroadcasted,
+                                       ArrayRef<int64_t>{2})
+          .getResult()[0];
+  SmallVector<ReassociationIndices> reassocIdxScaleA{{0}, {1, 2}};
+  Value scaleACollapsed = builder.create<tensor::CollapseShapeOp>(
+      location, scaleABroadcasted, reassocIdxScaleA);
+  Value emptyScaleBBroadcasted = builder.create<tensor::EmptyOp>(
+      location,
+      RankedTensorType::get({shapeScaleB[0], shapeScaleB[1], TILE_SIZE},
+                            bType.getElementType()),
+      ValueRange{});
+  Value scaleBBroadcasted =
+      builder
+          .create<linalg::BroadcastOp>(location, scaleBFinal,
+                                       emptyScaleBBroadcasted,
+                                       ArrayRef<int64_t>{2})
+          .getResult()[0];
+  SmallVector<ReassociationIndices> reassocIdxScaleB{{0}, {1, 2}};
+  Value scaleBCollapsed = builder.create<tensor::CollapseShapeOp>(
+      location, scaleBBroadcasted, reassocIdxScaleB);
+
+  // Transpose scale B
+  auto scaleBCollapsedType = cast<RankedTensorType>(scaleBCollapsed.getType());
+  auto shapeScaleBCollapsed = scaleBCollapsedType.getShape();
+  SmallVector<int64_t> shapeScaleBTransposed{shapeScaleBCollapsed[1],
+                                             shapeScaleBCollapsed[0]};
+  Value emptyScaleBTransposed = builder.create<tensor::EmptyOp>(
+      location,
+      RankedTensorType::get(shapeScaleBTransposed,
+                            scaleBCollapsedType.getElementType()),
+      ValueRange{});
+  Value scaleBTransposed =
+      builder
+          .create<linalg::TransposeOp>(location, scaleBCollapsed,
+                                       emptyScaleBTransposed,
+                                       ArrayRef<int64_t>{1, 0})
+          ->getResult(0);
+
+  // Multiply input and scale
+  auto linalgFnAttr = builder.getNamedAttr(
+      "fun", builder.getAttr<linalg::BinaryFnAttr>(linalg::BinaryFn::mul));
+  Value emptyA = builder.create<tensor::EmptyOp>(location, aType, ValueRange{});
+  Value emptyB = builder.create<tensor::EmptyOp>(location, bType, ValueRange{});
+  Value aFinal = builder
+                     .create<linalg::ElemwiseBinaryOp>(
+                         location, ValueRange{a, scaleACollapsed},
+                         ValueRange{emptyA}, linalgFnAttr)
+                     ->getResult(0);
+  Value bFinal = builder
+                     .create<linalg::ElemwiseBinaryOp>(
+                         location, ValueRange{b, scaleBTransposed},
+                         ValueRange{emptyB}, linalgFnAttr)
+                     ->getResult(0);
+
+  // Replace hfusion.matmul_mx with linalg.matmul
+  return SmallVector<Value>{
+      builder
+          .create<linalg::MatmulOp>(location, ValueRange{aFinal, bFinal},
+                                    ValueRange{c})
+          ->getResult(0)};
+}
+
 //===----------------------------------------------------------------------===//
 // GatherLoadOp
 //===----------------------------------------------------------------------===//
 
 LogicalResult GatherLoadOp::inferReturnTypes(
     MLIRContext *context, std::optional<Location> location,
-    GatherLoadOp::Adaptor adaptor,
-    SmallVectorImpl<Type> &inferredReturnTypes) {
+    GatherLoadOp::Adaptor adaptor, SmallVectorImpl<Type> &inferredReturnTypes) {
   auto dstType = dyn_cast<RankedTensorType>(adaptor.getDst().getType());
   if (dstType)
     inferredReturnTypes.push_back(dstType);
@@ -3227,9 +3902,10 @@ Conv1DOp::getRegionBuilder() {
   return [](ImplicitLocOpBuilder &builder, Block &block,
             ArrayRef<NamedAttribute> attrs
 #ifdef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
-            , function_ref<InFlightDiagnostic()> emitError
+            ,
+            function_ref<InFlightDiagnostic()> emitError
 #endif
-  ) {
+         ) {
     RegionBuilderHelper helper(builder.getContext(), block);
     SmallVector<Value> yields;
 
@@ -3544,9 +4220,10 @@ Conv2DOp::getRegionBuilder() {
   return [](ImplicitLocOpBuilder &builder, Block &block,
             ArrayRef<NamedAttribute> attrs
 #ifdef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
-            , function_ref<InFlightDiagnostic()> emitError
+            ,
+            function_ref<InFlightDiagnostic()> emitError
 #endif
-  ) {
+         ) {
     RegionBuilderHelper helper(builder.getContext(), block);
     SmallVector<Value> yields;
 
@@ -3584,8 +4261,8 @@ LogicalResult Conv3DOp::verify() {
 
   if (!inputTy.hasStaticShape() || !weightTy.hasStaticShape() ||
       !initTy.hasStaticShape() || !resultTy.hasStaticShape())
-    return emitOpError()
-           << "currently only supports static shape for input/weight/init/result";
+    return emitOpError() << "currently only supports static shape for "
+                            "input/weight/init/result";
 
   // init and result must be consistent
   if (initTy.getRank() != resultTy.getRank())
@@ -3870,9 +4547,10 @@ Conv3DOp::getRegionBuilder() {
   return [](ImplicitLocOpBuilder &builder, Block &block,
             ArrayRef<NamedAttribute> attrs
 #ifdef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
-            , function_ref<InFlightDiagnostic()> emitError
+            ,
+            function_ref<InFlightDiagnostic()> emitError
 #endif
-           ) {
+         ) {
     RegionBuilderHelper helper(builder.getContext(), block);
     SmallVector<Value> yields;
 
@@ -3895,7 +4573,6 @@ Conv3DOp::getRegionBuilder() {
     helper.yieldOutputs(yields);
   };
 }
-
 
 LogicalResult HypotOp::verify() {
   auto xType = dyn_cast<RankedTensorType>(getX().getType());

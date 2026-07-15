@@ -1,8 +1,17 @@
 //===-------------------- ConvertLayoutToFractalsUtils.cpp ----------------===//
 //
-// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
-// See https://llvm.org/LICENSE.txt for license information.
-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 //
 //===----------------------------------------------------------------------===//
 
@@ -97,7 +106,7 @@ extractNDToFractalConversionParams(ArrayRef<OpFoldResult> currentShape,
   params.batchIndexBias = computeBatchIndexBias(currentShape.size());
   LDBG("Batch index bias: " << params.batchIndexBias);
 
-  if (params.batchIndexBias > 0) {
+  if (params.batchIndexBias) {
     params.batch = currentShape[0];
   }
   params.a = currentShape[0 + params.batchIndexBias];
@@ -129,7 +138,7 @@ assembleFractalShape(OpFoldResult aTiles, OpFoldResult bTiles,
   SmallVector<OpFoldResult> fractalShape = {
       aTiles, bTiles, getAsIndexOpFoldResult(ctx, params.fractalSize.first),
       getAsIndexOpFoldResult(ctx, params.fractalSize.second)};
-  if (params.batchIndexBias > 0) {
+  if (params.batchIndexBias) {
     LDBG("Inserting batch dimension");
     fractalShape.insert(fractalShape.begin(), params.batch);
   }

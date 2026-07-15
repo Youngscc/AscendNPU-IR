@@ -66,10 +66,11 @@ inline std::string ParseEnumValue(const std::string &text) {
 
 class AllocExtraBufferModel {
 public:
-  explicit AllocExtraBufferModel(const GenericModule &module,
-                                 std::string function = "")
-      : module(module), valueTypes(ValueTypes(module)),
-        definitions(DefiningOperations(module)), function(std::move(function)) {}
+  explicit AllocExtraBufferModel(const GenericModule &inputModule,
+                                 std::string functionNameFilter = "")
+      : module(inputModule), valueTypes(ValueTypes(inputModule)),
+        definitions(DefiningOperations(inputModule)),
+        function(std::move(functionNameFilter)) {}
 
   std::vector<ExtraBufferAllocation> Run() const {
     std::vector<ExtraBufferAllocation> result;

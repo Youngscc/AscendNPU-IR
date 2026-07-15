@@ -34,10 +34,10 @@ struct CVPipelineAnalysisResult {
 
 class CVPipelineImplAnalysis {
 public:
-  CVPipelineImplAnalysis(GenericModule &module, int loop, int multibuffer,
-                         bool enableLazyLoading)
-      : module(module), pipelineLoop(loop), numMultibuffer(multibuffer),
-        enableLazyLoading(enableLazyLoading) {
+  CVPipelineImplAnalysis(GenericModule &inputModule, int loop, int multibuffer,
+                         bool shouldEnableLazyLoading)
+      : module(inputModule), pipelineLoop(loop), numMultibuffer(multibuffer),
+        enableLazyLoading(shouldEnableLazyLoading) {
     index();
   }
 

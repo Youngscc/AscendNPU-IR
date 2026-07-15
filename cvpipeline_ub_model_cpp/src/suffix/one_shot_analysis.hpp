@@ -64,8 +64,8 @@ CollectOneShotAnalysisOracle(const GenericModule &module) {
 
 class OneShotAnalysisModel {
 public:
-  explicit OneShotAnalysisModel(const GenericModule &module)
-      : module(module), definitions(DefiningOperations(module)) {
+  explicit OneShotAnalysisModel(const GenericModule &inputModule)
+      : module(inputModule), definitions(DefiningOperations(inputModule)) {
     indexBlockArguments();
     indexUses();
   }

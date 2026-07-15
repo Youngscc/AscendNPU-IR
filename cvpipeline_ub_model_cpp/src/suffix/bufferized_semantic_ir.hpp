@@ -33,12 +33,13 @@ inline std::string LocalBufferId(size_t ordinal) {
 class BufferizedSemanticIRBuilder {
 public:
   BufferizedSemanticIRBuilder(
-      const GenericModule &module, std::vector<BufferAllocation> allocations,
-      PreBufferizationCSEState preBufferizationCSE)
-      : module(module), allocations(std::move(allocations)),
-        preBufferizationCSE(std::move(preBufferizationCSE)),
-        valueTypes(ValueTypes(module)),
-        definitions(DefiningOperations(module)) {
+      const GenericModule &inputModule,
+      std::vector<BufferAllocation> inputAllocations,
+      PreBufferizationCSEState inputPreBufferizationCSE)
+      : module(inputModule), allocations(std::move(inputAllocations)),
+        preBufferizationCSE(std::move(inputPreBufferizationCSE)),
+        valueTypes(ValueTypes(inputModule)),
+        definitions(DefiningOperations(inputModule)) {
     indexBlockArguments();
     indexAllocationOwners();
   }

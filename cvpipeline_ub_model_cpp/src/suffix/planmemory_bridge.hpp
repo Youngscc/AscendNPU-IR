@@ -94,11 +94,15 @@ inline std::string PlanMemoryFormatMemRefTypeWithAddressSpace(
 
 class PlanMemoryBridge {
 public:
-  explicit PlanMemoryBridge(const PlanMemoryInputSemanticIR &module)
-      : module(module), logical(module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized.logicalModule) {
+  explicit PlanMemoryBridge(const PlanMemoryInputSemanticIR &inputModule)
+      : module(inputModule),
+        logical(inputModule.afterMarkMultiBuffer.afterInlineLoadCopy
+                    .afterAllocExtraBuffer.postBufferization.bufferized
+                    .logicalModule) {
     const PreBufferizationCSEState &preBufferizationCSE =
-        module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer
-            .postBufferization.bufferized.preBufferizationCSE;
+        inputModule.afterMarkMultiBuffer.afterInlineLoadCopy
+            .afterAllocExtraBuffer.postBufferization.bufferized
+            .preBufferizationCSE;
     erasedOperations.insert(preBufferizationCSE.erasedOperations.begin(),
                             preBufferizationCSE.erasedOperations.end());
     indexBuffers();
@@ -798,8 +802,8 @@ private:
     std::reverse(path.begin(), path.end());
     if (!path.empty())
       path.erase(path.begin());
-    path.erase(std::remove_if(path.begin(), path.end(), [&](int region) {
-                 return erasedRegionIds.count(region) != 0;
+    path.erase(std::remove_if(path.begin(), path.end(), [&](int regionId) {
+                 return erasedRegionIds.count(regionId) != 0;
                }),
                path.end());
     return path;
@@ -2475,12 +2479,12 @@ private:
                  PhysicalTypeSignature(type);
         if (composedExpandShapes.count(operandName) != 0)
           cseKey += "\n" + effectiveSemanticProperties;
-        auto aliases = collapseCseAliases.find(cseKey);
-        if (aliases != collapseCseAliases.end()) {
+        auto collapseAliases = collapseCseAliases.find(cseKey);
+        if (collapseAliases != collapseCseAliases.end()) {
           std::vector<int> regionPrefix = aliasPath;
           while (true) {
-            auto existing = aliases->second.find(regionPrefix);
-            if (existing != aliases->second.end())
+            auto existing = collapseAliases->second.find(regionPrefix);
+            if (existing != collapseAliases->second.end())
               return existing->second;
             if (regionPrefix.empty())
               break;
