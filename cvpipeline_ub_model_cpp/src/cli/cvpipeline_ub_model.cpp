@@ -227,10 +227,10 @@ std::string coverageDispositionName(cvub::CoverageDisposition disposition) {
   return "unsupported";
 }
 
-// Status derivation: a successful module is "success"; a module with any
-// overflowing function is "overflow"; anything else (e.g. a projected module
-// that violated the one-AIV invariant) is a "blocker".  Precision is orthogonal
-// and never changes the status-derived exit code.
+// Planning status before the exactness gate: a successful module is "success";
+// a module with any overflowing function is "overflow"; anything else is a
+// "blocker". plan-before-cvpipeline applies the exactness gate separately and
+// turns every Incomplete result into a non-authoritative blocker.
 std::string moduleStatus(const cvub::ModulePlanResult &result) {
   if (result.success)
     return "success";
@@ -247,12 +247,10 @@ std::string functionStatus(const cvub::FunctionPlanResult &function) {
   return "blocker";
 }
 
-// 0 success, 2 overflow, 1 blocker.  Incomplete precision does not alter the
-// status-derived code.
-int exitCodeFor(const cvub::ModulePlanResult &result) {
-  if (result.success)
+int exitCodeForStatus(const std::string &status) {
+  if (status == "success")
     return 0;
-  if (result.overflow)
+  if (status == "overflow")
     return 2;
   return 1;
 }
@@ -448,7 +446,9 @@ int planBeforeCVPipeline(const Options &opts) {
       opts.restrictInplaceAsISA);
 
   const cvub::Precision precision = combinedPrecision(projected, result);
-  const std::string status = moduleStatus(result);
+  const bool authoritative = precision == cvub::Precision::Exact;
+  const std::string estimateStatus = moduleStatus(result);
+  const std::string status = authoritative ? estimateStatus : "blocker";
   // Module UB peak is the max of per-function raw simultaneous peaks: projected
   // functions execute independently, so the module never sees their peaks sum.
   // required_bits is the module effective requirement (max of per-function
@@ -481,8 +481,10 @@ int planBeforeCVPipeline(const Options &opts) {
     std::cout << "{\n"
               << "  \"precision\": \"" << precisionString(precision) << "\",\n"
               << "  \"status\": \"" << status << "\",\n"
-              << "  \"success\": " << boolStr(result.success) << ",\n"
-              << "  \"overflow\": " << boolStr(result.overflow) << ",\n"
+              << "  \"success\": "
+              << boolStr(authoritative && result.success) << ",\n"
+              << "  \"overflow\": "
+              << boolStr(authoritative && result.overflow) << ",\n"
               << "  \"ub_peak_bits\": ";
     if (status == "blocker")
       std::cout << "null";
@@ -498,7 +500,7 @@ int planBeforeCVPipeline(const Options &opts) {
               << "  \"restrict_inplace_as_isa\": "
               << boolStr(opts.restrictInplaceAsISA) << ",\n"
               << "  \"selected_seed\": ";
-    if (moduleSeed)
+    if (authoritative && moduleSeed)
       std::cout << *moduleSeed;
     else
       std::cout << "null";
@@ -518,7 +520,9 @@ int planBeforeCVPipeline(const Options &opts) {
     std::cout << "  ],\n";
 
     std::cout << "  \"functions\": [\n";
-    for (size_t i = 0; i < result.functions.size(); ++i) {
+    const size_t authoritativeFunctionCount =
+        authoritative ? result.functions.size() : 0;
+    for (size_t i = 0; i < authoritativeFunctionCount; ++i) {
       const cvub::FunctionPlanResult &function = result.functions[i];
       std::cout << "    {\n"
                 << "      \"source_function\": \""
@@ -555,7 +559,7 @@ int planBeforeCVPipeline(const Options &opts) {
         std::cout << "\n      ";
       std::cout << "]\n"
                 << "    }";
-      std::cout << (i + 1 == result.functions.size() ? "\n" : ",\n");
+      std::cout << (i + 1 == authoritativeFunctionCount ? "\n" : ",\n");
     }
     std::cout << "  ],\n";
 
@@ -570,24 +574,71 @@ int planBeforeCVPipeline(const Options &opts) {
                 << jsonEscape(diagnostic.reason) << "\"}";
       std::cout << (i + 1 == diagnostics.size() ? "\n" : ",\n");
     }
-    std::cout << "  ]\n"
-              << "}\n";
-    return exitCodeFor(result);
+    std::cout << "  ],\n";
+    std::cout << "  \"debug_estimate\": ";
+    if (authoritative) {
+      std::cout << "null\n";
+    } else {
+      std::cout << "{\n"
+                << "    \"status\": \"" << estimateStatus << "\",\n"
+                << "    \"ub_peak_bits\": " << modulePeakBits << ",\n"
+                << "    \"required_bits\": " << result.requiredBits << ",\n"
+                << "    \"selected_seed\": ";
+      if (moduleSeed)
+        std::cout << *moduleSeed;
+      else
+        std::cout << "null";
+      std::cout << ",\n    \"functions\": [\n";
+      for (size_t i = 0; i < result.functions.size(); ++i) {
+        const cvub::FunctionPlanResult &function = result.functions[i];
+        std::cout << "      {\"source_function\": \""
+                  << jsonEscape(function.sourceFunction)
+                  << "\", \"function\": \"" << jsonEscape(function.function)
+                  << "\", \"status\": \"" << functionStatus(function)
+                  << "\", \"ub_peak_bits\": " << function.plan.peakBits
+                  << ", \"required_bits\": " << function.plan.requiredBits
+                  << ", \"selected_seed\": " << function.plan.selectedSeed
+                  << ", \"buffers\": [";
+        bool first = true;
+        for (const cvub::PlannedBufferRecord &record : function.plan.buffers)
+          for (uint64_t offset : record.offsetsBytes) {
+            if (!first)
+              std::cout << ", ";
+            first = false;
+            std::cout << "{\"name\": \"" << jsonEscape(record.name)
+                      << "\", \"extent_bits\": " << record.constBits
+                      << ", \"offset_bytes\": " << offset
+                      << ", \"alloc_time\": " << record.allocTime
+                      << ", \"free_time\": " << record.freeTime << "}";
+          }
+        std::cout << "]}" << (i + 1 == result.functions.size() ? "\n" : ",\n");
+      }
+      std::cout << "    ]\n  }\n";
+    }
+    std::cout << "}\n";
+    return exitCodeForStatus(status);
   }
 
   std::cout << "precision\t" << precisionString(precision) << "\n";
   std::cout << "status\t" << status << "\n";
-  std::cout << "success\t" << boolStr(result.success) << "\n";
-  std::cout << "overflow\t" << boolStr(result.overflow) << "\n";
+  std::cout << "success\t" << boolStr(authoritative && result.success) << "\n";
+  std::cout << "overflow\t" << boolStr(authoritative && result.overflow) << "\n";
   std::cout << "selected_seed\t"
-            << (moduleSeed ? std::to_string(*moduleSeed) : std::string())
+            << (authoritative && moduleSeed ? std::to_string(*moduleSeed)
+                                            : std::string())
             << "\n";
   std::cout << "restrict_inplace_as_isa\t" << boolStr(opts.restrictInplaceAsISA)
             << "\n";
-  std::cout << "peak_bits\t" << modulePeakBits << "\n";
-  std::cout << "required_bits\t" << result.requiredBits << "\n";
+  std::cout << "peak_bits\t"
+            << (authoritative ? std::to_string(modulePeakBits) : std::string())
+            << "\n";
+  std::cout << "required_bits\t"
+            << (authoritative ? std::to_string(result.requiredBits)
+                              : std::string())
+            << "\n";
   std::cout << "capacity_bits\t" << result.capacityBits << "\n";
-  std::cout << "function_count\t" << result.functions.size() << "\n";
+  std::cout << "function_count\t"
+            << (authoritative ? result.functions.size() : 0) << "\n";
   std::cout << "diagnostic_count\t" << diagnostics.size() << "\n";
   std::cout << "assumed_post_cvpipeline_options.tile_mix_vector_loop\t2\n";
   std::cout << "assumed_post_cvpipeline_options.tile_mix_cube_loop\t2\n";
@@ -595,15 +646,21 @@ int planBeforeCVPipeline(const Options &opts) {
   std::cout << "assumed_post_cvpipeline_options.enable_code_motion\ttrue\n";
   std::cout << "assumed_post_cvpipeline_options.enable_ubuf_saving\tfalse\n";
   std::cout << "function\tname\textent_bits\toffset_bytes\talloc_time\tfree_time\n";
-  for (const cvub::FunctionPlanResult &function : result.functions) {
+  if (!authoritative) {
+    std::cout << "debug_estimate.status\t" << estimateStatus << "\n";
+    std::cout << "debug_estimate.peak_bits\t" << modulePeakBits << "\n";
+    std::cout << "debug_estimate.required_bits\t" << result.requiredBits << "\n";
+  }
+  if (authoritative)
+    for (const cvub::FunctionPlanResult &function : result.functions) {
     for (const cvub::PlannedBufferRecord &record : function.plan.buffers) {
       for (uint64_t offset : record.offsetsBytes)
         std::cout << function.function << "\t" << record.name << "\t"
                   << record.constBits << "\t" << offset << "\t"
                   << record.allocTime << "\t" << record.freeTime << "\n";
     }
-  }
-  return exitCodeFor(result);
+    }
+  return exitCodeForStatus(status);
 }
 
 } // namespace

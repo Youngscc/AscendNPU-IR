@@ -48,14 +48,16 @@ enable_ubuf_saving     = false      # UB 节省默认关闭（不支持）
 - `precision = exact`：所有 post-CVPipeline 阶段都是可复现的已建模路径，UB 计划可
   复现编译器行为。
 - `precision = incomplete`：某个阶段遇到已知的硬情形或未建模形态，按 fail-closed 报
-  告。已记录的 Hybrid 覆盖缺口：
+  告。该结果的 `status` 固定为 `blocker`，正式 peak、required 和函数 buffer 计划不
+  输出；如底层规划曾完成，只会放在明确不可用于规划的 `debug_estimate` 中。已记录的
+  覆盖缺口：
   - `TileAndBindSubBlock` 的 tiling-success 路径（静态形状、无 hazard 的 AIV store
     会被真实 pass 切分，但子块循环 IR 不可精确复现）；
   - `LoopInvariantSubsetHoisting` 的适用情形（loop-carried subset 抽取/插入对需要
     重建循环，未建模）；
   - `InlineOTFLoadStore` 的动态 OTF 拼接 store（未建模）。
-- `status` 与 `precision` 正交：`success`/`overflow`/`blocker` 分别对应退出码
-  `0`/`2`/`1`；`incomplete + success` 是合法组合。
+- 只有 `precision = exact` 才可能返回 `success` 或 `overflow`；三种 status 的退出码
+  分别是 `0`/`2`/`1`。
 
 ## 模块 peak 语义
 

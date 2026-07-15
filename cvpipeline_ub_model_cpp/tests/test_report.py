@@ -7,8 +7,8 @@ post-CVPipeline per-function planning pipeline.  These tests lock in:
   * the top-level JSON contract (precision, status, ub_peak_bits, required_bits,
     capacity_bits, overflow, assumed_post_cvpipeline_options, functions[],
     diagnostics[], stage_coverage[]);
-  * the exit-code mapping (0 success, 2 overflow, 1 blocker) and the orthogonality
-    of precision (exact/incomplete) to the status-derived exit code;
+  * the exit-code mapping (0 exact success, 2 exact overflow, 1 blocker) and the
+    rule that incomplete estimates are never authoritative;
   * the per-function shape (source/projected name, status, peak, required, seed,
     buffer plan);
   * the text buffer table gaining a leading ``function`` column;
@@ -34,6 +34,7 @@ BINARY = MODULE_DIR / "output" / "bin" / "cvpipeline_ub_model"
 VECTOR_ADD = MODULE_DIR / "examples" / "inputs" / "demo_vector_add_before_cvpipeline.mlir"
 RANDN = MODULE_DIR / "examples" / "inputs" / "demo_randn_before_cvpipeline.mlir"
 MIX = MODULE_DIR / "examples" / "inputs" / "demo_mix_before_cvpipeline.mlir"
+INCOMPLETE = MODULE_DIR / "tests" / "fixtures" / "subblock_bind_success.mlir"
 
 FAILURES: list[str] = []
 
@@ -139,8 +140,7 @@ def test_vector_add() -> None:
     check(not stderr, f"vector_add: empty stderr (got {stderr!r})")
     payload = json.loads(stdout)
     assert_top_level_contract(payload, label="vector_add")
-    # precision is orthogonal to status: whatever precision the demo reports, a
-    # success must still exit 0 (incomplete+success is valid).
+    # Only an exact result may be reported as a successful authoritative plan.
     check_eq(payload.get("status"), "success", "vector_add: status success")
     # The pure-AIV demos classify index/mask utility ops (set_mask_norm,
     # get_block_idx) as Neutral, so no Incomplete diagnostic remains: the
@@ -291,19 +291,23 @@ def test_overflow() -> None:
     try:
         rc, stdout, _ = run_model(ir, fmt="json")
         # exact+overflow: an exact-precision result that overflows must exit 2.
-        check_eq(rc, 2, "overflow: exits 2")
+        # Scaling the demo makes an earlier post-CVPipeline stage incomplete,
+        # so the exact-only contract must block before exposing the estimated
+        # overflow as an authoritative result.
+        check_eq(rc, 1, "incomplete overflow estimate: exits 1")
         payload = json.loads(stdout)
-        assert_top_level_contract(payload, label="overflow")
-        check_eq(payload.get("status"), "overflow", "overflow: status overflow")
-        check_eq(payload.get("overflow"), True, "overflow: overflow flag true")
+        assert_top_level_contract(payload, label="incomplete overflow estimate")
+        check_eq(payload.get("status"), "blocker",
+                 "incomplete overflow estimate: status blocker")
+        check_eq(payload.get("overflow"), False,
+                 "incomplete overflow estimate: authoritative overflow false")
+        check_eq(payload.get("required_bits"), None,
+                 "incomplete overflow estimate: authoritative requirement null")
+        estimate = payload.get("debug_estimate", {})
         cap = payload.get("capacity_bits")
-        req = payload.get("required_bits")
+        req = estimate.get("required_bits") if isinstance(estimate, dict) else None
         check(isinstance(req, int) and isinstance(cap, int) and req > cap,
-              f"overflow: required ({req}) exceeds capacity ({cap})")
-        # precision must not be 'blocked' and must remain exact|incomplete even
-        # when the result overflows.
-        check(payload.get("precision") in {"exact", "incomplete"},
-              f"overflow: precision stays exact|incomplete (got {payload.get('precision')!r})")
+              f"incomplete overflow estimate: debug requirement ({req}) exceeds capacity ({cap})")
     finally:
         ir.unlink(missing_ok=True)
 
@@ -323,6 +327,32 @@ def test_blocker() -> None:
     check(bool(stderr), "blocker: stderr is non-empty")
 
 
+def test_incomplete_is_non_authoritative_blocker() -> None:
+    rc, stdout, _ = run_model(INCOMPLETE, fmt="json")
+    check_eq(rc, 1, "incomplete: exits 1")
+    payload = json.loads(stdout)
+    check_eq(payload.get("precision"), "incomplete",
+             "incomplete: precision remains incomplete")
+    check_eq(payload.get("status"), "blocker",
+             "incomplete: status is blocker")
+    check_eq(payload.get("success"), False,
+             "incomplete: authoritative success is false")
+    check_eq(payload.get("ub_peak_bits"), None,
+             "incomplete: authoritative peak is null")
+    check_eq(payload.get("required_bits"), None,
+             "incomplete: authoritative requirement is null")
+    check_eq(payload.get("functions"), [],
+             "incomplete: authoritative function plans are empty")
+    estimate = payload.get("debug_estimate")
+    check(isinstance(estimate, dict),
+          "incomplete: debug_estimate is explicitly separated")
+    if isinstance(estimate, dict):
+        check(isinstance(estimate.get("ub_peak_bits"), int),
+              "incomplete: debug estimate retains a peak")
+        check(isinstance(estimate.get("functions"), list),
+              "incomplete: debug estimate retains function details")
+
+
 def main() -> int:
     ensure_binary()
     test_vector_add()
@@ -332,6 +362,7 @@ def main() -> int:
     test_text_function_column()
     test_overflow()
     test_blocker()
+    test_incomplete_is_non_authoritative_blocker()
     print()
     if FAILURES:
         print(f"[ERROR] {len(FAILURES)} report-contract assertion(s) failed")
