@@ -57,11 +57,15 @@ static bool isBitwiseSelect(Operation *op) {
 // An Op is consider inlinable if its operand shape can be easily
 // inferred by init
 static bool isInlinableOp(Operation *op) {
+  auto mod = op->getParentOfType<ModuleOp>();
+  auto isRegBasedArch = hacc::utils::isRegBasedArch(mod);
   return isa<linalg::ElemwiseBinaryOp>(op) ||
          isa<linalg::ElemwiseUnaryOp>(op) ||
          isa<hfusion::ElemwiseBinaryOp>(op) ||
          isa<hfusion::ElemwiseUnaryOp>(op) ||
-         (isa<hfusion::SelectOp, linalg::SelectOp>(op) && !isBitwiseSelect(op));
+         (isRegBasedArch && isa<hfusion::CompareOp>(op)) ||
+         (isa<hfusion::SelectOp, linalg::SelectOp>(op) &&
+           (isRegBasedArch || !isBitwiseSelect(op)));
 }
 
 // TODO : add platform information
@@ -91,9 +95,10 @@ static void findUsersToInline(Value src, DenseSet<OpOperand *> &usesToInline,
   assert(src && "src must not be nullptr");
   for (OpOperand &use : src.getUses()) {
     Operation *user = use.getOwner();
+    ModuleOp mod = user->getParentOfType<ModuleOp>();
     // If user is select and src is select mask, pass
-    if (isa<hfusion::SelectOp, linalg::SelectOp>(user) &&
-        user->getOperand(0) == src)
+    if ((!mod || !hacc::utils::isRegBasedArch(mod)) &&
+      isa<hfusion::SelectOp, linalg::SelectOp>(user) && user->getOperand(0) == src)
       continue;
     if (canInlineBrc(user, &use, isInlineScalar)) {
       usesToInline.insert(&use);
