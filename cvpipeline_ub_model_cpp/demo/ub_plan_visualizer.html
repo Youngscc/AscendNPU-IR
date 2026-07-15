@@ -237,6 +237,9 @@
       display: block;
       min-width: 760px;
       width: 100%;
+    }
+
+    svg#planChart {
       height: 480px;
     }
 
@@ -369,6 +372,15 @@
             <div class="legend" id="legend"></div>
             <div class="chart-wrap">
               <svg id="chart" role="img" aria-label="UB memory plan chart"></svg>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" style="margin-top: 16px;">
+          <h2>UB Utilization</h2>
+          <div class="viz">
+            <div class="chart-wrap">
+              <svg id="utilChart" role="img" aria-label="UB utilization chart"></svg>
             </div>
           </div>
         </section>
@@ -532,6 +544,7 @@
       renderSummary(model);
       renderChart(model);
       renderTable(model.plan);
+      renderUtilChart(model.result, model.plan);
       inputText.value = JSON.stringify(data, null, 2);
       status.textContent = `Rendered ${model.plan.length} buffers.`;
     }
@@ -619,21 +632,48 @@
         maxTime
       ])].sort((a, b) => a - b);
 
+      const events = [];
+      plan.forEach(buffer => {
+        events.push({ time: buffer.allocTime, type: 'alloc', offset: buffer.offsetBytes, extent: bitsToBytes(buffer.extentBits) });
+        events.push({ time: buffer.freeTime, type: 'free', offset: buffer.offsetBytes, extent: bitsToBytes(buffer.extentBits) });
+      });
+      events.sort((a, b) => {
+        if (a.time !== b.time) return a.time - b.time;
+        return a.type === 'alloc' ? -1 : 1;
+      });
+
+      const activeRanges = [];
       const utilPoints = [];
-      for (let i = 0; i < allTimes.length - 1; i++) {
-        const tStart = allTimes[i];
-        let maxEnd = 0;
-        plan.forEach(buffer => {
-          if (buffer.allocTime <= tStart && buffer.freeTime > tStart) {
-            const endByte = buffer.offsetBytes + bitsToBytes(buffer.extentBits);
-            if (endByte > maxEnd) {
-              maxEnd = endByte;
-            }
-          }
+      let lastTime = minTime;
+
+      const maxEndByteAtTime = () => {
+        if (activeRanges.length === 0) return 0;
+        return Math.max(...activeRanges.map(r => r.end));
+      };
+
+      let currentTime = minTime;
+      let i = 0;
+      while (i < events.length) {
+        const evt = events[i];
+        if (evt.time > currentTime) {
+          utilPoints.push({ time: currentTime, bytes: maxEndByteAtTime() });
+          currentTime = evt.time;
+        }
+        const sameTimeEvts = [];
+        while (i < events.length && events[i].time === currentTime) {
+          sameTimeEvts.push(events[i]);
+          i++;
+        }
+        sameTimeEvts.filter(e => e.type === 'alloc').forEach(e => {
+          activeRanges.push({ start: e.offset, end: e.offset + e.extent });
         });
-        utilPoints.push({ time: tStart, bytes: maxEnd });
-        utilPoints.push({ time: allTimes[i + 1], bytes: maxEnd });
+        utilPoints.push({ time: currentTime, bytes: maxEndByteAtTime() });
+        sameTimeEvts.filter(e => e.type === 'free').forEach(e => {
+          const idx = activeRanges.findIndex(r => r.start === e.offset && r.end === e.offset + e.extent);
+          if (idx !== -1) activeRanges.splice(idx, 1);
+        });
       }
+      utilPoints.push({ time: maxTime, bytes: 0 });
 
       const maxUtil = Math.max(...utilPoints.map(p => p.bytes), 1);
       const yMax = Math.max(maxEndByte, bitsToBytes(requiredBits), 1);
@@ -739,81 +779,6 @@
         }
       });
 
-      if (utilPoints.length > 1 && capacityBytes > 0) {
-        const pathD = utilPoints.map((p, i) => {
-          const cmd = i === 0 ? "M" : "L";
-          return `${cmd} ${x(p.time)} ${y2(utilToPercent(p.bytes))}`;
-        }).join(" ");
-
-        const lastPoint = utilPoints[utilPoints.length - 1];
-        const firstPoint = utilPoints[0];
-        const areaD = `${pathD} L ${x(lastPoint.time)} ${y2(0)} L ${x(firstPoint.time)} ${y2(0)} Z`;
-        group.append(element("path", {
-          class: "util-area",
-          d: areaD,
-          fill: "rgba(255,99,71,0.15)"
-        }));
-
-        group.append(element("path", {
-          class: "util-line",
-          d: pathD,
-          fill: "none",
-          stroke: "rgba(255,99,71,0.85)",
-          "stroke-width": "2.5",
-          "stroke-linecap": "round",
-          "stroke-linejoin": "round"
-        }));
-
-        for (let i = 0; i <= 4; ++i) {
-          const percent = (100 / 4) * i;
-          group.append(element("line", {
-            class: "util-gridline",
-            x1: width - margin.right,
-            y1: y2(percent),
-            x2: width - margin.right + 8,
-            y2: y2(percent),
-            stroke: "rgba(255,99,71,0.4)",
-            "stroke-width": 1
-          }));
-          const label = element("text", {
-            x: width - margin.right + 12,
-            y: y2(percent) + 4,
-            "text-anchor": "start",
-            fill: "rgba(255,99,71,0.7)",
-            "font-size": 11
-          });
-          label.textContent = `${Math.round(percent)}%`;
-          group.append(label);
-        }
-
-        const peakUtil = Math.max(...utilPoints.map(p => p.bytes));
-        const avgUtil = utilPoints.reduce((sum, p) => sum + p.bytes, 0) / utilPoints.length;
-        const peakPercent = utilToPercent(peakUtil);
-        const avgPercent = utilToPercent(avgUtil);
-        const peakLabel = element("text", {
-          class: "util-label",
-          x: width - margin.right - 4,
-          y: y2(peakPercent) - 6,
-          "text-anchor": "end",
-          fill: "rgba(255,99,71,0.85)",
-          "font-size": 12,
-          "font-weight": "bold"
-        });
-        peakLabel.textContent = `${peakPercent.toFixed(1)}% peak`;
-        group.append(peakLabel);
-
-        const avgLabel = element("text", {
-          class: "util-label",
-          x: width - margin.right - 4,
-          y: y2(peakPercent) + 16,
-          "text-anchor": "end",
-          fill: "rgba(255,99,71,0.6)",
-          "font-size": 11
-        });
-        avgLabel.textContent = `${avgPercent.toFixed(1)}% avg`;
-        group.append(avgLabel);
-      }
-
       const peakByte = bitsToBytes(requiredBits);
       group.append(element("line", {
         class: "peak-line",
@@ -875,6 +840,207 @@
         }
         tbody.append(tr);
       }
+    }
+
+    function renderUtilChart(result, plan) {
+      const chart = document.getElementById("utilChart");
+      const width = chart.parentElement.clientWidth;
+      chart.innerHTML = "";
+
+      const minTime = Math.min(...plan.map(buffer => buffer.allocTime));
+      const maxTime = Math.max(...plan.map(buffer => buffer.freeTime), minTime + 1);
+
+      const events = [];
+      plan.forEach(buffer => {
+        events.push({ time: buffer.allocTime, type: 'alloc', offset: buffer.offsetBytes, extent: bitsToBytes(buffer.extentBits) });
+        events.push({ time: buffer.freeTime, type: 'free', offset: buffer.offsetBytes, extent: bitsToBytes(buffer.extentBits) });
+      });
+      events.sort((a, b) => {
+        if (a.time !== b.time) return a.time - b.time;
+        return a.type === 'alloc' ? -1 : 1;
+      });
+
+      const activeRanges = [];
+      const utilPoints = [];
+      let currentTime = minTime;
+
+      const maxEndByteAtTime = () => {
+        if (activeRanges.length === 0) return 0;
+        return Math.max(...activeRanges.map(r => r.end));
+      };
+
+      let i = 0;
+      while (i < events.length) {
+        const evt = events[i];
+        if (evt.time > currentTime) {
+          utilPoints.push({ time: currentTime, bytes: maxEndByteAtTime() });
+          currentTime = evt.time;
+        }
+        const sameTimeEvts = [];
+        while (i < events.length && events[i].time === currentTime) {
+          sameTimeEvts.push(events[i]);
+          i++;
+        }
+        sameTimeEvts.filter(e => e.type === 'alloc').forEach(e => {
+          activeRanges.push({ start: e.offset, end: e.offset + e.extent });
+        });
+        utilPoints.push({ time: currentTime, bytes: maxEndByteAtTime() });
+        sameTimeEvts.filter(e => e.type === 'free').forEach(e => {
+          const idx = activeRanges.findIndex(r => r.start === e.offset && r.end === e.offset + e.extent);
+          if (idx !== -1) activeRanges.splice(idx, 1);
+        });
+      }
+      utilPoints.push({ time: maxTime, bytes: 0 });
+
+      const capacityBits = Number(result.capacity_bits ?? result.capacityBits ?? 0);
+      const capacityBytes = bitsToBytes(capacityBits);
+      const utilToPercent = bytes => (bytes / capacityBytes) * 100;
+
+      const peakUtil = Math.max(...utilPoints.map(p => p.bytes), 1);
+      const peakPercent = utilToPercent(peakUtil);
+      const targetYMax = Math.max(peakPercent * 2, Math.ceil(peakPercent / 5) * 5);
+      const yMax = Math.min(100, Math.max(10, targetYMax));
+
+      const height = 550;
+      const margin = { top: 30, right: 45, bottom: 50, left: 70 };
+      const innerWidth = width - margin.left - margin.right;
+      const innerHeight = height - margin.top - margin.bottom;
+
+      chart.setAttribute("width", width);
+      chart.setAttribute("height", height);
+
+      const x = time => margin.left + ((time - minTime) / Math.max(1, maxTime - minTime)) * innerWidth;
+      const y = percent => margin.top + innerHeight - (percent / yMax) * innerHeight;
+
+      const group = element("g", {});
+
+      const numTicks = Math.min(Math.max(Math.ceil(yMax / 5), 2), 5);
+      for (let i = 0; i <= numTicks; ++i) {
+        const percent = (yMax / numTicks) * i;
+        group.append(element("line", {
+          class: "util-hgridline",
+          x1: margin.left,
+          y1: y(percent),
+          x2: width - margin.right,
+          y2: y(percent),
+          stroke: "#e5e5e5",
+          "stroke-width": 1,
+          "stroke-dasharray": "4,4"
+        }));
+        const label = element("text", {
+          x: margin.left - 8,
+          y: y(percent) + 4,
+          "text-anchor": "end",
+          fill: "#666",
+          "font-size": 11
+        });
+        label.textContent = `${Math.round(percent)}%`;
+        group.append(label);
+      }
+
+      for (const tick of [minTime, Math.round((minTime + maxTime) / 2), maxTime]) {
+        group.append(element("line", {
+          class: "util-vgridline",
+          x1: x(tick),
+          y1: margin.top,
+          x2: x(tick),
+          y2: height - margin.bottom,
+          stroke: "#e5e5e5",
+          "stroke-width": 1,
+          "stroke-dasharray": "4,4"
+        }));
+        const label = element("text", {
+          x: x(tick),
+          y: height - margin.bottom + 20,
+          "text-anchor": "middle",
+          fill: "#666",
+          "font-size": 11
+        });
+        label.textContent = tick;
+        group.append(label);
+      }
+
+      if (utilPoints.length > 1 && capacityBytes > 0) {
+        const pathD = [];
+        for (let i = 0; i < utilPoints.length - 1; i++) {
+          const p1 = utilPoints[i];
+          const p2 = utilPoints[i + 1];
+          pathD.push(`${i === 0 ? "M" : "L"} ${x(p1.time)} ${y(utilToPercent(p1.bytes))}`);
+          pathD.push(`L ${x(p2.time)} ${y(utilToPercent(p1.bytes))}`);
+        }
+        const lastP = utilPoints[utilPoints.length - 1];
+        pathD.push(`L ${x(lastP.time)} ${y(utilToPercent(lastP.bytes))}`);
+
+        const lastPoint = utilPoints[utilPoints.length - 1];
+        const firstPoint = utilPoints[0];
+        const areaD = `${pathD.join(" ")} L ${x(lastPoint.time)} ${y(0)} L ${x(firstPoint.time)} ${y(0)} Z`;
+        group.append(element("path", {
+          class: "util-area",
+          d: areaD,
+          fill: "rgba(255,99,71,0.15)"
+        }));
+
+        group.append(element("path", {
+          class: "util-line",
+          d: pathD.join(" "),
+          fill: "none",
+          stroke: "rgba(255,99,71,0.85)",
+          "stroke-width": "2.5",
+          "stroke-linecap": "round",
+          "stroke-linejoin": "round"
+        }));
+
+        const peakUtil = Math.max(...utilPoints.map(p => p.bytes));
+        const avgUtil = utilPoints.reduce((sum, p) => sum + p.bytes, 0) / utilPoints.length;
+        const peakPercent = utilToPercent(peakUtil);
+        const avgPercent = utilToPercent(avgUtil);
+
+        const peakLabel = element("text", {
+          class: "util-label",
+          x: width - margin.right - 8,
+          y: margin.top + 18,
+          "text-anchor": "end",
+          fill: "rgba(255,99,71,0.85)",
+          "font-size": 12,
+          "font-weight": "bold"
+        });
+        peakLabel.textContent = `${peakPercent.toFixed(1)}% peak`;
+        group.append(peakLabel);
+
+        const avgLabel = element("text", {
+          class: "util-label",
+          x: width - margin.right - 8,
+          y: margin.top + 36,
+          "text-anchor": "end",
+          fill: "rgba(255,99,71,0.6)",
+          "font-size": 11
+        });
+        avgLabel.textContent = `${avgPercent.toFixed(1)}% avg`;
+        group.append(avgLabel);
+      }
+
+      const yAxisLabel = element("text", {
+        x: 8,
+        y: height / 2,
+        "text-anchor": "middle",
+        fill: "#333",
+        "font-size": 12,
+        transform: `rotate(-90, 8, ${height / 2})`
+      });
+      yAxisLabel.textContent = "UB Utilization";
+      group.append(yAxisLabel);
+
+      const xAxisLabel = element("text", {
+        x: width / 2,
+        y: height - 8,
+        "text-anchor": "middle",
+        fill: "#333",
+        "font-size": 12
+      });
+      xAxisLabel.textContent = "PlanMemory operation time";
+      group.append(xAxisLabel);
+
+      chart.append(group);
     }
 
     function element(name, attributes) {
