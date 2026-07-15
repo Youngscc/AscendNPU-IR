@@ -125,6 +125,9 @@ createEraseAutoSchedulePass(const std::string &kernelName);
 std::unique_ptr<Pass>
 createAddFFTSAddrPass(const AddFFTSAddrOptions &options = {});
 
+/// Create a pass to outline vector function.
+std::unique_ptr<Pass> createOutlineVectorFunctionPass();
+
 /// Create a pass to lianlg generic ops to named ops
 std::unique_ptr<Pass> createConvertGenericToNamedOpPass();
 

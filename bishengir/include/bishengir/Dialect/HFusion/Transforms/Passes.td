@@ -125,6 +125,13 @@ def AddFFTSAddr : Pass<"hfusion-add-ffts-addr", "ModuleOp"> {
       "insert to the first param location.">];
 }
 
+def OutlineVectorFunction : Pass<"outline-vector-function", "ModuleOp"> {
+  let summary = "Outline vector function.";
+  let constructor = "mlir::hfusion::createOutlineVectorFunctionPass()";
+  let dependentDialects = ["scf::SCFDialect", "mlir::func::FuncDialect",
+                           "transform::TransformDialect"];
+}
+
 def ConvertGenericToNamedOp
     : Pass<"hfusion-convert-generic-to-named", "func::FuncOp"> {
   let summary =

@@ -41,6 +41,7 @@ add_bishengir_dialect_library(BiShengIRHFusionTransforms
   NormalizeSliceOps.cpp
   OpFusion.cpp
   OutlineSingleOp.cpp
+  OutlineVectorFunction.cpp
   PackTilingData.cpp
   PrepareI1Nx1ForVectorization.cpp
   PullSliceIntoVectorFunction.cpp
