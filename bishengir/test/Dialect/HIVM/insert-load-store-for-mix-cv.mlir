@@ -757,9 +757,9 @@ func.func @extract_i1(%arg0: memref<16x16xf16>, %arg1: memref<16x16xf16>, %arg2:
   %3 = hivm.hir.vcmp ins(%0, %1 : tensor<16x16xf16>, tensor<16x16xf16>) outs(%2 : tensor<16x16xi1>) compare_mode = <lt> -> tensor<16x16xi1>
   %4 = tensor.extract %3[%c0, %c0] : tensor<16x16xi1>
   // CHECK:  %[[VAL_12:.*]] = tensor.extract {{.*}} {"DuplicateTensorExtractForCube::visitedLabel" = 1 : i32} : tensor<16x16xi1>
-  // CHECK:  %[[VAL_19:.*]] = hivm.hir.store ins(%{{.*}} : tensor<16x16xi8>) outs(%{{.*}} : tensor<16x16xi8>) {"inserted-store"} -> tensor<16x16xi8>
-  // CHECK:  annotation.mark %[[VAL_19]] {hivm.tcore_type = #hivm.tcore_type<VECTOR>} : tensor<16x16xi8>
-  // CHECK:  %[[VAL_20:.*]] = tensor.extract %[[VAL_19]]{{\[}}%{{.*}}, %{{.*}}] {"DuplicateTensorExtractForCube::newExtractLabel" = 1 : i32, "DuplicateTensorExtractForCube::visitedLabel" = 1 : i32} : tensor<16x16xi8>
+  // CHECK:  %[[VAL_19:.*]] = hivm.hir.store ins(%{{.*}} : tensor<1xi8>) outs(%{{.*}} : tensor<1xi8>) {"inserted-store"} -> tensor<1xi8>
+  // CHECK:  annotation.mark %[[VAL_19]] {hivm.tcore_type = #hivm.tcore_type<VECTOR>} : tensor<1xi8>
+  // CHECK:  %[[VAL_20:.*]] = tensor.extract %[[VAL_19]]{{\[}}%{{.*}}] {"DuplicateTensorExtractForCube::newExtractLabel" = 1 : i32, "DuplicateTensorExtractForCube::visitedLabel" = 1 : i32} : tensor<1xi8>
   // CHECK:  %[[VAL_21:.*]] = arith.trunci %[[VAL_20]] : i8 to i1
   // CHECK:  annotation.mark %[[VAL_12]] {"DuplicateTensorExtractForCube::replacementLabel" = 1 : i32} keys = [] values = {{\[}}%[[VAL_21]] : i1] : i1
   %5 = scf.if %4 -> (index) {
