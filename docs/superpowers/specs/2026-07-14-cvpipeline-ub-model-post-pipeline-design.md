@@ -286,12 +286,30 @@ Default LICM and subset hoisting move definitions and uses across loop
 boundaries. The model reproduces these moves because operation order and loop
 placement directly affect PlanMemory lifetimes and peak overlap.
 
+**Known coverage gaps.** The model reproduces LICM hoisting for flat
+single-block `scf.for`/`scf.forall` loops (pure invariant ops hoisted to a
+fixed point; variant and effectful ops retained). It reports
+`precision=incomplete` with IR untouched for: loop bodies containing nested
+region-bearing ops (nested loops, `scf.if`, `scf.while`, scope) the model does
+not recurse into; unmodeled loop kinds (`scf.while`, `affine.for`,
+`scf.parallel`); and the subset-hoisting *applicable* case — an iter arg
+flowing through a `tensor.extract_slice`/`insert_slice` pair, which the real
+pass rebuilds with a new carried iter arg/result. Modeling the
+subset-hoisting rebuild exactly is tracked as a follow-up.
+
 ### 7.11 InlineOTFLoadStore
 
 The model reproduces the real unaligned last-dimension `vconcat + store`
 rewrite, including insert-slice construction and removal of obsolete
 buffer-size marks. This prevents dead concat destinations from being counted as
 UB allocations.
+
+**Known coverage gap.** The stage reproduces the static aligned no-op and the
+static unaligned insert-slice accumulator rewrite exactly. It reports
+`precision=incomplete` for stores whose `vconcat` inputs have dynamic extents
+(the real pass emits dynamic `arith` offset ops the model does not
+reconstruct), unparseable element bit widths, or vconcats with users beyond
+the store and its size mark.
 
 ## 8. Per-Function Planning
 
