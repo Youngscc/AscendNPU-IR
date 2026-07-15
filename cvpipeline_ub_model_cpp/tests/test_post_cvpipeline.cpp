@@ -3829,6 +3829,18 @@ CVUB_TEST(planning_rejects_module_without_exactly_one_aiv_function) {
                            "exactly one AIV function"));
 }
 
+CVUB_TEST(suffix_bridge_throws_on_multiple_aiv_functions) {
+  // A module with two AIV functions fed DIRECTLY to the suffix bridge (not via
+  // PlanProjectedAIVFunctions, which pre-isolates exactly one AIV per module)
+  // must throw fail-closed.  This locks in the bridge's own guard so a legacy or
+  // direct caller (fromSuffix CLI, bare-file PlanLocalMemory, tests, future code)
+  // can never silently plan only the first function and under-report UB as the
+  // module peak.  Removing the guard reverts to fail-open behavior.
+  auto module = cvub::test::ParseFixture("two_aiv_functions.mlir");
+  CVUB_CHECK_THROWS_CONTAINS(cvub::BuildSuffixPlanMemoryInput(module),
+                             "multiple AIV functions are not supported");
+}
+
 } // namespace
 
 int main() { return cvub::test::RunAllTests(); }
