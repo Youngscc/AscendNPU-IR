@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Pretty-print a UB plan JSON report for terminal demos."""
+"""Pretty-print a UB plan JSON report (plan-before-cvpipeline) for terminal demos.
+
+The CLI emits a flat top-level contract: status, precision, ub_peak_bits,
+required_bits, capacity_bits, assumed_post_cvpipeline_options, functions[]
+(each with buffers[]), diagnostics[], stage_coverage[]. There is no "result"
+or "options" wrapper.
+"""
 
 from __future__ import annotations
 
@@ -53,49 +59,48 @@ def divider(width: int = 76) -> str:
 def main() -> int:
     args = parse_args()
     payload = json.loads(args.json_file.read_text(encoding="utf-8"))
-    result = payload.get("result", {})
-    options = payload.get("options", {})
-    cvpipeline = options.get("cvpipeline", {})
-    suffix = options.get("suffix_planmemory", {})
-    plan = result.get("plan", [])
-    functions = result.get("functions", [])
 
-    status = result.get("status")
+    # Top-level contract (flat — no "result" wrapper).
+    status = payload.get("status")
     if not status:
-        status = "OVERFLOW" if result.get("overflow") else (
-            "SUCCESS" if result.get("success", False) else "BLOCKED")
-    status = status.upper()
-    peak_bits = result.get("ub_peak_bits", result.get("peak_bits"))
-    required_bits = int(result.get("required_bits") or 0)
-    capacity_bits = int(result.get("capacity_bits") or 0)
+        status = "overflow" if payload.get("overflow") else (
+            "success" if payload.get("success", False) else "blocker")
+    status = str(status).upper()
+    peak_bits = payload.get("ub_peak_bits")
+    required_bits = int(payload.get("required_bits") or 0)
+    capacity_bits = int(payload.get("capacity_bits") or 0)
     usage = (required_bits / capacity_bits * 100.0) if capacity_bits else 0.0
+    functions = payload.get("functions", [])
+    assumed = payload.get("assumed_post_cvpipeline_options", {})
+
+    # Buffers live under functions[].buffers[]; flatten with a function tag.
+    plan: list[dict[str, Any]] = []
+    for function in functions:
+        for buffer in function.get("buffers", []):
+            entry = dict(buffer)
+            entry["function"] = function.get("function", "")
+            plan.append(entry)
 
     print("CVPipeline UB Plan Demo")
     print(divider())
     print(f"Status        : {status}")
-    print(f"Precision     : {result.get('precision', '')}")
+    print(f"Precision     : {payload.get('precision', '')}")
     print(f"Peak (module) : {bit_size(peak_bits)}")
     print(f"Required      : {bit_size(required_bits)}")
     print(f"Capacity      : {bit_size(capacity_bits)}")
     print(f"Usage         : {usage:.4f}%")
-    print(f"Selected seed : {result.get('selected_seed', '')}")
+    print(f"Selected seed : {payload.get('selected_seed', '')}")
     print(f"Functions     : {len(functions) if functions else '(not reported)'}")
     print(f"Buffers       : {len(plan)}")
     print()
-    print("CVPipeline options")
+    print("Assumed post-CVPipeline options")
     print(divider())
-    print(f"disable_pipelining : {bool_text(cvpipeline.get('disable_pipelining'))}")
-    print(f"pipeline_depth     : {cvpipeline.get('pipeline_depth')}")
-    print(f"enable_preload     : {bool_text(cvpipeline.get('enable_preload'))}")
-    print(f"enable_lazy_loading: {bool_text(cvpipeline.get('enable_lazy_loading'))}")
-    print()
-    print("Suffix / PlanMemory options")
-    print(divider())
-    print(f"auto_multi_buffer  : {bool_text(suffix.get('enable_auto_multi_buffer'))}")
-    print(f"local_strategy     : {suffix.get('local_multi_buffer_strategy')}")
-    print(f"mix_strategy       : {suffix.get('mix_multi_buffer_strategy')}")
-    print(f"random_seed input  : {suffix.get('random_seed')}")
-    print(f"restrict_inplace   : {bool_text(suffix.get('restrict_inplace_as_isa'))}")
+    print(f"tile_mix_vector_loop      : {assumed.get('tile_mix_vector_loop')}")
+    print(f"tile_mix_cube_loop        : {assumed.get('tile_mix_cube_loop')}")
+    print(f"enable_auto_bind_sub_block: {bool_text(assumed.get('enable_auto_bind_sub_block'))}")
+    print(f"enable_code_motion        : {bool_text(assumed.get('enable_code_motion'))}")
+    print(f"enable_ubuf_saving        : {bool_text(assumed.get('enable_ubuf_saving'))}")
+    print(f"restrict_inplace_as_isa   : {bool_text(payload.get('restrict_inplace_as_isa'))}")
     print()
 
     if functions:
@@ -145,11 +150,22 @@ def main() -> int:
         if len(plan) > args.max_buffers:
             print(f"... {len(plan) - args.max_buffers} more buffers")
 
-    input_path = payload.get("input", {}).get("pre_cvpipeline_ir", "")
+    diagnostics = payload.get("diagnostics", [])
+    if diagnostics:
+        print()
+        print(f"Diagnostics ({len(diagnostics)})")
+        print(divider())
+        for diag in diagnostics:
+            stage = diag.get("pipeline_stage", "")
+            func = diag.get("function", "")
+            reason = diag.get("reason", "")
+            op = diag.get("operation", "")
+            op_part = f" [{op}]" if op else ""
+            print(f"  [{stage}] {func}{op_part}: {reason}")
+
     print()
     print("Artifacts")
     print(divider())
-    print(f"Input IR      : {input_path}")
     print(f"JSON report   : {args.json_file}")
     print(f"Visualizer    : {args.html}")
     return 0
