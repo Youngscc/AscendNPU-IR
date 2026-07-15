@@ -21,6 +21,7 @@
 #include "bishengir/Dialect/HIVM/Utils/Utils.h"
 #include "bishengir/Dialect/MemRef/IR/MemRefImpl.h"
 #include "bishengir/Dialect/MemRefExt/IR/MemRefExt.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "bishengir/Dialect/Tensor/IR/TensorImpl.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/DLTI/DLTI.h"
@@ -1358,4 +1359,121 @@ std::optional<int64_t> utils::traceToAllocMaxSize(mlir::Value memrefVal) {
   return allocSizeInBit /
          static_cast<int>(originalMemRefType.getElementTypeBitWidth());
 }
+
+namespace utils {
+
+bool isValidHIVMTileElementType(Type type) {
+  return type.isInteger(1) || type.isInteger(8) || type.isInteger(16) ||
+         type.isInteger(32) || type.isInteger(64) || type.isF16() ||
+         type.isF32() || type.isBF16() || type.isFloat8E4M3FN() ||
+         type.isFloat8E5M2();
+}
+
+unsigned getHIVMTileSliceMinNumElts(Type type) {
+  assert(isValidHIVMTileElementType(type) && "invalid tile type!");
+  unsigned factor = type.isInteger(64) ? 2 : 1;
+  return factor * hivm::util::VL_BITS / type.getIntOrFloatBitWidth();
+}
+
+bool isValidHIVMTileVectorType(VectorType vType) {
+  if (!hivm::util::isOneDimLikeVecType(vType))
+    return false;
+
+  auto elemType = vType.getElementType();
+  if (!isValidHIVMTileElementType(elemType))
+    return false;
+
+  unsigned minNumElts = getHIVMTileSliceMinNumElts(elemType);
+  if (vType.getNumElements() > minNumElts)
+    return false;
+
+  return true;
+}
+
+bool isValidTwoDimVectorType(VectorType vType) {
+  if (vType.getRank() < 2)
+    return false;
+  auto shape = vType.getShape();
+  for (int64_t i = 0, e = vType.getRank() - 2; i < e; ++i) {
+    if (shape[i] != 1)
+      return false;
+  }
+
+  auto elemType = vType.getElementType();
+  if (!isValidHIVMTileElementType(elemType))
+    return false;
+
+  unsigned minNumElts = getHIVMTileSliceMinNumElts(elemType);
+  if (vType.getNumElements() > minNumElts)
+    return false;
+
+  return true;
+}
+
+} // namespace utils
+
+bool utils::isTransferWriteSuitForStoreWithStride(Operation *op) {
+  if (!isa<vector::TransferWriteOp>(op)) {
+    return false;
+  }
+  auto writeOp = cast<vector::TransferWriteOp>(op);
+  auto memrefTy = mlir::dyn_cast<MemRefType>(writeOp.getSource().getType());
+  LLVM_DEBUG(DBGS() << "transferOp: " << writeOp << "\n");
+  if (!memrefTy) {
+    return false;
+  }
+  ArrayRef<int64_t> shape = memrefTy.getShape();
+  auto [strides, offset] = getStridesAndOffset(memrefTy);
+  if (shape.size() < 2) {
+    LLVM_DEBUG(DBGS() << "fail because of shape is 1");
+    return false;
+  }
+  int64_t first_dim = shape[0];
+  int64_t last_dim = shape[shape.size() - 1];
+  if (first_dim > hivm::util::BLOCK_NUM_PER_VL) {
+    LLVM_DEBUG(DBGS() << "fail becasuse of first dim is above 8\n");
+    return false;
+  }
+  if (first_dim == 1) {
+    LLVM_DEBUG(
+        DBGS()
+        << "fail becasuse of first dim is 1, only one block no need vsstb\n");
+    return false;
+  }
+  // check if all the dims between first dim and last dim are 1.
+  if (llvm::any_of(llvm::make_range(shape.begin() + 1, shape.end() - 1),
+                   [](const auto &dim) { return dim != 1; })) {
+    LLVM_DEBUG(DBGS() << "\n fail because of shape dim not 1\n");
+    return false;
+  }
+
+  // support I8, I16, I32, BF16, F16, F32, F8E4M3FN, F8E5M2
+  auto elementType = memrefTy.getElementType();
+  bool isSupportedFloat = elementType.isFloat8E4M3FN() ||
+                          elementType.isFloat8E5M2() || elementType.isBF16() ||
+                          elementType.isF16() || elementType.isF32();
+  bool isSupportedInt = elementType.isInteger(32) ||
+                        elementType.isInteger(16) || elementType.isInteger(8);
+  if (!isSupportedFloat && !isSupportedInt) {
+    return false;
+  }
+
+  // check if last dim size matches one block which is 256bit.
+  auto expectedDim =
+      hivm::util::vectorBlockSizeBit / elementType.getIntOrFloatBitWidth();
+  if (expectedDim != last_dim) {
+    LLVM_DEBUG(DBGS() << "last dim not support\n");
+    return false;
+  }
+  int64_t productLowerDims =
+      std::accumulate(shape.begin() + 1, shape.end(), static_cast<int64_t>(1),
+                      [](int64_t acc, const auto &dim) { return acc * dim; });
+  if (strides[0] == productLowerDims) {
+    LLVM_DEBUG(DBGS() << "fail becasuse of stride is continous\n");
+    return false;
+  }
+  LLVM_DEBUG(DBGS() << " matched!! for transferWriteWithStride\n");
+  return true;
+}
+
 } // namespace mlir

@@ -100,6 +100,13 @@ const std::map<TFuncCoreType, TCoreType> kTFuncCoreType2TCoreType = {
     {TFuncCoreType::MIX, TCoreType::CUBE_OR_VECTOR},
 };
 
+const std::map<std::string, int> membarType = {
+    {"VV_ALL", 0},  {"VST_VLD", 1}, {"VLD_VST", 2}, {"VST_VST", 3},
+    {"VS_ALL", 4},  {"VST_LD", 5},  {"VLD_ST", 6},  {"VST_ST", 7},
+    {"SV_ALL", 8},  {"ST_VLD", 9},  {"LD_VST", 10}, {"ST_VST", 11},
+    {"SS_ALL", 12}, {"ST_LD", 13},  {"LD_ST", 14},  {"ST_ST", 15},
+};
+
 /// Set the input type's memory scope to the input HIVM Address Space.
 void setBaseMemRefTypeScope(Value val, AddressSpaceAttr targetMemScope);
 
@@ -353,6 +360,10 @@ LogicalResult traceHIVMOpUntil(RewriterBase &rewriter, Operation *op,
   return failure();
 }
 
+// TODO: move to platform info
+uint32_t getHWAlignBytes(Attribute spaceAttr);
+std::optional<uint32_t> getHWAlignBytes(Type t);
+
 namespace util {
 enum class BitWidth : uint32_t {
   B1 = 1,
@@ -388,6 +399,7 @@ enum TaskType : int8_t {
   Unknown = 0
 };
 
+constexpr static unsigned int BLOCK_NUM_PER_VL = 8;
 constexpr static unsigned int VL = 256;
 constexpr static unsigned int BL = VL / 8;
 const static int vectorBlockSizeBit = 256;
@@ -396,6 +408,14 @@ const static int srcNumPerRepeatOfVBRCBIntrin = 8;
 constexpr static unsigned int INTR_BYTES_PER_BLOCK = 32;
 constexpr static unsigned int INTR_BYTES_PER_REPEAT = 256;
 constexpr static unsigned int VNCHWCONV_INTR_BYTES_PER_REPEAT = 512;
+
+constexpr static unsigned BITS_PER_BYTE = 8;
+constexpr static unsigned VL_BITS = VL * BITS_PER_BYTE;
+constexpr static unsigned PREDICATE_BITS = 256;
+
+constexpr static unsigned VL_B32 = VL / 4;
+constexpr static unsigned VL_B16 = VL / 2;
+constexpr static unsigned VL_B8 = VL;
 
 // Returns if the given source MemRef type is collapsible with the specified
 // reassociation indices. This function works as a strict extension based
@@ -428,6 +448,13 @@ bool isArgminOrArgmax(ReduceOperation op);
 bool isSIMTVF(Operation *op);
 
 void validateMultiBufferAttr(mlir::DictionaryAttr attrDict);
+
+/// Trims non-scalable one dimensions from `oldType` and returns the result
+/// type.
+VectorType trimNonScalableUnitDims(VectorType oldType);
+
+/// check if a vector type is of Vector<dtype> or Vector<1x...xdtype>
+bool isOneDimLikeVecType(VectorType vecType);
 } // namespace util
 } // namespace hivm
 } // namespace mlir

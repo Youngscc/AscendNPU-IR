@@ -81,5 +81,39 @@ Value createCollapseShapeOp(PatternRewriter &rewriter, Location loc,
                             loc, resultType, collapseSrc, collapseDims);
 }
 
+hivm::RoundMode mapRoundModeHFusionToHiVM(hfusion::RoundMode hsRndMode) {
+  switch (hsRndMode) {
+  case (hfusion::RoundMode::RINT):
+    return hivm::RoundMode::RINT;
+  case (hfusion::RoundMode::ROUND):
+    return hivm::RoundMode::ROUND;
+  case (hfusion::RoundMode::CEIL):
+    return hivm::RoundMode::CEIL;
+  case (hfusion::RoundMode::FLOOR):
+    return hivm::RoundMode::FLOOR;
+  case (hfusion::RoundMode::TRUNC):
+    return hivm::RoundMode::TRUNC;
+  case (hfusion::RoundMode::ODD):
+    return hivm::RoundMode::ODD;
+  case (hfusion::RoundMode::TRUNCWITHOVERFLOW):
+    return hivm::RoundMode::TRUNCWITHOVERFLOW;
+  }
+  llvm_unreachable("unsupported hfusion::RoundMode");
+}
+
+hivm::UnsignedMode mapUnsignedModeHFusionToHiVM(hfusion::UnsignedMode hsUniMode) {
+  switch (hsUniMode) {
+  case (hfusion::UnsignedMode::SI2SI):
+    return hivm::UnsignedMode::SI2SI;
+  case (hfusion::UnsignedMode::SI2UI):
+    return hivm::UnsignedMode::SI2UI;
+  case (hfusion::UnsignedMode::UI2SI):
+    return hivm::UnsignedMode::UI2SI;
+  case (hfusion::UnsignedMode::UI2UI):
+    return hivm::UnsignedMode::UI2UI;
+  }
+  llvm_unreachable("unsupported hfusion::UnsignedMode");
+}
+
 } // namespace hfusion_conversion_utils
 } // namespace mlir

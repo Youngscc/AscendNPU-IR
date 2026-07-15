@@ -47,6 +47,10 @@ constexpr static int64_t kUBAlignSizeInBits = 32 * 8;
 static constexpr llvm::StringLiteral kEnableAutoMarkBufferSize =
     "enable_auto_mark_buffer_size";
 static constexpr llvm::StringLiteral kMemrefAsPtr = "memref.memref_as_ptr";
+static constexpr llvm::StringLiteral maskOpIdx = "mask_op_idx";
+static constexpr llvm::StringLiteral reachedMaskOpsIdx = "reached_mask_ops_idx";
+static constexpr llvm::StringLiteral maskBitWidth = "mask_bit_width";
+static const llvm::StringLiteral kMapForToForallAttrName = "map_for_to_forall";
 
 namespace debugger {
 
@@ -599,6 +603,17 @@ bool isAlignedInUB(Type type);
 bool isUnstructuredMemAccLoop(Operation *op);
 
 ModuleOp getTopLevelModuleOp(Operation *op);
+
+bool isValidHIVMTileElementType(Type type);
+
+unsigned getHIVMTileSliceMinNumElts(Type type);
+
+bool isValidHIVMTileVectorType(VectorType vType);
+
+bool isValidTwoDimVectorType(VectorType vType);
+
+/// Return true if transfer write op suits for change to StoreWithStride
+bool isTransferWriteSuitForStoreWithStride(Operation *op);
 
 } // namespace utils
 

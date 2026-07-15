@@ -392,7 +392,6 @@ bool isRegBasedArch(ModuleOp op) {
     return false;
   return isRegBasedArch(maybeTargetDevice.value());
 }
-
 } // namespace utils
 
 static ModuleOp getDeviceModule(ModuleOp op) {
