@@ -1,4 +1,6 @@
 #include "test_support.hpp"
+#include "../src/post_cvpipeline/code_motion.hpp"
+#include "../src/post_cvpipeline/inline_otf_load_store.hpp"
 #include "../src/post_cvpipeline/ir_utils.hpp"
 #include "../src/post_cvpipeline/buffer_size.hpp"
 #include "../src/post_cvpipeline/canonicalization.hpp"
@@ -1471,7 +1473,10 @@ CVUB_TEST(post_pipeline_manifest_has_real_order) {
                             stage.stage == "TileAndBindSubBlock" ||
                             stage.stage == "FoldTensorEmpty" ||
                             stage.stage == "CanonicalizationAfterSplit" ||
-                            stage.stage == "CloneTensorEmpty"
+                            stage.stage == "LoopInvariantCodeMotion" ||
+                            stage.stage == "LoopInvariantSubsetHoisting" ||
+                            stage.stage == "CloneTensorEmpty" ||
+                            stage.stage == "InlineOTFLoadStore"
                         ? cvub::CoverageDisposition::Modeled
                         : cvub::CoverageDisposition::Unsupported);
 }
@@ -1512,19 +1517,20 @@ CVUB_TEST(post_pipeline_manifest_rejects_order_mismatch) {
                              "stage order mismatch");
 }
 
-CVUB_TEST(unsupported_stages_make_projection_incomplete) {
+CVUB_TEST(post_pipeline_manifest_has_full_coverage_after_task8) {
+  // After Task 8 every manifest stage is modeled or UB-invariant, so the
+  // compiled coverage table reports no Unsupported stage and the code-motion /
+  // OTF stages never emit an "unsupported" diagnostic.  (The overall precision
+  // may still be Incomplete for input- or stage-specific reasons.)
   const auto result = cvub::RunPostCVPipelineAIVProjection(
       cvub::test::ParseFixture("minimal_aiv.mlir"), {});
-  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
   CVUB_CHECK_EQ(result.coverage.size(), 14U);
-  CVUB_CHECK_EQ(result.coverage.front().disposition,
-                cvub::CoverageDisposition::Modeled);
-  CVUB_CHECK(!HasDiagnostic(result, "TileCubeVectorLoop", "unsupported"));
-  CVUB_CHECK(!HasDiagnostic(result, "InferAndSetBufferSize", "unsupported"));
-  // Task 7 flips TileAndBindSubBlock to modeled; minimal_aiv has no store, so
-  // the stage reports an exact recognized no-op and never emits "unsupported".
-  CVUB_CHECK(!HasDiagnostic(result, "TileAndBindSubBlock", "unsupported"));
-  CVUB_CHECK(HasDiagnostic(result, "LoopInvariantCodeMotion", "unsupported"));
+  for (const cvub::StageCoverage &stage : result.coverage)
+    CVUB_CHECK(stage.disposition != cvub::CoverageDisposition::Unsupported);
+  CVUB_CHECK(!HasDiagnostic(result, "LoopInvariantCodeMotion", "unsupported"));
+  CVUB_CHECK(!HasDiagnostic(result, "LoopInvariantSubsetHoisting",
+                            "unsupported"));
+  CVUB_CHECK(!HasDiagnostic(result, "InlineOTFLoadStore", "unsupported"));
 }
 
 CVUB_TEST(post_pipeline_passes_size_and_canonicalization_output_to_split) {
@@ -3359,6 +3365,178 @@ CVUB_TEST(tile_bind_subblock_pipeline_marks_stage_modeled) {
   CVUB_CHECK(!HasDiagnostic(result, "TileAndBindSubBlock", "unsupported"));
   CVUB_CHECK(!result.functions.empty());
   cvub::ValidateGenericModule(result.functions.front().module);
+}
+
+CVUB_TEST(licm_hoists_invariant_pure_ops_and_keeps_variant_and_effectful) {
+  auto module = cvub::test::ParseFixture("code_motion_lifetime.mlir");
+  const auto result =
+      cvub::RunLoopInvariantCodeMotion(module, /*enableCodeMotion=*/true);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  const int loopId = OperationWithCase(result.module, "lifetime_loop").id;
+  const int funcId = FunctionId(result.module, "code_motion_lifetime_aiv");
+  // The two invariant pure definitions move before the loop, sharing the
+  // function entry block with (and preceding) the loop.  Their gen-kill
+  // interval therefore starts before the loop instead of living across it.
+  for (const std::string hoistedCase : {"hoist_target", "hoist_dependent"}) {
+    const auto &hoisted = OperationWithCase(result.module, hoistedCase);
+    CVUB_CHECK_EQ(hoisted.parentId, funcId);
+    CVUB_CHECK_EQ(hoisted.blockId,
+                  OperationWithCase(result.module, "lifetime_loop").blockId);
+    CVUB_CHECK(hoisted.ordinal <
+               OperationWithCase(result.module, "lifetime_loop").ordinal);
+  }
+  // hoist_dependent is only invariant once hoist_target has moved: confirm the
+  // fixed-point iteration placed hoist_target before hoist_dependent.
+  CVUB_CHECK(OperationWithCase(result.module, "hoist_target").ordinal <
+             OperationWithCase(result.module, "hoist_dependent").ordinal);
+  // The loop-variant arithmetic (operand is the induction variable) and the
+  // side-effecting store remain inside the loop.
+  CVUB_CHECK_EQ(OperationWithCase(result.module, "loop_variant").parentId,
+                loopId);
+  CVUB_CHECK_EQ(OperationWithCase(result.module, "stays_store").parentId,
+                loopId);
+  cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(licm_enable_code_motion_false_is_recognized_noop) {
+  auto module = cvub::test::ParseFixture("code_motion_lifetime.mlir");
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result =
+      cvub::RunLoopInvariantCodeMotion(module, /*enableCodeMotion=*/false);
+  // enableCodeMotion=false gates both code-motion passes in the real compiler;
+  // the model mirrors that as a recognized no-op (Exact, IR untouched).
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(result.diagnostics.empty());
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+}
+
+CVUB_TEST(licm_function_without_loop_is_recognized_noop) {
+  auto module = cvub::test::ParseFixture("minimal_aiv.mlir");
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result =
+      cvub::RunLoopInvariantCodeMotion(module, /*enableCodeMotion=*/true);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(result.diagnostics.empty());
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+}
+
+CVUB_TEST(licm_loop_invariant_memory_op_is_flagged_as_scope_gap) {
+  // A loop-invariant hivm.hir.load may be hoisted by the real pass's advanced
+  // memory analysis, which the lightweight model does not reproduce.  The model
+  // must fail closed: leave the legal IR untouched and report incomplete rather
+  // than silently claiming an exact (and possibly wrong-lifetime) result.
+  auto module = cvub::test::ParseFixture("code_motion_lifetime.mlir");
+  auto &store = MutableOperationNamed(module, "hivm.hir.store");
+  // Turn the store into a load carrying a fresh result so the op remains a
+  // loop-invariant (operands defined outside the loop once the pure vabs
+  // producers hoist) inherent DMA, without colliding on an existing SSA value.
+  cvub::GenericRewriter rewriter(module);
+  const int loadResult = rewriter.newValue();
+  store.name = "hivm.hir.load";
+  store.resultTypes = {"tensor<16xf16>"};
+  store.results = {loadResult};
+  store.dpsInputs.clear();
+  store.dpsInits.clear();
+  store.effects.clear();
+  cvub::ApplyOperationSemantics(store);
+  cvub::ValidateGenericModule(module);
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result =
+      cvub::RunLoopInvariantCodeMotion(module, /*enableCodeMotion=*/true);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "LoopInvariantCodeMotion", "loop-invariant"));
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+}
+
+CVUB_TEST(subset_hoisting_loop_without_iter_args_is_recognized_noop) {
+  // The lifetime fixture's scf.for carries only the induction variable (no loop
+  // iter args), so upstream subset hoisting has no extraction/insertion pair to
+  // rewrite and the pass is a recognized no-op.  The model mirrors that exactly.
+  auto module = cvub::test::ParseFixture("code_motion_lifetime.mlir");
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result =
+      cvub::RunLoopInvariantSubsetHoisting(module, /*enableCodeMotion=*/true);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(result.diagnostics.empty());
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+}
+
+CVUB_TEST(subset_hoisting_loop_iter_arg_subset_pair_is_flagged_as_scope_gap) {
+  // A loop carrying an iter arg through a tensor.extract_slice /
+  // tensor.insert_slice pair is rewritten by the real pass (extraction before
+  // the loop, insertion after, plus a new carried iter arg/result).  That loop
+  // rebuild is not reproduced here, so the model fails closed and flags the
+  // function as a scope candidate rather than silently dropping the hoist.
+  auto module = cvub::test::ParseFixture("subset_hoisting_lifetime.mlir");
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result =
+      cvub::RunLoopInvariantSubsetHoisting(module, /*enableCodeMotion=*/true);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "LoopInvariantSubsetHoisting", "subset"));
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+}
+
+CVUB_TEST(subset_hoisting_enable_code_motion_false_is_recognized_noop) {
+  auto module = cvub::test::ParseFixture("subset_hoisting_lifetime.mlir");
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result =
+      cvub::RunLoopInvariantSubsetHoisting(module, /*enableCodeMotion=*/false);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(result.diagnostics.empty());
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+}
+
+CVUB_TEST(otf_unaligned_concat_store_rebuilds_insert_slice_chain) {
+  auto module = cvub::test::ParseFixture("unaligned_concat_store.mlir");
+  auto unaligned =
+      cvub::ExtractFunctionModule(module, "unaligned_concat_store_aiv");
+  const auto result = cvub::RunInlineOTFLoadStore(std::move(unaligned));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  // The vconcat result is dead after the store source is repointed, so the
+  // buffer_size_in_byte mark and the vconcat itself are removed by dead-op
+  // cleanup (this is what prevents the dead concat destination from being
+  // counted as a UB allocation).
+  CVUB_CHECK(!HasOperationCase(result.module, "unaligned_concat"));
+  CVUB_CHECK(!HasOperationCase(result.module, "unaligned_size_mark"));
+  CVUB_CHECK_EQ(OperationCount(result.module, "tensor.insert_slice"), 2U);
+  const auto &store = OperationWithCase(result.module, "unaligned_store");
+  const auto &finalAccumulator = DefinitionOf(result.module, store.operands[0]);
+  CVUB_CHECK_EQ(finalAccumulator.name, "tensor.insert_slice");
+  // The accumulator is seeded from the vconcat destination and threads the two
+  // inputs at their prefix-sum offsets along the (last) concat dimension.
+  const auto &firstInsert = OperationWithCase(result.module, "unaligned_a");
+  const auto &secondInsert = DefinitionOf(result.module, store.operands[0]);
+  CVUB_CHECK_EQ(
+      cvub::IRDictionaryValue(
+          result.module.operations.at(static_cast<size_t>(
+              OperationId(result.module, "tensor.insert_slice")))
+              .attributes,
+          "static_offsets"),
+      "[0, 0]");
+  (void)firstInsert;
+  // The destination buffer is reused as the accumulator seed, not dropped.
+  CVUB_CHECK(HasOperationCase(result.module, "unaligned_dst"));
+  CVUB_CHECK(HasOperationCase(result.module, "unaligned_a"));
+  CVUB_CHECK(HasOperationCase(result.module, "unaligned_b"));
+  cvub::ValidateGenericModule(result.module);
+  (void)secondInsert;
+}
+
+CVUB_TEST(otf_aligned_concat_store_is_recognized_noop) {
+  auto module = cvub::test::ParseFixture("unaligned_concat_store.mlir");
+  auto aligned =
+      cvub::ExtractFunctionModule(module, "aligned_concat_store_aiv");
+  const std::string before = cvub::SerializeGenericModule(aligned);
+  const auto result = cvub::RunInlineOTFLoadStore(std::move(aligned));
+  // Every cumulative last-dim input extent in bytes (32, 64) is divisible by the
+  // real pass's 32-byte block, so the pattern returns failure and leaves the IR
+  // unchanged.  The model mirrors that recognized no-op exactly.
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(result.diagnostics.empty());
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+  CVUB_CHECK(HasOperationCase(result.module, "aligned_concat"));
+  CVUB_CHECK(HasOperationCase(result.module, "aligned_size_mark"));
+  CVUB_CHECK_EQ(OperationCount(result.module, "tensor.insert_slice"), 0U);
 }
 
 } // namespace

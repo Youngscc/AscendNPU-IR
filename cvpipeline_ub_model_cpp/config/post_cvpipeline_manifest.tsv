@@ -9,7 +9,7 @@ order	stage	disposition
 8	TileAndBindSubBlock	modeled
 9	FoldTensorEmpty	modeled
 10	CanonicalizationAfterSplit	modeled
-11	LoopInvariantCodeMotion	unsupported
-12	LoopInvariantSubsetHoisting	unsupported
+11	LoopInvariantCodeMotion	modeled
+12	LoopInvariantSubsetHoisting	modeled
 13	CloneTensorEmpty	modeled
-14	InlineOTFLoadStore	unsupported
+14	InlineOTFLoadStore	modeled

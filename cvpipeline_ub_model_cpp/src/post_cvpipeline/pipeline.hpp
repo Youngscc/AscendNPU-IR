@@ -4,6 +4,8 @@
 #include "types.hpp"
 #include "buffer_size.hpp"
 #include "canonicalization.hpp"
+#include "code_motion.hpp"
+#include "inline_otf_load_store.hpp"
 #include "inline_scope.hpp"
 #include "split_mix_aiv.hpp"
 #include "tensor_empty.hpp"
@@ -132,7 +134,10 @@ inline std::vector<StageCoverage> CompiledPostCVPipelineCoverage() {
   stages[7].disposition = CoverageDisposition::Modeled;
   stages[8].disposition = CoverageDisposition::Modeled;
   stages[9].disposition = CoverageDisposition::Modeled;
+  stages[10].disposition = CoverageDisposition::Modeled;
+  stages[11].disposition = CoverageDisposition::Modeled;
   stages[12].disposition = CoverageDisposition::Modeled;
+  stages[13].disposition = CoverageDisposition::Modeled;
   return stages;
 }
 
@@ -194,9 +199,19 @@ inline PostCVPipelineResult RunPostCVPipelineAIVProjection(
                         RunFoldTensorEmpty(std::move(function.module)));
     applyProjectedStage(
         function, RunPostSplitCanonicalization(std::move(function.module)));
-    // Code-motion stages are inserted here by Task 8.
+    // Code-motion passes (gated by enableCodeMotion), in real pipeline order:
+    // LoopInvariantCodeMotion then LoopInvariantSubsetHoisting.
+    applyProjectedStage(function,
+                        RunLoopInvariantCodeMotion(std::move(function.module),
+                                                   options.enableCodeMotion));
+    applyProjectedStage(function,
+                        RunLoopInvariantSubsetHoisting(std::move(function.module),
+                                                       options.enableCodeMotion));
     applyProjectedStage(function,
                         RunCloneTensorEmpty(std::move(function.module)));
+    // InlineOTFLoadStore always runs (not gated by enableCodeMotion).
+    applyProjectedStage(function,
+                        RunInlineOTFLoadStore(std::move(function.module)));
   }
 
   if (options.enableUbufSaving) {
