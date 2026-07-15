@@ -342,6 +342,15 @@ tiling::deviceFuncsMatchTilingFunc(SmallVector<func::FuncOp> &deviceFuncs,
   return success();
 }
 
+bool hfusion::isFP8(Type type, Builder builder) {
+  return type == builder.getFloat8E5M2Type() ||
+         type == builder.getFloat8E4M3Type() ||
+         type == builder.getFloat8E4M3FNType() ||
+         type == builder.getFloat8E5M2FNUZType() ||
+         type == builder.getFloat8E4M3FNUZType() ||
+         type == builder.getFloat8E4M3B11FNUZType();
+}
+
 bool hfusion::isReshapeOp(Operation *op) {
   if (!op)
     return false;

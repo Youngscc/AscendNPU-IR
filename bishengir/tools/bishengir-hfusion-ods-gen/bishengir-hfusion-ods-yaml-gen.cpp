@@ -1,4 +1,4 @@
-//===- bishengir-hfusion-ods-yaml-gen.cpp - HFusion ODS gen. from yaml ----===//
+//===- bishengir-fusion-ods-yaml-gen.cpp - HFusion ODS generation from yaml===//
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -88,8 +88,10 @@ enum class HFusionOperandDefKind {
   TernaryFnAttr,
   TypeFnAttr,
   RoundModeAttr,
+  UnsignedModeAttr,
   AtomicKindAttr,
   EnableOverflowAttr,
+  EnableSaturateAttr,
 };
 
 struct HFusionOperandDef {
@@ -120,6 +122,7 @@ enum class ScalarFnKind {
   Ternary,
   Type,
   RoundMode,
+  UnsignedMode,
   AtomicKind
 };
 
@@ -241,10 +244,14 @@ template <> struct ScalarEnumerationTraits<HFusionOperandDefKind> {
     io.enumCase(value, "ternary_fn_attr", HFusionOperandDefKind::TernaryFnAttr);
     io.enumCase(value, "type_fn_attr", HFusionOperandDefKind::TypeFnAttr);
     io.enumCase(value, "round_mode_attr", HFusionOperandDefKind::RoundModeAttr);
+    io.enumCase(value, "unsigned_mode_attr",
+                HFusionOperandDefKind::UnsignedModeAttr);
     io.enumCase(value, "atomic_kind_attr",
                 HFusionOperandDefKind::AtomicKindAttr);
     io.enumCase(value, "enable_overflow_attr",
                 HFusionOperandDefKind::EnableOverflowAttr);
+    io.enumCase(value, "enable_saturate_attr",
+                HFusionOperandDefKind::EnableSaturateAttr);
   }
 };
 
@@ -313,6 +320,7 @@ template <> struct ScalarEnumerationTraits<ScalarFnKind> {
     io.enumCase(value, "type", ScalarFnKind::Type);
     io.enumCase(value, "round", ScalarFnKind::RoundMode);
     io.enumCase(value, "atomic_kind", ScalarFnKind::AtomicKind);
+    io.enumCase(value, "si2si", ScalarFnKind::UnsignedMode);
   }
 };
 
@@ -472,11 +480,13 @@ static bool isFunctionAttribute(HFusionOperandDefKind kind) {
          kind == HFusionOperandDefKind::TernaryFnAttr ||
          kind == HFusionOperandDefKind::TypeFnAttr ||
          kind == HFusionOperandDefKind::RoundModeAttr ||
+         kind == HFusionOperandDefKind::UnsignedModeAttr ||
          kind == HFusionOperandDefKind::AtomicKindAttr;
 }
 
 static bool isBoolAttribute(HFusionOperandDefKind kind) {
-  return kind == HFusionOperandDefKind::EnableOverflowAttr;
+  return kind == HFusionOperandDefKind::EnableOverflowAttr ||
+         kind == HFusionOperandDefKind::EnableSaturateAttr;
 }
 
 // Return true if the operand is an attribute.
@@ -500,6 +510,8 @@ std::string convertOperandKindToEnumName(HFusionOperandDefKind kind) {
     return std::string("TypeFn");
   case HFusionOperandDefKind::RoundModeAttr:
     return std::string("RoundMode");
+  case HFusionOperandDefKind::UnsignedModeAttr:
+    return std::string("UnsignedMode");
   case HFusionOperandDefKind::AtomicKindAttr:
     return std::string("AtomicKind");
   default:
@@ -523,6 +535,8 @@ std::string convertFunctionKindToEnumName(ScalarFnKind kind) {
     return std::string("TypeFn");
   case ScalarFnKind::RoundMode:
     return std::string("RoundMode");
+  case ScalarFnKind::UnsignedMode:
+    return std::string("UnsignedMode");
   case ScalarFnKind::AtomicKind:
     return std::string("AtomicKind");
   }
@@ -633,6 +647,7 @@ def {0} : HFusionStructuredBase_Op<"{1}", !listconcat([AttrSizedOperandSegments]
 
       // Generic methods.
       static unsigned getNumRegionArgs();
+      std::string getLibraryCallName();
       {7}
     }];
 }
@@ -689,7 +704,7 @@ ArrayAttr {0}::getIndexingMaps() {{
   MLIRContext *context = getContext();
   auto symbolBindings = getSymbolBindings(*this);
   SmallVector<AffineMap> maps;
-  {1}
+  {2}
   cached = Builder(context).getAffineMapArrayAttr(maps);
   getOperation()->setAttr(memoizeAttr, cached);
   return cached;
@@ -996,7 +1011,7 @@ exprs.push_back(getAffineConstantExpr(cst{1}, context));
         // TODO: This needs to be memoized and/or converted to non-parser based
         // C++ codegen prior to real use.
         os << llvm::formatv(structuredOpIndexingMapsFormat, className,
-                            interleaveToString(stmts, "\n  "));
+                            dimIdentsStr, interleaveToString(stmts, "\n  "));
       }
     } else {
       os << llvm::formatv(rankPolyStructuredOpIndexingMapsFormat, className);
@@ -1017,6 +1032,18 @@ unsigned {0}::getNumRegionArgs() {{ return {1}; }
 )FMT";
     os << llvm::formatv(structuredOpGetNumRegionArgsFormat, className,
                         numOfArgs);
+  }
+
+  // getLibraryCallName()
+  {
+    // Generates a getLibraryCallName method. Parameters:
+    // {0}: Class name
+    static const char structuredOpGetLibraryCallFormat[] = R"FMT(
+std::string {0}::getLibraryCallName() {{
+  return generateLibraryCallName(getOperation());
+}
+)FMT";
+    os << llvm::formatv(structuredOpGetLibraryCallFormat, className);
   }
 
   // hasDynamicIndexingMaps() and verifyIndexingMapRequiredAttributes()
@@ -1107,6 +1134,27 @@ void {0}::regionBuilder(ImplicitLocOpBuilder &b,
       attrs.push_back(
           llvm::formatv(attrDef, enumName, arg.name, arg.defaultFn));
     }
+
+    // Handle enable_saturate attribute
+    {
+      auto it = llvm::find_if(args, [&](HFusionOperandDef &a){
+          return a.kind == HFusionOperandDefKind::EnableSaturateAttr;
+      });
+      if (it != args.end()) {
+        attrs.push_back(llvm::formatv(R"(
+  bool {0}Val = false;
+  auto {0}Iter = llvm::find_if(attrs, [&](const NamedAttribute &attr) {{
+      return attr.getName() == "{0}";
+  });
+  if ({0}Iter != attrs.end()) {{
+      if (auto boolAttr = mlir::dyn_cast<BoolAttr>({0}Iter->getValue()))
+          {0}Val = boolAttr.getValue();
+  }
+)",
+                                      it->name));
+      }
+    }
+
     for (HFusionOperandDef &arg : args) {
       if (arg.kind != HFusionOperandDefKind::OutputTensor)
         continue;
@@ -1178,6 +1226,7 @@ void {0}::regionBuilder(ImplicitLocOpBuilder &b,
           SmallVector<std::string> operandCppValues;
           if (expression.scalarFn->kind == ScalarFnKind::Type ||
               expression.scalarFn->kind == ScalarFnKind::RoundMode ||
+              expression.scalarFn->kind == ScalarFnKind::UnsignedMode ||
               expression.scalarFn->kind == ScalarFnKind::AtomicKind) {
             assert(expression.scalarFn->typeVar.has_value());
             std::optional<std::string> typeCppValue =
@@ -1214,6 +1263,16 @@ void {0}::regionBuilder(ImplicitLocOpBuilder &b,
           generateExpression(assignment->value);
       if (!cppValue)
         return failure();
+      
+      // Handle EnableSaturateAttr.
+      auto it = llvm::find_if(args, [&](HFusionOperandDef &a){
+            return a.kind == HFusionOperandDefKind::EnableSaturateAttr;
+      });
+      if (it != args.end()) {
+        stmts.push_back(llvm::formatv(
+              "helper.buildEnableSaturate({0}, {1});", it->name + "Val", *cppValue));
+      }
+        
       stmts.push_back(llvm::formatv("yields.push_back({0});", *cppValue));
     }
 

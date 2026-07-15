@@ -40,6 +40,7 @@ mlir_tablegen(HIVMSynchronizationOps.cpp.inc -gen-op-defs)
 add_public_tablegen_target(BiShengIRHIVMSynchronizationOpsIncGen)
 add_dependencies(mlir-headers BiShengIRHIVMSynchronizationOpsIncGen)
 
+
 set(LLVM_TARGET_DEFINITIONS HIVMAttrs.td)
 mlir_tablegen(HIVMEnums.h.inc -gen-enum-decls ${tblgen_feat_list})
 mlir_tablegen(HIVMEnums.cpp.inc -gen-enum-defs ${tblgen_feat_list})

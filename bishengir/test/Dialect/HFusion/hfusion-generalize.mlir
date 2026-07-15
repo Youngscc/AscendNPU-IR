@@ -1,4 +1,4 @@
-// RUN: bishengir-opt --canonicalize --cse --hfusion-generalize %s --split-input-file | FileCheck %s
+// RUN: bishengir-opt --hfusion-generalize --canonicalize --cse %s --split-input-file | FileCheck %s
 
 // -----
 

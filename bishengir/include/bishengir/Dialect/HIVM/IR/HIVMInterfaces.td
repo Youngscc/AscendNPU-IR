@@ -29,7 +29,9 @@ include "bishengir/Interfaces/AggregatedOpInterface.td"
 include "bishengir/Dialect/HIVM/Interfaces/ImplByScalarOpInterface.td"
 include "bishengir/Dialect/HIVM/Interfaces/ExtraBufferOpInterface.td"
 include "bishengir/Dialect/HIVM/Interfaces/FlattenInterface.td"
+include "bishengir/Dialect/HIVM/Interfaces/LibraryFunctionOpInterface.td"
 include "bishengir/Dialect/HIVM/Interfaces/OpPipeInterface.td"
+include "bishengir/Dialect/HIVM/Interfaces/VectorizableOpInterface.td"
 
 def HIVMCoreTypeInterface : OpInterface<"CoreTypeInterface"> {
   let description = [{
