@@ -34,6 +34,12 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Interfaces/VectorInterfaces.h"
 
+namespace mlir {
+namespace hfusion {
+std::string generateLibraryCallName(Operation *op);
+} // namespace hfusion
+} // namespace mlir
+
 //===----------------------------------------------------------------------===//
 // HFusion Dialect
 //===----------------------------------------------------------------------===//

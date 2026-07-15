@@ -74,6 +74,31 @@ Value castTo(OpBuilder &builder, Value src, Type targetElemType,
              bool enableOverflow,
              hfusion::TypeFn castIntegerType = hfusion::TypeFn::cast_signed);
 
+/// Cast `src` value to the specified element type with full parameter control.
+///
+/// This overload exposes all CastOp attributes: rounding mode, overflow
+/// behavior, saturate mode, integer cast type, and unsigned conversion mode.
+Value castTo(OpBuilder &builder, Value src, Type targetElemType,
+             hfusion::RoundMode roundMode, std::optional<Value> dst,
+             bool enableOverflow, bool enableSaturate,
+             hfusion::TypeFn castIntegerType,
+             hfusion::UnsignedMode unsignedMode);
+
+/// Cast `src` value to the specified element type with unsigned mode control.
+///
+/// Select rounding mode inside. Provides explicit control over unsigned
+/// integer conversion semantics.
+Value castTo(OpBuilder &builder, Value src, Type targetElemType,
+             hfusion::TypeFn castIntegerType,
+             hfusion::UnsignedMode unsignedMode);
+
+template <typename TernaryOp, typename OpFun, typename OpFunAttr>
+Operation *createTernaryOp(OpBuilder &builder, Location loc, OpFun opFn,
+                           ValueRange inputs, ValueRange outs) {
+  auto attr = builder.getAttr<OpFunAttr>(opFn);
+  auto fnAttr = builder.getNamedAttr("fun", attr);
+  return builder.create<TernaryOp>(loc, inputs, outs, fnAttr);
+}
 } // namespace hfusion
 } // namespace mlir
 

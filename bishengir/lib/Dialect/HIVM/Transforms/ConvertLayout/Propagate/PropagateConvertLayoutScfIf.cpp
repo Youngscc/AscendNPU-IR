@@ -1,8 +1,17 @@
 //===-------------------- PropagateConvertLayoutScfIf.cpp -----------------===//
 //
-// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
-// See https://llvm.org/LICENSE.txt for license information.
-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 //
 //===----------------------------------------------------------------------===//
 
@@ -39,7 +48,7 @@ static LogicalResult verifyIfWithElseAndResults(scf::IfOp ifOp,
 
 static bool equivalentConvertMeta(ConvertLayoutOp a, ConvertLayoutOp b) {
   // Strict check: all attributes must match.
-  return a->getAttrs() == b->getAttrs();
+  return a.getDstLayout() == b.getDstLayout();
 }
 
 static SmallVector<Value> buildYieldOperands(scf::YieldOp oldYield,
@@ -124,7 +133,10 @@ struct PropagateConvertLayoutScfIfYieldDown
 
     if (failed(verifyIfWithElseAndResults(ifOp, rewriter, convertOp)))
       return failure();
-
+      
+    if (!ifOp.thenBlock() || !ifOp.elseBlock()) {
+      return rewriter.notifyMatchFailure(convertOp, "scf.if block is null");
+    }
     auto thenYield = cast<scf::YieldOp>(ifOp.thenBlock()->getTerminator());
     auto elseYield = cast<scf::YieldOp>(ifOp.elseBlock()->getTerminator());
 
@@ -195,6 +207,9 @@ struct PropagateConvertLayoutScfIfYieldDown
     {
       IRMapping mapping;
       rewriter.setInsertionPointToStart(newIfOp.elseBlock());
+      if (!ifOp.elseBlock()) {
+        return rewriter.notifyMatchFailure(convertOp, "scf.if else block is null");
+      }
       cloneBlockWithoutTerminator(rewriter, *ifOp.elseBlock(), mapping,
                                   elseConv.getOperation());
       Value rawElseK = mapping.lookupOrDefault(elseConv.getSource());
@@ -267,6 +282,9 @@ struct PropagateConvertLayoutScfIfResultUp
       return failure();
 
     uint32_t k = ifRes.getResultNumber();
+    if (!ifOp.thenBlock() || !ifOp.elseBlock()) {
+      return rewriter.notifyMatchFailure(convertOp, "scf.if block is null");
+    }
     auto thenYield = cast<scf::YieldOp>(ifOp.thenBlock()->getTerminator());
     auto elseYield = cast<scf::YieldOp>(ifOp.elseBlock()->getTerminator());
 
@@ -286,6 +304,9 @@ struct PropagateConvertLayoutScfIfResultUp
     {
       IRMapping mapping;
       rewriter.setInsertionPointToStart(newIfOp.thenBlock());
+      if (!ifOp.thenBlock()) {
+        return rewriter.notifyMatchFailure(convertOp, "scf.if then block is null");
+      }
       cloneBlockWithoutTerminator(rewriter, *ifOp.thenBlock(), mapping);
       Value mappedThenK = mapping.lookupOrDefault(thenYield.getOperand(k));
       Value thenUp =
