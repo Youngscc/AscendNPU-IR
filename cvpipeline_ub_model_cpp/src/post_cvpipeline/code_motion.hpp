@@ -64,9 +64,34 @@ inline bool IsInherentMemoryOp(const std::string &name) {
   return operations.count(name) != 0;
 }
 
+// The full set of arith ops that are ConditionallySpeculatable in upstream MLIR
+// (i.e. can be NotSpeculatable).  Verified against ArithOps.td/.cpp: exactly
+// arith.divui, arith.divsi, arith.ceildivui, arith.ceildivsi, arith.remui,
+// arith.remsi declare [ConditionallySpeculatable] and a getSpeculatability()
+// override.  All other arith.* ops are always speculatable.
+inline bool IsNonSpeculatableArith(const std::string &name) {
+  return name == "arith.divui" || name == "arith.divsi" ||
+         name == "arith.ceildivui" || name == "arith.ceildivsi" ||
+         name == "arith.remui" || name == "arith.remsi";
+}
+
 inline bool IsPureHoistableName(const std::string &name) {
-  if (startsWith(name, "arith."))
+  if (startsWith(name, "arith.")) {
+    // Integer division/remainder ops are ConditionallySpeculatable in upstream
+    // MLIR (ArithOps.cpp/.td) and return NotSpeculatable unless the divisor is
+    // provably non-zero (and, for signed division, not -1).  Upstream LICM's
+    // hoist predicate is isMemoryEffectFree(op) && isSpeculatable(op), so a
+    // loop-invariant such op with an unprovable divisor is LEFT IN THE LOOP.
+    // The model has no integer-range analysis, so it conservatively treats these
+    // as non-hoistable by name; the AnalyzeLoop classifier then routes a loop
+    // carrying a loop-invariant instance to Incomplete (fail-closed-safe).
+    // arith.floordivsi is NOT here: it is an Arith_TotalIntBinaryOp (no
+    // ConditionallySpeculatable trait, no getSpeculatability override) and is
+    // therefore always speculatable, so upstream LICM does hoist it.
+    if (IsNonSpeculatableArith(name))
+      return false;
     return true;
+  }
   static const std::set<std::string> operations = {
       "affine.apply", "affine.max", "affine.min",
       "memref.cast",  "memref.collapse_shape", "memref.expand_shape",
@@ -237,6 +262,17 @@ inline LoopHoistPlan AnalyzeLoop(const GenericModule &module, int loopId) {
       continue; // loop-variant op stays in place; real pass leaves it too.
     if (IsWriteOnlyStore(operation.name))
       continue; // loop-invariant write stays; real LICM never hoists stores.
+    if (IsNonSpeculatableArith(operation.name)) {
+      // A loop-invariant integer division/remainder op is NotSpeculatable when
+      // its divisor is not provably non-zero, so upstream LICM leaves it in the
+      // loop.  The model cannot reproduce the integer-range analysis, so it
+      // fails closed rather than claiming an exact (wrong) hoist.
+      plan.classifiable = false;
+      plan.reason = "loop-invariant " + operation.name +
+                    " is not unconditionally speculatable; the model cannot "
+                    "reproduce upstream LICM's divisor speculatability analysis";
+      return plan;
+    }
     plan.classifiable = false;
     plan.reason = "loop-invariant " + operation.name +
                   " has memory effects the model cannot hoist exactly";

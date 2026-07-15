@@ -75,9 +75,10 @@ inline std::vector<int64_t> StaticShape(const std::string &type) {
   return shape;
 }
 
-// Mirrors HIVMInlineOTFLoadStore.cpp:53 elemSizeInBytes =
-// tensorTypeOut.getElementTypeBitWidth() / 8 (integer division, e.g. f16 -> 2).
-inline int64_t ElementBytes(const std::string &type) {
+// Returns the element bit width parsed from the shaped type's element token
+// (e.g. f16 -> 16, i4 -> 4, bf16 -> 16).  Returns 0 when the bit width cannot
+// be parsed, which the caller treats as an unparseable (fail-closed) case.
+inline int64_t ElementBitWidth(const std::string &type) {
   const std::string inner = ShapedInner(type);
   if (inner.empty())
     return 0;
@@ -90,10 +91,18 @@ inline int64_t ElementBytes(const std::string &type) {
   if (digits.empty())
     return 0;
   try {
-    return std::stoll(digits) / 8;
+    return std::stoll(digits);
   } catch (const std::exception &) {
     return 0;
   }
+}
+
+// Mirrors HIVMInlineOTFLoadStore.cpp:53 elemSizeInBytes =
+// tensorTypeOut.getElementTypeBitWidth() / 8 (integer division, e.g. f16 -> 2).
+// A sub-byte type (e.g. i4) yields 0 here; callers must distinguish a genuine
+// 0 (sub-byte) from an unparseable bit width via ElementBitWidth.
+inline int64_t ElementBytes(const std::string &type) {
+  return ElementBitWidth(type) / 8;
 }
 
 inline int64_t ParseConcatDim(const GenericOperation &concat) {
@@ -233,6 +242,11 @@ enum class ConcatStoreKind {
   kUnalignedStatic,
   // The pattern would fire but a dynamic extent prevents an exact rebuild here.
   kUnrewriteable,
+  // The vconcat result has users beyond the matched store and its
+  // buffer_size_in_byte mark: the real pattern's rewriter requires the vconcat
+  // to be dead after repointing the store, so it cannot apply.  Classified up
+  // front so the Incomplete guard fires before any store is rewritten.
+  kExtraUsers,
 };
 
 struct ConcatStoreCandidate {
@@ -420,43 +434,61 @@ inline StageResult RunInlineOTFLoadStore(GenericModule module) {
     if (lastDynamic || !staticInputs) {
       candidate.kind = ConcatStoreKind::kUnrewriteable;
     } else {
-      const int64_t elementBytes = ElementBytes(outType);
-      if (elementBytes <= 0) {
+      const int64_t bitWidth = ElementBitWidth(outType);
+      if (bitWidth <= 0) {
         AddDiagnostic(result, concat->id, "hivm.hir.vconcat",
                       "vconcat element bit width is not parseable");
         continue;
       }
-      candidate.kind = IsLastDimConcatAligned(dim, elementBytes, inputShapes)
-                           ? ConcatStoreKind::kAlignedNoOp
-                           : ConcatStoreKind::kUnalignedStatic;
+      const int64_t elementBytes = bitWidth / 8;
+      if (elementBytes == 0) {
+        // Sub-byte element type (e.g. i4 -> bitWidth 4 -> 0 bytes).  The real
+        // pass computes elemSizeInBytes == 0, so every cumulative-extent check
+        // (accumOffset * 0) % 32 == 0 is trivially true and it treats the store
+        // as an aligned no-op (pattern returns failure, IR unchanged).  The
+        // model mirrors that exactly instead of spuriously failing closed.
+        candidate.kind = ConcatStoreKind::kAlignedNoOp;
+      } else {
+        candidate.kind = IsLastDimConcatAligned(dim, elementBytes, inputShapes)
+                             ? ConcatStoreKind::kAlignedNoOp
+                             : ConcatStoreKind::kUnalignedStatic;
+      }
     }
+    // Detect extra users of the vconcat result during classification (before any
+    // mutation): a kUnalignedStatic store whose vconcat feeds another user
+    // cannot be rewritten, so it is reclassified here and reported by the
+    // diagnostic loop, letting the Incomplete guard fire before the rewrite
+    // loop touches any store (the legal IR is left untouched on Incomplete).
+    if (candidate.kind == ConcatStoreKind::kUnalignedStatic &&
+        HasExtraUsers(result.module, sourceValue, operation.id))
+      candidate.kind = ConcatStoreKind::kExtraUsers;
     candidates.push_back(candidate);
   }
 
   for (const ConcatStoreCandidate &candidate : candidates) {
-    if (candidate.kind != ConcatStoreKind::kUnrewriteable)
-      continue;
-    const GenericOperation &concat =
-        result.module.operations.at(static_cast<size_t>(candidate.concatId));
-    AddDiagnostic(result, candidate.concatId, concat.name,
-                  "unaligned last-dim concat/store rewrite has dynamic extents "
-                  "not modeled");
+    if (candidate.kind == ConcatStoreKind::kUnrewriteable) {
+      const GenericOperation &concat =
+          result.module.operations.at(static_cast<size_t>(candidate.concatId));
+      AddDiagnostic(result, candidate.concatId, concat.name,
+                    "unaligned last-dim concat/store rewrite has dynamic "
+                    "extents not modeled");
+    } else if (candidate.kind == ConcatStoreKind::kExtraUsers) {
+      AddDiagnostic(result, candidate.concatId, "hivm.hir.vconcat",
+                    "vconcat result has users beyond the store and size mark");
+    }
   }
 
   if (result.precision == Precision::Incomplete) {
     ValidateGenericModule(result.module);
-    return result; // Fail closed: legal IR untouched.
+    return result; // Fail closed: legal IR untouched (no store rewritten yet).
   }
 
+  // Only kUnalignedStatic candidates reach here, and classification has already
+  // guaranteed none of them has extra users, so each rewrite is total and the
+  // module stays well-formed if the loop completes.
   for (const ConcatStoreCandidate &candidate : candidates) {
     if (candidate.kind != ConcatStoreKind::kUnalignedStatic)
       continue;
-    if (HasExtraUsers(result.module, candidate.storeSourceValue,
-                      candidate.storeId)) {
-      AddDiagnostic(result, candidate.concatId, "hivm.hir.vconcat",
-                    "vconcat result has users beyond the store and size mark");
-      continue;
-    }
     RewriteUnalignedConcatStore(result.module, candidate);
   }
 

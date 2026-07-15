@@ -40,4 +40,31 @@
     "hivm.hir.store"(%cat, %gm) {case = "aligned_store"} : (tensor<4x32xf16>, memref<4x32xf16>) -> ()
     "func.return"() : () -> ()
   }) {hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<AIV>, hivm.part_of_mix, mix_mode = "aiv"} : () -> ()
+  // extra_users_concat_store_aiv: two unaligned concat-stores.  The first
+  // (xu_store1) is a clean kUnalignedStatic candidate the pattern would
+  // rewrite.  The second vconcat's result (xu_concat2) feeds a second store
+  // (xu_store2_extra) in addition to xu_store2, i.e. it has an extra user, so
+  // the pattern cannot apply to it.  The model must classify the extra-user
+  // store up front and fail closed BEFORE rewriting xu_store1, leaving the
+  // whole module byte-for-byte unchanged on Incomplete.
+  "func.func"() <{function_type = () -> (), sym_name = "extra_users_concat_store_aiv"}> ({
+  ^bb0:
+    %a1 = "tensor.empty"() {case = "xu_a1"} : () -> tensor<4x4xf16>
+    %b1 = "tensor.empty"() {case = "xu_b1"} : () -> tensor<4x4xf16>
+    %d1 = "tensor.empty"() {case = "xu_dst1"} : () -> tensor<4x8xf16>
+    %c1 = "hivm.hir.vconcat"(%a1, %b1, %d1) <{dim = 1 : i64, operandSegmentSizes = array<i32: 2, 1>}> {case = "xu_concat1"} : (tensor<4x4xf16>, tensor<4x4xf16>, tensor<4x8xf16>) -> tensor<4x8xf16>
+    "annotation.mark"(%c1) {buffer_size_in_byte = 64 : i64, case = "xu_size1"} : (tensor<4x8xf16>) -> ()
+    %g1 = "memref.alloc"() {case = "xu_gm1"} : () -> memref<4x8xf16>
+    "hivm.hir.store"(%c1, %g1) {case = "xu_store1"} : (tensor<4x8xf16>, memref<4x8xf16>) -> ()
+    %a2 = "tensor.empty"() {case = "xu_a2"} : () -> tensor<4x4xf16>
+    %b2 = "tensor.empty"() {case = "xu_b2"} : () -> tensor<4x4xf16>
+    %d2 = "tensor.empty"() {case = "xu_dst2"} : () -> tensor<4x8xf16>
+    %c2 = "hivm.hir.vconcat"(%a2, %b2, %d2) <{dim = 1 : i64, operandSegmentSizes = array<i32: 2, 1>}> {case = "xu_concat2"} : (tensor<4x4xf16>, tensor<4x4xf16>, tensor<4x8xf16>) -> tensor<4x8xf16>
+    "annotation.mark"(%c2) {buffer_size_in_byte = 64 : i64, case = "xu_size2"} : (tensor<4x8xf16>) -> ()
+    %g2 = "memref.alloc"() {case = "xu_gm2"} : () -> memref<4x8xf16>
+    %g3 = "memref.alloc"() {case = "xu_gm3"} : () -> memref<4x8xf16>
+    "hivm.hir.store"(%c2, %g2) {case = "xu_store2"} : (tensor<4x8xf16>, memref<4x8xf16>) -> ()
+    "hivm.hir.store"(%c2, %g3) {case = "xu_store2_extra"} : (tensor<4x8xf16>, memref<4x8xf16>) -> ()
+    "func.return"() : () -> ()
+  }) {hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<AIV>, hivm.part_of_mix, mix_mode = "aiv"} : () -> ()
 }) : () -> ()

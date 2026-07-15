@@ -3503,23 +3503,23 @@ CVUB_TEST(otf_unaligned_concat_store_rebuilds_insert_slice_chain) {
   const auto &finalAccumulator = DefinitionOf(result.module, store.operands[0]);
   CVUB_CHECK_EQ(finalAccumulator.name, "tensor.insert_slice");
   // The accumulator is seeded from the vconcat destination and threads the two
-  // inputs at their prefix-sum offsets along the (last) concat dimension.
-  const auto &firstInsert = OperationWithCase(result.module, "unaligned_a");
-  const auto &secondInsert = DefinitionOf(result.module, store.operands[0]);
+  // inputs at their prefix-sum offsets along the (last) concat dimension.  The
+  // first insert_slice places unaligned_a at [0, 0]; the second (the store
+  // source) places unaligned_b at the running offset [0, 4] (unaligned_a's
+  // extent along dim 1 == 4).  Asserting both pins the running-offset update.
+  const auto &firstInsertSlice = result.module.operations.at(
+      static_cast<size_t>(OperationId(result.module, "tensor.insert_slice")));
   CVUB_CHECK_EQ(
-      cvub::IRDictionaryValue(
-          result.module.operations.at(static_cast<size_t>(
-              OperationId(result.module, "tensor.insert_slice")))
-              .attributes,
-          "static_offsets"),
+      cvub::IRDictionaryValue(firstInsertSlice.attributes, "static_offsets"),
       "[0, 0]");
-  (void)firstInsert;
+  CVUB_CHECK_EQ(
+      cvub::IRDictionaryValue(finalAccumulator.attributes, "static_offsets"),
+      "[0, 4]");
   // The destination buffer is reused as the accumulator seed, not dropped.
   CVUB_CHECK(HasOperationCase(result.module, "unaligned_dst"));
   CVUB_CHECK(HasOperationCase(result.module, "unaligned_a"));
   CVUB_CHECK(HasOperationCase(result.module, "unaligned_b"));
   cvub::ValidateGenericModule(result.module);
-  (void)secondInsert;
 }
 
 CVUB_TEST(otf_aligned_concat_store_is_recognized_noop) {
@@ -3536,6 +3536,61 @@ CVUB_TEST(otf_aligned_concat_store_is_recognized_noop) {
   CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
   CVUB_CHECK(HasOperationCase(result.module, "aligned_concat"));
   CVUB_CHECK(HasOperationCase(result.module, "aligned_size_mark"));
+  CVUB_CHECK_EQ(OperationCount(result.module, "tensor.insert_slice"), 0U);
+}
+
+CVUB_TEST(licm_loop_invariant_non_speculatable_divsi_fails_closed) {
+  // A loop-invariant arith.divsi whose divisor is a (non-constant) function
+  // argument is NotSpeculatable upstream, so real LICM leaves it in the loop.
+  // The model has no integer-range analysis to prove speculatability, so it must
+  // fail closed: report Incomplete and leave the legal IR untouched rather than
+  // hoisting the op and claiming a wrong Exact.
+  auto module = cvub::test::ParseFixture("code_motion_nonspeculatable.mlir");
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result =
+      cvub::RunLoopInvariantCodeMotion(module, /*enableCodeMotion=*/true);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(
+      HasDiagnostic(result, "LoopInvariantCodeMotion", "speculatable"));
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+}
+
+CVUB_TEST(otf_extra_users_concat_store_fails_closed_before_any_mutation) {
+  // Two unaligned concat-stores: xu_store1 is a clean candidate the pattern
+  // would rewrite, while xu_store2's vconcat feeds an extra user (xu_store2_extra).
+  // The model must classify the extra-user store up front and fail closed BEFORE
+  // the rewrite loop mutates xu_store1, leaving the whole module byte-for-byte
+  // unchanged on Incomplete (no partial rewrite).
+  auto module = cvub::test::ParseFixture("unaligned_concat_store.mlir");
+  auto extra =
+      cvub::ExtractFunctionModule(module, "extra_users_concat_store_aiv");
+  const std::string before = cvub::SerializeGenericModule(extra);
+  const auto result = cvub::RunInlineOTFLoadStore(std::move(extra));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(
+      HasDiagnostic(result, "InlineOTFLoadStore",
+                    "vconcat result has users beyond the store and size mark"));
+  // No store was rewritten: xu_store1 is still a hivm.hir.store of the original
+  // vconcat result, and no insert_slice accumulator was introduced anywhere.
+  CVUB_CHECK(HasOperationCase(result.module, "xu_store1"));
+  CVUB_CHECK(HasOperationCase(result.module, "xu_concat1"));
+  CVUB_CHECK_EQ(OperationCount(result.module, "tensor.insert_slice"), 0U);
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+}
+
+CVUB_TEST(otf_subbyte_concat_store_is_aligned_noop) {
+  // A sub-byte element type (i4 -> elemSizeInBytes = 4/8 = 0) makes every
+  // cumulative-extent alignment check (accumOffset * 0) % 32 == 0 trivially
+  // true, so the real pattern treats the store as an aligned no-op (returns
+  // failure, IR unchanged).  The model mirrors that exactly instead of
+  // spuriously routing the zero byte width to Incomplete.
+  auto module = cvub::test::ParseFixture("otf_subbyte_concat_store.mlir");
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result = cvub::RunInlineOTFLoadStore(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(result.diagnostics.empty());
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+  CVUB_CHECK(HasOperationCase(result.module, "sb_concat"));
   CVUB_CHECK_EQ(OperationCount(result.module, "tensor.insert_slice"), 0U);
 }
 
