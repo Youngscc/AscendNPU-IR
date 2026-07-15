@@ -367,6 +367,10 @@
           <h2>UB Offset x Lifetime</h2>
           <div class="viz">
             <div class="legend" id="legend"></div>
+            <div id="functionSelectorWrap" class="legend" style="display:none;">
+              <label for="functionSelector" style="margin-right:6px;">Function:</label>
+              <select id="functionSelector"></select>
+            </div>
             <div class="chart-wrap">
               <svg id="chart" role="img" aria-label="UB memory plan chart"></svg>
             </div>
@@ -379,6 +383,7 @@
             <table>
               <thead>
                 <tr>
+                  <th>Function</th>
                   <th>Name</th>
                   <th>Extent</th>
                   <th>Offset</th>
@@ -396,7 +401,7 @@
 
   <script>
     const sample = {
-      schema_version: 1,
+      schema_version: 2,
       input: { pre_cvpipeline_ir: "sample/before_cvpipeline_generic.mlir" },
       options: {
         cvpipeline: {
@@ -414,18 +419,39 @@
         }
       },
       result: {
-        precision: "before_cvpipeline_model",
+        precision: "exact",
+        status: "success",
         success: true,
         overflow: false,
         selected_seed: 0,
         restrict_inplace_as_isa: false,
+        ub_peak_bits: 640,
         peak_bits: 640,
         required_bits: 768,
         capacity_bits: 1572864,
+        stage_coverage: [],
+        diagnostics: [],
+        functions: [
+          {
+            source_function: "sample_kernel",
+            function: "sample_kernel",
+            status: "success",
+            success: true,
+            overflow: false,
+            ub_peak_bits: 640,
+            required_bits: 768,
+            selected_seed: 0,
+            buffers: [
+              { name: "%base_0", extent_bits: 256, offset_bytes: 0, alloc_time: 8, free_time: 14 },
+              { name: "%base_1", extent_bits: 128, offset_bytes: 32, alloc_time: 11, free_time: 16 },
+              { name: "%base_2", extent_bits: 128, offset_bytes: 64, alloc_time: 14, free_time: 18 }
+            ]
+          }
+        ],
         plan: [
-          { name: "%base_0", extent_bits: 256, offset_bytes: 0, alloc_time: 8, free_time: 14 },
-          { name: "%base_1", extent_bits: 128, offset_bytes: 32, alloc_time: 11, free_time: 16 },
-          { name: "%base_2", extent_bits: 128, offset_bytes: 64, alloc_time: 14, free_time: 18 }
+          { function: "sample_kernel", name: "%base_0", extent_bits: 256, offset_bytes: 0, alloc_time: 8, free_time: 14 },
+          { function: "sample_kernel", name: "%base_1", extent_bits: 128, offset_bytes: 32, alloc_time: 11, free_time: 16 },
+          { function: "sample_kernel", name: "%base_2", extent_bits: 128, offset_bytes: 64, alloc_time: 14, free_time: 18 }
         ]
       }
     };
@@ -468,73 +494,162 @@
       const trimmed = text.trim();
       if (!trimmed) throw new Error("Paste JSON or text output first.");
       if (trimmed.startsWith("{")) return JSON.parse(trimmed);
-      return parseTextOutput(trimmed);
+      return { schema_version: 2, result: parseTextOutput(trimmed) };
     }
 
     function parseTextOutput(text) {
       const lines = text.split(/\r?\n/);
-      const result = { plan: [] };
+      const result = { functions: [], plan: [] };
+      const header = "function\tname\textent_bits\toffset_bytes\talloc_time\tfree_time";
+      const legacyHeader = "name\textent_bits\toffset_bytes\talloc_time\tfree_time";
       let inPlan = false;
+      const groups = {};
+      const order = [];
+      const flat = [];
       for (const line of lines) {
         if (!line.trim()) continue;
         const parts = line.split("\t");
-        if (parts.join("\t") === "name\textent_bits\toffset_bytes\talloc_time\tfree_time") {
+        if (parts.join("\t") === header || parts.join("\t") === legacyHeader) {
           inPlan = true;
           continue;
         }
         if (inPlan) {
-          if (parts.length < 5) continue;
-          result.plan.push({
-            name: parts[0],
-            extent_bits: Number(parts[1]),
-            offset_bytes: Number(parts[2]),
-            alloc_time: Number(parts[3]),
-            free_time: Number(parts[4])
-          });
+          if (parts.length < 6) continue;
+          const [fn, name, extent, offset, alloc, free] = parts;
+          const buf = { name, extent_bits: Number(extent), offset_bytes: Number(offset),
+                        alloc_time: Number(alloc), free_time: Number(free) };
+          flat.push(Object.assign({ function: fn }, buf));
+          if (!groups[fn]) { groups[fn] = []; order.push(fn); }
+          groups[fn].push(buf);
           continue;
         }
         if (parts.length >= 2) {
           const key = parts[0];
           const value = parts.slice(1).join("\t");
-          if (["peak_bits", "required_bits", "capacity_bits", "selected_seed"].includes(key)) {
+          if (["peak_bits", "required_bits", "capacity_bits", "selected_seed",
+               "function_count", "diagnostic_count"].includes(key)) {
             result[key] = Number(value);
           } else if (["success", "overflow", "restrict_inplace_as_isa"].includes(key)) {
             result[key] = value === "true";
-          } else if (key === "precision") {
+          } else {
             result[key] = value;
           }
         }
       }
-      return { schema_version: 1, result };
+      if (result.ub_peak_bits == null && result.peak_bits != null)
+        result.ub_peak_bits = result.peak_bits;
+      const fnStatus = result.overflow ? "overflow" : "success";
+      result.functions = order.map(name => ({
+        source_function: name, function: name, status: fnStatus,
+        ub_peak_bits: result.ub_peak_bits, required_bits: result.required_bits,
+        selected_seed: result.selected_seed, buffers: groups[name]
+      }));
+      result.plan = flat;
+      return result;
     }
 
-    function normalize(data) {
-      const result = data.result || data;
-      if (!Array.isArray(result.plan)) {
-        throw new Error("Input does not contain result.plan.");
-      }
-      const plan = result.plan.map((buffer, index) => ({
+    function normalizeFunction(fn, fallback) {
+      const buffers = (fn.buffers || []).map((b, i) => bufferToView(b, i, fn.function || fn.name));
+      return {
+        name: String(fn.function ?? fn.name ?? ""),
+        source: String(fn.source_function ?? fn.function ?? ""),
+        status: String(fn.status ?? fallback.status ?? ""),
+        peakBits: Number(fn.ub_peak_bits ?? fn.peak_bits ?? fn.peakBits ?? fallback.modulePeakBits ?? 0),
+        requiredBits: Number(fn.required_bits ?? fn.requiredBits ?? fallback.moduleRequiredBits ?? 0),
+        seed: fn.selected_seed,
+        buffers
+      };
+    }
+
+    function bufferToView(buffer, index, functionName) {
+      return {
+        function: String(buffer.function ?? functionName ?? ""),
         name: String(buffer.name ?? `buffer_${index}`),
         extentBits: Number(buffer.extent_bits ?? buffer.extentBits ?? 0),
         offsetBytes: Number(buffer.offset_bytes ?? buffer.offsetBytes ?? 0),
         allocTime: Number(buffer.alloc_time ?? buffer.allocTime ?? 0),
         freeTime: Number(buffer.free_time ?? buffer.freeTime ?? 0)
-      })).filter(buffer => Number.isFinite(buffer.extentBits) &&
-                           Number.isFinite(buffer.offsetBytes) &&
-                           Number.isFinite(buffer.allocTime) &&
-                           Number.isFinite(buffer.freeTime));
-      if (plan.length === 0) throw new Error("The plan table is empty.");
-      return { data, result, plan };
+      };
     }
+
+    function normalize(data) {
+      const result = data.result || data;
+      const modulePeakBits = Number(result.ub_peak_bits ?? result.peak_bits ?? result.peakBits ?? 0);
+      const moduleRequiredBits = Number(result.required_bits ?? result.requiredBits ?? 0);
+      const capacityBits = Number(result.capacity_bits ?? result.capacityBits ?? 0);
+      const status = result.status ||
+        (result.overflow ? "overflow" : (result.success !== false ? "success" : "blocked"));
+      const fallback = { status, modulePeakBits, moduleRequiredBits };
+
+      let functions;
+      if (Array.isArray(result.functions) && result.functions.length > 0 &&
+          result.functions[0] && Array.isArray(result.functions[0].buffers)) {
+        functions = result.functions.map(fn => normalizeFunction(fn, fallback));
+      } else {
+        const flat = Array.isArray(result.plan) ? result.plan : [];
+        const groups = {};
+        const order = [];
+        flat.forEach((buffer, index) => {
+          const name = String(buffer.function ?? "(function)");
+          if (!groups[name]) { groups[name] = []; order.push(name); }
+          groups[name].push(bufferToView(buffer, index, name));
+        });
+        functions = order.map(name => ({
+          name, source: name, status,
+          peakBits: modulePeakBits, requiredBits: moduleRequiredBits,
+          seed: result.selected_seed, buffers: groups[name]
+        }));
+      }
+      const totalBuffers = functions.reduce((n, fn) => n + fn.buffers.length, 0);
+      if (totalBuffers === 0)
+        throw new Error("Input does not contain any planned buffers.");
+      return { data, result, functions, modulePeakBits, moduleRequiredBits,
+               capacityBits, status, precision: result.precision ?? "" };
+    }
+
+    let currentModel = null;
+    let selectedFunction = null;
 
     function render(data) {
       const model = normalize(data);
+      currentModel = model;
+      // Default to the function whose peak drives the module max; this keeps the
+      // chart honest (module max is never the sum of per-function extents).
+      let chosen = model.functions[0];
+      for (const fn of model.functions)
+        if (fn.peakBits > (chosen.peakBits || 0)) chosen = fn;
+      selectedFunction = chosen.name;
       renderSummary(model);
-      renderChart(model);
-      renderTable(model.plan);
+      renderFunctionSelector(model);
+      renderChart(model, selectedFunction);
+      renderTable(model);
       inputText.value = JSON.stringify(data, null, 2);
-      status.textContent = `Rendered ${model.plan.length} buffers.`;
+      const totalBuffers = model.functions.reduce((n, fn) => n + fn.buffers.length, 0);
+      status.textContent = `Rendered ${totalBuffers} buffers across ${model.functions.length} function(s).`;
     }
+
+    function renderFunctionSelector(model) {
+      const wrap = document.getElementById("functionSelectorWrap");
+      const select = document.getElementById("functionSelector");
+      select.innerHTML = "";
+      if (model.functions.length <= 1) {
+        wrap.style.display = "none";
+        return;
+      }
+      wrap.style.display = "";
+      model.functions.forEach(fn => {
+        const opt = document.createElement("option");
+        opt.value = fn.name;
+        opt.textContent = `${fn.name} (peak ${formatBits(fn.peakBits)})`;
+        select.append(opt);
+      });
+      select.value = selectedFunction;
+    }
+
+    document.getElementById("functionSelector").addEventListener("change", () => {
+      selectedFunction = document.getElementById("functionSelector").value;
+      if (currentModel) renderChart(currentModel, selectedFunction);
+    });
 
     function clearView() {
       inputText.value = "";
@@ -545,32 +660,38 @@
       document.getElementById("planTable").innerHTML = "";
       document.getElementById("capacityFill").style.width = "0%";
       document.getElementById("chart").innerHTML = "";
+      const wrap = document.getElementById("functionSelectorWrap");
+      if (wrap) wrap.style.display = "none";
+      currentModel = null;
+      selectedFunction = null;
     }
 
-    function renderSummary({ data, result, plan }) {
-      const requiredBits = Number(result.required_bits ?? result.requiredBits ?? 0);
-      const peakBits = Number(result.peak_bits ?? result.peakBits ?? requiredBits);
-      const capacityBits = Number(result.capacity_bits ?? result.capacityBits ?? 0);
-      const overflow = Boolean(result.overflow);
-      const success = result.success !== false && !overflow;
-      const usage = capacityBits > 0 ? requiredBits / capacityBits : 0;
+    function renderSummary(model) {
+      const { result, functions, modulePeakBits, moduleRequiredBits, capacityBits, status } = model;
+      const overflow = status === "overflow";
+      const tone = overflow ? "danger" : status === "success" ? "ok" : "warn";
+      const label = overflow ? "Overflow" : status === "success" ? "Success" : "Blocked";
+      const usage = capacityBits > 0 ? moduleRequiredBits / capacityBits : 0;
+      const totalBuffers = functions.reduce((n, fn) => n + fn.buffers.length, 0);
       const summary = document.getElementById("summary");
       summary.innerHTML = "";
       summary.append(
-        metric("Status", overflow ? "Overflow" : success ? "Success" : "Blocked", overflow ? "danger" : success ? "ok" : "warn"),
-        metric("Peak", formatBits(peakBits), overflow ? "danger" : "ok"),
-        metric("Required", formatBits(requiredBits), overflow ? "danger" : ""),
-        metric("Buffers", String(plan.length), "")
+        metric("Status", label, tone),
+        metric("Peak (module max)", formatBits(modulePeakBits), overflow ? "danger" : "ok"),
+        metric("Required", formatBits(moduleRequiredBits), overflow ? "danger" : ""),
+        metric("Functions", String(functions.length), "")
       );
       const fill = document.getElementById("capacityFill");
       fill.style.width = `${Math.min(100, Math.max(0, usage * 100))}%`;
       fill.classList.toggle("overflow", overflow);
 
-      const inputPath = data.input && data.input.pre_cvpipeline_ir ? data.input.pre_cvpipeline_ir : "";
+      const inputPath = model.data.input && model.data.input.pre_cvpipeline_ir
+        ? model.data.input.pre_cvpipeline_ir : "";
       const metadata = document.getElementById("metadata");
       metadata.innerHTML = "";
       const rows = [
-        ["Precision", result.precision ?? ""],
+        ["Precision", model.precision ?? ""],
+        ["Buffers", String(totalBuffers)],
         ["Seed", result.selected_seed ?? ""],
         ["Restrict Inplace", result.restrict_inplace_as_isa ?? ""],
         ["Capacity", formatBits(capacityBits)],
@@ -599,7 +720,9 @@
       return node;
     }
 
-    function renderChart({ result, plan }) {
+    function renderChart(model, functionName) {
+      const fn = model.functions.find(f => f.name === functionName) || model.functions[0];
+      const plan = fn.buffers;
       const svg = document.getElementById("chart");
       svg.innerHTML = "";
       const width = Math.max(760, svg.clientWidth || 920);
@@ -609,9 +732,10 @@
 
       const minTime = Math.min(...plan.map(buffer => buffer.allocTime));
       const maxTime = Math.max(...plan.map(buffer => buffer.freeTime), minTime + 1);
-      const maxEndByte = Math.max(...plan.map(buffer => buffer.offsetBytes + bitsToBytes(buffer.extentBits)));
-      const requiredBits = Number(result.required_bits ?? result.requiredBits ?? maxEndByte * 8);
-      const yMax = Math.max(maxEndByte, bitsToBytes(requiredBits), 1);
+      const maxEndByte = Math.max(...plan.map(buffer => buffer.offsetBytes + bitsToBytes(buffer.extentBits)), 1);
+      // The chart's extent uses the module max (not a sum across functions).
+      const yMax = Math.max(maxEndByte, bitsToBytes(model.modulePeakBits),
+                            bitsToBytes(model.moduleRequiredBits), 1);
       const innerWidth = width - margin.left - margin.right;
       const innerHeight = height - margin.top - margin.bottom;
       const x = time => margin.left + ((time - minTime) / Math.max(1, maxTime - minTime)) * innerWidth;
@@ -693,7 +817,7 @@
         });
         rect.append(element("title", {}));
         rect.querySelector("title").textContent =
-          `${buffer.name}\n${formatBits(buffer.extentBits)} at ${formatBytes(buffer.offsetBytes)}\n${buffer.allocTime} -> ${buffer.freeTime}`;
+          `${fn.name} :: ${buffer.name}\n${formatBits(buffer.extentBits)} at ${formatBytes(buffer.offsetBytes)}\n${buffer.allocTime} -> ${buffer.freeTime}`;
         group.append(rect);
 
         if (x(buffer.freeTime) - x(buffer.allocTime) > 54 &&
@@ -708,7 +832,8 @@
         }
       });
 
-      const peakByte = bitsToBytes(requiredBits);
+      // Module-max peak line (the report's headline figure, never a cross-function sum).
+      const peakByte = bitsToBytes(model.modulePeakBits || model.moduleRequiredBits);
       group.append(element("line", {
         class: "peak-line",
         x1: margin.left,
@@ -722,11 +847,12 @@
         y: y(peakByte) - 6,
         "text-anchor": "end"
       });
-      peakLabel.textContent = `required ${formatBits(requiredBits)}`;
+      peakLabel.textContent = `module peak ${formatBits(model.modulePeakBits)}`;
       group.append(peakLabel);
 
       const legend = document.getElementById("legend");
       legend.innerHTML = "";
+      const legendPrefix = model.functions.length > 1 ? `${fn.name}: ` : "";
       plan.slice(0, 24).forEach((buffer, index) => {
         const item = document.createElement("span");
         item.className = "legend-item";
@@ -734,7 +860,7 @@
         swatch.className = "swatch";
         swatch.style.background = palette[index % palette.length];
         const name = document.createElement("span");
-        name.textContent = buffer.name;
+        name.textContent = `${legendPrefix}${buffer.name}`;
         item.append(swatch, name);
         legend.append(item);
       });
@@ -745,29 +871,32 @@
       }
     }
 
-    function renderTable(plan) {
+    function renderTable(model) {
       const tbody = document.getElementById("planTable");
       tbody.innerHTML = "";
-      const sorted = [...plan].sort((a, b) =>
-        a.allocTime - b.allocTime || a.offsetBytes - b.offsetBytes ||
-        a.name.localeCompare(b.name));
-      for (const buffer of sorted) {
-        const tr = document.createElement("tr");
-        const endByte = buffer.offsetBytes + bitsToBytes(buffer.extentBits);
-        const cells = [
-          [buffer.name, "name"],
-          [formatBits(buffer.extentBits), ""],
-          [formatBytes(buffer.offsetBytes), ""],
-          [`${buffer.allocTime} -> ${buffer.freeTime}`, ""],
-          [formatBytes(endByte), ""]
-        ];
-        for (const [value, className] of cells) {
-          const td = document.createElement("td");
-          td.textContent = value;
-          if (className) td.className = className;
-          tr.append(td);
+      for (const fn of model.functions) {
+        const sorted = [...fn.buffers].sort((a, b) =>
+          a.allocTime - b.allocTime || a.offsetBytes - b.offsetBytes ||
+          a.name.localeCompare(b.name));
+        for (const buffer of sorted) {
+          const tr = document.createElement("tr");
+          const endByte = buffer.offsetBytes + bitsToBytes(buffer.extentBits);
+          const cells = [
+            [fn.name, "name"],
+            [buffer.name, "name"],
+            [formatBits(buffer.extentBits), ""],
+            [formatBytes(buffer.offsetBytes), ""],
+            [`${buffer.allocTime} -> ${buffer.freeTime}`, ""],
+            [formatBytes(endByte), ""]
+          ];
+          for (const [value, className] of cells) {
+            const td = document.createElement("td");
+            td.textContent = value;
+            if (className) td.className = className;
+            tr.append(td);
+          }
+          tbody.append(tr);
         }
-        tbody.append(tr);
       }
     }
 

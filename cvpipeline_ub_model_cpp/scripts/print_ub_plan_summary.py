@@ -58,9 +58,14 @@ def main() -> int:
     cvpipeline = options.get("cvpipeline", {})
     suffix = options.get("suffix_planmemory", {})
     plan = result.get("plan", [])
+    functions = result.get("functions", [])
 
-    status = "OVERFLOW" if result.get("overflow") else (
-        "SUCCESS" if result.get("success", False) else "BLOCKED")
+    status = result.get("status")
+    if not status:
+        status = "OVERFLOW" if result.get("overflow") else (
+            "SUCCESS" if result.get("success", False) else "BLOCKED")
+    status = status.upper()
+    peak_bits = result.get("ub_peak_bits", result.get("peak_bits"))
     required_bits = int(result.get("required_bits") or 0)
     capacity_bits = int(result.get("capacity_bits") or 0)
     usage = (required_bits / capacity_bits * 100.0) if capacity_bits else 0.0
@@ -69,11 +74,12 @@ def main() -> int:
     print(divider())
     print(f"Status        : {status}")
     print(f"Precision     : {result.get('precision', '')}")
-    print(f"Peak          : {bit_size(result.get('peak_bits'))}")
+    print(f"Peak (module) : {bit_size(peak_bits)}")
     print(f"Required      : {bit_size(required_bits)}")
     print(f"Capacity      : {bit_size(capacity_bits)}")
     print(f"Usage         : {usage:.4f}%")
     print(f"Selected seed : {result.get('selected_seed', '')}")
+    print(f"Functions     : {len(functions) if functions else '(not reported)'}")
     print(f"Buffers       : {len(plan)}")
     print()
     print("CVPipeline options")
@@ -92,21 +98,45 @@ def main() -> int:
     print(f"restrict_inplace   : {bool_text(suffix.get('restrict_inplace_as_isa'))}")
     print()
 
+    if functions:
+        print("Per-function UB (module reports the max, never the sum)")
+        print(divider())
+        widths = [24, 10, 12, 12, 8]
+        print(row(["function", "status", "peak", "required", "seed"], widths))
+        print(row(["-" * 24, "-" * 10, "-" * 12, "-" * 12, "-" * 8], widths))
+        for function in functions:
+            print(row([
+                str(function.get("function", ""))[:24],
+                str(function.get("status", "")),
+                bit_size(function.get("ub_peak_bits")),
+                bit_size(function.get("required_bits")),
+                str(function.get("selected_seed", "")),
+            ], widths))
+        print()
+
     if not plan:
         print("No buffer plan was emitted.")
     else:
-        print(f"Buffer plan (first {min(args.max_buffers, len(plan))})")
+        shown = min(args.max_buffers, len(plan))
+        print(f"Buffer plan (first {shown}, grouped by function)")
         print(divider())
-        widths = [24, 12, 10, 12, 10]
-        print(row(["name", "extent", "offset", "live", "end"], widths))
-        print(row(["-" * 24, "-" * 12, "-" * 10, "-" * 12, "-" * 10],
+        widths = [20, 20, 11, 9, 11, 9]
+        print(row(["function", "name", "extent", "offset", "live", "end"], widths))
+        print(row(["-" * 20, "-" * 20, "-" * 11, "-" * 9, "-" * 11, "-" * 9],
                   widths))
+        current = None
         for buffer in plan[: args.max_buffers]:
+            function = str(buffer.get("function", ""))
+            if current is None or function != current:
+                current = function
+                label = function if function else "(unknown function)"
+                print(row([f"[{label}]", "", "", "", "", ""], widths))
             extent_bits = int(buffer.get("extent_bits") or 0)
             offset_bytes = int(buffer.get("offset_bytes") or 0)
             end_bytes = offset_bytes + (extent_bits + 7) // 8
             print(row([
-                str(buffer.get("name", ""))[:24],
+                "",
+                str(buffer.get("name", ""))[:20],
                 bit_size(extent_bits),
                 byte_size(offset_bytes),
                 f"{buffer.get('alloc_time')}->{buffer.get('free_time')}",

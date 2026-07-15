@@ -118,6 +118,7 @@ def model_command(args: argparse.Namespace) -> list[str]:
         str(args.model),
         "--action=plan-before-cvpipeline",
         "--before-cvpipeline-ir", str(args.pre_cvpipeline_ir),
+        "--format", str(args.format),
         "--cv-pipeline-depth", str(args.cv_pipeline_depth),
         f"--disable-cv-pipelining={str(args.cv_disable_pipelining).lower()}",
         f"--enable-preload={str(args.cv_enable_preload).lower()}",
@@ -139,34 +140,70 @@ def run_model(args: argparse.Namespace) -> subprocess.CompletedProcess[str]:
     return subprocess.run(model_command(args), text=True, capture_output=True)
 
 
+def parse_model_json(stdout: str) -> dict[str, Any]:
+    """Parse the C++ model's JSON contract and attach a flat, per-buffer
+    ``plan`` array (each carrying a ``function`` field) for backward
+    compatibility with consumers that expect a single buffer list."""
+    contract = json.loads(stdout)
+    flat_plan: list[dict[str, Any]] = []
+    for function in contract.get("functions", []):
+        for buffer in function.get("buffers", []):
+            flat_plan.append({
+                "function": function.get("function", ""),
+                "source_function": function.get("source_function", ""),
+                "name": buffer.get("name", ""),
+                "extent_bits": int(buffer.get("extent_bits", 0)),
+                "offset_bytes": int(buffer.get("offset_bytes", 0)),
+                "alloc_time": int(buffer.get("alloc_time", 0)),
+                "free_time": int(buffer.get("free_time", 0)),
+            })
+    contract["plan"] = flat_plan
+    if "peak_bits" not in contract and "ub_peak_bits" in contract:
+        contract["peak_bits"] = contract["ub_peak_bits"]
+    return contract
+
+
 def parse_model_text(stdout: str) -> dict[str, Any]:
     result: dict[str, Any] = {}
     plan: list[dict[str, Any]] = []
+    functions: dict[str, dict[str, Any]] = {}
     in_plan = False
+    plan_header = "function\tname\textent_bits\toffset_bytes\talloc_time\tfree_time"
     for line in stdout.splitlines():
-        if line == "name\textent_bits\toffset_bytes\talloc_time\tfree_time":
+        if line == plan_header:
             in_plan = True
             continue
         if in_plan:
-            name, extent_bits, offset_bytes, alloc_time, free_time = line.split("\t")
-            plan.append({
+            parts = line.split("\t")
+            if len(parts) < 6:
+                continue
+            function, name, extent_bits, offset_bytes, alloc_time, free_time = parts[:6]
+            entry = {
+                "function": function,
                 "name": name,
                 "extent_bits": int(extent_bits),
                 "offset_bytes": int(offset_bytes),
                 "alloc_time": int(alloc_time),
                 "free_time": int(free_time),
-            })
+            }
+            plan.append(entry)
+            functions.setdefault(function, {"function": function, "buffers": []})
+            functions[function]["buffers"].append(entry)
             continue
         if "\t" not in line:
             continue
         key, value = line.split("\t", 1)
         if key in {"success", "overflow", "restrict_inplace_as_isa"}:
             result[key] = value == "true"
-        elif key in {"selected_seed", "peak_bits", "required_bits", "capacity_bits"}:
-            result[key] = int(value)
+        elif key in {"selected_seed", "peak_bits", "required_bits",
+                     "capacity_bits", "function_count", "diagnostic_count"}:
+            result[key] = int(value) if value else 0
         else:
             result[key] = value
+    if "peak_bits" not in result and "ub_peak_bits" in result:
+        result["peak_bits"] = result["ub_peak_bits"]
     result["plan"] = plan
+    result["functions"] = list(functions.values())
     return result
 
 
@@ -213,15 +250,16 @@ def text_report(args: argparse.Namespace,
 
 def json_report(args: argparse.Namespace,
                 process: subprocess.CompletedProcess[str]) -> str:
+    result = parse_model_json(process.stdout) if process.stdout else None
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "input": {
             "pre_cvpipeline_ir": str(args.pre_cvpipeline_ir),
         },
         "options": options_payload(args),
         "model_returncode": process.returncode,
         "model_stderr": process.stderr.strip(),
-        "result": parse_model_text(process.stdout) if process.stdout else None,
+        "result": result,
     }
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 

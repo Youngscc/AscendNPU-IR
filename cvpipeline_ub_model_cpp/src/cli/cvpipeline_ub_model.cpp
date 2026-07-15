@@ -5,14 +5,18 @@
 
 #include "../cvpipeline/cvpipelining_pass.hpp"
 #include "../model_core.hpp"
+#include "../post_cvpipeline/pipeline.hpp"
+#include "../post_cvpipeline/planning.hpp"
 #include "../suffix/suffix_pipeline.hpp"
 
+#include <algorithm>
 #include <exception>
 #include <iostream>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 struct Options {
@@ -205,6 +209,72 @@ std::string jsonEscape(const std::string &value) {
   return result;
 }
 
+const char *boolStr(bool value) { return value ? "true" : "false"; }
+
+std::string precisionString(cvub::Precision precision) {
+  return precision == cvub::Precision::Exact ? "exact" : "incomplete";
+}
+
+std::string coverageDispositionName(cvub::CoverageDisposition disposition) {
+  switch (disposition) {
+  case cvub::CoverageDisposition::Modeled:
+    return "modeled";
+  case cvub::CoverageDisposition::UBInvariant:
+    return "ub-invariant";
+  case cvub::CoverageDisposition::Unsupported:
+    return "unsupported";
+  }
+  return "unsupported";
+}
+
+// Status derivation: a successful module is "success"; a module with any
+// overflowing function is "overflow"; anything else (e.g. a projected module
+// that violated the one-AIV invariant) is a "blocker".  Precision is orthogonal
+// and never changes the status-derived exit code.
+std::string moduleStatus(const cvub::ModulePlanResult &result) {
+  if (result.success)
+    return "success";
+  if (result.overflow)
+    return "overflow";
+  return "blocker";
+}
+
+std::string functionStatus(const cvub::FunctionPlanResult &function) {
+  if (function.plan.success)
+    return "success";
+  if (function.plan.overflow)
+    return "overflow";
+  return "blocker";
+}
+
+// 0 success, 2 overflow, 1 blocker.  Incomplete precision does not alter the
+// status-derived code.
+int exitCodeFor(const cvub::ModulePlanResult &result) {
+  if (result.success)
+    return 0;
+  if (result.overflow)
+    return 2;
+  return 1;
+}
+
+cvub::Precision combinedPrecision(const cvub::PostCVPipelineResult &projected,
+                                  const cvub::ModulePlanResult &planned) {
+  if (projected.precision == cvub::Precision::Incomplete ||
+      planned.precision == cvub::Precision::Incomplete)
+    return cvub::Precision::Incomplete;
+  return cvub::Precision::Exact;
+}
+
+// The five real PostCVPipelineOptions defaults the model assumes (the CLI does
+// not expose post-CVPipeline knobs, so every run uses these defaults).
+void emitAssumedPostCVPipelineOptionsJson(std::ostream &out) {
+  out << "    \"tile_mix_vector_loop\": 2,\n"
+      << "    \"tile_mix_cube_loop\": 2,\n"
+      << "    \"enable_auto_bind_sub_block\": true,\n"
+      << "    \"enable_code_motion\": true,\n"
+      << "    \"enable_ubuf_saving\": false\n";
+}
+
 int analyzeLifetimes(const Options &opts) {
   if (opts.beforePlanMemoryIR.empty()) {
     std::cerr << "[ERROR] --before-planmemory-ir is required\n";
@@ -276,37 +346,18 @@ int dumpLivenessState(const Options &opts) {
 
 int planLocalMemory(const Options &opts) {
   const bool fromSuffix = opts.action == "plan-before-one-shot-bufferize";
-  const bool fromBeforeCVPipeline = opts.action == "plan-before-cvpipeline";
-  if ((!fromSuffix && !fromBeforeCVPipeline && opts.beforePlanMemoryIR.empty()) ||
-      (fromSuffix && opts.beforeOneShotBufferizeIR.empty()) ||
-      (fromBeforeCVPipeline && opts.beforeCVPipelineIR.empty())) {
+  if ((!fromSuffix && opts.beforePlanMemoryIR.empty()) ||
+      (fromSuffix && opts.beforeOneShotBufferizeIR.empty())) {
     std::cerr << "[ERROR] "
-              << (fromBeforeCVPipeline
-                      ? "--before-cvpipeline-ir"
-                      : (fromSuffix ? "--before-one-shot-bufferize-ir"
-                                    : "--before-planmemory-ir"))
+              << (fromSuffix ? "--before-one-shot-bufferize-ir"
+                             : "--before-planmemory-ir")
               << " is required\n";
     return 1;
   }
   if (opts.format != "text" && opts.format != "json")
     throw std::runtime_error("--format must be text or json");
   cvub::PlanMemoryModelResult result;
-  if (fromBeforeCVPipeline) {
-    cvub::GenericModule module =
-        cvub::ParseGenericIR(opts.beforeCVPipelineIR, false);
-    for (cvub::GenericOperation &operation : module.operations)
-      if (cvub::HasModeledOperationSemantics(operation.name))
-        cvub::ApplyOperationSemantics(operation);
-    module = cvub::RunCVPipeliningPass(std::move(module),
-                                       cvPipeliningOptions(opts));
-    const cvub::PlanMemoryInput input =
-        cvub::BuildSuffixPlanMemoryInput(std::move(module),
-                                         suffixPipelineOptions(opts));
-    result = opts.randomSeed
-                 ? cvub::PlanLocalMemoryForSeed(
-                       input, *opts.randomSeed, opts.restrictInplaceAsISA)
-                 : cvub::PlanLocalMemory(input, opts.restrictInplaceAsISA);
-  } else if (fromSuffix) {
+  if (fromSuffix) {
     const cvub::PlanMemoryInput input =
         cvub::BuildSuffixPlanMemoryInput(opts.beforeOneShotBufferizeIR,
                                          suffixPipelineOptions(opts));
@@ -370,6 +421,191 @@ int planLocalMemory(const Options &opts) {
   return result.success ? 0 : 2;
 }
 
+// Emits the per-function CVPipeline UB plan for the `plan-before-cvpipeline`
+// action.  Replaces the historical direct CVPipeline -> suffix bridge call with
+// the post-CVPipeline AIV projection + per-function planning chain, then reports
+// module and per-function results as stable JSON or text.
+int planBeforeCVPipeline(const Options &opts) {
+  if (opts.beforeCVPipelineIR.empty()) {
+    std::cerr << "[ERROR] --before-cvpipeline-ir is required\n";
+    return 1;
+  }
+  if (opts.format != "text" && opts.format != "json")
+    throw std::runtime_error("--format must be text or json");
+
+  cvub::GenericModule module =
+      cvub::ParseGenericIR(opts.beforeCVPipelineIR, false);
+  for (cvub::GenericOperation &operation : module.operations)
+    if (cvub::HasModeledOperationSemantics(operation.name))
+      cvub::ApplyOperationSemantics(operation);
+  module = cvub::RunCVPipeliningPass(std::move(module),
+                                     cvPipeliningOptions(opts));
+  const cvub::PostCVPipelineResult projected =
+      cvub::RunPostCVPipelineAIVProjection(std::move(module),
+                                           cvub::PostCVPipelineOptions{});
+  const cvub::ModulePlanResult result = cvub::PlanProjectedAIVFunctions(
+      projected, suffixPipelineOptions(opts), opts.randomSeed,
+      opts.restrictInplaceAsISA);
+
+  const cvub::Precision precision = combinedPrecision(projected, result);
+  const std::string status = moduleStatus(result);
+  // Module UB peak is the max of per-function raw simultaneous peaks: projected
+  // functions execute independently, so the module never sees their peaks sum.
+  // required_bits is the module effective requirement (max of per-function
+  // effective requirements) computed by PlanProjectedAIVFunctions.
+  uint64_t modulePeakBits = 0;
+  for (const cvub::FunctionPlanResult &function : result.functions)
+    modulePeakBits = std::max(modulePeakBits, function.plan.peakBits);
+  // Top-level seed is reported only when every planned function settled on the
+  // same retry seed; otherwise null, so the report never invents a single
+  // global seed for independently-planned functions.
+  std::optional<uint32_t> moduleSeed;
+  if (!result.functions.empty()) {
+    const uint32_t first = result.functions.front().plan.selectedSeed;
+    bool agrees = true;
+    for (const cvub::FunctionPlanResult &function : result.functions)
+      if (function.plan.selectedSeed != first) {
+        agrees = false;
+        break;
+      }
+    if (agrees)
+      moduleSeed = first;
+  }
+  // Diagnostics combine post-CVPipeline stage diagnostics (why precision is
+  // incomplete) with per-function planning diagnostics (e.g. one-AIV invariant).
+  std::vector<cvub::PostCVPipelineDiagnostic> diagnostics = projected.diagnostics;
+  diagnostics.insert(diagnostics.end(), result.diagnostics.begin(),
+                     result.diagnostics.end());
+
+  if (opts.format == "json") {
+    std::cout << "{\n"
+              << "  \"precision\": \"" << precisionString(precision) << "\",\n"
+              << "  \"status\": \"" << status << "\",\n"
+              << "  \"success\": " << boolStr(result.success) << ",\n"
+              << "  \"overflow\": " << boolStr(result.overflow) << ",\n"
+              << "  \"ub_peak_bits\": ";
+    if (status == "blocker")
+      std::cout << "null";
+    else
+      std::cout << modulePeakBits;
+    std::cout << ",\n  \"required_bits\": ";
+    if (status == "blocker")
+      std::cout << "null";
+    else
+      std::cout << result.requiredBits;
+    std::cout << ",\n"
+              << "  \"capacity_bits\": " << result.capacityBits << ",\n"
+              << "  \"restrict_inplace_as_isa\": "
+              << boolStr(opts.restrictInplaceAsISA) << ",\n"
+              << "  \"selected_seed\": ";
+    if (moduleSeed)
+      std::cout << *moduleSeed;
+    else
+      std::cout << "null";
+    std::cout << ",\n"
+              << "  \"assumed_post_cvpipeline_options\": {\n";
+    emitAssumedPostCVPipelineOptionsJson(std::cout);
+    std::cout << "  },\n";
+
+    std::cout << "  \"stage_coverage\": [\n";
+    for (size_t i = 0; i < projected.coverage.size(); ++i) {
+      const cvub::StageCoverage &stage = projected.coverage[i];
+      std::cout << "    {\"stage\": \"" << jsonEscape(stage.stage)
+                << "\", \"disposition\": \""
+                << coverageDispositionName(stage.disposition) << "\"}";
+      std::cout << (i + 1 == projected.coverage.size() ? "\n" : ",\n");
+    }
+    std::cout << "  ],\n";
+
+    std::cout << "  \"functions\": [\n";
+    for (size_t i = 0; i < result.functions.size(); ++i) {
+      const cvub::FunctionPlanResult &function = result.functions[i];
+      std::cout << "    {\n"
+                << "      \"source_function\": \""
+                << jsonEscape(function.sourceFunction) << "\",\n"
+                << "      \"function\": \"" << jsonEscape(function.function)
+                << "\",\n"
+                << "      \"status\": \"" << functionStatus(function)
+                << "\",\n"
+                << "      \"success\": " << boolStr(function.plan.success)
+                << ",\n"
+                << "      \"overflow\": " << boolStr(function.plan.overflow)
+                << ",\n"
+                << "      \"ub_peak_bits\": " << function.plan.peakBits
+                << ",\n"
+                << "      \"required_bits\": " << function.plan.requiredBits
+                << ",\n"
+                << "      \"selected_seed\": " << function.plan.selectedSeed
+                << ",\n"
+                << "      \"buffers\": [\n";
+      bool firstBuffer = true;
+      for (const cvub::PlannedBufferRecord &record : function.plan.buffers) {
+        for (uint64_t offset : record.offsetsBytes) {
+          if (!firstBuffer)
+            std::cout << ",\n";
+          firstBuffer = false;
+          std::cout << "        {\"name\": \"" << jsonEscape(record.name)
+                    << "\", \"extent_bits\": " << record.constBits
+                    << ", \"offset_bytes\": " << offset
+                    << ", \"alloc_time\": " << record.allocTime
+                    << ", \"free_time\": " << record.freeTime << "}";
+        }
+      }
+      if (!firstBuffer)
+        std::cout << "\n      ";
+      std::cout << "]\n"
+                << "    }";
+      std::cout << (i + 1 == result.functions.size() ? "\n" : ",\n");
+    }
+    std::cout << "  ],\n";
+
+    std::cout << "  \"diagnostics\": [\n";
+    for (size_t i = 0; i < diagnostics.size(); ++i) {
+      const cvub::PostCVPipelineDiagnostic &diagnostic = diagnostics[i];
+      std::cout << "    {\"pipeline_stage\": \""
+                << jsonEscape(diagnostic.pipelineStage) << "\", \"function\": \""
+                << jsonEscape(diagnostic.function) << "\", \"operation_id\": "
+                << diagnostic.operationId << ", \"operation\": \""
+                << jsonEscape(diagnostic.operation) << "\", \"reason\": \""
+                << jsonEscape(diagnostic.reason) << "\"}";
+      std::cout << (i + 1 == diagnostics.size() ? "\n" : ",\n");
+    }
+    std::cout << "  ]\n"
+              << "}\n";
+    return exitCodeFor(result);
+  }
+
+  std::cout << "precision\t" << precisionString(precision) << "\n";
+  std::cout << "status\t" << status << "\n";
+  std::cout << "success\t" << boolStr(result.success) << "\n";
+  std::cout << "overflow\t" << boolStr(result.overflow) << "\n";
+  std::cout << "selected_seed\t"
+            << (moduleSeed ? std::to_string(*moduleSeed) : std::string())
+            << "\n";
+  std::cout << "restrict_inplace_as_isa\t" << boolStr(opts.restrictInplaceAsISA)
+            << "\n";
+  std::cout << "peak_bits\t" << modulePeakBits << "\n";
+  std::cout << "required_bits\t" << result.requiredBits << "\n";
+  std::cout << "capacity_bits\t" << result.capacityBits << "\n";
+  std::cout << "function_count\t" << result.functions.size() << "\n";
+  std::cout << "diagnostic_count\t" << diagnostics.size() << "\n";
+  std::cout << "assumed_post_cvpipeline_options.tile_mix_vector_loop\t2\n";
+  std::cout << "assumed_post_cvpipeline_options.tile_mix_cube_loop\t2\n";
+  std::cout << "assumed_post_cvpipeline_options.enable_auto_bind_sub_block\ttrue\n";
+  std::cout << "assumed_post_cvpipeline_options.enable_code_motion\ttrue\n";
+  std::cout << "assumed_post_cvpipeline_options.enable_ubuf_saving\tfalse\n";
+  std::cout << "function\tname\textent_bits\toffset_bytes\talloc_time\tfree_time\n";
+  for (const cvub::FunctionPlanResult &function : result.functions) {
+    for (const cvub::PlannedBufferRecord &record : function.plan.buffers) {
+      for (uint64_t offset : record.offsetsBytes)
+        std::cout << function.function << "\t" << record.name << "\t"
+                  << record.constBits << "\t" << offset << "\t"
+                  << record.allocTime << "\t" << record.freeTime << "\n";
+    }
+  }
+  return exitCodeFor(result);
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -385,24 +621,50 @@ int main(int argc, char **argv) {
     if (opts.action == "plan-before-one-shot-bufferize")
       return planLocalMemory(opts);
     if (opts.action == "plan-before-cvpipeline")
-      return planLocalMemory(opts);
+      return planBeforeCVPipeline(opts);
     std::cerr << "[ERROR] unknown or missing --action: " << opts.action << "\n";
     return 1;
   } catch (const std::exception &ex) {
     if (opts.format == "json") {
-      const std::string oracle = actionOracle(opts.action);
-      std::cout << "{\n"
-                << "  \"precision\": \"blocked\",\n"
-                << "  \"oracle\": \"" << oracle << "\",\n"
-                << "  \"status\": \"blocker\",\n"
-                << "  \"ub_peak_bits\": null,\n"
-                << "  \"required_bits\": null,\n"
-                << "  \"capacity_bits\": " << cvub::kUBCapacityBits
-                << ",\n"
-                << "  \"overflow\": null,\n"
-                << "  \"blockers\": [\"" << jsonEscape(ex.what())
-                << "\"]\n"
-                << "}\n";
+      if (opts.action == "plan-before-cvpipeline") {
+        std::cout << "{\n"
+                  << "  \"precision\": \"incomplete\",\n"
+                  << "  \"status\": \"blocker\",\n"
+                  << "  \"success\": false,\n"
+                  << "  \"overflow\": false,\n"
+                  << "  \"ub_peak_bits\": null,\n"
+                  << "  \"required_bits\": null,\n"
+                  << "  \"capacity_bits\": " << cvub::kUBCapacityBits
+                  << ",\n"
+                  << "  \"restrict_inplace_as_isa\": "
+                  << boolStr(opts.restrictInplaceAsISA) << ",\n"
+                  << "  \"selected_seed\": null,\n"
+                  << "  \"assumed_post_cvpipeline_options\": {\n";
+        emitAssumedPostCVPipelineOptionsJson(std::cout);
+        std::cout << "  },\n"
+                  << "  \"stage_coverage\": [],\n"
+                  << "  \"functions\": [],\n"
+                  << "  \"diagnostics\": [\n"
+                  << "    {\"pipeline_stage\": \"cli\", \"function\": \"\", "
+                     "\"operation_id\": -1, \"operation\": \"\", \"reason\": \""
+                  << jsonEscape(ex.what()) << "\"}\n"
+                  << "  ]\n"
+                  << "}\n";
+      } else {
+        const std::string oracle = actionOracle(opts.action);
+        std::cout << "{\n"
+                  << "  \"precision\": \"blocked\",\n"
+                  << "  \"oracle\": \"" << oracle << "\",\n"
+                  << "  \"status\": \"blocker\",\n"
+                  << "  \"ub_peak_bits\": null,\n"
+                  << "  \"required_bits\": null,\n"
+                  << "  \"capacity_bits\": " << cvub::kUBCapacityBits
+                  << ",\n"
+                  << "  \"overflow\": null,\n"
+                  << "  \"blockers\": [\"" << jsonEscape(ex.what())
+                  << "\"]\n"
+                  << "}\n";
+      }
       std::cerr << "[ERROR] " << ex.what() << "\n";
       return 1;
     }
