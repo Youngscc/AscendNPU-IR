@@ -169,6 +169,8 @@ def HIVM_DataLayoutAttr : HIVM_Attr<"DataLayout", "data_layout"> {
         case hivm::DataLayout::DOTB_ND:
         case hivm::DataLayout::DOTC_ND:
         case hivm::DataLayout::ND:
+        case hivm::DataLayout::SCALEA_ND:
+        case hivm::DataLayout::SCALEB_DN:
           return true;
         default:
           return false;

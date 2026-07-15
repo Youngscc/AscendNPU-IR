@@ -33,7 +33,11 @@ enum class LayoutConversionKind : uint32_t {
   ND_TO_nZ,
   ND_TO_zN,
   nZ_TO_ND,
-  zN_TO_ND
+  zN_TO_ND,
+  DOT_SCALE_ND_TO_zZ,     // scaleA no-trans
+  DOT_SCALE_ND_TO_nN,     // scaleB transed
+  DOT_SCALE_DN_TO_zZ,     // scaleA transed
+  DOT_SCALE_DN_TO_nN,     // scaleB no-trans
 };
 
 class DataLayoutInferAndPropagateHelper {
@@ -42,7 +46,7 @@ public:
   struct LayoutInfo {
     bool operator==(const LayoutInfo &other) const {
       return currentLayout == other.currentLayout &&
-             targetLayout == other.currentLayout;
+             targetLayout == other.targetLayout;
     }
 
     bool operator!=(const LayoutInfo &other) const {
@@ -87,19 +91,16 @@ private:
   /// Update the layout info for all the values.
   void updateLayout(ValueRange values, const LayoutInfo &info,
                     SmallVector<Value> &changed);
+  /// Populate the layout info for all the values if absent.
+  void populateLayout(ValueRange values, const LayoutInfo &info,
+                      SmallVector<Value> &changed);
+  /// Populate layout info for distributed hivm.custom results.
+  void populateLayoutToHIVMCustom(hivm::CustomOp op,
+                                  SmallVector<Value> &changed);
   /// Update the layout info for the input value. Return true if the layout
   /// is different than before.
   bool updateLayoutIfChanged(Value value, const LayoutInfo &info);
-
-  /// Populate the layout info for all the values.
-  void populateLayout(ValueRange values, const LayoutInfo &info,
-                      SmallVector<Value> &changed);
-  /// Populate the layout info for hivm.custom results.
-  void populateLayoutToHIVMCustom(hivm::CustomOp op,
-                                  SmallVector<Value> &changed);
-  /// Populate the layout info for the input value if it is absent. Return true
-  /// if the layout was populated, false if the value already had layout
-  /// information and was not modified.
+  /// Populate the layout info for the input value if it is absent.
   bool populateLayoutIfAbsent(Value value, const LayoutInfo &info);
 
   /// Check whether the layout conversion is supported.
@@ -128,6 +129,12 @@ private:
                                 OpBuilder &builder, Location loc,
                                 SmallVector<int64_t> kBlockSizes) const;
 
+  /// Offset conversion pattern from DOT_SCALE_{A} to {zZ}.
+  FailureOr<SmallVector<Value>>
+  computeScaleNDToFractalzZOffset(SmallVector<Value> currentOffset,
+                               OpBuilder &builder, Location loc,
+                               SmallVector<int64_t> kBlockSizes) const;
+
   /// Shape conversion pattern from DOT_{A/B/C} to {zN}.
   FailureOr<SmallVector<Value>>
   computeDOTNDToFractalzNShape(SmallVector<Value> currentShape,
@@ -136,6 +143,12 @@ private:
   /// Shape conversion pattern from DOT_{A/B/C} to {nZ}.
   FailureOr<SmallVector<Value>>
   computeDOTNDToFractalnZShape(SmallVector<Value> currentShape,
+                               OpBuilder &builder, Location loc,
+                               SmallVector<int64_t> kBlockSizes) const;
+
+  /// Shape conversion pattern from DOT_SCALE_{A} to {zZ}.
+  FailureOr<SmallVector<Value>>
+  computeScaleNDToFractalzZShape(SmallVector<Value> currentShape,
                                OpBuilder &builder, Location loc,
                                SmallVector<int64_t> kBlockSizes) const;
 
@@ -149,17 +162,18 @@ private:
   /// Rewrite an op based on the layout info collected during propagation.
   Operation *rewriteOp(Operation *op);
   /// Rewrite implementation for different ops.
+  Operation *rewriteSelectOp(arith::SelectOp op);
   Operation *rewriteAllocOp(memref::AllocOp op);
   Operation *rewriteForOp(scf::ForOp op);
+  Operation *rewriteIfOp(scf::IfOp op);
   Operation *rewriteSubViewOp(memref::SubViewOp op);
   Operation *rewriteCollapseShapeOp(memref::CollapseShapeOp op);
   Operation *rewriteMemrefCastOp(memref::CastOp op);
   void rewriteCopyOp(mlir::Operation *op);
-  Operation *rewriteIfOp(scf::IfOp op);
   /// Try to fold ConvertLayoutOp + CopyOp to HIVM Data Copy Ops with
   /// on-the-fly data layout conversion.
   LogicalResult tryFoldLayoutConversionIntoCopy(Value src, Value dst,
-                                                Operation *originalOp,
+                                                Operation &originalOp,
                                                 OpBuilder &builder);
 
 private:

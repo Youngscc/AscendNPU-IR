@@ -1068,3 +1068,243 @@ module attributes {hacc.target = #hacc.target<"Ascend910B3">} {
     return
   }
 }
+
+// -----
+module attributes {hacc.target = #hacc.target<"Ascend950PR_9589">} {
+  // CHECK-LABEL: func.func @test_if_result_layout
+  func.func @test_if_result_layout(%cond: i1) attributes {hivm.func_core_type = #hivm.func_core_type<AIC>} {
+    %true = arith.constant true
+    %c64 = arith.constant 64 : index
+    %result = scf.if %cond -> (memref<64x64xf32, #hivm.address_space<cc>>) {
+      %a = memref.alloc() : memref<64x64xf16, #hivm.address_space<cbuf>>
+      %b = memref.alloc() : memref<64x64xf16, #hivm.address_space<cbuf>>
+      %c = memref.alloc() : memref<64x64xf32, #hivm.address_space<cc>>
+      hivm.hir.mmadL1 ins(%a, %b, %true, %c64, %c64, %c64 : memref<64x64xf16, #hivm.address_space<cbuf>>, memref<64x64xf16, #hivm.address_space<cbuf>>, i1, index, index, index) outs(%c : memref<64x64xf32, #hivm.address_space<cc>>)
+      scf.yield %c : memref<64x64xf32, #hivm.address_space<cc>>
+    } else {
+      %a = memref.alloc() : memref<64x64xf16, #hivm.address_space<cbuf>>
+      %b = memref.alloc() : memref<64x64xf16, #hivm.address_space<cbuf>>
+      %c = memref.alloc() : memref<64x64xf32, #hivm.address_space<cc>>
+      hivm.hir.mmadL1 ins(%a, %b, %true, %c64, %c64, %c64 : memref<64x64xf16, #hivm.address_space<cbuf>>, memref<64x64xf16, #hivm.address_space<cbuf>>, i1, index, index, index) outs(%c : memref<64x64xf32, #hivm.address_space<cc>>)
+      scf.yield %c : memref<64x64xf32, #hivm.address_space<cc>>
+    }
+    // CHECK: scf.if {{.*}} -> (memref<?x?x?x?xf32, #hivm.address_space<cc>>)
+    // CHECK: scf.yield {{.*}} : memref<?x?x?x?xf32, #hivm.address_space<cc>>
+    annotation.mark %result : memref<64x64xf32, #hivm.address_space<cc>>
+    return
+  }
+}
+
+// -----
+module attributes {hacc.target = #hacc.target<"Ascend950PR_9589">} {
+  // CHECK-LABEL: func.func @test_compact_batch_nd2nz
+  func.func @test_compact_batch_nd2nz(%src: memref<2x32x64xf16, #hivm.address_space<gm>>) attributes {hivm.func_core_type = #hivm.func_core_type<AIC>} {
+    %true = arith.constant true
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c32 = arith.constant 32 : index
+    %c64 = arith.constant 64 : index
+    %a = memref.alloc() : memref<2x32x64xf16, #hivm.address_space<cbuf>>
+    hivm.hir.load ins(%src : memref<2x32x64xf16, #hivm.address_space<gm>>) outs(%a : memref<2x32x64xf16, #hivm.address_space<cbuf>>)
+    scf.for %iv = %c0 to %c2 step %c1 {
+      %a_slice = memref.subview %a[%iv, 0, 0] [1, 32, 64] [1, 1, 1] : memref<2x32x64xf16, #hivm.address_space<cbuf>> to memref<32x64xf16, strided<[64, 1], offset: ?>, #hivm.address_space<cbuf>>
+      %b = memref.alloc() : memref<64x32xf16, #hivm.address_space<cbuf>>
+      %c = memref.alloc() : memref<32x32xf32, #hivm.address_space<cc>>
+      hivm.hir.mmadL1 ins(%a_slice, %b, %true, %c32, %c64, %c32 : memref<32x64xf16, strided<[64, 1], offset: ?>, #hivm.address_space<cbuf>>, memref<64x32xf16, #hivm.address_space<cbuf>>, i1, index, index, index) outs(%c : memref<32x32xf32, #hivm.address_space<cc>>)
+    }
+    // CHECK: scf.for
+    // CHECK: memref.collapse_shape
+    // CHECK: hivm.hir.nd2nz
+    // CHECK: hivm.hir.mmadL1
+    // CHECK-SAME: memref<?x?x?x?xf16
+    return
+  }
+}
+
+// -----
+module attributes {hacc.target = #hacc.target<"Ascend950PR_9589">} {
+  // CHECK-LABEL: func.func @test_rank3_subview_preserve_batch
+  func.func @test_rank3_subview_preserve_batch() attributes {hivm.func_core_type = #hivm.func_core_type<AIC>} {
+    %true = arith.constant true
+    %c32 = arith.constant 32 : index
+    %c64 = arith.constant 64 : index
+    %base = memref.alloc() : memref<2x64x64xf16, #hivm.address_space<cbuf>>
+    %a = memref.subview %base[0, 0, 0] [2, 32, 64] [1, 1, 1] : memref<2x64x64xf16, #hivm.address_space<cbuf>> to memref<2x32x64xf16, strided<[4096, 64, 1]>, #hivm.address_space<cbuf>>
+    %a_slice = memref.subview %a[0, 0, 0] [1, 32, 64] [1, 1, 1] : memref<2x32x64xf16, strided<[4096, 64, 1]>, #hivm.address_space<cbuf>> to memref<32x64xf16, strided<[64, 1]>, #hivm.address_space<cbuf>>
+    %b = memref.alloc() : memref<64x32xf16, #hivm.address_space<cbuf>>
+    %c = memref.alloc() : memref<32x32xf32, #hivm.address_space<cc>>
+    // CHECK: memref.subview {{.*}} : memref<?x?x?x?x?xf16
+    // CHECK-SAME: to memref<?x?x?x?x?xf16, strided<[?, ?, ?, ?, 1], offset: ?>
+    hivm.hir.mmadL1 ins(%a_slice, %b, %true, %c32, %c64, %c32 : memref<32x64xf16, strided<[64, 1]>, #hivm.address_space<cbuf>>, memref<64x32xf16, #hivm.address_space<cbuf>>, i1, index, index, index) outs(%c : memref<32x32xf32, #hivm.address_space<cc>>)
+    return
+  }
+}
+
+// -----
+module attributes {hacc.target = #hacc.target<"Ascend950PR_9589">} {
+  // CHECK-LABEL: func.func @test_rank3_subview_drop_batch
+  func.func @test_rank3_subview_drop_batch() attributes {hivm.func_core_type = #hivm.func_core_type<AIC>} {
+    %true = arith.constant true
+    %c64 = arith.constant 64 : index
+    %base = memref.alloc() : memref<1x64x64xf16, #hivm.address_space<cbuf>>
+    %a = memref.subview %base[0, 0, 0] [1, 64, 64] [1, 1, 1] : memref<1x64x64xf16, #hivm.address_space<cbuf>> to memref<64x64xf16, strided<[64, 1]>, #hivm.address_space<cbuf>>
+    %b = memref.alloc() : memref<64x64xf16, #hivm.address_space<cbuf>>
+    %c = memref.alloc() : memref<64x64xf32, #hivm.address_space<cc>>
+    // CHECK: memref.subview {{.*}} : memref<?x?x?x?x?xf16
+    // CHECK-SAME: to memref<?x?x?x?xf16
+    hivm.hir.mmadL1 ins(%a, %b, %true, %c64, %c64, %c64 : memref<64x64xf16, strided<[64, 1]>, #hivm.address_space<cbuf>>, memref<64x64xf16, #hivm.address_space<cbuf>>, i1, index, index, index) outs(%c : memref<64x64xf32, #hivm.address_space<cc>>)
+    return
+  }
+}
+
+// -----
+module attributes {hacc.target = #hacc.target<"Ascend950PR_9589">} {
+  // CHECK-LABEL: func.func @test_collapse_batch_dimension
+  func.func @test_collapse_batch_dimension() attributes {hivm.func_core_type = #hivm.func_core_type<AIC>} {
+    %true = arith.constant true
+    %c64 = arith.constant 64 : index
+    %base = memref.alloc() : memref<1x64x64xf16, #hivm.address_space<cbuf>>
+    %a = memref.collapse_shape %base [[0, 1], [2]] : memref<1x64x64xf16, #hivm.address_space<cbuf>> into memref<64x64xf16, #hivm.address_space<cbuf>>
+    %b = memref.alloc() : memref<64x64xf16, #hivm.address_space<cbuf>>
+    %c = memref.alloc() : memref<64x64xf32, #hivm.address_space<cc>>
+    // CHECK: memref.collapse_shape {{.*}}{{\[\[0, 1\], \[2\], \[3\], \[4\]\]}}
+    // CHECK-SAME: into memref<?x?x?x?xf16
+    hivm.hir.mmadL1 ins(%a, %b, %true, %c64, %c64, %c64 : memref<64x64xf16, #hivm.address_space<cbuf>>, memref<64x64xf16, #hivm.address_space<cbuf>>, i1, index, index, index) outs(%c : memref<64x64xf32, #hivm.address_space<cc>>)
+    return
+  }
+}
+
+// -----
+module attributes {hacc.target = #hacc.target<"Ascend950PR_9589">} {
+  // CHECK-LABEL: func.func @test_expand_1d_load
+  func.func @test_expand_1d_load(%src: memref<64xf16, #hivm.address_space<gm>>) attributes {hivm.func_core_type = #hivm.func_core_type<AIC>} {
+    // CHECK: %[[DST:.*]] = memref.alloc() : memref<1x64xf16, #hivm.address_space<cbuf>>
+    // CHECK: %[[SRC:.*]] = memref.expand_shape %{{.*}} {{.*}} output_shape [1, 64]
+    // CHECK: hivm.hir.load ins(%[[SRC]]
+    // CHECK-SAME: outs(%[[DST]]
+    // CHECK-SAME: {hivm.portable_marker}
+    %dst = memref.alloc() : memref<64xf16, #hivm.address_space<cbuf>>
+    hivm.hir.load ins(%src : memref<64xf16, #hivm.address_space<gm>>) outs(%dst : memref<64xf16, #hivm.address_space<cbuf>>) {hivm.portable_marker}
+    return
+  }
+}
+
+// -----
+module attributes {hacc.target = #hacc.target<"Ascend950PR_9589">} {
+  // CHECK-LABEL: func.func @test_transpose_a_exact_shape
+  func.func @test_transpose_a_exact_shape() attributes {hivm.func_core_type = #hivm.func_core_type<AIC>} {
+    %true = arith.constant true
+    %c17 = arith.constant 17 : index
+    %c33 = arith.constant 33 : index
+    %c49 = arith.constant 49 : index
+    %a = memref.alloc() : memref<33x17xf16, #hivm.address_space<cbuf>>
+    %b = memref.alloc() : memref<33x49xf16, #hivm.address_space<cbuf>>
+    %c = memref.alloc() : memref<17x49xf32, #hivm.address_space<cc>>
+    // CHECK: %[[ORIG49:.*]] = arith.constant 49 : index
+    // CHECK: %[[A_ROWS:.*]] = arith.constant 33 : index
+    // CHECK: %[[A_COLS:.*]] = arith.constant 17 : index
+    // CHECK: %[[A_OUTER0:.*]] = affine.apply #{{.*}}()[%[[A_COLS]], %[[A_ROWS]]]
+    // CHECK: %[[A_OUTER1:.*]] = affine.apply #{{.*}}()[%[[A_COLS]], %[[A_ROWS]]]
+    // CHECK: memref.alloc(%[[A_OUTER0]], %[[A_OUTER1]], {{.*}}) : memref<?x?x?x?xf16, #hivm.address_space<cbuf>>
+    // CHECK: hivm.hir.mmadL1 {a_transpose}
+    hivm.hir.mmadL1 {a_transpose} ins(%a, %b, %true, %c17, %c33, %c49 : memref<33x17xf16, #hivm.address_space<cbuf>>, memref<33x49xf16, #hivm.address_space<cbuf>>, i1, index, index, index) outs(%c : memref<17x49xf32, #hivm.address_space<cc>>)
+    return
+  }
+}
+
+// -----
+module attributes {hacc.target = #hacc.target<"Ascend950PR_9589">} {
+  // CHECK-LABEL: func.func @test_transpose_b_exact_shape
+  func.func @test_transpose_b_exact_shape() attributes {hivm.func_core_type = #hivm.func_core_type<AIC>} {
+    %true = arith.constant true
+    %c17 = arith.constant 17 : index
+    %c33 = arith.constant 33 : index
+    %c49 = arith.constant 49 : index
+    %a = memref.alloc() : memref<17x33xf16, #hivm.address_space<cbuf>>
+    %b = memref.alloc() : memref<49x33xf16, #hivm.address_space<cbuf>>
+    %c = memref.alloc() : memref<17x49xf32, #hivm.address_space<cc>>
+    // CHECK: memref.alloc({{.*}}) : memref<?x?x?x?xf16, #hivm.address_space<cbuf>>
+    // CHECK: %[[B_ROWS:.*]] = arith.constant 49 : index
+    // CHECK: %[[B_COLS:.*]] = arith.constant 33 : index
+    // CHECK: %[[B_OUTER0:.*]] = affine.apply #{{.*}}()[%[[B_COLS]], %[[B_ROWS]]]
+    // CHECK: %[[B_OUTER1:.*]] = affine.apply #{{.*}}()[%[[B_COLS]], %[[B_ROWS]]]
+    // CHECK: memref.alloc(%[[B_OUTER0]], %[[B_OUTER1]], {{.*}}) : memref<?x?x?x?xf16, #hivm.address_space<cbuf>>
+    // CHECK: hivm.hir.mmadL1 {b_transpose}
+    hivm.hir.mmadL1 {b_transpose} ins(%a, %b, %true, %c17, %c33, %c49 : memref<17x33xf16, #hivm.address_space<cbuf>>, memref<49x33xf16, #hivm.address_space<cbuf>>, i1, index, index, index) outs(%c : memref<17x49xf32, #hivm.address_space<cc>>)
+    return
+  }
+}
+
+// -----
+module attributes {hacc.target = #hacc.target<"Ascend950PR_9589">} {
+  // CHECK-LABEL: func.func @test_dynamic_subview_shape_offset
+  func.func @test_dynamic_subview_shape_offset(%off_m: index, %off_k: index, %m: index, %k: index) attributes {hivm.func_core_type = #hivm.func_core_type<AIC>} {
+    %true = arith.constant true
+    %c64 = arith.constant 64 : index
+    %base = memref.alloc() : memref<128x128xf16, #hivm.address_space<cbuf>>
+    %a = memref.subview %base[%off_m, %off_k] [%m, %k] [1, 1] : memref<128x128xf16, #hivm.address_space<cbuf>> to memref<?x?xf16, strided<[128, 1], offset: ?>, #hivm.address_space<cbuf>>
+    %b = memref.alloc() : memref<128x64xf16, #hivm.address_space<cbuf>>
+    %c = memref.alloc() : memref<128x64xf32, #hivm.address_space<cc>>
+    // CHECK: affine.apply #{{.*}}()[%arg0, %arg1]
+    // CHECK: affine.apply #{{.*}}()[%arg0, %arg1]
+    // CHECK: memref.subview {{.*}} : memref<?x?x?x?xf16
+    hivm.hir.mmadL1 ins(%a, %b, %true, %m, %k, %c64 : memref<?x?xf16, strided<[128, 1], offset: ?>, #hivm.address_space<cbuf>>, memref<128x64xf16, #hivm.address_space<cbuf>>, i1, index, index, index) outs(%c : memref<128x64xf32, #hivm.address_space<cc>>)
+    return
+  }
+}
+
+// -----
+module attributes {hacc.target = #hacc.target<"Ascend950PR_9589">} {
+  // CHECK-LABEL: func.func @test_already_fractal_rank4
+  func.func @test_already_fractal_rank4() attributes {hivm.func_core_type = #hivm.func_core_type<AIC>} {
+    %true = arith.constant true
+    %c64 = arith.constant 64 : index
+    // CHECK: %[[A:.*]] = memref.alloc() : memref<4x4x16x16xf16
+    // CHECK: %[[B:.*]] = memref.alloc() : memref<4x4x16x16xf16
+    // CHECK-NOT: hivm.hir.convert_layout
+    %a = memref.alloc() : memref<4x4x16x16xf16, #hivm.address_space<cbuf>>
+    %b = memref.alloc() : memref<4x4x16x16xf16, #hivm.address_space<cbuf>>
+    %c = memref.alloc() : memref<4x4x16x16xf32, #hivm.address_space<cc>>
+    hivm.hir.mmadL1 ins(%a, %b, %true, %c64, %c64, %c64 : memref<4x4x16x16xf16, #hivm.address_space<cbuf>>, memref<4x4x16x16xf16, #hivm.address_space<cbuf>>, i1, index, index, index) outs(%c : memref<4x4x16x16xf32, #hivm.address_space<cc>>)
+    return
+  }
+}
+
+// -----
+module attributes {hacc.target = #hacc.target<"Ascend950PR_9589">} {
+  // CHECK-LABEL: func.func @test_aiv_pass_guard
+  func.func @test_aiv_pass_guard() attributes {hivm.func_core_type = #hivm.func_core_type<AIV>} {
+    // CHECK: memref.alloc() : memref<64x64xf16, #hivm.address_space<cbuf>>
+    // CHECK-NOT: memref<?x?x?x?xf16
+    %a = memref.alloc() : memref<64x64xf16, #hivm.address_space<cbuf>>
+    return
+  }
+}
+
+// -----
+module attributes {hacc.target = #hacc.target<"Ascend950PR_9589">} {
+  // CHECK-LABEL: func.func @test_missing_core_type_guard
+  func.func @test_missing_core_type_guard() {
+    // CHECK: memref.alloc() : memref<64x64xf16, #hivm.address_space<cbuf>>
+    // CHECK-NOT: memref<?x?x?x?xf16
+    %a = memref.alloc() : memref<64x64xf16, #hivm.address_space<cbuf>>
+    return
+  }
+}
+
+// -----
+module attributes {hacc.target = #hacc.target<"Ascend950PR_9589">} {
+  // CHECK-LABEL: func.func @test_subview_hivm_attr_preserved
+  func.func @test_subview_hivm_attr_preserved() attributes {hivm.func_core_type = #hivm.func_core_type<AIC>} {
+    %true = arith.constant true
+    %c64 = arith.constant 64 : index
+    %base = memref.alloc() : memref<128x128xf16, #hivm.address_space<cbuf>>
+    // CHECK: memref.subview {{.*}} {hivm.portable_marker}
+    %a = memref.subview %base[0, 0] [64, 64] [1, 1] {hivm.portable_marker} : memref<128x128xf16, #hivm.address_space<cbuf>> to memref<64x64xf16, strided<[128, 1]>, #hivm.address_space<cbuf>>
+    %b = memref.alloc() : memref<64x64xf16, #hivm.address_space<cbuf>>
+    %c = memref.alloc() : memref<64x64xf32, #hivm.address_space<cc>>
+    hivm.hir.mmadL1 ins(%a, %b, %true, %c64, %c64, %c64 : memref<64x64xf16, strided<[128, 1]>, #hivm.address_space<cbuf>>, memref<64x64xf16, #hivm.address_space<cbuf>>, i1, index, index, index) outs(%c : memref<64x64xf32, #hivm.address_space<cc>>)
+    return
+  }
+}

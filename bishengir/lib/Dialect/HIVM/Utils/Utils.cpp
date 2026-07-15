@@ -209,6 +209,14 @@ FailureOr<memref::AllocOp> getMemRefAlloc(Value operand) {
 /// Recursively traces through scf::IfOp branches and falls back
 /// to getMemRefAlloc for simple def-use chains.
 SmallVector<Value> getMemRefAllocs(Value operand) {
+  // -- if operand comes from arith.select, collect allocs from both arms --
+  if (auto selectOp = operand.getDefiningOp<arith::SelectOp>()) {
+    SmallVector<Value> results = getMemRefAllocs(selectOp.getTrueValue());
+    SmallVector<Value> falseResults = getMemRefAllocs(selectOp.getFalseValue());
+    results.append(falseResults);
+    return results;
+  }
+
   // -- if operand comes from scf.if, collect allocs from all branches --
   if (auto ifOp = operand.getDefiningOp<scf::IfOp>()) {
     auto resultNum = cast<OpResult>(operand).getResultNumber(); // which result?
