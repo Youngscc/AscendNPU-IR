@@ -214,12 +214,20 @@ def test_mix() -> None:
     payload = json.loads(stdout)
     assert_top_level_contract(payload, label="mix")
     check_eq(payload.get("status"), "success", "mix: status success")
-    # The MIX fixture's AIV store takes the same-address hazard Exact path
-    # (TileAndBindSubBlock) and the flat loop's invariant tensor.empty is hoisted
-    # (LICM); every reproducible stage reports Exact, so the module is exact.
+    # The MIX fixture's AIV store takes the same-address-hazard Exact path:
+    # TileAndBindSubBlock wraps the store in a `limit_sub_block_id0` scf.if guard
+    # (limitUniqueSubBlockToStore), and CanonicalizationAfterSplit recognizes the
+    # marked guard and leaves it (non-foldable runtime condition).  The flat
+    # loop's invariant tensor.empty is hoisted by LICM.  Every reproducible stage
+    # reports Exact, so the module is exact.
     check_eq(payload.get("precision"), "exact", "mix: precision exact")
     check_eq(len(payload.get("diagnostics", [])), 0,
              "mix: no diagnostics on the exact path")
+    # Golden UB footprint: the projected AIV kernel materializes exactly one UB
+    # buffer (`%base_0`, the load output tensor of one f16x16x16 element block)
+    # whose extent equals the simultaneous peak.
+    check_eq(payload.get("ub_peak_bits"), 4096, "mix: ub_peak_bits=4096")
+    check_eq(payload.get("required_bits"), 4096, "mix: required_bits=4096")
     functions = payload.get("functions", [])
     check_eq(len(functions), 1, "mix: exactly one projected AIV function")
     if functions:
@@ -234,12 +242,18 @@ def test_mix() -> None:
         # module peak equals that function's peak (never the sum).
         check_eq(payload.get("ub_peak_bits"), fn_peak,
                  "mix: module peak equals the single function peak")
-        check(isinstance(fn.get("buffers"), list) and len(fn["buffers"]) >= 1,
-              "mix: projected function has at least one UB buffer")
-        for buf in fn.get("buffers", []):
-            for key in ("name", "extent_bits", "offset_bytes",
-                        "alloc_time", "free_time"):
-                check(key in buf, f"mix: buffer has {key}")
+        check_eq(fn.get("ub_peak_bits"), 4096,
+                 "mix: per-function ub_peak_bits=4096")
+        # Exactly one UB buffer with concrete name/extent/lifetime.
+        buffers = fn.get("buffers", [])
+        check_eq(len(buffers), 1, "mix: exactly one UB buffer")
+        check_eq(buffers[0].get("name"), "%base_0",
+                 "mix: buffer name is %base_0")
+        check_eq(buffers[0].get("extent_bits"), 4096,
+                 "mix: buffer extent_bits=4096")
+        for key in ("name", "extent_bits", "offset_bytes",
+                    "alloc_time", "free_time"):
+            check(key in buffers[0], f"mix: buffer has {key}")
 
 
 def test_text_function_column() -> None:

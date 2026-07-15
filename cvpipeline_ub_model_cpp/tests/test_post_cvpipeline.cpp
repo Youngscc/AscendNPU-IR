@@ -1302,13 +1302,42 @@ CVUB_TEST(core_classification_treats_index_mask_utilities_as_neutral) {
                 cvub::CoreKind::Neutral);
 }
 
+CVUB_TEST(core_classification_treats_sibling_index_utilities_as_neutral) {
+  // The real compiler marks these index/config/debug utility ops with
+  // CubeVectorCoreTypeTrait (TCoreType::CUBE_OR_VECTOR) in HIVMOps.td
+  // (get_block_num, get_sub_block_idx, get_sub_block_num, get_sys_cnt,
+  // set_ffts_base_addr, init_debug, finish_debug).  Like get_block_idx they
+  // survive the AIV projection (filterMixFunc only erases exactly-CUBE ops) and
+  // allocate no UB buffer, so the model must classify them Neutral.  A regression
+  // here would make any AIV kernel using these input-occurrence ops report
+  // Incomplete.  INPUT occurrences only: the model's own T7 rewrite creates
+  // get_sub_block_idx after ScanUnsupportedOperations has already run.
+  const std::vector<std::string> neutralUtilityOps = {
+      "hivm.hir.get_block_num", "hivm.hir.get_sub_block_idx",
+      "hivm.hir.get_sub_block_num", "hivm.hir.get_sys_cnt",
+      "hivm.hir.set_ffts_base_addr", "hivm.hir.init_debug",
+      "hivm.hir.finish_debug"};
+  for (const std::string &name : neutralUtilityOps) {
+    cvub::GenericModule module;
+    cvub::GenericOperation operation;
+    operation.id = 0;
+    operation.name = name;
+    module.operations.push_back(operation);
+    CVUB_CHECK_EQ(cvub::ClassifyCore(module, module.operations.back()),
+                  cvub::CoreKind::Neutral);
+  }
+}
+
 CVUB_TEST(mix_fixture_projects_to_single_exact_aiv_kernel) {
   // End-to-end MIX golden: the compiler-boundary MIX function `kernel` (Cube
   // mmadL1 + a Vector load + a flat scf.for) is projected to exactly one
   // `kernel_mix_aiv` function on a fully reproducible path.  The Cube mmadL1 is
   // dropped; the Vector load survives (its output tensor materializes the UB
-  // buffer); TileAndBindSubBlock runs the recognized no-store isFailed revert
-  // (Exact); the flat loop's invariant tensor.empty is hoisted by LICM; and no
+  // buffer); TileAndBindSubBlock runs the same-address-hazard Exact path (the
+  // AIV store's destination traces to the same block argument as the load
+  // source, so limitUniqueSubBlockToStore wraps the store in a
+  // `limit_sub_block_id0` guard, which CanonicalizationAfterSplit leaves in
+  // place); the flat loop's invariant tensor.empty is hoisted by LICM; and no
   // stage reports Incomplete.  Mirrors the plan-before-cvpipeline CLI flow.
   auto module = cvub::ParseGenericIR(
       "cvpipeline_ub_model_cpp/examples/inputs/"
@@ -1330,7 +1359,18 @@ CVUB_TEST(mix_fixture_projects_to_single_exact_aiv_kernel) {
   const cvub::GenericModule &aiv = projected.functions.front().module;
   CVUB_CHECK(!HasOperation(aiv, "hivm.hir.mmadL1"));  // Cube side dropped.
   CVUB_CHECK(HasOperation(aiv, "hivm.hir.load"));     // Vector side retained.
+  CVUB_CHECK(HasOperation(aiv, "hivm.hir.store"));    // AIV store retained.
   CVUB_CHECK(HasOperation(aiv, "scf.for")); // flat loop survives for LICM.
+  // The same-address-hazard store survives the split and is wrapped in the
+  // recognized `limit_sub_block_id0` scf.if guard, which survives
+  // CanonicalizationAfterSplit (the full end-to-end validation of the
+  // canonicalization false-positive fix).
+  bool hasLimitGuard = false;
+  for (const cvub::GenericOperation &operation : aiv.operations)
+    if (operation.name == "scf.if" &&
+        HasUnitAttribute(operation.attributes, "limit_sub_block_id0"))
+      hasLimitGuard = true;
+  CVUB_CHECK(hasLimitGuard);
   cvub::ValidateGenericModule(aiv);
 }
 
@@ -3304,6 +3344,38 @@ CVUB_TEST(tile_bind_subblock_same_address_hazard_applies_store_limit) {
   CVUB_CHECK_EQ(OperationCount(result.module, "arith.index_cast"), 1U);
   CVUB_CHECK_EQ(OperationCount(result.module, "arith.cmpi"), 1U);
   cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(canonicalization_keeps_limit_sub_block_id0_guard_exact) {
+  // T7 (TileAndBindSubBlock) wraps a same-address-hazard store in an
+  // scf.if guarded by `get_sub_block_idx == 0` and marks that scf.if with the
+  // unit attribute `limit_sub_block_id0`.  The guard's condition is a runtime
+  // value (the sub-block index) that upstream SCF canonicalization cannot fold,
+  // so the real pass leaves the guard in place.  CanonicalizationAfterSplit
+  // (RunPostSplitCanonicalization -> RunPreSplitCanonicalization) must therefore
+  // NOT flag the marked guard as an unmodeled SCF canonicalization pattern:
+  // doing so would flip an otherwise-Exact limit-store path to Incomplete.
+  auto module = cvub::test::ParseFixture("subblock_bind_fallback.mlir");
+  const auto tileResult =
+      cvub::RunTileAndBindSubBlock(module, /*enableTile=*/true);
+  CVUB_CHECK_EQ(tileResult.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(OperationCount(tileResult.module, "scf.if"), 1U);
+  bool hasLimitGuard = false;
+  for (const cvub::GenericOperation &operation : tileResult.module.operations)
+    if (operation.name == "scf.if" &&
+        HasUnitAttribute(operation.attributes, "limit_sub_block_id0"))
+      hasLimitGuard = true;
+  CVUB_CHECK(hasLimitGuard);
+  // The marked guard survives canonicalization without being flagged: the
+  // limit-store path stays end-to-end Exact.
+  const auto canonicalResult =
+      cvub::RunPostSplitCanonicalization(std::move(tileResult.module));
+  CVUB_CHECK_EQ(canonicalResult.precision, cvub::Precision::Exact);
+  CVUB_CHECK(canonicalResult.diagnostics.empty());
+  CVUB_CHECK_EQ(OperationCount(canonicalResult.module, "scf.if"), 1U);
+  CVUB_CHECK(!HasDiagnostic(canonicalResult, "CanonicalizationAfterSplit",
+                            "unmodeled applicable"));
+  cvub::ValidateGenericModule(canonicalResult.module);
 }
 
 CVUB_TEST(tile_bind_subblock_implicit_transpose_hazard_applies_store_limit) {

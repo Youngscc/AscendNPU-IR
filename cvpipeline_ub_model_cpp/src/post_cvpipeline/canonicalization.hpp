@@ -861,7 +861,18 @@ inline StageResult RunPreSplitCanonicalization(GenericModule module) {
   for (const GenericOperation &operation : result.module.operations) {
     std::string family;
     std::string detail;
-    if (operation.name == "scf.if" || operation.name == "scf.while")
+    // Stage 8 (TileAndBindSubBlock, limitUniqueSubBlockToStore) wraps a
+    // same-address-hazard / dynamic / disable-path store in an scf.if guarded by
+    // `get_sub_block_idx == 0` and marks that scf.if with the unit attribute
+    // `limit_sub_block_id0` (the real pass's kLimitedSubBlockOpAttrName).  The
+    // guard condition is a runtime value upstream SCF canonicalization cannot
+    // fold, so the real pass leaves the marked guard in place.  Flagging it as an
+    // unmodeled SCF pattern would be a false positive that flips an otherwise
+    // Exact limit-store path to Incomplete.  Only that specific marked guard is
+    // skipped; every other scf.if (and all scf.while) stays fail-closed.
+    if ((operation.name == "scf.if" &&
+         !HasUnitAttribute(operation.attributes, "limit_sub_block_id0")) ||
+        operation.name == "scf.while")
       family = "SCF canonicalization";
     else if (operation.name == "scf.for" && operation.operands.size() >= 3) {
       const auto lower = ConstantIntegerValue(result.module,

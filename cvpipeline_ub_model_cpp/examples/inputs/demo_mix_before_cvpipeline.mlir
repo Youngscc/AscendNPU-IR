@@ -10,20 +10,14 @@
 // mmadL1), FoldTensorEmpty / CloneTensorEmpty (tensor-empty ownership),
 // LoopInvariantCodeMotion (the flat loop's loop-invariant tensor.empty is
 // hoisted), and InlineOTFLoadStore (no concat store -> recognized no-op).
-// TileAndBindSubBlock runs the recognized isFailed-revert no-op: the projected
-// AIV function has no store-like op, so limitUniqueSubBlockToStore is a no-op
-// (Exact).  TileCubeVectorLoop finds no hivm.loop_core_type candidates and is a
-// recognized no-op.  No stage reports Incomplete, so the module reports
-// precision=exact.
-//
-// Design note: an AIV *store* on a non-tiling Exact path (same-address hazard
-// or genuine dynamic store) would make TileAndBindSubBlock wrap the store in a
-// `limit_sub_block_id0` scf.if guard.  CanonicalizationAfterSplit currently
-// flags any scf.if as an unmodeled canonicalization pattern (a false positive:
-// the marked guard has a runtime condition the real pass does not fold), which
-// would flip the module to incomplete.  Repairing that belongs to the
-// canonicalization stage and is outside this task's file scope, so the fixture
-// omits the AIV store to stay on a fully reproducible exact path.
+// TileAndBindSubBlock runs the same-address-hazard Exact path: the AIV store's
+// destination traces through reinterpret_cast to the same block argument as the
+// load source, so limitUniqueSubBlockToStore wraps the store in a
+// `limit_sub_block_id0` scf.if guard (Exact).  CanonicalizationAfterSplit
+// recognizes the marked guard and leaves it (the runtime get_sub_block_idx
+// condition is non-foldable), keeping the limit-store path end-to-end exact.
+// TileCubeVectorLoop finds no hivm.loop_core_type candidates and is a recognized
+// no-op.  No stage reports Incomplete, so the module reports precision=exact.
 "builtin.module"() ({
   "func.func"() <{arg_attrs = [{tt.divisibility = 16 : i32, tt.tensor_kind = 0 : i32}], function_type = (memref<?xf16>) -> (), sym_name = "kernel"}> ({
   ^bb0(%arg0: memref<?xf16>):
@@ -58,9 +52,16 @@
       "scf.yield"() : () -> ()
     }) : (index, index, index) -> ()
     // The load result is the UB-relevant Vector artifact (its output tensor
-    // materializes one UB buffer).  No store: the projected AIV function has no
-    // store-like op, so TileAndBindSubBlock's attemptBindSubBlock reverts with
-    // isFailed and limitUniqueSubBlockToStore is a recognized no-op (Exact).
+    // materializes one UB buffer).  An AIV store exercises sub-block binding on
+    // a non-tiling Exact path: the store destination traces through
+    // reinterpret_cast to %arg0, the same block argument as the load source, so
+    // TileAndBindSubBlock detects the same-address hazard and applies
+    // limitUniqueSubBlockToStore (wrapping the store in a `limit_sub_block_id0`
+    // scf.if guard).  CanonicalizationAfterSplit recognizes the marked guard and
+    // leaves it in place (the runtime get_sub_block_idx condition is non-foldable,
+    // Exact), so the limit-store path is end-to-end exact.
+    %store_view = "memref.reinterpret_cast"(%arg0, %c0) <{operandSegmentSizes = array<i32: 1, 1, 0, 0>, static_offsets = array<i64: 0>, static_sizes = array<i64: 16, 16>, static_strides = array<i64: 16, 1>}> : (memref<?xf16>, index) -> memref<16x16xf16, strided<[16, 1], offset: ?>>
+    "hivm.hir.store"(%loaded, %store_view) <{operandSegmentSizes = array<i32: 2, 0>}> : (tensor<16x16xf16>, memref<16x16xf16, strided<[16, 1], offset: ?>>) -> ()
     "func.return"() : () -> ()
   }) {SyncBlockLockArgIdx = 0 : i64, WorkspaceArgIdx = -1 : i64, hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<MIX>, mix_mode = "mix"} : () -> ()
 }) {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #hacc.target_device_spec<#dlti.dl_entry<"AI_CORE_COUNT", 24 : i32>, #dlti.dl_entry<"CUBE_CORE_COUNT", 24 : i32>, #dlti.dl_entry<"VECTOR_CORE_COUNT", 48 : i32>, #dlti.dl_entry<"UB_SIZE", 1572864 : i32>, #dlti.dl_entry<"L1_SIZE", 4194304 : i32>, #dlti.dl_entry<"L0A_SIZE", 524288 : i32>, #dlti.dl_entry<"L0B_SIZE", 524288 : i32>, #dlti.dl_entry<"L0C_SIZE", 1048576 : i32>, #dlti.dl_entry<"UB_ALIGN_SIZE", 256 : i32>, #dlti.dl_entry<"L1_ALIGN_SIZE", 256 : i32>, #dlti.dl_entry<"L0C_ALIGN_SIZE", 4096 : i32>>>, hacc.hivmc_compatible_print = false, hacc.hivmc_version = #hacc.hivmc_version<"0.0.0">, hivm.module_core_type = #hivm.module_core_type<MIX>} : () -> ()

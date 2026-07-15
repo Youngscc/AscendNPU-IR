@@ -247,20 +247,29 @@ ClassifyCoreDetailed(const GenericModule &module,
   if (vectorOperations.count(operation.name) != 0)
     return {CoreKind::Vector, "fixed Vector operation registry"};
 
-  // Index/mask utility ops retained on the AIV side by the real compiler.
-  // get_block_idx carries CubeVectorCoreTypeTrait (TCoreType::CUBE_OR_VECTOR);
+  // Index/mask/config/debug utility ops retained on the AIV side by the real
+  // compiler.  get_block_idx, get_block_num, get_sub_block_idx,
+  // get_sub_block_num, get_sys_cnt, set_ffts_base_addr, init_debug and
+  // finish_debug all carry CubeVectorCoreTypeTrait (TCoreType::CUBE_OR_VECTOR);
   // set_mask_norm has no core trait and getCoreType defaults it to
   // CUBE_OR_VECTOR.  SplitMixKernel's filterMixFunc erases only ops whose
   // coreType is exactly CUBE, so CUBE_OR_VECTOR utility ops survive the AIV
-  // projection.  They produce a scalar index / set a mask and allocate no UB
-  // buffer, so for UB modeling they are Neutral (kept, not flagged).  The
-  // generic CUBE_OR_VECTOR case is still treated as Unknown elsewhere because
-  // mix_matmul and similar contextual ops are not safe to delete from one side.
+  // projection.  They produce a scalar index / set a mask or debug register and
+  // allocate no UB buffer, so for UB modeling they are Neutral (kept, not
+  // flagged).  The generic CUBE_OR_VECTOR case is still treated as Unknown
+  // elsewhere because mix_matmul and similar contextual ops are not safe to
+  // delete from one side.  Note: the model's own T7 rewrite *creates*
+  // get_sub_block_idx, but that runs after ScanUnsupportedOperations, so only
+  // INPUT occurrences of these ops are classified here.
   static const std::set<std::string> neutralOperations = {
       "builtin.module", "func.func", "func.return", "scope.scope",
       "cf.br", "cf.cond_br", "scf.condition", "scf.for", "scf.if",
       "scf.while", "scf.yield", "scope.yield",
-      "hivm.hir.set_mask_norm", "hivm.hir.get_block_idx"};
+      "hivm.hir.set_mask_norm", "hivm.hir.get_block_idx",
+      "hivm.hir.get_block_num", "hivm.hir.get_sub_block_idx",
+      "hivm.hir.get_sub_block_num", "hivm.hir.get_sys_cnt",
+      "hivm.hir.set_ffts_base_addr", "hivm.hir.init_debug",
+      "hivm.hir.finish_debug"};
   static const std::vector<std::string> neutralPrefixes = {
       "affine.", "annotation.", "arith.", "bufferization.", "cf.",
       "func.", "llvm.", "memref.", "memref_ext.", "scf.", "scope.",
