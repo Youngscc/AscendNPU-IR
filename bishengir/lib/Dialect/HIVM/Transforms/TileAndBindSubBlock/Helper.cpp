@@ -58,6 +58,42 @@ bool isMarkedInsertSliceOp(Operation *op) {
   return op->hasAttrOfType<UnitAttr>(toBeCancelOutInsertSlice);
 }
 
+int64_t calculateBufferSizeInBytes(ShapedType tiledType,
+                                   ArrayRef<int64_t> originShape,
+                                   int64_t tilingDim) {
+  if (tiledType.getRank() != static_cast<int64_t>(originShape.size()))
+    llvm::report_fatal_error(
+        "odd tiling buffer size calculation requires matching ranks");
+  if (tilingDim < 0 || tilingDim >= tiledType.getRank())
+    llvm::report_fatal_error(
+        "odd tiling buffer size calculation got invalid tiling dimension");
+
+  int64_t numElements = 1;
+  ArrayRef<int64_t> tiledShape = tiledType.getShape();
+  for (auto [idx, size] : llvm::enumerate(tiledShape)) {
+    if (!ShapedType::isDynamic(size)) {
+      numElements *= size;
+      continue;
+    }
+    if (static_cast<int64_t>(idx) != tilingDim ||
+        ShapedType::isDynamic(originShape[idx]))
+      llvm::report_fatal_error(
+          "odd tiling buffer size calculation only supports one dynamic "
+          "tiled dimension with static original size");
+
+    int64_t originalDimSize = originShape[idx];
+    int64_t subBlockDim = static_cast<int64_t>(kSubBlockDim);
+    numElements *=
+        static_cast<int64_t>(llvm::divideCeil(originalDimSize, subBlockDim));
+  }
+
+  int64_t bitWidth =
+      static_cast<int64_t>(tiledType.getElementType().getIntOrFloatBitWidth());
+  int64_t bitsToByte = static_cast<int64_t>(utils::kBitsToByte);
+  return numElements *
+         static_cast<int64_t>(llvm::divideCeil(bitWidth, bitsToByte));
+}
+
 OpFoldResult calculateOffsetAtTilingDim(RewriterBase &rewriter, Location loc,
                                         scf::ForOp containingLoop,
                                         OpFoldResult singleTileSize) {
@@ -67,6 +103,40 @@ OpFoldResult calculateOffsetAtTilingDim(RewriterBase &rewriter, Location loc,
       rewriter, loc, mulExpr,
       {containingLoop.getInductionVar(), singleTileSize});
   return offsetAtTileDim;
+}
+
+OpFoldResult calculateOffsetAtTilingDim(RewriterBase &rewriter, Location loc,
+                                        scf::ForOp containingLoop,
+                                        Value toBeTiledVal, int64_t tileDimension) {
+  if (!isa<ShapedType>(toBeTiledVal.getType()))
+    llvm::report_fatal_error("expected shaped type in calculateOffsetAtTilingDim");
+  auto inputType = cast<ShapedType>(toBeTiledVal.getType());
+  auto dimSize = inputType.getShape()[tileDimension];
+
+  OpFoldResult tileStride;
+  if (ShapedType::isDynamic(dimSize)) {
+    Value dimVal;
+    if (isa<TensorType>(inputType)) {
+      dimVal = rewriter.create<tensor::DimOp>(loc, toBeTiledVal, tileDimension);
+    } else {
+      dimVal = rewriter.create<memref::DimOp>(loc, toBeTiledVal, tileDimension);
+    }
+    AffineExpr d0;
+    bindDims(rewriter.getContext(), d0);
+    auto ceilDivMap = AffineMap::get(/*dimCount=*/1, /*symbolCount=*/0,
+                                     d0.ceilDiv(kSubBlockDim));
+    tileStride = affine::makeComposedFoldedAffineApply(
+        rewriter, loc, ceilDivMap, {dimVal});
+  } else {
+    tileStride = getAsIndexOpFoldResult(
+        rewriter.getContext(), llvm::divideCeil(dimSize, kSubBlockDim));
+  }
+
+  AffineExpr mulExpr =
+      rewriter.getAffineSymbolExpr(0) * rewriter.getAffineSymbolExpr(1);
+  return affine::makeComposedFoldedAffineApply(
+      rewriter, loc, mulExpr,
+      {containingLoop.getInductionVar(), tileStride});
 }
 
 /// This function calculates the tile size by dividing the dimension size

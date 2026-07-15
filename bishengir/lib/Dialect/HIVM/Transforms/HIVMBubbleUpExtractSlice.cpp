@@ -15,6 +15,7 @@
 //
 //============================================================================//
 
+#include "bishengir/Dialect/HACC/Utils/Utils.h"
 #include "bishengir/Dialect/HIVM/IR/HIVMImpl.h"
 #include "bishengir/Dialect/HIVM/Transforms/BubbleUpExtractSlice/CSEPattern.h"
 #include "bishengir/Dialect/HIVM/Transforms/BubbleUpExtractSlice/HoistAffine.h"
@@ -55,7 +56,9 @@ using namespace mlir::hivm::detail;
 class HIVMBubbleUpExtractSlicePass
     : public impl::HIVMBubbleUpExtractSliceBase<HIVMBubbleUpExtractSlicePass> {
 public:
-  using Base::Base;
+  explicit HIVMBubbleUpExtractSlicePass(
+      const HIVMBubbleUpExtractSliceOptions &options)
+      : Base(options) {}
 
   static bool traceAndCheckIsGMOrTightCoupledBuffer(Value value) {
     auto maybeAlloc = traceDefOp<memref::AllocOp>(value);
@@ -77,6 +80,13 @@ public:
         if (isMarkedInsertSliceOp(insertSliceOp))
           return WalkResult::interrupt();
       }
+      if (hacc::utils::isRegBasedArch(op->getParentOfType<ModuleOp>())) {
+        if (auto reduceOp = dyn_cast<hivm::VReduceOp>(op)) {
+          auto srcType = cast<ShapedType>(reduceOp.getSrc().getType());
+          if (ShapedType::isDynamicShape(srcType.getShape()))
+            return WalkResult::interrupt();
+        }
+      }
 
       if (!isa<tensor::ExtractSliceOp>(op)) {
         return WalkResult::advance();
@@ -88,7 +98,8 @@ public:
         if (isa<BlockArgument>(extractSrc)) {
           return WalkResult::advance();
         }
-        if (failed(findContainingSubblockLoop(extractSrc.getDefiningOp()))) {
+        auto *srcDefOp = extractSrc.getDefiningOp();
+        if (failed(findContainingSubblockLoop(srcDefOp))) {
           return WalkResult::advance();
         }
         if (auto bufferizeToTensor = dyn_cast<bufferization::ToTensorOp>(
@@ -96,15 +107,16 @@ public:
           if (!traceAndCheckIsGMOrTightCoupledBuffer(bufferizeToTensor->getOperand(0)) &&
               strictMode) {
             return WalkResult::interrupt();
-          } else {
-            return WalkResult::advance();
           }
+          return WalkResult::advance();
         }
         if (auto whileOp =
-                dyn_cast<scf::WhileOp>((extractSrc.getDefiningOp()))) {
+                dyn_cast<scf::WhileOp>(srcDefOp)) {
           return WalkResult::interrupt();
         }
-        if (!isa<tensor::EmptyOp>(extractSrc.getDefiningOp())) {
+        if (!isa<tensor::EmptyOp>(srcDefOp) &&
+            !(isa<scf::ForOp>(srcDefOp) && srcDefOp->hasAttr("ExtractedLoadOrStore")) &&
+            !srcDefOp->hasAttr(tiledOp)) {
           if (strictMode) {
             return WalkResult::interrupt();
           }
@@ -123,12 +135,17 @@ public:
     func::FuncOp funcOp = getOperation();
     GreedyRewriteConfig config;
     config.maxIterations = 50;
-    // Apply bubble up patterns
+    // Apply bubble up patterns.
+    // MarkEmptySliceBufferSize runs after BubbleUpPattern (which
+    // may reject due to areOperandsUpperLevel) but before
+    // FoldTensorEmptyPatterns. This ensures the mark is on the extract_slice
+    // result before the fold moves it to tensor.empty.
     RewritePatternSet patterns(funcOp.getContext());
     populateHoistAffinePattern(patterns);
     affine::AffineApplyOp::getCanonicalizationPatterns(patterns, patterns.getContext());
     populateBubbleUpExtractSliceOpPatterns(patterns);
     populateCSEPattern(patterns);
+    patterns.add<MarkEmptySliceBufferSize>(funcOp.getContext());
     tensor::populateFoldTensorEmptyPatterns(patterns, true);
     if (failed(applyPatternsGreedily(funcOp, std::move(patterns), config))) {
       return signalPassFailure();
@@ -150,6 +167,7 @@ public:
     affine::AffineApplyOp::getCanonicalizationPatterns(patterns2, patterns.getContext());
     populateBubbleUpExtractSliceOpPatterns(patterns2);
     populateCSEPattern(patterns2);
+    patterns2.add<MarkEmptySliceBufferSize>(funcOp.getContext());
     tensor::populateFoldTensorEmptyPatterns(patterns2, true);
     if (failed(applyPatternsGreedily(funcOp, std::move(patterns2), config))) {
       return signalPassFailure();
@@ -184,6 +202,11 @@ private:
     strategies.push_back(std::make_shared<ScopeBubbleUpStrategy>());
     strategies.push_back(std::make_shared<SelectBubbleUpStrategy>());
     strategies.push_back(std::make_shared<FixpipeBubbleUpStrategy>());
+    // TODO: Support Operations
+    // strategies.push_back(std::make_shared<IndirectLoadBubbleUpStrategy>());
+    strategies.push_back(std::make_shared<GatherLoadBubbleUpStrategy>());
+    // strategies.push_back(std::make_shared<StrideLoadBubbleUpStrategy>());
+    
 
     patterns.add<BubbleUpPattern>(context, std::move(strategies));
   }
