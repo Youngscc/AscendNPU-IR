@@ -16,6 +16,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "bishengir/Config/bishengir-config.h"
+#include "bishengir/Dialect/HACC/Utils/Utils.h"
 #include "bishengir/Tools/bishengir-compile/Config.h"
 #include "mlir/Support/LLVM.h"
 #include "llvm/ADT/StringRef.h"
@@ -34,7 +35,10 @@ static cl::OptionCategory
     hfusionOptCategory("BiShengIR HFusion Optimization Options");
 static cl::OptionCategory
     hivmOptCategory("BiShengIR HIVM Optimization Options");
+static cl::OptionCategory protonCategory("BiShengIR Proton Options");
 static cl::OptionCategory targetCategory("BiShengIR Target Options");
+static cl::OptionCategory
+    simtOptCategory("BiShengIR SIMT Optimization Options");
 static llvm::cl::OptionCategory
     enableCPURunnerCategory("BiShengIR CPU Runner Options");
 static cl::OptionCategory
@@ -136,6 +140,7 @@ std::string handleOpt(const cl::opt<std::string, ExternalStorage> &opt) {
   }
 
 HANDLE_OPT_INT_OR_FLOAT(unsigned)
+HANDLE_OPT_INT_OR_FLOAT(int)
 
 template <bool ExternalStorage>
 std::string
@@ -148,11 +153,26 @@ handleOpt(const cl::opt<MultiBufferStrategy, ExternalStorage> &opt) {
   };
   return keyMap.at(opt.getValue());
 }
+
+template <bool ExternalStorage>
+std::string
+handleOpt(const cl::opt<mlir::hacc::TargetDevice, ExternalStorage> &opt) {
+  return mlir::hacc::stringifyTargetDeviceEnum(opt.getValue()).str();
+}
 } // namespace option_handler
 
 void BiShengIRCompileMainConfig::collectHIVMCArgs() {
   std::vector<std::string> collectedArgs;
   auto &opts = cl::getRegisteredOptions();
+
+  bool isRegBase =
+      mlir::hacc::utils::isRegBasedArch(clOptionsConfig->getTarget());
+  bool collectA3OnlyOptions = !isRegBase;
+  bool collectA5OnlyOptions = isRegBase;
+  // Referenced from generated code, disable unused variable warning.
+  (void)collectA3OnlyOptions;
+  (void)collectA5OnlyOptions;
+
   // Warning: please do not modify this part unless you know what you're doing.
   for (auto &[optStr, opt] : opts) {
     std::string optValue = "";

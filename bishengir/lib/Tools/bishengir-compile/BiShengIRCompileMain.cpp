@@ -15,6 +15,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "bishengir/Dialect/HACC/Utils/Utils.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Tools/Utils/Utils.h"
 #include "bishengir/Tools/RetriablePassManager/RetriablePassManager.h"
@@ -155,6 +156,12 @@ getCompatibleOptions(const std::vector<std::string> &arguments,
   std::vector<std::string> options = arguments;
   // if enabled, skip debug options for compatibility.
   options = skipDebugOptions(options);
+  if (mlir::hacc::utils::isMemBasedArch(config.getTarget())) {
+    // TODO: Remove this after unify A3/A5 arguments for hivmc.
+    std::set<std::string> unsupported = {"target",
+                                         "enable-triton-kernel-compile"};
+    options = skipOptions(options, unsupported);
+  }
   // TODO: support hivmc compatibility for different versions
   auto version = bishengir::parseHIVMCVersion(config.getHIVMCVersion());
   if (!version.has_value() || version.value().empty()) {
