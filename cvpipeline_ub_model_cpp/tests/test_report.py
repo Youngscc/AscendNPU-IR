@@ -33,6 +33,7 @@ MODULE_DIR = REPO_ROOT / "cvpipeline_ub_model_cpp"
 BINARY = MODULE_DIR / "output" / "bin" / "cvpipeline_ub_model"
 VECTOR_ADD = MODULE_DIR / "examples" / "inputs" / "demo_vector_add_before_cvpipeline.mlir"
 RANDN = MODULE_DIR / "examples" / "inputs" / "demo_randn_before_cvpipeline.mlir"
+MIX = MODULE_DIR / "examples" / "inputs" / "demo_mix_before_cvpipeline.mlir"
 
 FAILURES: list[str] = []
 
@@ -141,6 +142,12 @@ def test_vector_add() -> None:
     # precision is orthogonal to status: whatever precision the demo reports, a
     # success must still exit 0 (incomplete+success is valid).
     check_eq(payload.get("status"), "success", "vector_add: status success")
+    # The pure-AIV demos classify index/mask utility ops (set_mask_norm,
+    # get_block_idx) as Neutral, so no Incomplete diagnostic remains: the
+    # reproducible path reports precision=exact.
+    check_eq(payload.get("precision"), "exact", "vector_add: precision exact")
+    check_eq(len(payload.get("diagnostics", [])), 0,
+             "vector_add: no diagnostics on the exact path")
     check_eq(payload.get("ub_peak_bits"), 65536, "vector_add: ub_peak_bits=65536")
     check_eq(payload.get("required_bits"), 65536, "vector_add: required_bits=65536")
     check_eq(payload.get("overflow"), False, "vector_add: no overflow")
@@ -162,6 +169,9 @@ def test_randn() -> None:
     payload = json.loads(stdout)
     assert_top_level_contract(payload, label="randn")
     check_eq(payload.get("status"), "success", "randn: status success")
+    check_eq(payload.get("precision"), "exact", "randn: precision exact")
+    check_eq(len(payload.get("diagnostics", [])), 0,
+             "randn: no diagnostics on the exact path")
     # randn plans a single AIV kernel whose raw simultaneous peak (23904) is
     # smaller than its total required footprint (24064).  The report must keep
     # both numbers distinct rather than collapsing them.
@@ -169,6 +179,67 @@ def test_randn() -> None:
     check_eq(payload.get("required_bits"), 24064, "randn: required_bits=24064")
     check(payload.get("ub_peak_bits") != payload.get("required_bits"),
           "randn: peak and required remain distinct (module max, not collapsed)")
+
+
+def test_suffix_manifest_audit() -> None:
+    # Every suffix stage row carries a documented input_contract (the operation
+    # forms it assumes after the post-CVPipeline pipeline), and every row is
+    # exercised on an AIV module by the MIX demo's suffix pipeline run below
+    # (test_mix drives the full suffix chain on kernel_mix_aiv).  Unsupported
+    # forms fail closed (throw -> blocker diagnostic) rather than being dropped.
+    manifest = MODULE_DIR / "config" / "initial_suffix_manifest.tsv"
+    lines = manifest.read_text(encoding="utf-8").splitlines()
+    nonempty = [ln for ln in lines if ln.strip()]
+    header = nonempty[0].split("\t")
+    check_eq(header,
+             ["order", "compiler_pass_group", "model_module", "ub_role",
+              "input_contract"],
+             "suffix manifest: header has the audited input_contract column")
+    rows = nonempty[1:]
+    check_eq(len(rows), 11, "suffix manifest: all 11 suffix stages present")
+    for row in rows:
+        parts = row.split("\t")
+        check_eq(len(parts), 5, "suffix manifest: row has 5 columns")
+        order, group, module, role, contract = parts
+        check(bool(order) and bool(group) and bool(module) and bool(role),
+              "suffix manifest: row has non-empty identifying columns")
+        check(bool(contract),
+              f"suffix manifest: {group} has a non-empty input_contract")
+
+
+def test_mix() -> None:
+    rc, stdout, stderr = run_model(MIX, fmt="json")
+    check_eq(rc, 0, "mix: success exits 0")
+    check(not stderr, f"mix: empty stderr (got {stderr!r})")
+    payload = json.loads(stdout)
+    assert_top_level_contract(payload, label="mix")
+    check_eq(payload.get("status"), "success", "mix: status success")
+    # The MIX fixture's AIV store takes the same-address hazard Exact path
+    # (TileAndBindSubBlock) and the flat loop's invariant tensor.empty is hoisted
+    # (LICM); every reproducible stage reports Exact, so the module is exact.
+    check_eq(payload.get("precision"), "exact", "mix: precision exact")
+    check_eq(len(payload.get("diagnostics", [])), 0,
+             "mix: no diagnostics on the exact path")
+    functions = payload.get("functions", [])
+    check_eq(len(functions), 1, "mix: exactly one projected AIV function")
+    if functions:
+        fn = functions[0]
+        # SplitMixKernelAIVProjection renames the MIX function `kernel` to
+        # `kernel_mix_aiv`; no AIC side reaches the planner.
+        check_eq(fn.get("function"), "kernel_mix_aiv",
+                 "mix: projected function is kernel_mix_aiv")
+        assert_function_shape(fn, label="mix")
+        fn_peak = fn.get("ub_peak_bits")
+        # Module peak is the max of per-function peaks; with one function the
+        # module peak equals that function's peak (never the sum).
+        check_eq(payload.get("ub_peak_bits"), fn_peak,
+                 "mix: module peak equals the single function peak")
+        check(isinstance(fn.get("buffers"), list) and len(fn["buffers"]) >= 1,
+              "mix: projected function has at least one UB buffer")
+        for buf in fn.get("buffers", []):
+            for key in ("name", "extent_bits", "offset_bytes",
+                        "alloc_time", "free_time"):
+                check(key in buf, f"mix: buffer has {key}")
 
 
 def test_text_function_column() -> None:
@@ -242,6 +313,8 @@ def main() -> int:
     ensure_binary()
     test_vector_add()
     test_randn()
+    test_suffix_manifest_audit()
+    test_mix()
     test_text_function_column()
     test_overflow()
     test_blocker()

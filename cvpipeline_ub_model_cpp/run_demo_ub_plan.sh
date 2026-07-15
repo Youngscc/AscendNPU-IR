@@ -1,29 +1,45 @@
 #!/usr/bin/env bash
+# Demo driver for the CVPipeline UB model.
+#
+# Runs the lightweight C++ model (cvpipeline_ub_model --action=plan-before-cvpipeline)
+# on the before-CVPipeline example inputs and prints a per-demo UB plan summary.
+# The model owns the whole path: CVPipelining model -> post-CVPipeline AIV
+# projection (14 stages) -> per-function suffix planning -> UB peak/buffers.
+#
+# Input boundary: compiler-emitted generic MLIR immediately before
+# createCVPipeliningPass.  The model assumes the compiler's post-CVPipeline
+# defaults: tile_mix_vector_loop=2, tile_mix_cube_loop=2,
+# enable_auto_bind_sub_block=true, enable_code_motion=true,
+# enable_ubuf_saving=false.  UB-saving and non-default post-pipeline configs are
+# unsupported (reported incomplete/blocker, never silently forced exact).
+#
+# This script does NOT invoke the historical suffix compiler/oracle; the
+# post-CVPipeline pipeline is modeled directly by the lightweight tool.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
-PRE_CVPIPELINE_IR="cvpipeline_ub_model_cpp/examples/inputs/demo_randn_before_cvpipeline.mlir"
+# Default demo set: the two pure-AIV demos plus the end-to-end MIX demo.
+DEMO_VECTOR_ADD="cvpipeline_ub_model_cpp/examples/inputs/demo_vector_add_before_cvpipeline.mlir"
+DEMO_RANDN="cvpipeline_ub_model_cpp/examples/inputs/demo_randn_before_cvpipeline.mlir"
+DEMO_MIX="cvpipeline_ub_model_cpp/examples/inputs/demo_mix_before_cvpipeline.mlir"
+
+# Visualizer outputs for the primary (MIX) demo.
 DEMO_JSON="cvpipeline_ub_model_cpp/output/demo/ub_plan.json"
 DEMO_HTML="cvpipeline_ub_model_cpp/output/demo/ub_plan_visualizer.html"
-ORACLE_DIR="cvpipeline_ub_model_cpp/output/demo/suffix_oracle"
-SUFFIX_TOOL="build/bin/bishengir-cvpipeline-suffix-compile"
-RUN_ORACLE=true
-BUILD_SUFFIX_ORACLE=true
 
-# CVPipeline 参数：只影响 createCVPipeliningPass 的建模路径。
+# CVPipeline knobs (only affect the createCVPipeliningPass modeling path).
 CV_DISABLE_PIPELINING=false
 CV_PIPELINE_DEPTH=-1
 CV_ENABLE_PRELOAD=false
 CV_ENABLE_LAZY_LOADING=false
 
-# suffix / PlanMemory 参数：只影响 CVPipeline 之后的 UB buffer 和规划。
+# Suffix / PlanMemory knobs (only affect UB buffers after CVPipeline).
 SUFFIX_ENABLE_AUTO_MULTI_BUFFER=false
 SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY=no-l0c
 SUFFIX_MIX_MULTI_BUFFER_STRATEGY=only-cube
 RESTRICT_INPLACE_AS_ISA=false
-# 默认留空，保持 PlanMemory retry/attempt 行为；只在定位固定 attempt 时设置。
 RANDOM_SEED=""
 
 usage() {
@@ -31,39 +47,32 @@ usage() {
 Usage:
   bash cvpipeline_ub_model_cpp/run_demo_ub_plan.sh [options]
 
-Input/output:
-  --pre-cvpipeline-ir PATH
-  --json PATH
-  --html PATH
-  --oracle-dir DIR
-  --suffix-tool PATH
-  --skip-oracle
-  --skip-suffix-build
+Runs the lightweight CVPipeline UB model on the vector_add, randn, and MIX
+demos and prints each demo's precision, status, and UB peak.
 
-CVPipeline options:
+Primary demo / visualization:
+  --json PATH            JSON output for the primary demo (default: MIX)
+  --html PATH            HTML visualizer output for the primary demo
+
+CVPipeline options (affect createCVPipeliningPass modeling only):
   --cv-disable-pipelining true|false
   --cv-pipeline-depth N
   --cv-enable-preload true|false
   --cv-enable-lazy-loading true|false
 
-Suffix / PlanMemory options:
+Suffix / PlanMemory options (affect UB buffers after CVPipeline):
   --suffix-enable-auto-multi-buffer true|false
   --suffix-local-multi-buffer-strategy no-limit|only-cube|only-vector|no-l0c
   --suffix-mix-multi-buffer-strategy no-limit|only-cube|only-vector|no-l0c
   --restrict-inplace-as-isa true|false
-  --random-seed N        # omit for PlanMemory retry mode
+  --random-seed N        # omit for PlanMemory retry mode (default)
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --pre-cvpipeline-ir) PRE_CVPIPELINE_IR="$2"; shift 2 ;;
     --json) DEMO_JSON="$2"; shift 2 ;;
     --html) DEMO_HTML="$2"; shift 2 ;;
-    --oracle-dir) ORACLE_DIR="$2"; shift 2 ;;
-    --suffix-tool) SUFFIX_TOOL="$2"; shift 2 ;;
-    --skip-oracle) RUN_ORACLE=false; shift ;;
-    --skip-suffix-build) BUILD_SUFFIX_ORACLE=false; shift ;;
     --cv-disable-pipelining) CV_DISABLE_PIPELINING="$2"; shift 2 ;;
     --cv-pipeline-depth) CV_PIPELINE_DEPTH="$2"; shift 2 ;;
     --cv-enable-preload) CV_ENABLE_PRELOAD="$2"; shift 2 ;;
@@ -78,83 +87,87 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-echo "[1/5] Building cvpipeline_ub_model incrementally..."
+echo "[1/3] Building the lightweight CVPipeline UB model..."
 bash cvpipeline_ub_model_cpp/build.sh >/dev/null
+MODEL="cvpipeline_ub_model_cpp/output/bin/cvpipeline_ub_model"
 
-if [[ "${RUN_ORACLE}" == "true" && "${BUILD_SUFFIX_ORACLE}" == "true" ]]; then
-  echo "[2/5] Building suffix compiler incrementally..."
-  cmake --build build --target bishengir-cvpipeline-suffix-compile -j8 >/dev/null
-fi
-
-echo "[3/5] Running lightweight model and writing JSON..."
-mkdir -p "$(dirname "${DEMO_JSON}")"
-model_args=(
-  python3 cvpipeline_ub_model_cpp/scripts/plan_precvpipeline_ub.py
-  --pre-cvpipeline-ir="${PRE_CVPIPELINE_IR}" \
-  --cv-disable-pipelining="${CV_DISABLE_PIPELINING}" \
-  --cv-pipeline-depth="${CV_PIPELINE_DEPTH}" \
-  --cv-enable-preload="${CV_ENABLE_PRELOAD}" \
-  --cv-enable-lazy-loading="${CV_ENABLE_LAZY_LOADING}" \
-  --suffix-enable-auto-multi-buffer="${SUFFIX_ENABLE_AUTO_MULTI_BUFFER}" \
-  --suffix-local-multi-buffer-strategy="${SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY}" \
-  --suffix-mix-multi-buffer-strategy="${SUFFIX_MIX_MULTI_BUFFER_STRATEGY}" \
-  --format=json \
-  --output="${DEMO_JSON}"
-)
-if [[ "${RESTRICT_INPLACE_AS_ISA}" == "true" || "${RESTRICT_INPLACE_AS_ISA}" == "1" ]]; then
-  model_args+=(--restrict-inplace-as-isa)
-fi
-if [[ -n "${RANDOM_SEED}" ]]; then
-  model_args+=(--random-seed="${RANDOM_SEED}")
-fi
-"${model_args[@]}" >"$(dirname "${DEMO_JSON}")/model_stdout.log"
-
-if [[ "${RUN_ORACLE}" == "true" ]]; then
-  if [[ ! -x "${SUFFIX_TOOL}" ]]; then
-    echo "[ERROR] suffix compiler not found or not executable: ${SUFFIX_TOOL}" >&2
-    echo "        build it with: cmake --build build --target bishengir-cvpipeline-suffix-compile -j8" >&2
-    exit 1
-  fi
-
-  echo "[4/5] Running suffix-compile oracle..."
-  mkdir -p "${ORACLE_DIR}"
-  oracle_tsv="${ORACLE_DIR}/oracle.tsv"
-  oracle_ir="${ORACLE_DIR}/after_local_plan_memory.mlir"
-  suffix_args=(
-    "${SUFFIX_TOOL}" "${PRE_CVPIPELINE_IR}"
-    --mlir-disable-threading
+run_demo() {
+  local label="$1"
+  local ir="$2"
+  echo
+  echo "=== ${label} (${ir}) ==="
+  local args=(
+    "${MODEL}"
+    --action=plan-before-cvpipeline
+    --before-cvpipeline-ir="${ir}"
     --cv-pipeline-depth="${CV_PIPELINE_DEPTH}"
     --disable-cv-pipelining="${CV_DISABLE_PIPELINING}"
     --enable-preload="${CV_ENABLE_PRELOAD}"
     --enable-cv-lazy-loading="${CV_ENABLE_LAZY_LOADING}"
     --enable-auto-multi-buffer="${SUFFIX_ENABLE_AUTO_MULTI_BUFFER}"
-    --limit-auto-multi-buffer-of-local-buffer "${SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY}"
-    --limit-auto-multi-buffer-buffer "${SUFFIX_MIX_MULTI_BUFFER_STRATEGY}"
-    -o "${oracle_ir}"
+    --limit-auto-multi-buffer-of-local-buffer="${SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY}"
+    --limit-auto-multi-buffer-buffer="${SUFFIX_MIX_MULTI_BUFFER_STRATEGY}"
+    --format=json
   )
   if [[ "${RESTRICT_INPLACE_AS_ISA}" == "true" || "${RESTRICT_INPLACE_AS_ISA}" == "1" ]]; then
-    suffix_args+=(--restrict-inplace-as-isa)
+    args+=(--restrict-inplace-as-isa)
   fi
   if [[ -n "${RANDOM_SEED}" ]]; then
-    suffix_args+=(--plan-memory-seed "${RANDOM_SEED}")
+    args+=(--random-seed="${RANDOM_SEED}")
   fi
-  BISHENGIR_DUMP_PLAN_MEMORY_ATTEMPTS=1 "${suffix_args[@]}" \
-    >"${ORACLE_DIR}/stdout.log" 2>"${oracle_tsv}"
-else
-  echo "[3/4] Skipping suffix-compile oracle."
-fi
+  python3 - "${args[@]}" <<'PY'
+import json, subprocess, sys
+cmd = sys.argv[1:]
+proc = subprocess.run(cmd, text=True, capture_output=True)
+if proc.returncode != 0:
+    print(f"  [ERROR] exit {proc.returncode}: {proc.stderr.strip()}", file=sys.stderr)
+    sys.exit(proc.returncode)
+payload = json.loads(proc.stdout)
+print(f"  precision = {payload.get('precision')}")
+print(f"  status    = {payload.get('status')}")
+print(f"  ub_peak_bits   = {payload.get('ub_peak_bits')}")
+print(f"  required_bits  = {payload.get('required_bits')}")
+print(f"  capacity_bits  = {payload.get('capacity_bits')}")
+print(f"  functions      = {len(payload.get('functions', []))}")
+for fn in payload.get("functions", []):
+    print(f"    - {fn.get('function')}: peak={fn.get('ub_peak_bits')} "
+          f"required={fn.get('required_bits')} buffers={len(fn.get('buffers', []))}")
+for diag in payload.get("diagnostics", []):
+    print(f"  [diagnostic] {diag.get('pipeline_stage')}: {diag.get('reason')}")
+PY
+}
+
+echo "[2/3] Running demos..."
+run_demo "vector_add (pure-AIV)" "${DEMO_VECTOR_ADD}"
+run_demo "randn (pure-AIV)" "${DEMO_RANDN}"
+run_demo "MIX (end-to-end)" "${DEMO_MIX}"
 
 echo
-echo "[5/5] Summary"
+echo "[3/3] Writing primary demo JSON + visualizer..."
+mkdir -p "$(dirname "${DEMO_JSON}")"
+primary_args=(
+  "${MODEL}"
+  --action=plan-before-cvpipeline
+  --before-cvpipeline-ir="${DEMO_MIX}"
+  --cv-pipeline-depth="${CV_PIPELINE_DEPTH}"
+  --disable-cv-pipelining="${CV_DISABLE_PIPELINING}"
+  --enable-preload="${CV_ENABLE_PRELOAD}"
+  --enable-cv-lazy-loading="${CV_ENABLE_LAZY_LOADING}"
+  --enable-auto-multi-buffer="${SUFFIX_ENABLE_AUTO_MULTI_BUFFER}"
+  --limit-auto-multi-buffer-of-local-buffer="${SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY}"
+  --limit-auto-multi-buffer-buffer="${SUFFIX_MIX_MULTI_BUFFER_STRATEGY}"
+  --format=json
+)
+if [[ "${RESTRICT_INPLACE_AS_ISA}" == "true" || "${RESTRICT_INPLACE_AS_ISA}" == "1" ]]; then
+  primary_args+=(--restrict-inplace-as-isa)
+fi
+if [[ -n "${RANDOM_SEED}" ]]; then
+  primary_args+=(--random-seed="${RANDOM_SEED}")
+fi
+"${primary_args[@]}" >"${DEMO_JSON}"
 python3 cvpipeline_ub_model_cpp/scripts/render_ub_demo_html.py \
   --template cvpipeline_ub_model_cpp/demo/ub_plan_visualizer.html \
   --json "${DEMO_JSON}" \
   --output "${DEMO_HTML}" >/dev/null
 python3 cvpipeline_ub_model_cpp/scripts/print_ub_plan_summary.py \
   "${DEMO_JSON}" --html "${DEMO_HTML}"
-if [[ "${RUN_ORACLE}" == "true" ]]; then
-  echo
-  python3 cvpipeline_ub_model_cpp/scripts/compare_ub_plan_with_suffix_oracle.py \
-    --model-json "${DEMO_JSON}" \
-    --oracle-tsv "${ORACLE_DIR}/oracle.tsv"
-fi

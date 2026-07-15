@@ -1,12 +1,12 @@
-order	compiler_pass_group	model_module	ub_role
-1	OneShotBufferize	one_shot_analysis.hpp;bufferized_semantic_ir.hpp	materialize tensor buffers and aliases
-2	CanonicalizeIterArg;HIVMOptSinglePoint	hivm_opt_single_point.hpp	remove or scalarize local buffers
-3	HIVMDecomposeOp	hivm_decompose_op.hpp	materialize decomposition temporaries
-4	ConvertNonContiguousReshapeToCopy	convert_non_contiguous_reshape_to_copy.hpp	materialize reshape copies
-5	InferHIVMMemScope	infer_hivm_mem_scope.hpp	select UB address space
-6	AlignAllocSize;MarkStrideAlign;EnableStrideAlign	align_storage.hpp	change physical UB extents and layouts
-7	FlattenOps;ReduceRankSubview;LiftLowestStride	after_alloc_extra_buffer.hpp;planmemory_bridge.hpp	produce PlanMemory-visible buffer views
-8	AllocExtraBuffer	alloc_extra_buffer.hpp	materialize operation scratch buffers
-9	InlineLoadCopy	inline_load_copy.hpp	remove eligible intermediate UB buffers
-10	MarkMultiBuffer	mark_multi_buffer.hpp	multiply selected buffer instances
-11	PlanMemoryInputBridge	planmemory_input_semantic_ir.hpp;planmemory_bridge.hpp	produce PlanMemory operations and allocations
+order	compiler_pass_group	model_module	ub_role	input_contract
+1	OneShotBufferize	one_shot_analysis.hpp;bufferized_semantic_ir.hpp	materialize tensor buffers and aliases	projected AIV generic IR whose ops all carry modeled semantics (HasModeledOperationSemantics) and whose tensor<*> operands (tensor.empty, tensor.extract_slice/insert_slice, hivm.hir elementwise and DPS ops) one-shot bufferization can lower to memref without aliasing ambiguity; an unreviewed op or ambiguous alias fails closed
+2	CanonicalizeIterArg;HIVMOptSinglePoint	hivm_opt_single_point.hpp	remove or scalarize local buffers	bufferized scf.for iter-args and single-point (scalar) HIVM ops; unmodeled iter-arg or non-single-point forms are left in place rather than rewritten
+3	HIVMDecomposeOp	hivm_decompose_op.hpp	materialize decomposition temporaries	HIVM structured ops with a known decomposition template; unrecognized structured ops pass through unchanged with no extra temporary
+4	ConvertNonContiguousReshapeToCopy	convert_non_contiguous_reshape_to_copy.hpp	materialize reshape copies	memref.collapse_shape/expand_shape over non-contiguous layouts materialize a copy; contiguous reshapes pass through without a copy
+5	InferHIVMMemScope	infer_hivm_mem_scope.hpp	select UB address space	local memref allocations without an explicit #hivm.address_space are assigned UB; allocs already carrying a concrete address space are honored as-is
+6	AlignAllocSize;MarkStrideAlign;EnableStrideAlign	align_storage.hpp	change physical UB extents and layouts	UB allocations with statically known element shapes and strides; a dynamic stride-aligned allocation fails closed (throw surfaced as a blocker diagnostic, never silently dropped)
+7	FlattenOps;ReduceRankSubview;LiftLowestStride	after_alloc_extra_buffer.hpp;planmemory_bridge.hpp	produce PlanMemory-visible buffer views	subview/collapse_shape chains over UB allocs with consistent operand ranks; a rank mismatch fails closed
+8	AllocExtraBuffer	alloc_extra_buffer.hpp	materialize operation scratch buffers	HIVM ops declaring a ceil-factor/scratch operand with a valid constant; an invalid ceil-factor operand fails closed
+9	InlineLoadCopy	inline_load_copy.hpp	remove eligible intermediate UB buffers	hivm.hir.load -> hivm.hir.copy -> single-use chains fully inside one function; a cross-function copy fails closed
+10	MarkMultiBuffer	mark_multi_buffer.hpp	multiply selected buffer instances	UB buffers eligible for multi-buffering; with the default (auto-multi-buffer off) no buffer is multiplied
+11	PlanMemoryInputBridge	planmemory_input_semantic_ir.hpp;planmemory_bridge.hpp	produce PlanMemory operations and allocations	finalized UB buffer records with static extents and resolved lifetimes; the projected module must carry exactly one AIV function or planning fails closed

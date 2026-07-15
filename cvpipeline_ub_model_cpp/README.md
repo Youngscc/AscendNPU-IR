@@ -1,71 +1,98 @@
 # CVPipeline UB 使用量模型
 
-这是一个独立的轻量 C++ 工具，用于从 `before-CVPipeline` generic IR 建模到
-PlanMemory 的 UB buffer、lifetime、offset 和 UB peak。Python 只负责命令封装、
-JSON 转换和结果比较，不参与核心计算。
+这是一个独立的轻量 C++ 工具，用于从 **before-CVPipeline** generic IR 出发，
+建模到 PlanMemory 的 UB buffer、lifetime、offset 和 UB peak。Python 只负责命令
+封装、JSON 转换和可视化，不参与核心计算。
 
-默认示例输入：
+工具直接建模整条路径：
 
 ```text
-cvpipeline_ub_model_cpp/examples/inputs/demo_vector_add_before_cvpipeline.mlir
-cvpipeline_ub_model_cpp/examples/inputs/demo_randn_before_cvpipeline.mlir
+before-CVPipeline generic IR
+  -> CVPipelining 模型 (createCVPipeliningPass 的 UB 语义)
+  -> post-CVPipeline AIV 投影 (14 个阶段，见 config/post_cvpipeline_manifest.tsv)
+  -> 每个 AIV 函数独立的 suffix/PlanMemory 规划
+  -> 模块级 UB peak（按函数取最大，绝不求和）
 ```
 
-## 1. 增量构建并比较
+## 输入边界
 
-一键脚本会依次完成以下工作：
+输入是编译器在 **`createCVPipeliningPass` 之前**立即产出的 generic MLIR：
 
-1. 增量构建轻量模型。
-2. 增量构建 `bishengir-cvpipeline-suffix-compile`。
-3. 分别运行轻量模型和 suffix 编译器。
-4. 比较 UB peak，以及 `(extent_bits, offset_bytes)` buffer placement。
+- `func.func` 的 `hivm.func_core_type` 为 `MIX` / `AIV` / `AIC`，`hacc.function_kind = DEVICE`；
+- 模块带有 `dlti.target_system_spec`（至少含 `L0C_SIZE` 与 `UB_ALIGN_SIZE`）；
+- op 形态与编译器在该边界产出的一致（`hivm.hir.*` 结构化算子、`tensor.empty`、
+  `tensor.extract_slice`/`insert_slice`、`memref.reinterpret_cast`、`scf.for` 等）。
+
+`MIX` 函数会被 `SplitMixKernelAIVProjection` 投影为 `<name>_mix_aiv`；只有 AIV 侧
+到达后续阶段，Cube 侧的 L1/L0A/L0B/L0C 不进入 PlanMemory。
+
+## 假设的 post-CVPipeline 默认配置
+
+工具假设编译器 post-CVPipeline 的默认开关（报告为
+`assumed_post_cvpipeline_options`，不随 CLI 选项改变）：
+
+```text
+tile_mix_vector_loop   = 2     # TileCubeVectorLoop 默认 2/2 切分
+tile_mix_cube_loop     = 2
+enable_auto_bind_sub_block = true   # TileAndBindSubBlock 默认开启
+enable_code_motion     = true       # LICM + SubsetHoisting 默认开启
+enable_ubuf_saving     = false      # UB 节省默认关闭（不支持）
+```
+
+不支持的非默认配置：`enable_ubuf_saving = true`、以及任何会改变 UB buffer 集合的
+非默认 post-pipeline 选项，都会被报告为 `incomplete` 或 `blocker`，绝不静默按 exact
+处理。
+
+## precision 与 status 的含义
+
+- `precision = exact`：所有 post-CVPipeline 阶段都是可复现的已建模路径，UB 计划可
+  复现编译器行为。
+- `precision = incomplete`：某个阶段遇到已知的硬情形或未建模形态，按 fail-closed 报
+  告。已记录的 Hybrid 覆盖缺口：
+  - `TileAndBindSubBlock` 的 tiling-success 路径（静态形状、无 hazard 的 AIV store
+    会被真实 pass 切分，但子块循环 IR 不可精确复现）；
+  - `LoopInvariantSubsetHoisting` 的适用情形（loop-carried subset 抽取/插入对需要
+    重建循环，未建模）；
+  - `InlineOTFLoadStore` 的动态 OTF 拼接 store（未建模）。
+- `status` 与 `precision` 正交：`success`/`overflow`/`blocker` 分别对应退出码
+  `0`/`2`/`1`；`incomplete + success` 是合法组合。
+
+## 模块 peak 语义
+
+模块 UB peak 是**所有 AIV 函数原始同时期 peak 的最大值**，不是求和：投影后的 AIV
+函数独立执行，模块永远不会看到它们的 peak 叠加。`required_bits` 是模块有效需求
+（各函数有效需求的最大值）。多个 AIV 函数会被独立规划后按最大值聚合。
+
+## 默认示例输入
+
+```text
+cvpipeline_ub_model_cpp/examples/inputs/demo_vector_add_before_cvpipeline.mlir   # 纯 AIV, peak=65536 exact
+cvpipeline_ub_model_cpp/examples/inputs/demo_randn_before_cvpipeline.mlir        # 纯 AIV, peak=23904 / required=24064 exact
+cvpipeline_ub_model_cpp/examples/inputs/demo_mix_before_cvpipeline.mlir          # 端到端 MIX, peak=4096 exact
+```
+
+## 1. 一键 demo
+
+依次构建轻量模型，运行三个示例（vector_add / randn / MIX），打印每个示例的
+precision、status、UB peak，并为 MIX 示例生成可视化 JSON/HTML：
 
 ```bash
 bash cvpipeline_ub_model_cpp/run_demo_ub_plan.sh
 ```
 
-脚本默认不传 PlanMemory seed。这样 PlanMemory 会保持与原本编译器相同的
-retry/attempt 行为。只有需要固定某个 attempt 做定位时，才显式追加
-`--random-seed N`。
+只调整 CVPipeline 的 pipeline 深度：
 
-脚本中的参数分为两组：
-
-```text
-CVPipeline 参数：
-  --cv-disable-pipelining true|false
-  --cv-pipeline-depth N
-  --cv-enable-preload true|false
-  --cv-enable-lazy-loading true|false
-
-suffix / PlanMemory 参数：
-  --suffix-enable-auto-multi-buffer true|false
-  --suffix-local-multi-buffer-strategy no-limit|only-cube|only-vector|no-l0c
-  --suffix-mix-multi-buffer-strategy no-limit|only-cube|only-vector|no-l0c
-  --restrict-inplace-as-isa true|false
+```bash
+bash cvpipeline_ub_model_cpp/run_demo_ub_plan.sh --cv-pipeline-depth=4
 ```
 
-例如，只调整 CVPipeline 的 pipeline 深度：
+只调整 suffix/PlanMemory 的 multi-buffer 策略：
 
 ```bash
 bash cvpipeline_ub_model_cpp/run_demo_ub_plan.sh \
-  --pre-cvpipeline-ir=cvpipeline_ub_model_cpp/examples/inputs/demo_randn_before_cvpipeline.mlir \
-  --cv-pipeline-depth=4
-```
-
-例如，只调整 suffix/PlanMemory 的 multi-buffer 策略：
-
-```bash
-bash cvpipeline_ub_model_cpp/run_demo_ub_plan.sh \
-  --pre-cvpipeline-ir=cvpipeline_ub_model_cpp/examples/inputs/demo_vector_add_before_cvpipeline.mlir \
   --suffix-enable-auto-multi-buffer=true \
   --suffix-local-multi-buffer-strategy=no-limit \
   --suffix-mix-multi-buffer-strategy=only-cube
-```
-
-如果本地已经有可用的 suffix 编译器，但不希望脚本再次调用 CMake，可以使用：
-
-```bash
-bash cvpipeline_ub_model_cpp/run_demo_ub_plan.sh --skip-suffix-build
 ```
 
 完整参数说明：
@@ -74,55 +101,34 @@ bash cvpipeline_ub_model_cpp/run_demo_ub_plan.sh --skip-suffix-build
 bash cvpipeline_ub_model_cpp/run_demo_ub_plan.sh --help
 ```
 
-脚本中可以编辑的关键变量位于文件开头，包括默认输入、CVPipeline 参数、
-suffix/PlanMemory 参数、suffix 编译器路径和输出目录。
+该脚本**不调用**历史 suffix 编译器/oracle；post-CVPipeline 流水线由轻量工具直接建模。
 
 ## 2. 可视化 demo
 
-运行一键 demo 后，HTML 和 JSON 位于：
+一键 demo 后，HTML 和 JSON 位于：
 
 ```text
 cvpipeline_ub_model_cpp/output/demo/ub_plan_visualizer.html
 cvpipeline_ub_model_cpp/output/demo/ub_plan.json
 ```
 
-直接运行：
-
-```bash
-bash cvpipeline_ub_model_cpp/run_demo_ub_plan.sh
-```
-
-也可以只生成 JSON，再替换可视化页面中的数据：
-
-```bash
-python3 cvpipeline_ub_model_cpp/scripts/generate_ub_demo_json.py \
-  --pre-cvpipeline-ir=cvpipeline_ub_model_cpp/examples/inputs/demo_randn_before_cvpipeline.mlir \
-  --output=cvpipeline_ub_model_cpp/output/demo/ub_plan.json
-```
-
-页面模板是：
-
-```text
-cvpipeline_ub_model_cpp/demo/ub_plan_visualizer.html
-```
-
-打开页面后使用 `Open JSON` 载入新的 JSON。也可以把任意输入路径传给
-`run_demo_ub_plan.sh --pre-cvpipeline-ir PATH`，脚本会重新生成 JSON 和 HTML。
+页面模板是 `cvpipeline_ub_model_cpp/demo/ub_plan_visualizer.html`，打开后用
+`Open JSON` 载入新的 JSON。任意输入路径都可经 `--json`/`--html` 重新生成。
 
 ## 3. 单独运行轻量模型
 
-先增量构建模型：
+先增量构建：
 
 ```bash
 bash cvpipeline_ub_model_cpp/build.sh
 ```
 
-直接运行 before-CVPipeline 到 UB plan：
+直接运行 before-CVPipeline 到 UB plan（以 MIX 示例为例）：
 
 ```bash
 cvpipeline_ub_model_cpp/output/bin/cvpipeline_ub_model \
   --action=plan-before-cvpipeline \
-  --before-cvpipeline-ir=cvpipeline_ub_model_cpp/examples/inputs/demo_randn_before_cvpipeline.mlir \
+  --before-cvpipeline-ir=cvpipeline_ub_model_cpp/examples/inputs/demo_mix_before_cvpipeline.mlir \
   --cv-pipeline-depth=-1 \
   --disable-cv-pipelining=false \
   --enable-preload=false \
@@ -133,7 +139,8 @@ cvpipeline_ub_model_cpp/output/bin/cvpipeline_ub_model \
   --format=json
 ```
 
-上面的命令故意没有设置 seed，保持 PlanMemory 的默认 retry 行为。
+上面的命令故意没有设置 seed，保持 PlanMemory 的默认 retry 行为；只有复现固定
+PlanMemory attempt 时才使用 `--random-seed N`。
 
 主要参数对应关系如下：
 
@@ -141,13 +148,13 @@ cvpipeline_ub_model_cpp/output/bin/cvpipeline_ub_model \
 输入：
   --before-cvpipeline-ir PATH
 
-CVPipeline：
+CVPipeline（只影响 createCVPipeliningPass 建模路径）：
   --cv-pipeline-depth N
   --disable-cv-pipelining true|false
   --enable-preload true|false
   --enable-cv-lazy-loading true|false
 
-suffix / PlanMemory：
+suffix / PlanMemory（只影响 CVPipeline 之后的 UB buffer）：
   --enable-auto-multi-buffer true|false
   --limit-auto-multi-buffer-of-local-buffer STRATEGY
   --limit-auto-multi-buffer-buffer STRATEGY
@@ -158,50 +165,25 @@ suffix / PlanMemory：
   --output PATH
 ```
 
-只有在复现固定 PlanMemory attempt 时才使用：
+## 4. post-CVPipeline 阶段覆盖
 
-```text
---random-seed N
-```
-
-## 4. 单独构建和运行 suffix 编译器
-
-suffix 编译器属于原编译器工程，不是轻量模型的核心实现。使用原编译器的
-构建目录进行增量构建：
-
-```bash
-cmake --build build --target bishengir-cvpipeline-suffix-compile -j8
-```
-
-运行 suffix 编译器时同样不设置 seed：
-
-```bash
-build/bin/bishengir-cvpipeline-suffix-compile \
-  cvpipeline_ub_model_cpp/examples/inputs/demo_randn_before_cvpipeline.mlir \
-  --mlir-disable-threading \
-  --cv-pipeline-depth=-1 \
-  --disable-cv-pipelining=false \
-  --enable-preload=false \
-  --enable-cv-lazy-loading=false \
-  --enable-auto-multi-buffer=false \
-  --limit-auto-multi-buffer-of-local-buffer no-l0c \
-  --limit-auto-multi-buffer-buffer only-cube \
-  -o cvpipeline_ub_model_cpp/output/demo/suffix_after_planmemory.mlir
-```
-
-suffix 编译器的 PlanMemory dump 会写入终端重定向指定的日志文件。完整比较
-通常直接使用第 1 节的一键脚本，因为它会同时保存 model JSON、suffix oracle
-和比较结果。
+`config/post_cvpipeline_manifest.tsv` 记录 14 个 post-CVPipeline 阶段的覆盖判定
+（`modeled` / `ub-invariant` / `unsupported`），并在报告的 `stage_coverage` 中逐阶段
+输出。`config/initial_suffix_manifest.tsv` 记录 11 个 suffix 阶段的 `ub_role` 与
+`input_contract`（每个阶段在 post-CVPipeline 流水线之后假设的 op 形态；未支持形态
+按 fail-closed 抛错并转为 blocker 诊断，绝不静默丢弃 buffer）。
 
 ## 目录说明
 
 ```text
 src/semantic_ir/       generic IR 解析和语义表示
 src/cvpipeline/        CVPipelining 相关 UB 语义
-src/suffix/             suffix pass 的 UB 相关模拟
-src/planmemory/         PlanMemory lifetime、storage 和 planner
-src/cli/                生产入口
-scripts/                构建封装、JSON 处理和 oracle 比较
-demo/                   HTML 可视化模板
-examples/inputs/        产品自带示例 IR
+src/post_cvpipeline/   post-CVPipeline 14 阶段 AIV 投影建模
+src/suffix/            suffix pass 的 UB 相关模拟
+src/planmemory/        PlanMemory lifetime、storage 和 planner
+src/cli/               生产入口
+scripts/               构建封装、JSON 处理和可视化
+demo/                  HTML 可视化模板
+examples/inputs/       产品自带示例 IR
+config/                阶段覆盖与 suffix 输入契约清单
 ```

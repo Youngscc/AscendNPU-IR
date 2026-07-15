@@ -11,6 +11,8 @@
 #include "../src/post_cvpipeline/tensor_empty.hpp"
 #include "../src/post_cvpipeline/tile_bind_subblock.hpp"
 #include "../src/post_cvpipeline/tile_cube_vector_loop.hpp"
+#include "../src/cvpipeline/cvpipelining_pass.hpp"
+#include "../src/semantic_ir/generic_op_semantics.hpp"
 #include "../src/suffix/suffix_pipeline.hpp"
 
 #include <fstream>
@@ -1275,6 +1277,61 @@ CVUB_TEST(split_mix_models_contextual_core_rules) {
   CVUB_CHECK_EQ(cvub::ClassifyCore(module,
                                   OperationWithCase(module, "context_unknown")),
                 cvub::CoreKind::Unknown);
+}
+
+CVUB_TEST(core_classification_treats_index_mask_utilities_as_neutral) {
+  // set_mask_norm and get_block_idx are index/mask utility ops that the real
+  // compiler retains on the AIV side (get_block_idx carries CubeVectorCoreTrait
+  // = CUBE_OR_VECTOR; set_mask_norm has no core trait and defaults to
+  // CUBE_OR_VECTOR).  SplitMixKernel's filterMixFunc only erases ops whose
+  // coreType is exactly CUBE, so CUBE_OR_VECTOR utility ops stay on the AIV
+  // projection.  They allocate no UB buffer and compute no tensor data, so the
+  // UB model must classify them Neutral (retained, not flagged Incomplete).
+  // Regression for the demo_vector_add/demo_randn precision=incomplete gap.
+  const auto module = cvub::ParseGenericIR(
+      "cvpipeline_ub_model_cpp/examples/inputs/"
+      "demo_vector_add_before_cvpipeline.mlir",
+      false);
+  CVUB_CHECK_EQ(cvub::ClassifyCore(
+                    module, module.operations.at(static_cast<size_t>(
+                                OperationId(module, "hivm.hir.set_mask_norm")))),
+                cvub::CoreKind::Neutral);
+  CVUB_CHECK_EQ(cvub::ClassifyCore(
+                    module, module.operations.at(static_cast<size_t>(
+                                OperationId(module, "hivm.hir.get_block_idx")))),
+                cvub::CoreKind::Neutral);
+}
+
+CVUB_TEST(mix_fixture_projects_to_single_exact_aiv_kernel) {
+  // End-to-end MIX golden: the compiler-boundary MIX function `kernel` (Cube
+  // mmadL1 + a Vector load + a flat scf.for) is projected to exactly one
+  // `kernel_mix_aiv` function on a fully reproducible path.  The Cube mmadL1 is
+  // dropped; the Vector load survives (its output tensor materializes the UB
+  // buffer); TileAndBindSubBlock runs the recognized no-store isFailed revert
+  // (Exact); the flat loop's invariant tensor.empty is hoisted by LICM; and no
+  // stage reports Incomplete.  Mirrors the plan-before-cvpipeline CLI flow.
+  auto module = cvub::ParseGenericIR(
+      "cvpipeline_ub_model_cpp/examples/inputs/"
+      "demo_mix_before_cvpipeline.mlir",
+      false);
+  for (cvub::GenericOperation &operation : module.operations)
+    if (cvub::HasModeledOperationSemantics(operation.name))
+      cvub::ApplyOperationSemantics(operation);
+  module = cvub::RunCVPipeliningPass(std::move(module),
+                                     cvub::CVPipeliningOptions{});
+  const cvub::PostCVPipelineResult projected =
+      cvub::RunPostCVPipelineAIVProjection(std::move(module),
+                                           cvub::PostCVPipelineOptions{});
+  CVUB_CHECK_EQ(projected.precision, cvub::Precision::Exact);
+  CVUB_CHECK(projected.diagnostics.empty());
+  CVUB_CHECK_EQ(projected.functions.size(), 1U);
+  CVUB_CHECK_EQ(projected.functions.front().projectedFunction,
+                "kernel_mix_aiv");
+  const cvub::GenericModule &aiv = projected.functions.front().module;
+  CVUB_CHECK(!HasOperation(aiv, "hivm.hir.mmadL1"));  // Cube side dropped.
+  CVUB_CHECK(HasOperation(aiv, "hivm.hir.load"));     // Vector side retained.
+  CVUB_CHECK(HasOperation(aiv, "scf.for")); // flat loop survives for LICM.
+  cvub::ValidateGenericModule(aiv);
 }
 
 CVUB_TEST(split_mix_scope_stubs_multi_results_and_preserves_unsafe_if) {
