@@ -6,6 +6,7 @@
 #include "../src/post_cvpipeline/canonicalization.hpp"
 #include "../src/post_cvpipeline/inline_scope.hpp"
 #include "../src/post_cvpipeline/pipeline.hpp"
+#include "../src/post_cvpipeline/planning.hpp"
 #include "../src/post_cvpipeline/split_mix_aiv.hpp"
 #include "../src/post_cvpipeline/tensor_empty.hpp"
 #include "../src/post_cvpipeline/tile_bind_subblock.hpp"
@@ -30,6 +31,15 @@ bool HasDiagnostic(const cvub::PostCVPipelineResult &result,
 
 bool HasDiagnostic(const cvub::StageResult &result, const std::string &stage,
                    const std::string &reason) {
+  for (const cvub::PostCVPipelineDiagnostic &diagnostic : result.diagnostics)
+    if (diagnostic.pipelineStage == stage &&
+        diagnostic.reason.find(reason) != std::string::npos)
+      return true;
+  return false;
+}
+
+bool HasDiagnostic(const cvub::ModulePlanResult &result,
+                   const std::string &stage, const std::string &reason) {
   for (const cvub::PostCVPipelineDiagnostic &diagnostic : result.diagnostics)
     if (diagnostic.pipelineStage == stage &&
         diagnostic.reason.find(reason) != std::string::npos)
@@ -3592,6 +3602,231 @@ CVUB_TEST(otf_subbyte_concat_store_is_aligned_noop) {
   CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
   CVUB_CHECK(HasOperationCase(result.module, "sb_concat"));
   CVUB_CHECK_EQ(OperationCount(result.module, "tensor.insert_slice"), 0U);
+}
+
+// ---------------------------------------------------------------------------
+// Task 9: per-function suffix planning + module aggregation helpers and tests.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Writes `ir` to a temporary file under output/tests and parses it back as a
+// generic module.  The generic IR parser only reads files, so test modules
+// built from string must round-trip through disk.
+cvub::GenericModule ParseBuiltIR(const std::string &name, const std::string &ir) {
+  const cvub::fs::path path =
+      cvub::fs::path("cvpipeline_ub_model_cpp/output/tests") / name;
+  {
+    std::ofstream output(path);
+    if (!output)
+      throw std::runtime_error("cannot write built IR: " + path.string());
+    output << ir;
+  } // close/flush before parsing so the reader sees the full file
+  return cvub::ParseGenericIR(path, false);
+}
+
+// Builds an isolated AIV module with exactly one func.func holding a single UB
+// allocation of `elements` x f32 kept live by a memref.store.  After the suffix
+// pipeline + PlanMemory this yields a deterministic peak of elements*32 bits.
+// elements == 0 produces a function with no allocation (an "empty" AIV module
+// whose only function has zero UB footprint).
+cvub::GenericModule BuildAIVModuleWithAlloc(const std::string &functionName,
+                                             unsigned elements) {
+  std::string body;
+  if (elements > 0) {
+    const std::string ty =
+        "memref<" + std::to_string(elements) + "xf32, #hivm.address_space<UB>>";
+    body =
+        "    %c0 = \"arith.constant\"() <{value = 0 : f32}> : () -> f32\n"
+        "    %idx = \"arith.constant\"() <{value = 0 : index}> : () -> index\n"
+        "    %b = \"memref.alloc\"() : () -> " +
+        ty +
+        "\n"
+        "    \"memref.store\"(%c0, %b, %idx) : (f32, " +
+        ty + ", index) -> ()\n";
+  }
+  const std::string ir =
+      "\"builtin.module\"() ({\n"
+      "  \"func.func\"() <{function_type = () -> (), sym_name = \"" +
+      functionName + "\"}> ({\n"
+      "  ^bb0:\n" +
+      body +
+      "    \"func.return\"() : () -> ()\n"
+      "  }) {hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, "
+      "hivm.func_core_type = #hivm.func_core_type<AIV>, mix_mode = \"aiv\"} : "
+      "() -> ()\n"
+      "}) : () -> ()\n";
+  return ParseBuiltIR("built_aiv_" + functionName + ".mlir", ir);
+}
+
+// peak bits -> f32 element count (32 bits per element), used so a test can name
+// a desired post-planning peak directly.
+unsigned ElementsForPeakBits(uint64_t peakBits) {
+  return static_cast<unsigned>(peakBits / 32U);
+}
+
+cvub::ProjectedAIVModule MakeProjectedModule(const std::string &sourceFunction,
+                                              const std::string &projectedFunction,
+                                              unsigned elements) {
+  return {sourceFunction, projectedFunction,
+          BuildAIVModuleWithAlloc(projectedFunction, elements)};
+}
+
+// Builds a PostCVPipelineResult with two independently plannable AIV modules
+// whose suffix+PlanMemory peaks equal `peakA` and `peakB`.
+cvub::PostCVPipelineResult MakeTwoAIVModulesWithPeaks(uint64_t peakA,
+                                                       uint64_t peakB) {
+  cvub::PostCVPipelineResult result;
+  result.functions.push_back(MakeProjectedModule(
+      "source_a", "kernel_a", ElementsForPeakBits(peakA)));
+  result.functions.push_back(MakeProjectedModule(
+      "source_b", "kernel_b", ElementsForPeakBits(peakB)));
+  return result;
+}
+
+// 196608 f32 = 6291456 bits, comfortably over the 192 KiB UB capacity, so the
+// function overflows under every retry seed.
+constexpr unsigned kOverflowElements = 196608U;
+
+} // namespace
+
+CVUB_TEST(module_peak_is_max_not_sum) {
+  auto projected = MakeTwoAIVModulesWithPeaks(65536, 98304);
+  auto result = cvub::PlanProjectedAIVFunctions(
+      projected, {}, std::nullopt, false);
+  CVUB_CHECK_EQ(result.functions.size(), 2U);
+  CVUB_CHECK_EQ(result.peakBits, 98304U);
+  CVUB_CHECK_EQ(result.requiredBits, 98304U);
+  CVUB_CHECK(result.success);
+  CVUB_CHECK(!result.overflow);
+  CVUB_CHECK_EQ(result.capacityBits, cvub::kUBCapacityBits);
+  CVUB_CHECK_EQ(result.functions[0].plan.peakBits, 65536U);
+  CVUB_CHECK_EQ(result.functions[1].plan.peakBits, 98304U);
+}
+
+CVUB_TEST(module_aggregates_one_overflow_plus_one_success) {
+  cvub::PostCVPipelineResult projected;
+  projected.functions.push_back(
+      MakeProjectedModule("overflow_src", "overflow_aiv", kOverflowElements));
+  projected.functions.push_back(
+      MakeProjectedModule("ok_src", "ok_aiv", ElementsForPeakBits(65536)));
+  auto result = cvub::PlanProjectedAIVFunctions(
+      projected, {}, std::nullopt, false);
+  CVUB_CHECK_EQ(result.functions.size(), 2U);
+  CVUB_CHECK(!result.success);
+  CVUB_CHECK(result.overflow);
+  CVUB_CHECK(result.functions[0].plan.overflow);
+  CVUB_CHECK(!result.functions[0].plan.success);
+  CVUB_CHECK(result.functions[1].plan.success);
+  CVUB_CHECK(!result.functions[1].plan.overflow);
+  // Overflowing effective requirement is plan.requiredBits; the successful
+  // function's is max(peak, required).  The module takes the max of both, which
+  // is dominated by the overflowing function's requiredBits.
+  const uint64_t overflowRequired = result.functions[0].plan.requiredBits;
+  CVUB_CHECK(overflowRequired > cvub::kUBCapacityBits);
+  CVUB_CHECK_EQ(result.peakBits, overflowRequired);
+  CVUB_CHECK_EQ(result.requiredBits, overflowRequired);
+  CVUB_CHECK(result.peakBits > result.functions[1].plan.peakBits);
+}
+
+CVUB_TEST(module_preserves_different_selected_retry_seeds) {
+  // Planned with no fixed seed: the successful function settles on seed 0
+  // immediately, while the overflowing function exhausts all 20 retry seeds and
+  // reports seed 19.  The module must preserve each function's own seed rather
+  // than inventing a single module-level seed.
+  cvub::PostCVPipelineResult projected;
+  projected.functions.push_back(
+      MakeProjectedModule("ok_src", "ok_aiv", ElementsForPeakBits(65536)));
+  projected.functions.push_back(
+      MakeProjectedModule("overflow_src", "overflow_aiv", kOverflowElements));
+  auto result = cvub::PlanProjectedAIVFunctions(
+      projected, {}, std::nullopt, false);
+  CVUB_CHECK_EQ(result.functions.size(), 2U);
+  CVUB_CHECK_EQ(result.functions[0].plan.selectedSeed, 0U);
+  CVUB_CHECK_EQ(result.functions[1].plan.selectedSeed, 19U);
+  CVUB_CHECK(result.functions[0].plan.selectedSeed !=
+             result.functions[1].plan.selectedSeed);
+}
+
+CVUB_TEST(module_fixed_seed_propagates_to_every_function) {
+  auto projected = MakeTwoAIVModulesWithPeaks(65536, 98304);
+  auto result = cvub::PlanProjectedAIVFunctions(
+      projected, {}, static_cast<uint32_t>(7), false);
+  CVUB_CHECK_EQ(result.functions.size(), 2U);
+  CVUB_CHECK_EQ(result.functions[0].plan.selectedSeed, 7U);
+  CVUB_CHECK_EQ(result.functions[1].plan.selectedSeed, 7U);
+  CVUB_CHECK(result.functions[0].plan.success);
+  CVUB_CHECK(result.functions[1].plan.success);
+  CVUB_CHECK_EQ(result.peakBits, 98304U);
+}
+
+CVUB_TEST(module_tolerates_duplicate_buffer_names_across_functions) {
+  // Each isolated module independently names its single UB allocation %base_0;
+  // planning every function in isolation must not collide on that name, and the
+  // module peak is still the max (not a confused merge) of the two.
+  auto projected = MakeTwoAIVModulesWithPeaks(65536, 98304);
+  auto result = cvub::PlanProjectedAIVFunctions(
+      projected, {}, std::nullopt, false);
+  CVUB_CHECK_EQ(result.functions.size(), 2U);
+  for (const cvub::FunctionPlanResult &function : result.functions) {
+    CVUB_CHECK(!function.plan.buffers.empty());
+    CVUB_CHECK_EQ(function.plan.buffers.front().name, "%base_0");
+  }
+  CVUB_CHECK_EQ(result.peakBits, 98304U);
+}
+
+CVUB_TEST(module_handles_empty_aiv_modules) {
+  cvub::PostCVPipelineResult projected;
+  projected.functions.push_back(MakeProjectedModule("empty_src", "empty_aiv", 0));
+  projected.functions.push_back(
+      MakeProjectedModule("ok_src", "ok_aiv", ElementsForPeakBits(65536)));
+  auto result = cvub::PlanProjectedAIVFunctions(
+      projected, {}, std::nullopt, false);
+  CVUB_CHECK_EQ(result.functions.size(), 2U);
+  CVUB_CHECK(result.functions[0].plan.buffers.empty());
+  CVUB_CHECK_EQ(result.functions[0].plan.peakBits, 0U);
+  CVUB_CHECK_EQ(result.functions[0].plan.requiredBits, 0U);
+  CVUB_CHECK(result.functions[0].plan.success);
+  CVUB_CHECK(result.functions[1].plan.success);
+  CVUB_CHECK(result.success);
+  CVUB_CHECK(!result.overflow);
+  CVUB_CHECK_EQ(result.peakBits, 65536U);
+  CVUB_CHECK_EQ(result.requiredBits, 65536U);
+}
+
+CVUB_TEST(planning_two_function_fixture_plans_each_independently) {
+  auto module = cvub::test::ParseFixture("two_aiv_functions.mlir");
+  cvub::PostCVPipelineResult projected;
+  projected.functions.push_back(
+      {std::string("small_src"), std::string("small_aiv"),
+       cvub::ExtractFunctionModule(module, "small_aiv")});
+  projected.functions.push_back(
+      {std::string("large_src"), std::string("large_aiv"),
+       cvub::ExtractFunctionModule(module, "large_aiv")});
+  auto result = cvub::PlanProjectedAIVFunctions(
+      projected, {}, std::nullopt, false);
+  CVUB_CHECK_EQ(result.functions.size(), 2U);
+  CVUB_CHECK_EQ(result.functions[0].plan.peakBits, 65536U);
+  CVUB_CHECK_EQ(result.functions[1].plan.peakBits, 98304U);
+  CVUB_CHECK_EQ(result.peakBits, 98304U);
+  CVUB_CHECK_EQ(result.requiredBits, 98304U);
+  CVUB_CHECK(result.success);
+}
+
+CVUB_TEST(planning_rejects_module_without_exactly_one_aiv_function) {
+  // A module with two AIV functions violates the per-module invariant that
+  // replaced the bridge's old multiple-AIV blocker.  Planning reports a
+  // diagnostic and marks the result incomplete instead of silently merging.
+  auto module = cvub::test::ParseFixture("two_aiv_functions.mlir");
+  cvub::PostCVPipelineResult projected;
+  projected.functions.push_back(
+      {std::string("both_src"), std::string("both_aiv"), std::move(module)});
+  auto result = cvub::PlanProjectedAIVFunctions(
+      projected, {}, std::nullopt, false);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(!result.success);
+  CVUB_CHECK(HasDiagnostic(result, "PlanProjectedAIVFunctions",
+                           "exactly one AIV function"));
 }
 
 } // namespace

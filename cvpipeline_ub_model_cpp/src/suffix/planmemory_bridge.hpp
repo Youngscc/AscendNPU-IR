@@ -110,14 +110,17 @@ public:
   PlanMemoryInput Build() {
     if (!module.accessBlockers.empty())
       throw std::runtime_error("PlanMemory bridge: unresolved access blocker");
+    // Each supplied module is expected to contain exactly one AIV function
+    // (enforced by the post-CVPipeline per-function planner); the bridge plans
+    // that function.  The historical "multiple AIV functions are not supported"
+    // blocker is removed because the invariant is now enforced upstream, so the
+    // bridge no longer needs to reject multi-function modules itself.
     const GenericOperation *function = nullptr;
     for (const GenericOperation &operation : logical.operations) {
       if (operation.name != "func.func" || !IsAIVFunction(operation))
         continue;
-      if (function)
-        throw std::runtime_error(
-            "PlanMemory bridge: multiple AIV functions are not supported");
       function = &operation;
+      break;
     }
     if (!function)
       return {};
