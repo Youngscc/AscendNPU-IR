@@ -176,6 +176,26 @@ MemScopeInferAndPropagateHelper::propagateMemScopeToUsers(Value val) {
           // we don't know the relationship between the inputs and results.
           // But we don't need to report failure because we can run propagation
           // for the results.
+          func::FuncOp funcOp = llvm::dyn_cast<func::FuncOp>(
+              SymbolTable::lookupNearestSymbolFrom(op, op.getCalleeAttr()));
+          if (!funcOp || !util::isSIMTVF(funcOp))
+            return success();
+
+          auto argTypes = funcOp.getArgumentTypes().vec();
+          for (size_t idx = 0; idx < op->getOperands().size(); idx++) {
+            if (op->getOperand(idx) == val) {
+              auto newType = util::getBaseMemRefTypeWithNewScope(
+                  llvm::dyn_cast<BaseMemRefType>(argTypes[idx]), memrefScope);
+              argTypes[idx] = newType;
+              if (!funcOp->getRegion(0).empty()) {
+                funcOp.front().getArgument(idx).setType(newType);
+              }
+            }
+          }
+          auto newFt = funcOp.getFunctionType().clone(argTypes,
+                                                      funcOp->getResultTypes());
+          funcOp.setFunctionType(newFt);
+
           return success();
         })
         .Case<hivm::CustomOp>([&](hivm::CustomOp op) {
@@ -473,12 +493,20 @@ LogicalResult hivm::inferAndPropagateMemScopeForFunc(func::FuncOp op) {
   MemScopeInferAndPropagateHelper helper;
   auto gmSpaceAttr =
       AddressSpaceAttr::get(op->getContext(), hivm::AddressSpace::GM);
+  auto ubSpaceAttr =
+      AddressSpaceAttr::get(op->getContext(), hivm::AddressSpace::UB);
   auto args = op.getArguments();
   for (auto arg : args) {
     if (!isa<BaseMemRefType>(arg.getType())) {
       continue;
     }
-    if (failed(helper.Run(arg, gmSpaceAttr))) {
+
+    if (op->hasAttr(hivm::VectorFunctionAttr::name)) {
+      if (failed(helper.Run(arg, ubSpaceAttr)))
+        return op->emitOpError()
+               << "Failed to propagate UB memory scope for argument # in VF"
+               << arg.getArgNumber();
+    } else if (failed(helper.Run(arg, gmSpaceAttr))) {
       return op->emitOpError()
              << "Failed to propagate memory scope for argument #"
              << arg.getArgNumber();

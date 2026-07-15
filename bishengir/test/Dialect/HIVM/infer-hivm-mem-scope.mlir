@@ -115,6 +115,33 @@ func.func private @extern_host_func(memref<?xf32>, memref<?xf32>, memref<?xf32>)
 
 // -----
 
+module {
+  // CHECK-LABEL: func.func @simt_vf_caller(
+  // CHECK-SAME: %[[GM:.*]]: memref<16xf32, #hivm.address_space<gm>>
+  func.func @simt_vf_caller(%gm: memref<16xf32>) attributes {
+      hacc.function_kind = #hacc.function_kind<DEVICE>} {
+    // CHECK: %[[LOCAL:.*]] = memref.alloc() : memref<16xf32, #hivm.address_space<ub>>
+    %local = memref.alloc() : memref<16xf32>
+    // CHECK: call @simt_vf(%[[GM]], %[[LOCAL]])
+    // CHECK-SAME: (memref<16xf32, #hivm.address_space<gm>>,
+    // CHECK-SAME: memref<16xf32, #hivm.address_space<ub>>) -> ()
+    call @simt_vf(%gm, %local) {hivm.vector_function} :
+        (memref<16xf32>, memref<16xf32>) -> ()
+    return
+  }
+
+  // CHECK-LABEL: func.func @simt_vf(
+  // CHECK-SAME: %{{.*}}: memref<16xf32, #hivm.address_space<gm>>,
+  // CHECK-SAME: %{{.*}}: memref<16xf32, #hivm.address_space<ub>>)
+  func.func @simt_vf(%gm: memref<16xf32>, %local: memref<16xf32>)
+      attributes {hivm.vector_function,
+                  hivm.vf_mode = #hivm.vf_mode<SIMT>} {
+    return
+  }
+}
+
+// -----
+
 // CHECK: func.func @test_scf_if_0
 // CHECK: scf.if
 func.func @test_scf_if_0(%arg0: memref<19xf32>, %arg1: memref<17xf32>, %arg2: index, %arg3: index) {
