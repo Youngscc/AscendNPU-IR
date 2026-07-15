@@ -100,6 +100,11 @@ func::FuncOp copyShapeFunction(MLIRContext *context, func::FuncOp srcFunc) {
       /*sym_visibility=*/StringAttr(),
       /*arg_attrs=*/srcFunc.getArgAttrsAttr(),
       /*res_attrs=*/ArrayAttr());
+  // regbase-only
+  if (auto moduleOp = srcFunc->getParentOfType<ModuleOp>();
+      moduleOp && hacc::utils::isRegBasedArch(moduleOp)) {
+    newFunc->setAttr("no_inline", builder.getUnitAttr());
+  }
   IRMapping mapper;
   srcFunc.cloneInto(newFunc, mapper);
   return newFunc;
