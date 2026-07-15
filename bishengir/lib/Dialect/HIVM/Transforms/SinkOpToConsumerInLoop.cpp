@@ -14,8 +14,13 @@
 // limitations under the License.
 //
 //===---------------------------------------------------------------------===//
+#include "bishengir/Dialect/HACC/Utils/Utils.h"
+#include "bishengir/Dialect/HFusion/IR/HFusion.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Dialect/HIVM/Transforms/Passes.h"
+#include "bishengir/Dialect/Scope/IR/Scope.h"
+#include "bishengir/Dialect/Utils/Util.h"
+
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -43,50 +48,50 @@ public:
     if (op.getOperation()->getNumResults() != 1)
       return rewriter.notifyMatchFailure(op, "doesn't only have one result");
 
-    auto users = op.getOperation()->getResult(0).getUsers();
-    if (llvm::hasSingleElement(users)) {
-      Operation *singleUser = *users.begin();
-      auto scfParent =
-          dyn_cast_if_present<scf::ForOp>(singleUser->getParentOp());
-      auto scfIf = dyn_cast_if_present<scf::IfOp>(singleUser->getParentOp());
-      if (!scfParent && !scfIf)
+    auto opResult = op.getOperation()->getResult(0);
+    SmallVector<OpOperand *> uses;
+    uint64_t notFusedCounter = 0;
+    for (auto &use : opResult.getUses()) {
+      uses.push_back(&use);
+      auto user = use.getOwner();
+      if (op->getBlock() == user->getBlock())
+        return rewriter.notifyMatchFailure(
+            op, "and its user are in the same block, so that we can't sink it");
+
+      auto loopParent = user->template getParentOfType<scf::ForOp>();
+      if (!loopParent)
         return rewriter.notifyMatchFailure(op, "the user is not in a loop");
 
-      if (op->getBlock() == singleUser->getBlock())
-        return rewriter.notifyMatchFailure(op, "already in the same block");
+      // For manual VF case, scopeOp will be outlined into VF before ops(fillOp,
+      // vbrcOp) are vectorized, so we can't sink these ops into scopeOp. See
+      // more details in issue !1199.
+      auto scopeParent = user->template getParentOfType<scope::ScopeOp>();
+      if (scopeParent && scopeParent->hasAttr("outline"))
+        return rewriter.notifyMatchFailure(op, "can't sink op into manual VF");
 
-      rewriter.setInsertionPoint(singleUser);
+      // If op is sinked into loop but not fused into vf, we will have a
+      // performance regression. So we will not sink it in this case.
+      if (!isa<linalg::LinalgOp, hfusion::ElemwiseUnaryOp>(user)) {
+        notFusedCounter++;
+      }
+    }
+    
+    if (hacc::utils::isAscend910_95(utils::getTopLevelModuleOp(op)) &&
+        notFusedCounter > 1) {
+      return rewriter.notifyMatchFailure(
+          op, "if op is sinked into loop and it's user can't be fused into vf, "
+              "this will cause performance regression");
+    }
+    
+    for_each(uses, [&](OpOperand *use) {
+      auto *user = use->getOwner();
+      rewriter.setInsertionPoint(user);
       IRMapping map;
-      Operation *newBrcOp = rewriter.clone(*op.getOperation(), map);
-      rewriter.replaceOp(op, newBrcOp);
-      return success();
-    }
-    SmallVector<OpOperand *> uses;
-    for (OpOperand &use : op.getOperation()->getResult(0).getUses()) {
-      uses.push_back(&use);
-    }
-    if (uses.empty())
-      return failure();
-    Operation *firstUser = uses[0]->getOwner();
-    auto forOp = firstUser->getParentOfType<scf::ForOp>();
-    if (!forOp)
-      return failure();
-    for (OpOperand *use : uses) {
-      auto userForOp = use->getOwner()->getParentOfType<scf::ForOp>();
-      if (userForOp != forOp)
-        return failure();
-    }
-    for (OpOperand *use : uses) {
-      rewriter.setInsertionPoint(use->getOwner());
-      IRMapping map;
-      Operation *newBrcOp = rewriter.clone(*op.getOperation(), map);
-      use->set(newBrcOp->getResult(0));
-    }
-    if (op.getOperation()->getResult(0).getUses().empty()) {
-      op->erase();
-      return success();
-    }
-    return failure();
+      Operation *newOp = rewriter.clone(*op.getOperation(), map);
+      rewriter.modifyOpInPlace(user, [&]() { use->set(newOp->getResult(0)); });
+    });
+    rewriter.eraseOp(op);
+    return success();
   }
 };
 
