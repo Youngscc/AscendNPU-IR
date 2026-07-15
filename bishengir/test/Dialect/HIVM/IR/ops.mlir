@@ -335,3 +335,15 @@ module {
     return
   }
 }
+
+// -----
+// CHECK-LABEL: test_load_mx_scale
+// CHECK: hivm.hir.load_scale
+func.func @test_load_mx_scale(
+    %src : memref<16x4xi8, #hivm.address_space<gm>>,
+    %dst : memref<1x1x16x16xi8, #hivm.address_space<cbuf>>) {
+  hivm.hir.load_scale {is_transposed = true}
+      ins(%src : memref<16x4xi8, #hivm.address_space<gm>>)
+      outs(%dst : memref<1x1x16x16xi8, #hivm.address_space<cbuf>>)
+  return
+}

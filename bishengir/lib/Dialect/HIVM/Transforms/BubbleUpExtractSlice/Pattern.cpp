@@ -2353,6 +2353,7 @@ FixpipeBubbleUpStrategy::execute(tensor::ExtractSliceOp sliceOp,
       hivm::FixpipeDualDstModeAttr::get(rewriter.getContext(), splitMode);
   NamedAttrList attrs(fixpipeOp->getAttrs());
   attrs.set(fixpipeOp.getDualDstModeAttrName(), dualAttr);
+  attrs.erase(fixpipeOp.getSubBlockIdxAttrName());
   auto newFixpipeOp = rewriter.create<hivm::FixpipeOp>(
       sliceOp.getLoc(), TypeRange{sliceOp.getType()},
       ValueRange{fixpipeOp.getSrc(), newSliceOp.getResult()}, attrs.getAttrs());

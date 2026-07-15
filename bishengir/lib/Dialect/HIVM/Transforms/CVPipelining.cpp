@@ -626,7 +626,8 @@ processWorkspaceOutputs(OpBuilder &builder, WorkItem *item,
     else if (auto fixpipe = dyn_cast<FixpipeOp>(store))
       builder.create<FixpipeOp>(
           loc, TypeRange{}, fixpipe.getSrc(), newDst, fixpipe.getDmaModeAttr(),
-          fixpipe.getDualDstModeAttr(), fixpipe.getPreQuantAttr(),
+          fixpipe.getDualDstModeAttr(), fixpipe.getSubBlockIdxAttr(),
+          fixpipe.getPreQuantAttr(),
           fixpipe.getPreReluAttr(), fixpipe.getChannelSplitAttr());
 
     // Before forOp so to_tensor dominates in-loop and later consumers.
@@ -1948,7 +1949,8 @@ LogicalResult CVPipelineImpl::migrateOpsForPreload(OpBuilder &builder) {
         builder.create<FixpipeOp>(
             loc, TypeRange{}, fixpipe.getSrc(), newDst,
             fixpipe.getDmaModeAttr(), fixpipe.getDualDstModeAttr(),
-            fixpipe.getPreQuantAttr(), fixpipe.getPreReluAttr(),
+            fixpipe.getSubBlockIdxAttr(), fixpipe.getPreQuantAttr(),
+            fixpipe.getPreReluAttr(),
             fixpipe.getChannelSplitAttr());
       }
 
