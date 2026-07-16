@@ -983,6 +983,13 @@ def InferSimtVFMemEffect : Pass<"infer-simt-vf-memory-effect"> {
   let constructor = "mlir::hivm::createInferSimtVFMemEffectPass()";
 }
 
+def InferSimtVFMemScopeHint
+    : Pass<"infer-simt-vf-memory-scope-hint", "ModuleOp"> {
+  let summary = "Infer memory scope hints for simt vf arguments";
+  let constructor = "mlir::hivm::createInferSimtVFMemScopeHintPass()";
+  let dependentDialects = ["hivm::HIVMDialect", "memref::MemRefDialect"];
+}
+
 def SplitSimtModule : Pass<"split-simt-module"> {
   let summary = "Split simt module for every simt vf";
   let constructor = "mlir::hivm::createSplitSimtModulePass()";

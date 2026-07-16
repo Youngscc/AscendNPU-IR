@@ -316,6 +316,9 @@ std::unique_ptr<Pass> createComposeCollapseExpandPass();
 // Create a pass to infer simt vf func args memory effect.
 std::unique_ptr<Pass> createInferSimtVFMemEffectPass();
 
+// Create a pass to infer simt vf func args memory scope hints.
+std::unique_ptr<Pass> createInferSimtVFMemScopeHintPass();
+
 // Split simt module for every simt vf
 std::unique_ptr<Pass> createSplitSimtModulePass();
 

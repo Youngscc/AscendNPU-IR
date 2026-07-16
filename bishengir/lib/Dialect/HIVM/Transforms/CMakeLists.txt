@@ -69,6 +69,7 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   InferHIVMDataLayout.cpp
   InferHIVMMemScope.cpp
   InferSimtVFMemEffect.cpp
+  InferSimtVFMemScopeHint.cpp
   InitEntryKernel.cpp
   InjectBlockSync.cpp
   InlineFixpipe.cpp
