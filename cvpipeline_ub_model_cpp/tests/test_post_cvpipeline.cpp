@@ -1584,7 +1584,7 @@ CVUB_TEST(post_pipeline_manifest_has_real_order) {
                             stage.stage == "LoopInvariantSubsetHoisting" ||
                             stage.stage == "CloneTensorEmpty" ||
                             stage.stage == "InlineOTFLoadStore"
-                        ? cvub::CoverageDisposition::Modeled
+                        ? cvub::CoverageDisposition::Partial
                         : cvub::CoverageDisposition::Unsupported);
 }
 
@@ -1624,8 +1624,9 @@ CVUB_TEST(post_pipeline_manifest_rejects_order_mismatch) {
                              "stage order mismatch");
 }
 
-CVUB_TEST(post_pipeline_manifest_has_full_coverage_after_task8) {
-  // After Task 8 every manifest stage is modeled or UB-invariant, so the
+CVUB_TEST(post_pipeline_manifest_separates_partial_from_oracle_exact) {
+  // Supported-but-incomplete stages are explicitly Partial, not ambiguously
+  // "modeled" and not falsely advertised as oracle-proven exact.
   // compiled coverage table reports no Unsupported stage and the code-motion /
   // OTF stages never emit an "unsupported" diagnostic.  (The overall precision
   // may still be Incomplete for input- or stage-specific reasons.)
@@ -1634,6 +1635,9 @@ CVUB_TEST(post_pipeline_manifest_has_full_coverage_after_task8) {
   CVUB_CHECK_EQ(result.coverage.size(), 14U);
   for (const cvub::StageCoverage &stage : result.coverage)
     CVUB_CHECK(stage.disposition != cvub::CoverageDisposition::Unsupported);
+  for (const cvub::StageCoverage &stage : result.coverage)
+    if (stage.disposition != cvub::CoverageDisposition::UBInvariant)
+      CVUB_CHECK_EQ(stage.disposition, cvub::CoverageDisposition::Partial);
   CVUB_CHECK(!HasDiagnostic(result, "LoopInvariantCodeMotion", "unsupported"));
   CVUB_CHECK(!HasDiagnostic(result, "LoopInvariantSubsetHoisting",
                             "unsupported"));
@@ -3263,15 +3267,15 @@ CVUB_TEST(post_split_scope_empty_stages_are_ordered_and_propagated) {
   const auto result = cvub::RunPostCVPipelineAIVProjection(
       cvub::test::ParseFixture("minimal_aiv.mlir"), {});
   CVUB_CHECK_EQ(result.coverage[6].disposition,
-                cvub::CoverageDisposition::Modeled);
+                cvub::CoverageDisposition::Partial);
   CVUB_CHECK_EQ(result.coverage[7].disposition,
-                cvub::CoverageDisposition::Modeled);
+                cvub::CoverageDisposition::Partial);
   CVUB_CHECK_EQ(result.coverage[8].disposition,
-                cvub::CoverageDisposition::Modeled);
+                cvub::CoverageDisposition::Partial);
   CVUB_CHECK_EQ(result.coverage[9].disposition,
-                cvub::CoverageDisposition::Modeled);
+                cvub::CoverageDisposition::Partial);
   CVUB_CHECK_EQ(result.coverage[12].disposition,
-                cvub::CoverageDisposition::Modeled);
+                cvub::CoverageDisposition::Partial);
   CVUB_CHECK(!result.functions.empty());
   cvub::ValidateGenericModule(result.functions.front().module);
 }
@@ -3295,26 +3299,80 @@ CVUB_TEST(scope_tensor_empty_full_rewrite_matches_checked_golden) {
                 ReadFixtureText("scope_tensor_empty.golden.generic-ir"));
 }
 
-CVUB_TEST(tile_bind_subblock_success_form_is_reported_incomplete) {
+CVUB_TEST(tile_bind_subblock_success_form_models_ub_semantics_exactly) {
   auto module = cvub::test::ParseFixture("subblock_bind_success.mlir");
-  const std::string before = cvub::SerializeGenericModule(module);
+  for (cvub::GenericOperation &operation : module.operations)
+    if (cvub::HasModeledOperationSemantics(operation.name))
+      cvub::ApplyOperationSemantics(operation);
   const auto result = cvub::RunTileAndBindSubBlock(module, /*enableTile=*/true);
-  // The real pass would derive a tiling dimension for the static-shaped store
-  // and wrap the body in a sub-block loop.  The lightweight model cannot
-  // reproduce the bubble-up tiling exactly, so it must fail closed: keep the
-  // legal IR untouched and report incomplete instead of a silent exact result.
-  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
-  CVUB_CHECK(!result.diagnostics.empty());
-  bool namedAivFunction = false;
-  for (const cvub::PostCVPipelineDiagnostic &diagnostic : result.diagnostics)
-    if (diagnostic.pipelineStage == "TileAndBindSubBlock" &&
-        diagnostic.reason.find("sub-block") != std::string::npos)
-      namedAivFunction = true;
-  CVUB_CHECK(namedAivFunction);
-  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
-  CVUB_CHECK_EQ(OperationCount(result.module, "scf.if"), 0U);
-  CVUB_CHECK_EQ(OperationCount(result.module, "hivm.hir.get_sub_block_idx"), 0U);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(result.diagnostics.empty());
+  const auto &store = OperationWithCase(result.module, "tileable_store");
+  CVUB_CHECK_EQ(store.operandTypes[0], "tensor<8x16xf16>");
+  CVUB_CHECK_EQ(store.operandTypes[1],
+                "memref<16x16xf16, #hivm.address_space<gm>>");
+  CVUB_CHECK(HasUnitAttribute(store.attributes, "tiled_op"));
+  CVUB_CHECK_EQ(OperationCount(result.module, "tensor.extract_slice"), 1U);
+  for (const cvub::GenericOperation &operation : result.module.operations)
+    for (const std::string &type : operation.resultTypes)
+      if (operation.name == "tensor.empty")
+        CVUB_CHECK_EQ(type, "tensor<8x16xf16>");
   cvub::ValidateGenericModule(result.module);
+}
+
+CVUB_TEST(pre_split_canonicalization_preserves_distinct_tensor_empty_owners) {
+  auto module = cvub::test::ParseFixture("subblock_bind_success.mlir");
+  for (cvub::GenericOperation &operation : module.operations)
+    if (cvub::HasModeledOperationSemantics(operation.name))
+      cvub::ApplyOperationSemantics(operation);
+  const auto result = cvub::RunPreSplitCanonicalization(std::move(module));
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK_EQ(OperationCount(result.module, "tensor.empty"), 2U);
+  const auto &add = OperationNamed(result.module, "hivm.hir.vadd");
+  const auto &load = OperationNamed(result.module, "hivm.hir.load");
+  CVUB_CHECK(add.operands[2] != load.operands[1]);
+}
+
+CVUB_TEST(tile_bind_subblock_success_matcher_rejects_extra_operation) {
+  auto module = cvub::test::ParseFixture("subblock_bind_success.mlir");
+  const auto &function = OperationNamed(module, "func.func");
+  const int blockId = module.regions.at(
+      static_cast<size_t>(function.regions.front())).blocks.front();
+  const auto returnIt = std::find_if(
+      module.blocks.at(static_cast<size_t>(blockId)).operations.begin(),
+      module.blocks.at(static_cast<size_t>(blockId)).operations.end(),
+      [&](int operationId) {
+        return module.operations.at(static_cast<size_t>(operationId)).name ==
+               "func.return";
+      });
+  CVUB_CHECK(returnIt !=
+             module.blocks.at(static_cast<size_t>(blockId)).operations.end());
+  cvub::GenericRewriter rewriter(module);
+  const int extra = rewriter.createOperation(
+      function.id, function.regions.front(), blockId, "arith.constant",
+      {"index"}, {}, {}, "", "{value = 0 : index}");
+  const size_t ordinal = static_cast<size_t>(std::distance(
+      module.blocks.at(static_cast<size_t>(blockId)).operations.begin(),
+      returnIt));
+  rewriter.insertToBlock(blockId, ordinal, extra);
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result =
+      cvub::RunTileAndBindSubBlock(std::move(module), /*enableTile=*/true);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "TileAndBindSubBlock", "not modeled"));
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+}
+
+CVUB_TEST(tile_bind_subblock_early_alloc_to_tensor_cannot_be_false_exact) {
+  auto module =
+      cvub::test::ParseFixture("subblock_early_alloc_to_tensor.mlir");
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result =
+      cvub::RunTileAndBindSubBlock(std::move(module), /*enableTile=*/true);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "TileAndBindSubBlock",
+                           "alloc-to-tensor early pattern"));
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
 }
 
 CVUB_TEST(tile_bind_subblock_same_address_hazard_applies_store_limit) {
@@ -3463,6 +3521,10 @@ CVUB_TEST(tile_bind_subblock_dynamic_store_is_recognized_rollback) {
       if (type == "tensor<16x16xf16>")
         type = "tensor<?x16xf16>";
   }
+  for (cvub::GenericBlock &block : module.blocks)
+    for (std::string &type : block.argumentTypes)
+      if (type == "tensor<16x16xf16>")
+        type = "tensor<?x16xf16>";
   cvub::ValidateGenericModule(module);
   const auto result = cvub::RunTileAndBindSubBlock(module, /*enableTile=*/true);
   CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
@@ -3495,12 +3557,12 @@ CVUB_TEST(tile_bind_subblock_slice_wrapped_dynamic_store_is_incomplete) {
   cvub::ValidateGenericModule(result.module);
 }
 
-CVUB_TEST(tile_bind_subblock_pipeline_marks_stage_modeled) {
+CVUB_TEST(tile_bind_subblock_pipeline_marks_stage_partial) {
   const auto result = cvub::RunPostCVPipelineAIVProjection(
       cvub::test::ParseFixture("minimal_aiv.mlir"), {});
   CVUB_CHECK_EQ(result.coverage[7].stage, "TileAndBindSubBlock");
   CVUB_CHECK_EQ(result.coverage[7].disposition,
-                cvub::CoverageDisposition::Modeled);
+                cvub::CoverageDisposition::Partial);
   CVUB_CHECK(!HasDiagnostic(result, "TileAndBindSubBlock", "unsupported"));
   CVUB_CHECK(!result.functions.empty());
   cvub::ValidateGenericModule(result.functions.front().module);
@@ -3600,18 +3662,70 @@ CVUB_TEST(subset_hoisting_loop_without_iter_args_is_recognized_noop) {
   CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
 }
 
-CVUB_TEST(subset_hoisting_loop_iter_arg_subset_pair_is_flagged_as_scope_gap) {
-  // A loop carrying an iter arg through a tensor.extract_slice /
-  // tensor.insert_slice pair is rewritten by the real pass (extraction before
-  // the loop, insertion after, plus a new carried iter arg/result).  That loop
-  // rebuild is not reproduced here, so the model fails closed and flags the
-  // function as a scope candidate rather than silently dropping the hoist.
+CVUB_TEST(subset_hoisting_static_pair_models_real_loop_rebuild) {
+  // This is the narrow static pair accepted by the real pass.  Its UB-relevant
+  // semantics are: extract before the loop, carry the subset independently,
+  // yield the full tensor and subset, then insert the subset after the loop.
   auto module = cvub::test::ParseFixture("subset_hoisting_lifetime.mlir");
+  const auto result =
+      cvub::RunLoopInvariantSubsetHoisting(module, /*enableCodeMotion=*/true);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
+  CVUB_CHECK(result.diagnostics.empty());
+
+  const auto &loop = OperationWithCase(result.module, "subset_loop");
+  const auto &extract = OperationWithCase(result.module, "subset_extract");
+  const auto &insert = OperationWithCase(result.module, "subset_insert");
+  CVUB_CHECK_EQ(extract.blockId, loop.blockId);
+  CVUB_CHECK_EQ(insert.blockId, loop.blockId);
+  CVUB_CHECK(extract.ordinal < loop.ordinal);
+  CVUB_CHECK(loop.ordinal < insert.ordinal);
+
+  CVUB_CHECK_EQ(loop.operands.size(), 5U);
+  CVUB_CHECK_EQ(loop.results.size(), 2U);
+  CVUB_CHECK_EQ(loop.resultTypes.size(), 2U);
+  CVUB_CHECK_EQ(loop.resultTypes[1], "tensor<4xf32>");
+  const int bodyBlock = result.module.regions.at(
+      static_cast<size_t>(loop.regions.front())).blocks.front();
+  CVUB_CHECK(bodyBlock >= 0);
+  const auto &body = result.module.blocks.at(static_cast<size_t>(bodyBlock));
+  CVUB_CHECK_EQ(body.arguments.size(), 3U);
+  CVUB_CHECK_EQ(body.argumentTypes[2], "tensor<4xf32>");
+  CVUB_CHECK_EQ(body.operations.size(), 1U);
+  const auto &yield = result.module.operations.at(
+      static_cast<size_t>(body.operations.front()));
+  CVUB_CHECK_EQ(yield.name, "scf.yield");
+  CVUB_CHECK_EQ(yield.operands.size(), 2U);
+  CVUB_CHECK_EQ(yield.operands[0], body.arguments[1]);
+  CVUB_CHECK_EQ(yield.operands[1], body.arguments[2]);
+  CVUB_CHECK_EQ(insert.operands[0], loop.results[1]);
+  CVUB_CHECK_EQ(insert.operands[1], loop.results[0]);
+}
+
+CVUB_TEST(subset_hoisting_unproven_pair_is_transactional_blocker) {
+  auto module = cvub::test::ParseFixture("subset_hoisting_lifetime.mlir");
+  const int insertId = OperationWithCase(module, "subset_insert").id;
+  module.operations.at(static_cast<size_t>(insertId)).properties =
+      ""; // Candidate topology, but no proven static slice.
   const std::string before = cvub::SerializeGenericModule(module);
   const auto result =
       cvub::RunLoopInvariantSubsetHoisting(module, /*enableCodeMotion=*/true);
   CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
-  CVUB_CHECK(HasDiagnostic(result, "LoopInvariantSubsetHoisting", "subset"));
+  CVUB_CHECK(HasDiagnostic(result, "LoopInvariantSubsetHoisting", "static"));
+  CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
+}
+
+CVUB_TEST(subset_hoisting_mismatched_static_pair_is_blocker) {
+  auto module = cvub::test::ParseFixture("subset_hoisting_lifetime.mlir");
+  const int insertId = OperationWithCase(module, "subset_insert").id;
+  cvub::GenericOperation &insert =
+      module.operations.at(static_cast<size_t>(insertId));
+  insert.properties = cvub::SetDictionaryValue(
+      insert.properties, "static_sizes", "array<i64: 3>");
+  const std::string before = cvub::SerializeGenericModule(module);
+  const auto result =
+      cvub::RunLoopInvariantSubsetHoisting(module, /*enableCodeMotion=*/true);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Incomplete);
+  CVUB_CHECK(HasDiagnostic(result, "LoopInvariantSubsetHoisting", "static"));
   CVUB_CHECK_EQ(cvub::SerializeGenericModule(result.module), before);
 }
 
@@ -3844,6 +3958,7 @@ CVUB_TEST(module_aggregates_one_overflow_plus_one_success) {
   CVUB_CHECK_EQ(result.functions.size(), 2U);
   CVUB_CHECK(!result.success);
   CVUB_CHECK(result.overflow);
+  CVUB_CHECK_EQ(result.precision, cvub::Precision::Exact);
   CVUB_CHECK(result.functions[0].plan.overflow);
   CVUB_CHECK(!result.functions[0].plan.success);
   CVUB_CHECK(result.functions[1].plan.success);

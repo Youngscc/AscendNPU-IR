@@ -803,6 +803,12 @@ inline bool RunOneCanonicalizationIteration(GenericModule &module) {
           module.operations.at(static_cast<size_t>(operationId));
       if (!IsCanonicalizablePure(operation))
         continue;
+      // tensor.empty is destination ownership, not a value expression that
+      // may be merged by the real canonicalizer.  CSE-ing two empties aliases
+      // distinct DPS destinations and changes both Task7 tiling sizes and UB
+      // lifetimes.
+      if (operation.name == "tensor.empty")
+        continue;
       const auto key = std::make_pair(block.id, ExactCSEKey(operation));
       const auto found = representatives.find(key);
       if (found == representatives.end()) {

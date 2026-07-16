@@ -12,7 +12,8 @@ post-CVPipeline per-function planning pipeline.  These tests lock in:
   * the per-function shape (source/projected name, status, peak, required, seed,
     buffer plan);
   * the text buffer table gaining a leading ``function`` column;
-  * the demo invariants (vector_add ub_peak_bits=65536, randn 23904/24064).
+  * demo fail-closed invariants (vector_add keeps 65536 only in debug_estimate;
+    randn remains non-authoritative).
 
 Run directly:
     python3 cvpipeline_ub_model_cpp/tests/test_report.py
@@ -34,7 +35,16 @@ BINARY = MODULE_DIR / "output" / "bin" / "cvpipeline_ub_model"
 VECTOR_ADD = MODULE_DIR / "examples" / "inputs" / "demo_vector_add_before_cvpipeline.mlir"
 RANDN = MODULE_DIR / "examples" / "inputs" / "demo_randn_before_cvpipeline.mlir"
 MIX = MODULE_DIR / "examples" / "inputs" / "demo_mix_before_cvpipeline.mlir"
-INCOMPLETE = MODULE_DIR / "tests" / "fixtures" / "subblock_bind_success.mlir"
+SUBBLOCK_EXACT = MODULE_DIR / "tests" / "fixtures" / "subblock_bind_success.mlir"
+INCOMPLETE = MODULE_DIR / "tests" / "fixtures" / "subblock_bind_unmodeled_static.mlir"
+CAT_CHAIN = (MODULE_DIR / "data" / "before_cvpipeline" /
+             "triton.language.cat.ttadapter" /
+             "before_cvpipelining_func_func_cat_1d_kernel_32.mlir")
+SEED_DEPENDENT = (MODULE_DIR / "data" / "before_cvpipeline" /
+                  "kernels_vllm_fused_gdn_gating_kernel.ttadapter" /
+                  "before_cvpipelining_func_func_fused_gdn_gating_kernel_32.mlir")
+ORACLE_MANIFEST_VALIDATOR = MODULE_DIR / "scripts" / "validate_pipeline_manifest.py"
+PLAN_ORACLE_COMPARATOR = MODULE_DIR / "scripts" / "compare_ub_plan_with_suffix_oracle.py"
 
 FAILURES: list[str] = []
 
@@ -120,6 +130,12 @@ def assert_top_level_contract(payload: dict[str, Any], *, label: str) -> None:
     if isinstance(payload.get("stage_coverage"), list):
         check(len(payload["stage_coverage"]) >= 14,
               f"{label}: stage_coverage lists every pipeline stage")
+        dispositions = {stage.get("disposition")
+                        for stage in payload["stage_coverage"]}
+        check("modeled" not in dispositions,
+              f"{label}: stage coverage does not use ambiguous modeled label")
+        check(dispositions <= {"oracle-exact", "partial", "ub-invariant", "unsupported"},
+              f"{label}: stage coverage uses evidence-aware dispositions")
 
 
 def assert_function_shape(fn: dict[str, Any], *, label: str) -> None:
@@ -136,49 +152,45 @@ def assert_function_shape(fn: dict[str, Any], *, label: str) -> None:
 
 def test_vector_add() -> None:
     rc, stdout, stderr = run_model(VECTOR_ADD, fmt="json")
-    check_eq(rc, 0, "vector_add: success exits 0")
+    check_eq(rc, 1, "vector_add: unproven inplace inference exits blocker")
     check(not stderr, f"vector_add: empty stderr (got {stderr!r})")
     payload = json.loads(stdout)
     assert_top_level_contract(payload, label="vector_add")
-    # Only an exact result may be reported as a successful authoritative plan.
-    check_eq(payload.get("status"), "success", "vector_add: status success")
-    # The pure-AIV demos classify index/mask utility ops (set_mask_norm,
-    # get_block_idx) as Neutral, so no Incomplete diagnostic remains: the
-    # reproducible path reports precision=exact.
-    check_eq(payload.get("precision"), "exact", "vector_add: precision exact")
-    check_eq(len(payload.get("diagnostics", [])), 0,
-             "vector_add: no diagnostics on the exact path")
-    check_eq(payload.get("ub_peak_bits"), 65536, "vector_add: ub_peak_bits=65536")
-    check_eq(payload.get("required_bits"), 65536, "vector_add: required_bits=65536")
+    check_eq(payload.get("status"), "blocker", "vector_add: status blocker")
+    check_eq(payload.get("precision"), "incomplete",
+             "vector_add: precision incomplete")
+    check(any("inplace-pair" in diagnostic.get("reason", "")
+              for diagnostic in payload.get("diagnostics", [])),
+          "vector_add: diagnostic identifies unproven inplace inference")
+    check_eq(payload.get("ub_peak_bits"), None,
+             "vector_add: authoritative peak is null")
+    check_eq(payload.get("required_bits"), None,
+             "vector_add: authoritative requirement is null")
     check_eq(payload.get("overflow"), False, "vector_add: no overflow")
-    functions = payload.get("functions", [])
-    check(len(functions) >= 1, "vector_add: at least one function")
-    for fn in functions:
-        assert_function_shape(fn, label="vector_add")
-    # The leading function is the projected AIV kernel for vector_add.
-    if functions:
-        first = functions[0]
-        check(bool(first.get("function")), "vector_add: function name is non-empty")
-        check(first.get("ub_peak_bits") == 65536,
-              f"vector_add: per-function ub_peak_bits=65536 (got {first.get('ub_peak_bits')})")
+    check_eq(payload.get("functions"), [],
+             "vector_add: authoritative function plans are empty")
+    check_eq(payload.get("debug_estimate", {}).get("ub_peak_bits"), 65536,
+             "vector_add: debug-only peak retained")
 
 
 def test_randn() -> None:
     rc, stdout, _ = run_model(RANDN, fmt="json")
-    check_eq(rc, 0, "randn: success exits 0")
+    check_eq(rc, 1, "randn: unproven decomposition exits as blocker")
     payload = json.loads(stdout)
     assert_top_level_contract(payload, label="randn")
-    check_eq(payload.get("status"), "success", "randn: status success")
-    check_eq(payload.get("precision"), "exact", "randn: precision exact")
-    check_eq(len(payload.get("diagnostics", [])), 0,
-             "randn: no diagnostics on the exact path")
-    # randn plans a single AIV kernel whose raw simultaneous peak (23904) is
-    # smaller than its total required footprint (24064).  The report must keep
-    # both numbers distinct rather than collapsing them.
-    check_eq(payload.get("ub_peak_bits"), 23904, "randn: ub_peak_bits=23904")
-    check_eq(payload.get("required_bits"), 24064, "randn: required_bits=24064")
-    check(payload.get("ub_peak_bits") != payload.get("required_bits"),
-          "randn: peak and required remain distinct (module max, not collapsed)")
+    check_eq(payload.get("status"), "blocker", "randn: status blocker")
+    check_eq(payload.get("precision"), "incomplete",
+             "randn: precision incomplete")
+    check_eq(payload.get("ub_peak_bits"), None,
+             "randn: authoritative peak is null")
+    estimate = payload.get("debug_estimate", {})
+    check_eq(estimate.get("ub_peak_bits"), 23904,
+             "randn: non-authoritative debug peak retained")
+    check_eq(estimate.get("required_bits"), 24064,
+             "randn: non-authoritative debug requirement retained")
+    check(any(diagnostic.get("pipeline_stage") == "HIVMDecomposeOp"
+              for diagnostic in payload.get("diagnostics", [])),
+          "randn: diagnostic identifies unproven decomposition ordering")
 
 
 def test_suffix_manifest_audit() -> None:
@@ -258,23 +270,12 @@ def test_mix() -> None:
 
 def test_text_function_column() -> None:
     rc, stdout, _ = run_model(VECTOR_ADD, fmt="text")
-    check_eq(rc, 0, "vector_add text: success exits 0")
+    check_eq(rc, 1, "vector_add text: blocker exits 1")
     header = "function\tname\textent_bits\toffset_bytes\talloc_time\tfree_time"
     check(header in stdout, "vector_add text: buffer table has leading function column")
-    in_table = False
-    seen_rows = 0
-    for line in stdout.splitlines():
-        if line == header:
-            in_table = True
-            continue
-        if in_table and line.strip():
-            parts = line.split("\t")
-            check_eq(len(parts), 6,
-                     "vector_add text: buffer row has 6 tab-separated columns")
-            check(bool(parts[0]), "vector_add text: function column is non-empty")
-            seen_rows += 1
-    check(seen_rows >= 1, "vector_add text: at least one buffer row emitted")
-    check("status\tsuccess" in stdout, "vector_add text: has status line")
+    check("status\tblocker" in stdout, "vector_add text: has blocker status")
+    check("debug_estimate.peak_bits\t65536" in stdout,
+          "vector_add text: debug-only peak retained")
     check("precision\t" in stdout, "vector_add text: has precision line")
     check(payload_precision_valid(stdout), "vector_add text: precision is exact|incomplete")
 
@@ -353,6 +354,148 @@ def test_incomplete_is_non_authoritative_blocker() -> None:
               "incomplete: debug estimate retains function details")
 
 
+def test_subblock_success_matches_real_ub_oracle() -> None:
+    rc, stdout, _ = run_model(SUBBLOCK_EXACT, fmt="json")
+    check_eq(rc, 1, "subblock Task7 estimate: unproven inplace exits blocker")
+    payload = json.loads(stdout)
+    check_eq(payload.get("precision"), "incomplete",
+             "subblock Task7 estimate: precision incomplete")
+    check_eq(payload.get("status"), "blocker",
+             "subblock Task7 estimate: status blocker")
+    # The instrumented real compiler produces two non-overlapping 2048-bit UB
+    # buffers at the same offset after successful sub-block tiling.
+    check_eq(payload.get("ub_peak_bits"), None,
+             "subblock Task7 estimate: authoritative peak is null")
+    estimate = payload.get("debug_estimate", {})
+    check_eq(estimate.get("ub_peak_bits"), 2048,
+             "subblock Task7 estimate: debug peak matches real-pass oracle")
+    buffers = estimate.get("functions", [{}])[0].get("buffers", [])
+    check_eq(sorted(buffer.get("extent_bits") for buffer in buffers),
+             [2048, 2048],
+             "subblock Task7 estimate: physical extents match real-pass oracle")
+
+
+def test_chained_insert_slice_is_not_false_exact() -> None:
+    rc, stdout, _ = run_model(CAT_CHAIN, fmt="json")
+    payload = json.loads(stdout)
+    check_eq(rc, 1, "concat insert_slice: exits as blocker")
+    check_eq(payload.get("precision"), "incomplete",
+             "concat insert_slice: precision incomplete")
+    check(any(diagnostic.get("pipeline_stage") == "OneShotBufferize"
+              for diagnostic in payload.get("diagnostics", [])),
+          "concat insert_slice: diagnostic names ownership stage")
+
+
+def test_seed_dependent_plan_is_not_false_exact() -> None:
+    rc, stdout, _ = run_model(SEED_DEPENDENT, fmt="json",
+                              extra=["--random-seed=0"])
+    payload = json.loads(stdout)
+    check_eq(rc, 1, "seed-dependent layout: exits as blocker")
+    check_eq(payload.get("ub_peak_bits"), None,
+             "seed-dependent layout: authoritative peak is null")
+    check(any(diagnostic.get("pipeline_stage") == "PlanMemory"
+              for diagnostic in payload.get("diagnostics", [])),
+          "seed-dependent layout: diagnostic names planner stage")
+
+
+def test_pipeline_manifest_validator() -> None:
+    post = [
+        "TileCubeVectorLoop", "InferAndSetBufferSize",
+        "WorkspaceSemanticProjection", "CanonicalizationBeforeSplit",
+        "CrossCoreSyncInvariant", "SplitMixKernelAIVProjection",
+        "InlineScope", "TileAndBindSubBlock", "FoldTensorEmpty",
+        "CanonicalizationAfterSplit", "LoopInvariantCodeMotion",
+        "LoopInvariantSubsetHoisting", "CloneTensorEmpty",
+        "InlineOTFLoadStore",
+    ]
+    suffix = [
+        "OneShotBufferize", "CanonicalizeIterArg;HIVMOptSinglePoint",
+        "HIVMDecomposeOp", "ConvertNonContiguousReshapeToCopy",
+        "InferHIVMMemScope", "AlignAllocSize;MarkStrideAlign;EnableStrideAlign",
+        "FlattenOps;ReduceRankSubview;LiftLowestStride", "AllocExtraBuffer",
+        "InlineLoadCopy", "MarkMultiBuffer", "PlanMemoryInputBridge",
+    ]
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        compiler = root / "compiler.tsv"
+        compiler.write_text(
+            "ORACLE_PIPELINE_SCHEMA\t1\n" +
+            "PIPELINE_SHA256\tdeadbeef\n" +
+            "".join(f"STAGE\tpost\t{i}\t{name}\n"
+                    for i, name in enumerate(post, 1)) +
+            "".join(f"STAGE\tsuffix\t{i}\t{name}\n"
+                    for i, name in enumerate(suffix, 1)),
+            encoding="utf-8")
+        expected_hash = root / "pipeline.sha256"
+        expected_hash.write_text("deadbeef\n", encoding="utf-8")
+        cmd = [sys.executable, str(ORACLE_MANIFEST_VALIDATOR),
+               "--compiler-manifest", str(compiler),
+               "--post-manifest", str(MODULE_DIR / "config" / "post_cvpipeline_manifest.tsv"),
+               "--suffix-manifest", str(MODULE_DIR / "config" / "initial_suffix_manifest.tsv"),
+               "--expected-pipeline-sha256", str(expected_hash)]
+        good = subprocess.run(cmd, text=True, capture_output=True)
+        check_eq(good.returncode, 0,
+                 "pipeline manifest: matching compiler/model stages pass")
+
+        compiler.write_text(compiler.read_text(encoding="utf-8").replace(
+            "STAGE\tpost\t8\tTileAndBindSubBlock\n", ""), encoding="utf-8")
+        bad = subprocess.run(cmd, text=True, capture_output=True)
+        check_eq(bad.returncode, 1,
+                 "pipeline manifest: missing real stage fails")
+
+
+def test_flat_report_planmemory_oracle_comparator() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        model = root / "model.json"
+        oracle = root / "oracle.tsv"
+        model.write_text(json.dumps({
+            "precision": "exact", "status": "success",
+            "ub_peak_bits": 4096, "selected_seed": 3,
+            "functions": [{"function": "kernel", "buffers": [{
+                "name": "%base_0", "extent_bits": 4096,
+                "offset_bytes": 0, "alloc_time": 1, "free_time": 2,
+            }]}],
+        }), encoding="utf-8")
+        oracle.write_text(
+            "PLANMEM_PLAN_ATTEMPT\tkernel\t3\tsuccess\n"
+            "PLANMEM_PEAK\t3\t6\t4096\n"
+            "PLANMEM_EXACT_BUFFER\t3\t0\t4096\t6\t0\t10\t20\n"
+            "PLANMEM_EXACT_PLANNED_BUFFER\t3\t6\t0\t4096\t0\n",
+            encoding="utf-8")
+        compared = subprocess.run(
+            [sys.executable, str(PLAN_ORACLE_COMPARATOR),
+             "--model-json", str(model), "--oracle-tsv", str(oracle)],
+            text=True, capture_output=True)
+        check_eq(compared.returncode, 0,
+                 "PlanMemory oracle: flat exact report compares successfully")
+
+        model.write_text(json.dumps({
+            "precision": "exact", "status": "success",
+            "ub_peak_bits": 4096, "selected_seed": 3,
+            "functions": [{"function": "kernel", "buffers": [
+                {"name": "%base_0", "extent_bits": 4096,
+                 "offset_bytes": 0, "alloc_time": 1, "free_time": 4},
+                {"name": "%base_1", "extent_bits": 4096,
+                 "offset_bytes": 0, "alloc_time": 1, "free_time": 4},
+            ]}],
+        }), encoding="utf-8")
+        oracle.write_text(
+            "PLANMEM_PLAN_ATTEMPT\tkernel\t3\tsuccess\n"
+            "PLANMEM_PEAK\t3\t6\t4096\n"
+            "PLANMEM_EXACT_BUFFER\t3\t0\t4096\t6\t0\t10\t20\n"
+            "PLANMEM_EXACT_BUFFER\t3\t1\t4096\t6\t0\t20\t30\n"
+            "PLANMEM_EXACT_PLANNED_BUFFER\t3\t6\t0\t4096\t0\n"
+            "PLANMEM_EXACT_PLANNED_BUFFER\t3\t6\t1\t4096\t0\n",
+            encoding="utf-8")
+        lifetime_mismatch = subprocess.run(
+            [sys.executable, str(PLAN_ORACLE_COMPARATOR),
+             "--model-json", str(model), "--oracle-tsv", str(oracle)],
+            text=True, capture_output=True)
+        check_eq(lifetime_mismatch.returncode, 1,
+                 "PlanMemory oracle: lifetime-order mismatch fails")
+
+
 def main() -> int:
     ensure_binary()
     test_vector_add()
@@ -363,6 +506,11 @@ def main() -> int:
     test_overflow()
     test_blocker()
     test_incomplete_is_non_authoritative_blocker()
+    test_subblock_success_matches_real_ub_oracle()
+    test_chained_insert_slice_is_not_false_exact()
+    test_seed_dependent_plan_is_not_false_exact()
+    test_pipeline_manifest_validator()
+    test_flat_report_planmemory_oracle_comparator()
     print()
     if FAILURES:
         print(f"[ERROR] {len(FAILURES)} report-contract assertion(s) failed")

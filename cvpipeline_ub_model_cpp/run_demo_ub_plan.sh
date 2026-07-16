@@ -119,7 +119,7 @@ run_demo() {
 import json, subprocess, sys
 cmd = sys.argv[1:]
 proc = subprocess.run(cmd, text=True, capture_output=True)
-if proc.returncode != 0:
+if proc.returncode not in (0, 1, 2) or not proc.stdout.strip():
     print(f"  [ERROR] exit {proc.returncode}: {proc.stderr.strip()}", file=sys.stderr)
     sys.exit(proc.returncode)
 payload = json.loads(proc.stdout)
@@ -129,6 +129,10 @@ print(f"  ub_peak_bits   = {payload.get('ub_peak_bits')}")
 print(f"  required_bits  = {payload.get('required_bits')}")
 print(f"  capacity_bits  = {payload.get('capacity_bits')}")
 print(f"  functions      = {len(payload.get('functions', []))}")
+estimate = payload.get("debug_estimate")
+if estimate:
+    print(f"  debug_estimate = peak={estimate.get('ub_peak_bits')} "
+          f"required={estimate.get('required_bits')} (non-authoritative)")
 for fn in payload.get("functions", []):
     print(f"    - {fn.get('function')}: peak={fn.get('ub_peak_bits')} "
           f"required={fn.get('required_bits')} buffers={len(fn.get('buffers', []))}")

@@ -102,12 +102,21 @@ inline std::optional<int64_t> StaticSizeBits(const ShapedType &type) {
 }
 
 inline std::vector<int64_t> ParseIntegerArray(const std::string &text) {
-  if (text.size() < 2 || text.front() != '[' || text.back() != ']')
+  std::string payload = trim(text);
+  if (startsWith(payload, "array<i64:") ||
+      startsWith(payload, "array<i32:")) {
+    const size_t colon = payload.find(':');
+    if (colon == std::string::npos || payload.back() != '>')
+      return {};
+    payload = "[" + payload.substr(colon + 1,
+                                    payload.size() - colon - 2) + "]";
+  }
+  if (payload.size() < 2 || payload.front() != '[' || payload.back() != ']')
     return {};
   std::vector<int64_t> result;
   try {
     for (const std::string &item :
-         splitTopLevel(text.substr(1, text.size() - 2)))
+         splitTopLevel(payload.substr(1, payload.size() - 2)))
       result.push_back(std::stoll(item));
   } catch (const std::exception &) {
     return {};

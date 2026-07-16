@@ -8,9 +8,9 @@ namespace cvub {
 struct SuffixPipelineOptions {
   bool enableAutoMultiBuffer = false;
   MultiBufferStrategy limitAutoMultiBufferOfLocalBuffer =
-      MultiBufferStrategy::NoLimit;
+      MultiBufferStrategy::CubeNoL0C;
   MultiBufferStrategy limitMixAutoMultiBufferBuffer =
-      MultiBufferStrategy::NoLimit;
+      MultiBufferStrategy::OnlyCube;
 };
 
 inline PlanMemoryInput BuildSuffixPlanMemoryInput(

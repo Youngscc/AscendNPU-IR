@@ -2,6 +2,7 @@
 #define CVPIPELINE_UB_MODEL_CPP_POST_CVPIPELINE_TILE_BIND_SUBBLOCK_HPP
 
 #include "ir_utils.hpp"
+#include "tile_cube_vector_loop.hpp"
 #include "types.hpp"
 
 #include <set>
@@ -120,6 +121,32 @@ inline const GenericOperation *Definition(const GenericModule &module,
     if (std::find(operation.results.begin(), operation.results.end(), value) !=
         operation.results.end())
       return &operation;
+  return nullptr;
+}
+
+// runTileAndBindSubBlockEarlyPatterns always runs before function collection.
+// CanonicalizeAllocToTensor replaces a one-use memref.alloc ->
+// bufferization.to_tensor chain with tensor.empty and erases the allocation.
+// Until the semantic rewrite is modeled, detecting applicability is required to
+// prevent no-store and hazard paths from being mislabeled Exact.
+inline const GenericOperation *ApplicableAllocToTensorEarlyPattern(
+    const GenericModule &module) {
+  for (const GenericOperation &allocation : module.operations) {
+    if (allocation.name != "memref.alloc" || allocation.results.size() != 1)
+      continue;
+    const int value = allocation.results.front();
+    const GenericOperation *onlyUser = nullptr;
+    size_t useCount = 0;
+    for (const GenericOperation &user : module.operations)
+      for (int operand : user.operands)
+        if (operand == value) {
+          ++useCount;
+          onlyUser = &user;
+        }
+    if (useCount == 1 && onlyUser != nullptr &&
+        onlyUser->name == "bufferization.to_tensor")
+      return &allocation;
+  }
   return nullptr;
 }
 
@@ -323,6 +350,197 @@ ClassifyDynamicStores(const GenericModule &module, int functionId) {
                          : DynamicStoreDisposition::kNone;
 }
 
+// Exact UB-semantic subset of successful sub-block tiling.  The real pass
+// oracle for this topology produces an axis-0 two-way tile: tensor temporaries
+// become half-sized while the destination allocation remains full-sized and is
+// addressed through a subview.  Keeping the full destination value here is UB
+// equivalent because the suffix sees the same allocation and alias root; only
+// the tensor temporaries need their physical types reduced.
+inline bool ApplySimpleVectorStoreUBTiling(GenericModule &module,
+                                           int functionId) {
+  using tile_cube_vector_loop_detail::ParseStaticShapedType;
+  using tile_cube_vector_loop_detail::PrintShapedType;
+  using tile_cube_vector_loop_detail::ShapedType;
+
+  const GenericOperation &function =
+      module.operations.at(static_cast<size_t>(functionId));
+  const GenericOperation *load = nullptr;
+  const GenericOperation *add = nullptr;
+  std::vector<const GenericOperation *> empties;
+  GenericOperation *store = nullptr;
+  size_t returnCount = 0;
+  for (int opId : AllOperations(module, functionId)) {
+    GenericOperation &operation = module.operations.at(static_cast<size_t>(opId));
+    if (operation.name == "hivm.hir.load") {
+      if (load != nullptr)
+        return false;
+      load = &operation;
+    } else if (operation.name == "hivm.hir.vadd") {
+      if (add != nullptr)
+        return false;
+      add = &operation;
+    } else if (operation.name == "hivm.hir.store") {
+      if (store != nullptr)
+        return false;
+      store = &operation;
+    } else if (operation.name == "tensor.empty") {
+      empties.push_back(&operation);
+      if (empties.size() > 2)
+        return false;
+    } else if (operation.name == "func.return") {
+      ++returnCount;
+      if (!operation.operands.empty() || !operation.results.empty())
+        return false;
+    } else if (operation.name != "func.func") {
+      return false;
+    }
+  }
+  if (load == nullptr || add == nullptr || store == nullptr ||
+      empties.size() != 2 || returnCount != 1 ||
+      load->operands.size() != 2 || add->operands.size() != 3)
+    return false;
+  const GenericOperation *loadEmpty = Definition(module, load->operands[1]);
+  const GenericOperation *addEmpty = Definition(module, add->operands[2]);
+  if (loadEmpty == nullptr || addEmpty == nullptr || loadEmpty == addEmpty ||
+      loadEmpty->name != "tensor.empty" || addEmpty->name != "tensor.empty" ||
+      loadEmpty->results.size() != 1 || addEmpty->results.size() != 1 ||
+      !loadEmpty->operands.empty() || !addEmpty->operands.empty() ||
+      load->results.size() != 1 || add->results.size() != 1 ||
+      load->operandTypes.size() != 2 ||
+      add->operands.size() != 3 || add->operandTypes.size() != 3 ||
+      store->operands.size() != 2 || store->operandTypes.size() != 2 ||
+      store->operands[0] != add->results.front() ||
+      add->operands[0] != load->results.front() ||
+      add->operands[1] != load->results.front() ||
+      load->operands[1] != loadEmpty->results.front() ||
+      add->operands[2] != addEmpty->results.front())
+    return false;
+
+  // Prove the complete value topology before mutating anything.  In
+  // particular, neither temporary may have an additional user whose type or
+  // lifetime the narrow rewrite below would silently change.
+  const int sourceValue = load->operands[0];
+  const int destinationValue = store->operands[1];
+  if (!IsFunctionBlockArgument(module, function, sourceValue) ||
+      !IsFunctionBlockArgument(module, function, destinationValue) ||
+      Definition(module, sourceValue) != nullptr ||
+      Definition(module, destinationValue) != nullptr)
+    return false;
+  const auto useCount = [&](int value) {
+    size_t count = 0;
+    for (int opId : AllOperations(module, functionId))
+      for (int operand :
+           module.operations.at(static_cast<size_t>(opId)).operands)
+        if (operand == value)
+          ++count;
+    return count;
+  };
+  if (useCount(sourceValue) != 1 ||
+      useCount(loadEmpty->results.front()) != 1 ||
+      useCount(load->results.front()) != 2 ||
+      useCount(addEmpty->results.front()) != 1 ||
+      useCount(add->results.front()) != 1 || useCount(destinationValue) != 1)
+    return false;
+
+  const int storeId = store->id;
+
+  const auto source = ParseStaticShapedType(store->operandTypes.front());
+  const auto destination = ParseStaticShapedType(store->operandTypes[1]);
+  if (!source || source->kind != "tensor" || source->shape.size() != 2 ||
+      source->shape.front() <= 0 || source->shape.front() % 2 != 0 ||
+      !destination || destination->kind != "memref" ||
+      destination->shape != source->shape ||
+      tile_cube_vector_loop_detail::ElementBitWidth(destination->tail) !=
+          tile_cube_vector_loop_detail::ElementBitWidth(source->tail) ||
+      store->operandTypes[1].find("#hivm.address_space<gm>") ==
+          std::string::npos)
+    return false;
+  ShapedType tiled = *source;
+  tiled.shape.front() /= 2;
+  const std::string tiledType = PrintShapedType(tiled);
+  const int loadEmptyId = loadEmpty->id;
+  const int addEmptyId = addEmpty->id;
+  const int addId = add->id;
+
+  const std::string fullTensorType = PrintShapedType(*source);
+  const auto allTypesAreFull = [&](const GenericOperation &operation) {
+    for (const std::string &type : operation.operandTypes) {
+      const auto shaped = ParseStaticShapedType(type);
+      if (shaped && shaped->kind == "tensor" && type != fullTensorType)
+        return false;
+    }
+    for (const std::string &type : operation.resultTypes) {
+      const auto shaped = ParseStaticShapedType(type);
+      if (shaped && shaped->kind == "tensor" && type != fullTensorType)
+        return false;
+    }
+    return true;
+  };
+  if (!allTypesAreFull(*loadEmpty) || !allTypesAreFull(*load) ||
+      !allTypesAreFull(*addEmpty) || !allTypesAreFull(*add) ||
+      !allTypesAreFull(*store) || load->operandTypes[0] != fullTensorType)
+    return false;
+
+  // The real bubble-up tiler slices an external tensor source before the load.
+  // Preserve that alias boundary instead of changing the function block
+  // argument type (which would be invalid and would also misrepresent the
+  // externally owned buffer).
+  const int loadId = load->id;
+  const GenericOperation loadCopy =
+      module.operations.at(static_cast<size_t>(loadId));
+  GenericRewriter rewriter(module);
+  const int externalSliceId = rewriter.createOperation(
+          loadCopy.parentId, loadCopy.regionId, loadCopy.blockId,
+          "tensor.extract_slice", {tiledType}, {sourceValue},
+          {fullTensorType},
+          "operandSegmentSizes = array<i32: 1, 0, 0, 0>, "
+          "static_offsets = array<i64: 0, 0>, "
+          "static_sizes = array<i64: " + std::to_string(tiled.shape[0]) +
+              ", " + std::to_string(tiled.shape[1]) +
+              ">, static_strides = array<i64: 1, 1>");
+  const GenericBlock &block =
+      module.blocks.at(static_cast<size_t>(loadCopy.blockId));
+  const auto position =
+      std::find(block.operations.begin(), block.operations.end(), loadId);
+  rewriter.insertToBlock(
+          loadCopy.blockId,
+          static_cast<size_t>(std::distance(block.operations.begin(), position)),
+          externalSliceId);
+  GenericOperation &mutableLoad =
+      module.operations.at(static_cast<size_t>(loadId));
+  const int slicedValue = module.operations.at(
+          static_cast<size_t>(externalSliceId)).results.front();
+  mutableLoad.operands.front() = slicedValue;
+  RemapValues(mutableLoad.dpsInputs, {{sourceValue, slicedValue}});
+  RemapValues(mutableLoad.dpsInits, {{sourceValue, slicedValue}});
+
+  // Only the proven load/add/store closure is tiled.  The function arguments
+  // and unrelated values (there cannot be any in this matcher) retain their
+  // external full-shape types.
+  for (int opId : {loadEmptyId, loadId, addEmptyId, addId}) {
+    GenericOperation &operation = module.operations.at(static_cast<size_t>(opId));
+    for (std::string &type : operation.operandTypes) {
+      const auto shaped = ParseStaticShapedType(type);
+      if (shaped && shaped->kind == "tensor")
+        type = tiledType;
+    }
+    for (std::string &type : operation.resultTypes) {
+      const auto shaped = ParseStaticShapedType(type);
+      if (shaped && shaped->kind == "tensor")
+        type = tiledType;
+    }
+  }
+  GenericOperation &tiledStore =
+      module.operations.at(static_cast<size_t>(storeId));
+  tiledStore.operandTypes[0] = tiledType;
+  if (tiledStore.attributes == "{}" || tiledStore.attributes.empty())
+    tiledStore.attributes = "{tiled_op}";
+  else
+    tiledStore.attributes.insert(tiledStore.attributes.size() - 1,
+                                 ", tiled_op");
+  return true;
+}
+
 // Rewraps a single valueless store/indirect_store/L1-copy in an
 // `if (sub_block_idx == 0)` guard carrying `limit_sub_block_id0`, matching the
 // case-1 rewrite in LimitUniqueSubBlockIdToStoreCopy.  Returns false if the
@@ -453,6 +671,14 @@ inline StageResult RunTileAndBindSubBlock(GenericModule module,
                        kDisableAttrName))
     return result; // Recognized no-op, Exact.
 
+  if (const GenericOperation *allocation =
+          ApplicableAllocToTensorEarlyPattern(result.module)) {
+    AddDiagnostic(result, allocation->id, allocation->name,
+                  "alloc-to-tensor early pattern would change UB ownership but "
+                  "is not modeled");
+    return result;
+  }
+
   const std::vector<int> aivFuncs = CollectAivFunctions(result.module);
   const std::vector<int> aicFuncs = CollectAicFunctions(result.module);
   if (aivFuncs.empty())
@@ -502,7 +728,10 @@ inline StageResult RunTileAndBindSubBlock(GenericModule module,
         AddDiagnostic(result, functionId, "func.func", resultBearerReason);
       continue;
     }
-    // kNone (static store) or kSliceWrapped (the real pass traces the slice and
+    if (disposition == DynamicStoreDisposition::kNone &&
+        ApplySimpleVectorStoreUBTiling(result.module, functionId))
+      continue;
+    // kNone (other static store) or kSliceWrapped (the real pass traces the slice and
     // then tiles): the exact sub-block loop IR is not reproduced.  Fail closed:
     // keep the legal IR and report the function as an incomplete (unmodeled
     // potentially-successful) form.

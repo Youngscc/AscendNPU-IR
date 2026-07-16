@@ -40,8 +40,10 @@ inline constexpr std::array<const char *, 14> kPostCVPipelineStageNames = {
     "InlineOTFLoadStore"};
 
 inline CoverageDisposition ParseCoverageDisposition(const std::string &text) {
-  if (text == "modeled")
-    return CoverageDisposition::Modeled;
+  if (text == "oracle-exact")
+    return CoverageDisposition::OracleExact;
+  if (text == "partial")
+    return CoverageDisposition::Partial;
   if (text == "ub-invariant")
     return CoverageDisposition::UBInvariant;
   if (text == "unsupported")
@@ -124,20 +126,20 @@ inline std::vector<StageCoverage> CompiledPostCVPipelineCoverage() {
   stages.reserve(kPostCVPipelineStageNames.size());
   for (const char *stage : kPostCVPipelineStageNames)
     stages.push_back({stage, CoverageDisposition::Unsupported});
-  stages.front().disposition = CoverageDisposition::Modeled;
-  stages[1].disposition = CoverageDisposition::Modeled;
+  stages.front().disposition = CoverageDisposition::Partial;
+  stages[1].disposition = CoverageDisposition::Partial;
   stages[2].disposition = CoverageDisposition::UBInvariant;
-  stages[3].disposition = CoverageDisposition::Modeled;
+  stages[3].disposition = CoverageDisposition::Partial;
   stages[4].disposition = CoverageDisposition::UBInvariant;
-  stages[5].disposition = CoverageDisposition::Modeled;
-  stages[6].disposition = CoverageDisposition::Modeled;
-  stages[7].disposition = CoverageDisposition::Modeled;
-  stages[8].disposition = CoverageDisposition::Modeled;
-  stages[9].disposition = CoverageDisposition::Modeled;
-  stages[10].disposition = CoverageDisposition::Modeled;
-  stages[11].disposition = CoverageDisposition::Modeled;
-  stages[12].disposition = CoverageDisposition::Modeled;
-  stages[13].disposition = CoverageDisposition::Modeled;
+  stages[5].disposition = CoverageDisposition::Partial;
+  stages[6].disposition = CoverageDisposition::Partial;
+  stages[7].disposition = CoverageDisposition::Partial;
+  stages[8].disposition = CoverageDisposition::Partial;
+  stages[9].disposition = CoverageDisposition::Partial;
+  stages[10].disposition = CoverageDisposition::Partial;
+  stages[11].disposition = CoverageDisposition::Partial;
+  stages[12].disposition = CoverageDisposition::Partial;
+  stages[13].disposition = CoverageDisposition::Partial;
   return stages;
 }
 

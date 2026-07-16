@@ -754,6 +754,8 @@ inline PlanMemoryModelResult PlanLocalMemoryImpl(
     result.requiredBits = requiredBits;
     result.peakBits = requiredBits;
     result.capacityBits = kUBCapacityBits;
+    result.inplacePairs = liveness.inplacePairList;
+    result.multiBufferNums = liveness.buffer2MultiNum;
     std::map<std::string, LifetimeRecord> lifeByName;
     for (const LifetimeRecord &life : liveness.records)
       lifeByName[life.name] = life;
@@ -771,8 +773,8 @@ inline PlanMemoryModelResult PlanLocalMemoryImpl(
       plannedByName.emplace(
           name, PlannedBufferRecord{name, info.constBits,
                                     buffer2StorageExtentBits.at(name),
-                                    std::move(item.second), life.allocTime,
-                                    life.freeTime});
+                                    std::move(item.second), life.directAllocTime,
+                                    life.directFreeTime});
     }
     for (auto &item : plannedByName)
       result.buffers.push_back(std::move(item.second));

@@ -51,10 +51,10 @@ enable_ubuf_saving     = false      # UB 节省默认关闭（不支持）
   告。该结果的 `status` 固定为 `blocker`，正式 peak、required 和函数 buffer 计划不
   输出；如底层规划曾完成，只会放在明确不可用于规划的 `debug_estimate` 中。已记录的
   覆盖缺口：
-  - `TileAndBindSubBlock` 的 tiling-success 路径（静态形状、无 hazard 的 AIV store
-    会被真实 pass 切分，但子块循环 IR 不可精确复现）；
-  - `LoopInvariantSubsetHoisting` 的适用情形（loop-carried subset 抽取/插入对需要
-    重建循环，未建模）；
+  - `TileAndBindSubBlock` 已支持单 load/vadd/store 的静态成功切片 UB 语义；其它成功
+    tiling 形态、slice 包装的动态 store 和不能证明回滚等价的形态仍会阻断；
+  - `LoopInvariantSubsetHoisting` 已支持单 iter-arg 的静态
+    extract_slice/insert_slice/yield 对；transfer、动态或更复杂循环体仍会阻断；
   - `InlineOTFLoadStore` 的动态 OTF 拼接 store（未建模）。
 - 只有 `precision = exact` 才可能返回 `success` 或 `overflow`；三种 status 的退出码
   分别是 `0`/`2`/`1`。
@@ -68,8 +68,8 @@ enable_ubuf_saving     = false      # UB 节省默认关闭（不支持）
 ## 默认示例输入
 
 ```text
-cvpipeline_ub_model_cpp/examples/inputs/demo_vector_add_before_cvpipeline.mlir   # 纯 AIV, peak=65536 exact
-cvpipeline_ub_model_cpp/examples/inputs/demo_randn_before_cvpipeline.mlir        # 纯 AIV, peak=23904 / required=24064 exact
+cvpipeline_ub_model_cpp/examples/inputs/demo_vector_add_before_cvpipeline.mlir   # 默认配置 blocker；debug peak=65536（inplace 尚未证明）
+cvpipeline_ub_model_cpp/examples/inputs/demo_randn_before_cvpipeline.mlir        # blocker；仅保留调试估算
 cvpipeline_ub_model_cpp/examples/inputs/demo_mix_before_cvpipeline.mlir          # 端到端 MIX, peak=4096 exact
 ```
 
@@ -170,10 +170,44 @@ suffix / PlanMemory（只影响 CVPipeline 之后的 UB buffer）：
 ## 4. post-CVPipeline 阶段覆盖
 
 `config/post_cvpipeline_manifest.tsv` 记录 14 个 post-CVPipeline 阶段的覆盖判定
-（`modeled` / `ub-invariant` / `unsupported`），并在报告的 `stage_coverage` 中逐阶段
-输出。`config/initial_suffix_manifest.tsv` 记录 11 个 suffix 阶段的 `ub_role` 与
+（`oracle-exact` / `partial` / `ub-invariant` / `unsupported`），并在报告的
+`stage_coverage` 中逐阶段输出。`partial` 表示存在已精确支持的输入路径，也存在明确
+阻断的未覆盖路径；只有经过真实编译器逐阶段差分证明的完整输入合同才能标成
+`oracle-exact`。`config/initial_suffix_manifest.tsv` 记录 11 个 suffix 阶段的 `ub_role` 与
 `input_contract`（每个阶段在 post-CVPipeline 流水线之后假设的 op 形态；未支持形态
 按 fail-closed 抛错并转为 blocker 诊断，绝不静默丢弃 buffer）。
+
+## 5. 真实编译器 oracle 门禁
+
+`bishengir-cvpipeline-suffix-compile` 支持在 14 个 post-CVPipeline 阶段和 11 个
+suffix pass group 后输出稳定语义快照，并导出真实 pipeline 的阶段顺序和文本哈希：
+
+```bash
+bishengir-cvpipeline-suffix-compile INPUT.mlir -o /tmp/result.mlir \
+  --plan-memory-seed=0 --mlir-disable-threading \
+  --dump-stage-oracle-dir=/tmp/cvub-stages \
+  --dump-pipeline-stage-manifest=/tmp/cvub-pipeline.tsv
+
+python3 cvpipeline_ub_model_cpp/scripts/validate_pipeline_manifest.py \
+  --compiler-manifest /tmp/cvub-pipeline.tsv \
+  --post-manifest cvpipeline_ub_model_cpp/config/post_cvpipeline_manifest.tsv \
+  --suffix-manifest cvpipeline_ub_model_cpp/config/initial_suffix_manifest.tsv \
+  --expected-pipeline-sha256 cvpipeline_ub_model_cpp/config/real_pipeline.sha256
+```
+
+全 corpus 最终 PlanMemory 差分（Exact 校验 peak、buffer/offset 和规范化 gen/kill
+关系；Incomplete 校验 blocker 合同）：
+
+```bash
+python3 cvpipeline_ub_model_cpp/scripts/run_corpus_oracle.py \
+  --corpus-root cvpipeline_ub_model_cpp/data/before_cvpipeline \
+  --model cvpipeline_ub_model_cpp/output/bin/cvpipeline_ub_model \
+  --compiler /path/to/bishengir-cvpipeline-suffix-compile \
+  --seeds 0-19
+```
+
+oracle 固定关闭 MLIR 多线程，避免 pass verifier 和逐阶段快照并行时产生非确定性；
+这不改变 pass 顺序或 UB 语义。
 
 ## 目录说明
 

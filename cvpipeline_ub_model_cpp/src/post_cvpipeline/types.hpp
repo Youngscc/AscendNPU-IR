@@ -9,7 +9,16 @@
 namespace cvub {
 
 enum class Precision { Exact, Incomplete };
-enum class CoverageDisposition { Modeled, UBInvariant, Unsupported };
+// Stage-level evidence, separate from the per-input Precision result.  Partial
+// means exact paths exist but the stage also has explicit fail-closed paths;
+// OracleExact is reserved for a stage whose supported input contract has been
+// proven against real-compiler snapshots.
+enum class CoverageDisposition {
+  OracleExact,
+  Partial,
+  UBInvariant,
+  Unsupported
+};
 
 struct PostCVPipelineOptions {
   unsigned tileMixVectorLoop = 2;

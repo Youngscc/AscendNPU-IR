@@ -2,8 +2,11 @@
 #define CVPIPELINE_UB_MODEL_CPP_POST_CVPIPELINE_CODE_MOTION_HPP
 
 #include "ir_utils.hpp"
+#include "tile_cube_vector_loop.hpp"
 #include "types.hpp"
 
+#include <limits>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -308,10 +311,6 @@ inline bool IsSubsetSliceOp(const std::string &name) {
          name == "vector.transfer_read" || name == "vector.transfer_write";
 }
 
-// Upstream createLoopInvariantSubsetHoistingPass rebuilds a loop when an iter
-// arg flows through a matching extract_slice/insert_slice (or transfer) pair,
-// threading a new carried iter arg/result.  That loop rebuild is not reproduced
-// here, so the presence of the pattern is detected and reported as a scope gap.
 inline bool LoopCarriesSubsetPattern(const GenericModule &module, int loopId) {
   const GenericOperation &loop =
       module.operations.at(static_cast<size_t>(loopId));
@@ -339,6 +338,201 @@ inline bool LoopCarriesSubsetPattern(const GenericModule &module, int loopId) {
       return true;
   }
   return false;
+}
+
+struct SubsetHoistPlan {
+  bool candidate = false;
+  bool exact = false;
+  int loopId = -1;
+  int bodyBlock = -1;
+  int extractId = -1;
+  int insertId = -1;
+  int yieldId = -1;
+  std::string reason;
+};
+
+// Recognize the static tensor.extract_slice/tensor.insert_slice form emitted by
+// the CV pipeline corpus.  Requiring the complete three-op body is deliberate:
+// it makes the rewrite below a proof of the UB-relevant loop-carried values,
+// rather than an approximation of the much broader upstream interface pass.
+inline SubsetHoistPlan AnalyzeStaticSubsetHoist(const GenericModule &module,
+                                                int loopId) {
+  SubsetHoistPlan plan;
+  plan.loopId = loopId;
+  if (!LoopCarriesSubsetPattern(module, loopId))
+    return plan;
+  plan.candidate = true;
+
+  const GenericOperation &loop =
+      module.operations.at(static_cast<size_t>(loopId));
+  plan.bodyBlock = LoopBodyBlock(module, loop);
+  if (loop.name != "scf.for" || plan.bodyBlock < 0 ||
+      loop.operands.size() != 4 || loop.operandTypes.size() != 4 ||
+      loop.results.size() != 1 || loop.resultTypes.size() != 1) {
+    plan.reason = "subset-carrying loop is outside the modeled single-iter-arg "
+                  "scf.for form";
+    return plan;
+  }
+  const GenericBlock &body =
+      module.blocks.at(static_cast<size_t>(plan.bodyBlock));
+  if (body.arguments.size() != 2 || body.argumentTypes.size() != 2 ||
+      body.operations.size() != 3) {
+    plan.reason = "subset-carrying loop body is outside the modeled static "
+                  "extract/insert/yield form";
+    return plan;
+  }
+
+  const GenericOperation &extract =
+      module.operations.at(static_cast<size_t>(body.operations[0]));
+  const GenericOperation &insert =
+      module.operations.at(static_cast<size_t>(body.operations[1]));
+  const GenericOperation &yield =
+      module.operations.at(static_cast<size_t>(body.operations[2]));
+  using tile_cube_vector_loop_detail::ParseIntegerArray;
+  using tile_cube_vector_loop_detail::ParseStaticShapedType;
+  const auto propertyArray = [&](const GenericOperation &operation,
+                                 const char *key) {
+    return ParseIntegerArray(IRDictionaryValue(operation.properties, key));
+  };
+  const std::vector<int64_t> extractOffsets =
+      propertyArray(extract, "static_offsets");
+  const std::vector<int64_t> extractSizes =
+      propertyArray(extract, "static_sizes");
+  const std::vector<int64_t> extractStrides =
+      propertyArray(extract, "static_strides");
+  const std::vector<int64_t> insertOffsets =
+      propertyArray(insert, "static_offsets");
+  const std::vector<int64_t> insertSizes =
+      propertyArray(insert, "static_sizes");
+  const std::vector<int64_t> insertStrides =
+      propertyArray(insert, "static_strides");
+  const auto fullType = ParseStaticShapedType(body.argumentTypes[1]);
+  const auto subsetType = extract.resultTypes.empty()
+                              ? std::nullopt
+                              : ParseStaticShapedType(extract.resultTypes[0]);
+  const int64_t dynamicSentinel = std::numeric_limits<int64_t>::min();
+  const auto allStatic = [&](const std::vector<int64_t> &values) {
+    return std::none_of(values.begin(), values.end(),
+                        [&](int64_t value) { return value == dynamicSentinel; });
+  };
+  const bool matchingStaticProperties =
+      fullType && subsetType && !extractOffsets.empty() &&
+      extractOffsets == insertOffsets && extractSizes == insertSizes &&
+      extractStrides == insertStrides &&
+      extractOffsets.size() == fullType->shape.size() &&
+      extractSizes.size() == fullType->shape.size() &&
+      extractStrides.size() == fullType->shape.size() &&
+      subsetType->shape.size() == fullType->shape.size() &&
+      allStatic(extractOffsets) && allStatic(extractSizes) &&
+      allStatic(extractStrides) &&
+      std::all_of(extractSizes.begin(), extractSizes.end(),
+                  [](int64_t value) { return value > 0; }) &&
+      std::all_of(extractStrides.begin(), extractStrides.end(),
+                  [](int64_t value) { return value > 0; });
+  const std::vector<int64_t> extractSegments =
+      propertyArray(extract, "operandSegmentSizes");
+  const std::vector<int64_t> insertSegments =
+      propertyArray(insert, "operandSegmentSizes");
+  const bool noDynamicOperands =
+      extractSegments == std::vector<int64_t>({1, 0, 0, 0}) &&
+      insertSegments == std::vector<int64_t>({1, 1, 0, 0, 0});
+  if (extract.name != "tensor.extract_slice" ||
+      extract.operands != std::vector<int>{body.arguments[1]} ||
+      extract.operandTypes.size() != 1 || extract.results.size() != 1 ||
+      extract.resultTypes.size() != 1 || !extract.regions.empty() ||
+      insert.name != "tensor.insert_slice" ||
+      insert.operands !=
+          std::vector<int>{extract.results[0], body.arguments[1]} ||
+      insert.operandTypes.size() != 2 || insert.results.size() != 1 ||
+      insert.resultTypes != loop.resultTypes || !insert.regions.empty() ||
+      yield.name != "scf.yield" ||
+      yield.operands != std::vector<int>{insert.results[0]} ||
+      yield.operandTypes != loop.resultTypes || !matchingStaticProperties ||
+      !noDynamicOperands) {
+    plan.reason = "subset-carrying loop does not match the proven static "
+                  "extract/insert pair";
+    return plan;
+  }
+  if (loop.operandTypes[3] != body.argumentTypes[1] ||
+      loop.resultTypes[0] != body.argumentTypes[1] ||
+      extract.operandTypes[0] != body.argumentTypes[1] ||
+      insert.operandTypes[1] != body.argumentTypes[1] ||
+      insert.operandTypes[0] != extract.resultTypes[0]) {
+    plan.reason = "subset-carrying loop has inconsistent tensor types";
+    return plan;
+  }
+
+  plan.extractId = extract.id;
+  plan.insertId = insert.id;
+  plan.yieldId = yield.id;
+  plan.exact = true;
+  return plan;
+}
+
+inline void ReplaceUsesExcept(GenericModule &module, int oldValue, int newValue,
+                              int excludedOperation) {
+  const std::map<int, int> replacement = {{oldValue, newValue}};
+  for (GenericOperation &operation : module.operations) {
+    if (operation.id == excludedOperation)
+      continue;
+    RemapValues(operation.operands, replacement);
+    RemapValues(operation.dpsInputs, replacement);
+    RemapValues(operation.dpsInits, replacement);
+  }
+}
+
+inline void ApplyStaticSubsetHoist(GenericModule &module,
+                                   const SubsetHoistPlan &plan) {
+  GenericRewriter rewriter(module);
+  const int subsetBlockArgument = rewriter.newValue();
+  const int subsetLoopResult = rewriter.newValue();
+
+  GenericOperation &loop =
+      module.operations.at(static_cast<size_t>(plan.loopId));
+  GenericBlock &body = module.blocks.at(static_cast<size_t>(plan.bodyBlock));
+  GenericOperation &extract =
+      module.operations.at(static_cast<size_t>(plan.extractId));
+  GenericOperation &insert =
+      module.operations.at(static_cast<size_t>(plan.insertId));
+  GenericOperation &yield =
+      module.operations.at(static_cast<size_t>(plan.yieldId));
+  const int fullLoopResult = loop.results.front();
+  const int fullLoopInit = loop.operands[3];
+  const std::string subsetType = extract.resultTypes.front();
+
+  extract.operands = {fullLoopInit};
+  extract.operandTypes = {loop.operandTypes[3]};
+  ApplyOperationSemantics(extract);
+
+  loop.operands.push_back(extract.results.front());
+  loop.operandTypes.push_back(subsetType);
+  loop.results.push_back(subsetLoopResult);
+  loop.resultTypes.push_back(subsetType);
+  body.arguments.push_back(subsetBlockArgument);
+  body.argumentTypes.push_back(subsetType);
+
+  yield.operands = {body.arguments[1], subsetBlockArgument};
+  yield.operandTypes = {body.argumentTypes[1], subsetType};
+  ApplyOperationSemantics(yield);
+
+  insert.operands = {subsetLoopResult, fullLoopResult};
+  insert.operandTypes = {subsetType, loop.resultTypes.front()};
+  ApplyOperationSemantics(insert);
+  ReplaceUsesExcept(module, fullLoopResult, insert.results.front(), insert.id);
+
+  MoveOperationBefore(module, extract.id, loop.id);
+  rewriter.removeFromBlock(plan.bodyBlock, insert.id);
+  const GenericBlock &outer =
+      module.blocks.at(static_cast<size_t>(loop.blockId));
+  const auto loopPosition =
+      std::find(outer.operations.begin(), outer.operations.end(), loop.id);
+  if (loopPosition == outer.operations.end())
+    throw std::runtime_error("subset hoisting: loop is not attached");
+  rewriter.insertToBlock(
+      loop.blockId,
+      static_cast<size_t>(std::distance(outer.operations.begin(), loopPosition)) +
+          1,
+      insert.id);
 }
 
 inline void AddDiagnostic(StageResult &result, int operationId,
@@ -415,14 +609,10 @@ inline StageResult RunLoopInvariantCodeMotion(GenericModule module,
 // Models upstream createLoopInvariantSubsetHoistingPass on a projected AIV
 // module.
 //
-// When no loop carries an iter arg through a tensor.extract_slice /
-// tensor.insert_slice (or vector transfer) pair, the pass is a recognized no-op
-// and the model reports Exact with the IR unchanged.  When the pattern is
-// present, the real pass rebuilds the loop with an extra carried iter
-// arg/result (extraction before the loop, insertion after); that loop rebuild
-// is not reproduced at this altitude, so the model fails closed to Incomplete
-// and flags the function as a scope candidate rather than silently dropping a
-// lifetime-affecting hoist.  enableCodeMotion=false gates the pass to a no-op.
+// The proven static single-iter-arg form is rebuilt at the UB-semantic level:
+// extraction before the loop, an extra carried subset arg/result, and insertion
+// after the loop.  All other applicable forms fail closed before any mutation.
+// enableCodeMotion=false gates the pass to a recognized no-op.
 inline StageResult RunLoopInvariantSubsetHoisting(GenericModule module,
                                                   bool enableCodeMotion) {
   using namespace code_motion_detail;
@@ -432,15 +622,26 @@ inline StageResult RunLoopInvariantSubsetHoisting(GenericModule module,
   if (!enableCodeMotion)
     return result; // Recognized no-op, Exact.
 
+  std::vector<SubsetHoistPlan> plans;
   for (const GenericOperation &operation : result.module.operations) {
     if (operation.blockId < 0 || !IsModeledLoop(operation.name))
       continue;
-    if (LoopCarriesSubsetPattern(result.module, operation.id))
+    SubsetHoistPlan plan =
+        AnalyzeStaticSubsetHoist(result.module, operation.id);
+    if (!plan.candidate)
+      continue;
+    if (!plan.exact)
       AddDiagnostic(result, operation.id, operation.name,
-                    "LoopInvariantSubsetHoisting",
-                    "loop carries a loop-invariant subset extraction/insertion "
-                    "pair whose hoisting is not modeled");
+                    "LoopInvariantSubsetHoisting", plan.reason);
+    plans.push_back(std::move(plan));
   }
+
+  if (result.precision == Precision::Incomplete) {
+    ValidateGenericModule(result.module);
+    return result; // Transactional fail-close: no partially rebuilt loops.
+  }
+  for (const SubsetHoistPlan &plan : plans)
+    ApplyStaticSubsetHoist(result.module, plan);
 
   ValidateGenericModule(result.module);
   return result;

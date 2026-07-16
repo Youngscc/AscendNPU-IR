@@ -32,9 +32,9 @@ struct Options {
   bool enableCVLazyLoading = false;
   bool enableAutoMultiBuffer = false;
   cvub::MultiBufferStrategy localMultiBufferStrategy =
-      cvub::MultiBufferStrategy::NoLimit;
+      cvub::MultiBufferStrategy::CubeNoL0C;
   cvub::MultiBufferStrategy mixMultiBufferStrategy =
-      cvub::MultiBufferStrategy::NoLimit;
+      cvub::MultiBufferStrategy::OnlyCube;
   std::string format = "text";
 };
 
@@ -217,8 +217,10 @@ std::string precisionString(cvub::Precision precision) {
 
 std::string coverageDispositionName(cvub::CoverageDisposition disposition) {
   switch (disposition) {
-  case cvub::CoverageDisposition::Modeled:
-    return "modeled";
+  case cvub::CoverageDisposition::OracleExact:
+    return "oracle-exact";
+  case cvub::CoverageDisposition::Partial:
+    return "partial";
   case cvub::CoverageDisposition::UBInvariant:
     return "ub-invariant";
   case cvub::CoverageDisposition::Unsupported:
@@ -551,12 +553,25 @@ int planBeforeCVPipeline(const Options &opts) {
           std::cout << "        {\"name\": \"" << jsonEscape(record.name)
                     << "\", \"extent_bits\": " << record.constBits
                     << ", \"offset_bytes\": " << offset
+                    << ", \"multi_buffer_num\": "
+                    << (function.plan.multiBufferNums.count(record.name)
+                            ? function.plan.multiBufferNums.at(record.name)
+                            : 1U)
                     << ", \"alloc_time\": " << record.allocTime
                     << ", \"free_time\": " << record.freeTime << "}";
         }
       }
       if (!firstBuffer)
         std::cout << "\n      ";
+      std::cout << "],\n      \"inplace_pairs\": [";
+      for (size_t pairIndex = 0;
+           pairIndex < function.plan.inplacePairs.size(); ++pairIndex) {
+        if (pairIndex != 0)
+          std::cout << ", ";
+        const auto &pair = function.plan.inplacePairs[pairIndex];
+        std::cout << "[\"" << jsonEscape(pair.first) << "\", \""
+                  << jsonEscape(pair.second) << "\"]";
+      }
       std::cout << "]\n"
                 << "    }";
       std::cout << (i + 1 == authoritativeFunctionCount ? "\n" : ",\n");
@@ -608,6 +623,10 @@ int planBeforeCVPipeline(const Options &opts) {
             std::cout << "{\"name\": \"" << jsonEscape(record.name)
                       << "\", \"extent_bits\": " << record.constBits
                       << ", \"offset_bytes\": " << offset
+                      << ", \"multi_buffer_num\": "
+                      << (function.plan.multiBufferNums.count(record.name)
+                              ? function.plan.multiBufferNums.at(record.name)
+                              : 1U)
                       << ", \"alloc_time\": " << record.allocTime
                       << ", \"free_time\": " << record.freeTime << "}";
           }
