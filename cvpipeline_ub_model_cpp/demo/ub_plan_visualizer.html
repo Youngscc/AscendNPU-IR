@@ -702,7 +702,7 @@
         zeroDurationPeaks.push({ time, bytes: baseBytes + extent, baseBytes, extent });
       });
 
-      const maxUtil = Math.max(...utilPoints.map(p => p.bytes), 1);
+      const maxUtil = Math.max(...utilPoints.map(p => p.bytes), ...zeroDurationPeaks.map(p => p.bytes), 1);
       const yMax = Math.max(maxEndByte, bitsToBytes(requiredBits), 1);
 
       const capacityBits = Number(result.capacity_bits ?? result.capacityBits ?? 0);
@@ -1067,7 +1067,8 @@
           }));
         });
 
-        const peakUtil = Math.max(...utilPoints.map(p => p.bytes));
+        const allPeaks = [...utilPoints.map(p => p.bytes), ...zeroDurationPeaks.map(p => p.bytes)];
+        const peakUtil = Math.max(...allPeaks);
         const avgUtil = utilPoints.reduce((sum, p) => sum + p.bytes, 0) / utilPoints.length;
         const peakPercent = utilToPercent(peakUtil);
         const avgPercent = utilToPercent(avgUtil);
