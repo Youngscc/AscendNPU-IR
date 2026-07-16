@@ -14,6 +14,7 @@
 // limitations under the License.
 //
 //============================================================================//
+
 #include "bishengir/Dialect/Annotation/IR/Annotation.h"
 #include "bishengir/Dialect/HIVM/Transforms/BubbleUpExtractSlice/Pattern.h"
 #include "bishengir/Dialect/HIVM/Transforms/HIVMTilingInterfaceImpl.h"
@@ -363,6 +364,19 @@ ElementwiseBubbleUpStrategy::execute(tensor::ExtractSliceOp sliceOp,
   rewriter.setInsertionPointAfter(hivmOp);
   Operation *newOp = clone(rewriter, hivmOp, resultTensorTypes, tiledOperands);
   rewriter.replaceOp(sliceOp, newOp->getResults());
+  if (hivmOp->getResults().empty()) {
+    rewriter.eraseOp(hivmOp);
+    return success();
+  }
+  for (Operation *user :
+       llvm::make_early_inc_range(hivmOp->getResult(0).getUsers())) {
+    if (auto mark = dyn_cast<annotation::MarkOp>(user)) {
+      rewriter.modifyOpInPlace(
+          mark, [&]() { mark->setOperand(0, newOp->getResult(0)); });
+    }
+  }
+
+  rewriter.eraseOp(hivmOp);
   return success();
 }
 

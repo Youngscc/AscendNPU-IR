@@ -21,6 +21,7 @@
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/PatternMatch.h"
 
 #include <memory>
 
@@ -158,12 +159,13 @@ public:
 /// Base class for bubble up patterns using Template Method pattern
 class BubbleUpPattern : public OpRewritePattern<tensor::ExtractSliceOp> {
 public:
-  using OpRewritePattern<tensor::ExtractSliceOp>::OpRewritePattern;
-
-  // Use shared_ptr to manage strategy lifetime
+  // Benefit above tensor::populateFoldTensorEmptyPatterns (benefit 1) so odd
+  // tiling can attach buffer_size_in_byte on extract_slice before fold merges
+  // it into tensor.empty.
   BubbleUpPattern(MLIRContext *context,
-                  SmallVector<std::shared_ptr<BubbleUpStrategy>> strategies)
-      : OpRewritePattern<tensor::ExtractSliceOp>(context),
+                  SmallVector<std::shared_ptr<BubbleUpStrategy>> strategies,
+                  PatternBenefit benefit = PatternBenefit(10))
+      : OpRewritePattern<tensor::ExtractSliceOp>(context, benefit),
         bubbleUpStrategies(std::move(strategies)) {}
 
 protected:
@@ -216,6 +218,42 @@ public:
 };
 
 class FixpipeBubbleUpStrategy : public BubbleUpStrategy {
+public:
+  bool isSupportedOperation(tensor::ExtractSliceOp sliceOp) const override;
+
+  LogicalResult execute(tensor::ExtractSliceOp sliceOp,
+                        PatternRewriter &rewriter) const override;
+};
+
+class GatherLoadBubbleUpStrategy : public BubbleUpStrategy {
+public:
+  bool isSupportedOperation(tensor::ExtractSliceOp sliceOp) const override;
+
+  LogicalResult execute(tensor::ExtractSliceOp sliceOp,
+                        PatternRewriter &rewriter) const override;
+};
+
+/// Pattern to add buffer_size_in_byte mark on ExtractSliceOp whose
+/// tensor::ExtractSliceOp whose source is tensor::EmptyOp. This  handles cases
+/// that were rejected by BubbleUpPattern::areOperandsUpperLevel (e.g. operands
+/// in a deeper inner loop than the extract_slice).
+class MarkEmptySliceBufferSize
+    : public OpRewritePattern<tensor::ExtractSliceOp> {
+public:
+  using OpRewritePattern<tensor::ExtractSliceOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(tensor::ExtractSliceOp sliceOp,
+                                PatternRewriter &rewriter) const override;
+};
+
+class IndirectLoadBubbleUpStrategy : public BubbleUpStrategy {
+public:
+  bool isSupportedOperation(tensor::ExtractSliceOp sliceOp) const override;
+
+  LogicalResult execute(tensor::ExtractSliceOp sliceOp,
+                        PatternRewriter &rewriter) const override;
+};
+
+class StrideLoadBubbleUpStrategy : public BubbleUpStrategy {
 public:
   bool isSupportedOperation(tensor::ExtractSliceOp sliceOp) const override;
 

@@ -1,6 +1,6 @@
-# Cube-Vector 软件流水优化
+# Cube-Vector软件流水优化
 
-本文介绍HIVM中的CV Pipelining `Pass`。该`Pass`针对CV类`kernel`进行优化。在阅读本文之前，建议先阅读[CV Optimization](../CV/CVOptimization.md)，了解CV编译相关术语。
+本文介绍HIVM中的CV Pipelining Pass。该Pass针对CV类kernel进行优化。在阅读本文之前，建议先阅读[CV Optimization](../CV/CVOptimization.md)，了解CV编译相关术语。
 
 ## 硬件背景
 
@@ -12,9 +12,9 @@
 
 ## 算法原理
 
-寻找适当的`for`循环，将Cube与Vector指令分开成独立的`Work Item`，建立每个`Work Item`之间的数据依赖并将其中需要扩展成`multi-buffer`的`tensor`扩展，将原循环`unroll`后，再将每个`Work Item`放至单独循环中。
+寻找适当的`for`循环，将Cube与Vector指令分开成独立的Work Item，建立每个Work Item之间的数据依赖并将其中需要扩展成`multi-buffer`的`tensor`扩展，将原循环`unroll`后，再将每个Work Item放至单独循环中。
 
-Before:
+变换前：
 
 ```mlir
 scf.for 0 to N step S {
@@ -26,7 +26,7 @@ scf.for 0 to N step S {
 
 ```
 
-After:
+变换后：
 
 ```mlir
 scf.for 0 to N step 3*S {
@@ -52,14 +52,12 @@ scf.for 0 to N step 3*S {
 }
 ```
 
-## 接口说明
-
-### 编译选项
+## 编译选项
 
 | 选项 | 默认值 | 含义 |
 |------|--------|------|
 | `set-workspace-multibuffer` | 2 | 软件流水的阶段数，同时也是Multi-Buffering的数量 |
-| `--enable-lazy-loading` | false | 开启CV Pipelining中的Lazy Load功能，允许将Load op克隆到多个`Work Item`中，以减少中间buffer扩展 |
+| `--enable-lazy-loading` | false | 开启CV Pipelining中的Lazy Load功能，允许将Load op克隆到多个Work Item中，以减少中间buffer扩展 |
 
 也可以在算子侧通过`cv_pipeline_lazy_load`编译提示为指定tensor开启Lazy Load功能：
 
@@ -67,12 +65,14 @@ scf.for 0 to N step 3*S {
 extension.compile_hint(t, "cv_pipeline_lazy_load", True)
 ```
 
-## 约束能力
+## 使用约束
 
-1. Pipeline的循环只有`scf.for`与`scf.if` op拥有region/block，并且其region内只能有cube或vector指令。
-2. 迭代间的数据依赖必须可以被分离至独自的`Work Item`
-    - 以下情况无法开启`cv-pipelining`：`v0`与`v1`无法被提取至同一`Work Item`（因为中间有Cube依赖），但是`arg0`的定义在`v1`，却被`v0`用到。该情况`CV-Pipelining`不会开启
-    - 若`Cube`没有用到`v0`，那么`v0`会下沉至`v1`同一个`Work Item`，`CV-Pipelining`会生效
+1. 支持Pipeline处理的循环中，仅`scf.for`与`scf.if` op可包含region/block，且上述算子的region内部仅允许存在cube或vector指令。
+2. 迭代间的数据依赖必须能够拆分到各自独立的Work Item中
+    - 无法开启CV-Pipelining场景：若`v0`与`v1`无法被提取至同一Work Item（因为中间有Cube依赖），同时参数`arg0`由`v1`定义却被`v0`使用。
+    - CV-Pipelining可正常生效场景：若Cube未使用`v0`，则`v0`可下沉至`v1`所在的Work Item，此时CV-Pipelining可正常生效。
+
+示例代码：
 
 ```mlir
 scf.for iter_args(%arg0 = %init) {
