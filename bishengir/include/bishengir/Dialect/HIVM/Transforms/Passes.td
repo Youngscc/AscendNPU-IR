@@ -990,6 +990,13 @@ def InferSimtVFMemScopeHint
   let dependentDialects = ["hivm::HIVMDialect", "memref::MemRefDialect"];
 }
 
+def MaterializeSimtVFMemScope
+    : Pass<"materialize-simt-vf-memory-scope", "ModuleOp"> {
+  let summary = "Materialize explicit memory scopes inside split simt modules";
+  let constructor = "mlir::hivm::createMaterializeSimtVFMemScopePass()";
+  let dependentDialects = ["hivm::HIVMDialect", "memref::MemRefDialect"];
+}
+
 def SplitSimtModule : Pass<"split-simt-module"> {
   let summary = "Split simt module for every simt vf";
   let constructor = "mlir::hivm::createSplitSimtModulePass()";

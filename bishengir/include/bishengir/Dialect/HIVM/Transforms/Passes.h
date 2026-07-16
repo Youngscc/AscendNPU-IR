@@ -319,6 +319,10 @@ std::unique_ptr<Pass> createInferSimtVFMemEffectPass();
 // Create a pass to infer simt vf func args memory scope hints.
 std::unique_ptr<Pass> createInferSimtVFMemScopeHintPass();
 
+// Create a pass to materialize explicit memory scopes inside split simt
+// modules.
+std::unique_ptr<Pass> createMaterializeSimtVFMemScopePass();
+
 // Split simt module for every simt vf
 std::unique_ptr<Pass> createSplitSimtModulePass();
 

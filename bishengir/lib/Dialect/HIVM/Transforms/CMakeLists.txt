@@ -96,6 +96,7 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   MarkSyncBlockLockWithSubblock.cpp
   MarkRealCoreType.cpp
   MarkTightlyCoupledBuffer.cpp
+  MaterializeSimtVFMemScope.cpp
   MemoryDisplay.cpp
   NormalizeBitwiseSelect.cpp
   NormalizeConvOps.cpp
