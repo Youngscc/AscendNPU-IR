@@ -191,6 +191,9 @@ void removeMarkOpAttr(annotation::MarkOp markOp, ::llvm::StringLiteral attrName,
 void removeMarkOpAttr(annotation::MarkOp markOp, StringRef attrName,
                       RewriterBase &rewriter, bool removeOp = true);
 
+void removeMarkOpDynamicAttr(annotation::MarkOp markOp, StringRef attrName,
+                             PatternRewriter &rewriter);
+
 // Check whether current for loop is subblock binded.
 bool isSubBlockBindedFor(scf::ForOp op);
 
