@@ -1,0 +1,12 @@
+order	compiler_pass_group	model_module	ub_role
+1	OneShotBufferize	one_shot_analysis.hpp;bufferized_semantic_ir.hpp	materialize tensor buffers and aliases
+2	CanonicalizeIterArg;HIVMOptSinglePoint	hivm_opt_single_point.hpp	remove or scalarize local buffers
+3	HIVMDecomposeOp	hivm_decompose_op.hpp	materialize decomposition temporaries
+4	ConvertNonContiguousReshapeToCopy	convert_non_contiguous_reshape_to_copy.hpp	materialize reshape copies
+5	InferHIVMMemScope	infer_hivm_mem_scope.hpp	select UB address space
+6	AlignAllocSize;MarkStrideAlign;EnableStrideAlign	align_storage.hpp	change physical UB extents and layouts
+7	FlattenOps;ReduceRankSubview;LiftLowestStride	after_alloc_extra_buffer.hpp;plan_memory_input_builder.hpp	produce PlanMemory-visible buffer views
+8	AllocExtraBuffer	alloc_extra_buffer.hpp	materialize operation scratch buffers
+9	InlineLoadCopy	inline_load_copy.hpp	remove eligible intermediate UB buffers
+10	MarkMultiBuffer	mark_multi_buffer.hpp	multiply selected buffer instances
+11	PlanMemory	plan_memory_input_semantic_ir.hpp;plan_memory_input_builder.hpp	produce PlanMemory operations and allocations
