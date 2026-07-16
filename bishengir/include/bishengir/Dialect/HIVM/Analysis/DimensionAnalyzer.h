@@ -144,7 +144,7 @@ protected:
   void processScopeOp(scope::ScopeOp op);
   void processTilingDimMapping(tensor::ExpandShapeOp expandShapeOp,
                                DictionaryAttr tilingDimMapping);
-  void processMmadL1Op(hivm::MmadL1Op op, bool isTransposeA = false,	 
+  void processMmadL1Op(hivm::MmadL1Op op, bool isTransposeA = false,
                        bool isTransposeB = false);
 
   void startTransaction(Operation *op);
@@ -178,9 +178,31 @@ protected:
   void transferDimMarkImpl(hivm::VBrcOp op);
   void transferDimMarkImpl(hivm::VTransposeOp op);
 
-  int64_t
-  getHigherDimCounts(ArrayRef<Dimension> candidate,
-                     SmallVectorImpl<int64_t> *candidateDims = nullptr);
+  int64_t getHigherDimCounts(ArrayRef<Dimension> candidate,
+                             SmallVectorImpl<int64_t> *candidateDims = nullptr);
+
+  bool isValidTilingSize(int64_t dim) const;
+  /// Tells us if we can still treat axis \p i as a tiling candidate for every
+  /// \c StoreOpTy, even when the *view* on that axis has unknown size or
+  /// size 1. This will try to recover the size of the parent buffer.
+  ///
+  /// Example: axis \p i is 0. The store operands are \c memref.subview results;
+  /// axis 0 of each view may be `?` (or a length-1 row), but the parent buffers
+  /// are still \c 16x16, so the helper can recover size 16 for both sides.
+  /// \code
+  /// %subSrc = memref.subview %ub[0, 0] [1, 16] [1, 1]
+  ///     : memref<16x16xf16, #hivm.address_space<ub>>
+  ///     to memref<?x16xf16, strided<[16, 1]>, #hivm.address_space<ub>>
+  /// %subDst = memref.subview %gm[0, 0] [1, 16] [1, 1]
+  ///     : memref<16x16xf16, #hivm.address_space<gm>>
+  ///     to memref<?x16xf16, strided<[16, 1]>, #hivm.address_space<gm>>
+  /// hivm.store
+  ///     ins(%subSrc : memref<?x16xf16, strided<[16, 1]>,
+  ///     #hivm.address_space<ub>>) outs(%subDst : memref<?x16xf16, strided<[16,
+  ///     1]>, #hivm.address_space<gm>>)
+  /// \endcode
+  template <typename StoreOpTy>
+  bool checkTileableMaskedStore(StoreOpTy storeOp, size_t i) const;
 
   template <typename StoreOpTy>
   void computeTilingDimImpl(

@@ -1013,17 +1013,14 @@ module {
 // -----
 // CHECK-LABEL:   func.func @simple_testcase_unaligned(
 // CHECK:           %[[VAL_2:.*]] = arith.constant 0 : index
-// CHECK:           %[[VAL_3:.*]] = arith.constant 1 : index
-// CHECK:           %[[VAL_4:.*]] = arith.constant 2 : index
-// CHECK:           scf.for %[[VAL_5:.*]] = %[[VAL_2]] to %[[VAL_4]] step %[[VAL_3]] {
-// CHECK:             %[[VAL_6:.*]] = affine.apply
-// CHECK:             %[[VAL_7:.*]] = affine.apply
-// CHECK:             %[[VAL_8:.*]] = memref.subview %{{.*}}{{\[}}%[[VAL_6]]] [%[[VAL_7]]] [1] {to_be_bubbled_slice} : memref<63xf32> to memref<?xf32, strided<[1], offset: ?>>
-// CHECK:             %[[VAL_9:.*]] = tensor.extract_slice %{{.*}}{{\[}}%[[VAL_6]]] [%[[VAL_7]]] [1] {to_be_bubbled_slice} : tensor<63xf32> to tensor<?xf32>
-// CHECK:             %[[VAL_10:.*]] = tensor.empty(%[[VAL_7]]) : tensor<?xf32>
-// CHECK:             %[[VAL_11:.*]] = hivm.hir.vln ins(%[[VAL_9]] : tensor<?xf32>) outs(%[[VAL_10]] : tensor<?xf32>) -> tensor<?xf32>
-// CHECK:             hivm.hir.store ins(%[[VAL_11]] : tensor<?xf32>) outs(%[[VAL_8]] : memref<?xf32, strided<[1], offset: ?>>) {tiled_op}
-// CHECK:           } {map_for_to_forall, mapping = [#hivm.sub_block<x>]}
+// CHECK:           %[[VAL_3:.*]] = tensor.empty() : tensor<63xf32>
+// CHECK:           %[[VAL_4:.*]] = hivm.hir.vln ins(%[[SRC:.*]] : tensor<63xf32>) outs(%[[VAL_3]] : tensor<63xf32>) -> tensor<63xf32>
+// CHECK:           %[[VAL_5:.*]] = hivm.hir.get_sub_block_idx -> i64
+// CHECK:           %[[VAL_6:.*]] = arith.index_cast %[[VAL_5]] : i64 to index
+// CHECK:           %[[VAL_7:.*]] = arith.cmpi eq, %[[VAL_6]], %[[VAL_2]] : index
+// CHECK:           scf.if %[[VAL_7]] {
+// CHECK:             hivm.hir.store ins(%[[VAL_4]] : tensor<63xf32>) outs(%[[DST:.*]] : memref<63xf32>)
+// CHECK:           } {limit_sub_block_id0}
 // CHECK:           return
 // CHECK:         }
 module {
@@ -1031,6 +1028,31 @@ module {
     %0 = tensor.empty() : tensor<63xf32>
     %3 = hivm.hir.vln ins(%arg0 : tensor<63xf32>) outs(%0 : tensor<63xf32>) -> tensor<63xf32>
     hivm.hir.store ins(%3 : tensor<63xf32>) outs(%arg1 : memref<63xf32>)
+    return
+  }
+}
+
+// -----
+// CHECK-LABEL:   func.func @simple_testcase_unaligned_reg_based(
+// CHECK:           %[[VAL_0:.*]] = arith.constant 0 : index
+// CHECK:           %[[VAL_1:.*]] = arith.constant 1 : index
+// CHECK:           %[[VAL_2:.*]] = arith.constant 2 : index
+// CHECK:           scf.for %[[VAL_3:.*]] = %[[VAL_0]] to %[[VAL_2]] step %[[VAL_1]] {
+// CHECK:             %[[VAL_4:.*]] = affine.apply
+// CHECK:             %[[VAL_5:.*]] = affine.apply
+// CHECK:             %[[VAL_6:.*]] = memref.subview %{{.*}}{{\[}}%[[VAL_4]]] [%[[VAL_5]]] [1] {to_be_bubbled_slice} : memref<63xf32> to memref<?xf32, strided<[1], offset: ?>>
+// CHECK:             %[[VAL_7:.*]] = tensor.extract_slice %{{.*}}{{\[}}%[[VAL_4]]] [%[[VAL_5]]] [1] {to_be_bubbled_slice} : tensor<63xf32> to tensor<?xf32>
+// CHECK:             %[[VAL_8:.*]] = tensor.empty(%[[VAL_5]]) : tensor<?xf32>
+// CHECK:             %[[VAL_9:.*]] = hivm.hir.vln ins(%[[VAL_7]] : tensor<?xf32>) outs(%[[VAL_8]] : tensor<?xf32>) -> tensor<?xf32>
+// CHECK:             hivm.hir.store ins(%[[VAL_9]] : tensor<?xf32>) outs(%[[VAL_6]] : memref<?xf32, strided<[1], offset: ?>>) {tiled_op}
+// CHECK:           } {map_for_to_forall, mapping = [#hivm.sub_block<x>]}
+// CHECK:           return
+// CHECK:         }
+module attributes {hacc.target = #hacc.target<"Ascend950PR_9579">} {
+  func.func @simple_testcase_unaligned_reg_based(%arg0: tensor<63xf32>, %arg1: memref<63xf32>) attributes {hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<AIV>, hivm.part_of_mix, mix_mode = "mix"} {
+    %0 = tensor.empty() : tensor<63xf32>
+    %1 = hivm.hir.vln ins(%arg0 : tensor<63xf32>) outs(%0 : tensor<63xf32>) -> tensor<63xf32>
+    hivm.hir.store ins(%1 : tensor<63xf32>) outs(%arg1 : memref<63xf32>)
     return
   }
 }
