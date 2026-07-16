@@ -55,9 +55,9 @@ inline std::string MemRefWithElementType(const std::string &type,
 
 class HIVMDecomposeOpModel {
 public:
-  explicit HIVMDecomposeOpModel(const GenericModule &module,
-                                std::string function = "")
-      : module(module), function(std::move(function)) {}
+  explicit HIVMDecomposeOpModel(const GenericModule &inputModule,
+                                std::string functionName = "")
+      : module(inputModule), function(std::move(functionName)) {}
 
   std::vector<DecomposeBufferAllocation> Run() const {
     std::vector<DecomposeBufferAllocation> result;

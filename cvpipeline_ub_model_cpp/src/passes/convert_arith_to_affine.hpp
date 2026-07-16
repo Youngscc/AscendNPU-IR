@@ -2,6 +2,7 @@
 #define CVPIPELINE_UB_MODEL_CPP_CONVERT_ARITH_TO_AFFINE_HPP
 
 #include "../pipeline/buffer_topology.hpp"
+#include "../support/checked_math.hpp"
 
 namespace cvub {
 
@@ -124,18 +125,16 @@ inline int64_t AffineLargestKnownDivisor(const std::string &expression) {
                : std::abs(*constant);
   if (startsWith(expression, "v("))
     return 1;
-  for (const std::string &kind : {"mul", "add", "mod", "floordiv",
-                                  "ceildiv"}) {
+  for (const std::string kind : {"mul", "add", "mod", "floordiv",
+                                 "ceildiv"}) {
     const auto operands = AffineBinaryExpressionOperands(expression, kind);
     if (!operands)
       continue;
     const int64_t lhs = AffineLargestKnownDivisor(operands->first);
     const int64_t rhs = AffineLargestKnownDivisor(operands->second);
     if (kind == "mul") {
-      const __int128 product = static_cast<__int128>(lhs) * rhs;
-      return product > std::numeric_limits<int64_t>::max()
-                 ? 1
-                 : static_cast<int64_t>(product);
+      const std::optional<int64_t> product = CheckedMulInt64(lhs, rhs);
+      return product ? *product : 1;
     }
     if (kind == "add" || kind == "mod")
       return static_cast<int64_t>(
@@ -151,15 +150,10 @@ inline int64_t AffineLargestKnownDivisor(const std::string &expression) {
 
 inline std::optional<int64_t> CheckedAffineArithmetic(
     const std::string &kind, int64_t lhs, int64_t rhs) {
-  if (kind == "add" || kind == "mul") {
-    const __int128 value = kind == "add"
-                               ? static_cast<__int128>(lhs) + rhs
-                               : static_cast<__int128>(lhs) * rhs;
-    if (value < std::numeric_limits<int64_t>::min() ||
-        value > std::numeric_limits<int64_t>::max())
-      return std::nullopt;
-    return static_cast<int64_t>(value);
-  }
+  if (kind == "add")
+    return CheckedAddInt64(lhs, rhs);
+  if (kind == "mul")
+    return CheckedMulInt64(lhs, rhs);
   if (rhs <= 0)
     return std::nullopt;
   int64_t quotient = lhs / rhs;
@@ -195,11 +189,11 @@ struct AffineLinearForm {
 
 inline bool AccumulateAffineCoefficient(int64_t value, int64_t scale,
                                         int64_t &target) {
-  const __int128 result = static_cast<__int128>(value) * scale + target;
-  if (result < std::numeric_limits<int64_t>::min() ||
-      result > std::numeric_limits<int64_t>::max())
+  const std::optional<int64_t> result =
+      CheckedMulAddInt64(value, scale, target);
+  if (!result)
     return false;
-  target = static_cast<int64_t>(result);
+  target = *result;
   return true;
 }
 

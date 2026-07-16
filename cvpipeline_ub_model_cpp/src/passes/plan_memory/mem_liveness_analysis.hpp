@@ -246,7 +246,7 @@ inline FlattenResultModel getFlattenedUniformReassociation(
     MemRefTypeModel type;
   };
   std::vector<TypedOperand> operands;
-  for (const std::string &group : {"ins", "outs"}) {
+  for (const std::string group : {"ins", "outs"}) {
     const std::string body = extractGroupBody(op.text, group);
     std::vector<std::string> values = extractSSAs(body);
     std::vector<std::string> types = extractMemrefTypes(body);
@@ -1063,7 +1063,7 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
     if (IsDestinationStyleOp(op.opName)) {
       for (const std::string &out : extractGroupSSAs(line, "outs"))
         UpdateOpGenInfo(info, out);
-      for (const std::string &group : {"temp_buffer", "tmps"}) {
+      for (const std::string group : {"temp_buffer", "tmps"}) {
         for (const std::string &temp : extractGroupSSAs(line, group)) {
           if (auto alloc = resolveAlloc(temp))
             ignoreInplaceBuffers.insert(*alloc);

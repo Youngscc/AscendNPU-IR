@@ -294,8 +294,8 @@ inline std::string joinHexTypes(const std::vector<std::string> &values) {
 
 class GenericIRParser {
 public:
-  explicit GenericIRParser(bool applyOperationSemantics = true)
-      : applyOperationSemantics(applyOperationSemantics) {}
+  explicit GenericIRParser(bool shouldApplyOperationSemantics = true)
+      : applyOperationSemantics(shouldApplyOperationSemantics) {}
 
   GenericModule Parse(const fs::path &path) {
     std::ifstream input(path);

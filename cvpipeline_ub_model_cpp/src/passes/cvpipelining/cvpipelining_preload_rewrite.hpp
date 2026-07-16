@@ -7,9 +7,10 @@ namespace cvub {
 
 class CVPipelinePreloadRewriter {
 public:
-  CVPipelinePreloadRewriter(GenericModule &module,
-                            CVPipelineAnalysisResult analysis)
-      : module(module), analysis(std::move(analysis)), rewriter(module) {
+  CVPipelinePreloadRewriter(GenericModule &inputModule,
+                            CVPipelineAnalysisResult analysisResult)
+      : module(inputModule), analysis(std::move(analysisResult)),
+        rewriter(inputModule) {
     index();
   }
 

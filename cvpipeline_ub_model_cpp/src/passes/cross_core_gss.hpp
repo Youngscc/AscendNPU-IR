@@ -3,6 +3,8 @@
 
 #include "mark_real_core_type.hpp"
 
+#include <queue>
+
 namespace cvub {
 
 inline std::optional<int> GetFFTSBaseAddressArgument(
@@ -70,8 +72,8 @@ struct CrossCoreMemoryAccess {
 // deliberately not roots.
 class CrossCoreMemoryValueTracer {
 public:
-  explicit CrossCoreMemoryValueTracer(const GenericModule &module)
-      : module(module), definitions(DefiningOperations(module)) {
+  explicit CrossCoreMemoryValueTracer(const GenericModule &inputModule)
+      : module(inputModule), definitions(DefiningOperations(inputModule)) {
     indexBlockArguments();
     indexBranchAliases();
   }

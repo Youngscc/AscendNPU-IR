@@ -1,6 +1,7 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_OPERATION_FOLDER_HPP
 #define CVPIPELINE_UB_MODEL_CPP_OPERATION_FOLDER_HPP
 
+#include "generic_rewriter.hpp"
 #include "../pipeline/buffer_topology.hpp"
 
 namespace cvub {
@@ -87,15 +88,18 @@ ArithCmpIPredicate(const GenericOperation &operation) {
   }
 }
 
-inline __int128 SignedArithInteger(const ArithIntegerConstant &value) {
-  const __int128 bits = value.bits;
-  if (value.width == 64)
-    return (value.bits & (uint64_t{1} << 63)) != 0
-               ? bits - (static_cast<__int128>(1) << 64)
-               : bits;
-  return (value.bits & (uint64_t{1} << (value.width - 1))) != 0
-             ? bits - (static_cast<__int128>(1) << value.width)
-             : bits;
+inline int64_t SignedArithInteger(const ArithIntegerConstant &value) {
+  const uint64_t signBit = uint64_t{1} << (value.width - 1);
+  if ((value.bits & signBit) == 0)
+    return static_cast<int64_t>(value.bits);
+
+  const uint64_t mask = value.width == 64
+                            ? std::numeric_limits<uint64_t>::max()
+                            : (uint64_t{1} << value.width) - 1;
+  const uint64_t magnitude = ((~value.bits) & mask) + uint64_t{1};
+  if (magnitude == (uint64_t{1} << 63))
+    return std::numeric_limits<int64_t>::min();
+  return -static_cast<int64_t>(magnitude);
 }
 
 // Mirrors arith::applyCmpPredicate for scalar integer constants.

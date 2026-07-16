@@ -246,9 +246,10 @@ CVPipelineWorkspaceCollapseReassociation(const std::string &expandedType) {
 
 class CVPipelineLoopRewriter {
 public:
-  CVPipelineLoopRewriter(GenericModule &module,
-                         CVPipelineAnalysisResult analysis)
-      : module(module), analysis(std::move(analysis)), rewriter(module) {
+  CVPipelineLoopRewriter(GenericModule &inputModule,
+                         CVPipelineAnalysisResult analysisResult)
+      : module(inputModule), analysis(std::move(analysisResult)),
+        rewriter(inputModule) {
     index();
   }
 

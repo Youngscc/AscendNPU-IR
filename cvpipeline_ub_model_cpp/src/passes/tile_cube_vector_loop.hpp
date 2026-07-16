@@ -500,11 +500,11 @@ inline bool HasStaticBoundaryView(const GenericModule &module, int value) {
   return !offsets.empty() && offsets.size() == sizes.size() &&
          sizes.size() == strides.size() &&
          std::none_of(offsets.begin(), offsets.end(),
-                      [](int64_t value) { return value < 0; }) &&
+                      [](int64_t dimension) { return dimension < 0; }) &&
          std::none_of(sizes.begin(), sizes.end(),
-                      [](int64_t value) { return value < 0; }) &&
+                      [](int64_t dimension) { return dimension < 0; }) &&
          std::all_of(strides.begin(), strides.end(),
-                     [](int64_t value) { return value == 1; });
+                     [](int64_t dimension) { return dimension == 1; });
 }
 
 inline bool HasUnitIterationDomain(const GenericModule &module,

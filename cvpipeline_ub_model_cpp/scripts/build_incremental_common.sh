@@ -25,10 +25,12 @@ compile_if_needed() {
   local source="$1"
   local output="$2"
   local module_dir="$3"
+  local compiler="${CXX:-c++}"
 
   mkdir -p "$(dirname "${output}")"
   if needs_rebuild "${output}" "${module_dir}"; then
-    c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror \
+    "${compiler}" -std=c++17 -O2 -Wall -Wextra -Wpedantic -Wconversion \
+      -Wshadow -Werror \
       "${source}" -o "${output}"
   fi
   echo "${output}"

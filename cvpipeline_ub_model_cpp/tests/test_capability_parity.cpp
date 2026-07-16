@@ -16,22 +16,21 @@ void Check(bool condition, const char *message) {
 }
 
 const cvub::GenericOperation &FindOperation(
-    const cvub::GenericModule &module, const std::string &name) {
+    const cvub::GenericModule &module, const char *name) {
   for (const cvub::GenericOperation &operation : module.operations)
     if (operation.name == name)
       return operation;
-  throw std::runtime_error("missing operation: " + name);
+  throw std::runtime_error(std::string("missing operation: ") + name);
 }
 
 const cvub::GenericOperation &FindCase(
-    const cvub::GenericModule &module, const std::string &caseName) {
+    const cvub::GenericModule &module, const char *caseName) {
+  const std::string marker = std::string("case = \"") + caseName + "\"";
   for (const cvub::GenericOperation &operation : module.operations)
-    if (operation.attributes.find("case = \"" + caseName + "\"") !=
-            std::string::npos ||
-        operation.properties.find("case = \"" + caseName + "\"") !=
-            std::string::npos)
+    if (operation.attributes.find(marker) != std::string::npos ||
+        operation.properties.find(marker) != std::string::npos)
       return operation;
-  throw std::runtime_error("missing case: " + caseName);
+  throw std::runtime_error(std::string("missing case: ") + caseName);
 }
 
 size_t CountOperation(const cvub::GenericModule &module,

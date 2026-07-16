@@ -96,8 +96,8 @@ inline std::string PlanMemoryFormatMemRefTypeWithAddressSpace(
 class PlanMemoryInputBuilder {
 public:
   explicit PlanMemoryInputBuilder(const PlanMemoryInputSemanticIR &inputModule,
-                                  std::string targetFunction = {})
-      : module(inputModule), targetFunction(std::move(targetFunction)),
+                                  std::string targetFunctionName = {})
+      : module(inputModule), targetFunction(std::move(targetFunctionName)),
         logical(inputModule.afterMarkMultiBuffer.afterInlineLoadCopy
                     .afterAllocExtraBuffer.postBufferization.bufferized
                     .logicalModule) {
@@ -884,8 +884,8 @@ private:
       if (const std::optional<int> operand = AffineValue(expression))
         return evaluateMappedAffineValue(*operand, inductionValues,
                                          definitions, visiting);
-      for (const std::string &kind : {"mul", "add", "mod", "floordiv",
-                                      "ceildiv"}) {
+      for (const std::string kind : {"mul", "add", "mod", "floordiv",
+                                     "ceildiv"}) {
         const auto operands =
             AffineBinaryExpressionOperands(expression, kind);
         if (!operands)
@@ -933,13 +933,9 @@ private:
       if (lhs && rhs) {
         if (operation.name == "arith.addi")
           evaluated = CheckedAffineArithmetic("add", *lhs, *rhs);
-        else if (operation.name == "arith.subi") {
-          const __int128 difference =
-              static_cast<__int128>(*lhs) - static_cast<__int128>(*rhs);
-          if (difference >= std::numeric_limits<int64_t>::min() &&
-              difference <= std::numeric_limits<int64_t>::max())
-            evaluated = static_cast<int64_t>(difference);
-        } else if (operation.name == "arith.muli")
+        else if (operation.name == "arith.subi")
+          evaluated = CheckedSubInt64(*lhs, *rhs);
+        else if (operation.name == "arith.muli")
           evaluated = CheckedAffineArithmetic("mul", *lhs, *rhs);
         else if (operation.name == "arith.minsi" ||
                  operation.name == "arith.minui")

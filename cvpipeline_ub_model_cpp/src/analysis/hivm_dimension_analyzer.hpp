@@ -61,7 +61,8 @@ inline std::vector<std::vector<int64_t>> ParseReassociationIndices(
 
 class DimensionAnalyzer {
 public:
-  explicit DimensionAnalyzer(const GenericModule &module) : module(module) {
+  explicit DimensionAnalyzer(const GenericModule &inputModule)
+      : module(inputModule) {
     indexValues();
   }
 

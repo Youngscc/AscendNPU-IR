@@ -7,11 +7,11 @@ namespace cvub {
 
 class GenericRewriter {
 public:
-  explicit GenericRewriter(GenericModule &module) : module(module) {
-    for (const GenericBlock &block : module.blocks)
+  explicit GenericRewriter(GenericModule &inputModule) : module(inputModule) {
+    for (const GenericBlock &block : inputModule.blocks)
       for (int argument : block.arguments)
         nextValue = std::max(nextValue, argument + 1);
-    for (const GenericOperation &operation : module.operations)
+    for (const GenericOperation &operation : inputModule.operations)
       for (int result : operation.results)
         nextValue = std::max(nextValue, result + 1);
   }

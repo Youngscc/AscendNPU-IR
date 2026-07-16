@@ -16,8 +16,8 @@ inline std::string ReplaceAffineExpressionValue(
     const std::string &replacement) {
   if (AffineValue(expression) == value)
     return replacement;
-  for (const std::string &kind : {"mul", "add", "mod", "floordiv",
-                                  "ceildiv"}) {
+  for (const std::string kind : {"mul", "add", "mod", "floordiv",
+                                 "ceildiv"}) {
     const auto operands = AffineBinaryExpressionOperands(expression, kind);
     if (!operands)
       continue;
@@ -73,8 +73,8 @@ inline void RunAffineApplyCanonicalization(
   rewriteExpression = [&](const std::string &expression) -> std::string {
     if (const std::optional<int> value = AffineValue(expression))
       return AffineValueExpression(resolveAlias(*value));
-    for (const std::string &kind : {"mul", "add", "mod", "floordiv",
-                                    "ceildiv"}) {
+    for (const std::string kind : {"mul", "add", "mod", "floordiv",
+                                   "ceildiv"}) {
       const auto operands = AffineBinaryExpressionOperands(expression, kind);
       if (!operands)
         continue;
@@ -299,8 +299,8 @@ inline void RunAffineCanonicalizationCSE(
   rewriteExpression = [&](const std::string &expression) -> std::string {
     if (const std::optional<int> value = AffineValue(expression))
       return AffineValueExpression(resolveAlias(*value));
-    for (const std::string &kind : {"mul", "add", "mod", "floordiv",
-                                    "ceildiv"}) {
+    for (const std::string kind : {"mul", "add", "mod", "floordiv",
+                                   "ceildiv"}) {
       const auto operands = AffineBinaryExpressionOperands(expression, kind);
       if (!operands)
         continue;
