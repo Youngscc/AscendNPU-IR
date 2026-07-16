@@ -260,6 +260,17 @@ bool isAICModule(ModuleOp mod);
 
 bool isAIVModule(ModuleOp mod);
 
+/// Trace a value through `scf.for` iter_args / subview / extract_slice back to
+/// a function or block argument, if possible.
+std::optional<BlockArgument> traceValueToBlockArgument(Value value);
+
+/// For a VF (`vector_function`) call, recover the call-operand indices that
+/// correspond to `vector.transfer_write` destinations in the callee.
+///
+/// TODO: current VF has only one return value; later VF will move after
+/// SplitMixKernel and this helper can be removed.
+SmallVector<unsigned> traceVFWriteOpArgIds(func::CallOp callOp);
+
 /// Getter setter of the hivm.module_core_type attribute.
 TModuleCoreTypeAttr getModuleCoreTypeAttr(ModuleOp mod);
 void setModuleCoreTypeAttr(ModuleOp mod, TModuleCoreType coreType);
@@ -412,6 +423,9 @@ bool isLastDimContiguous(Value operand);
 bool isGMPointerCastOp(Operation *op);
 
 bool isArgminOrArgmax(ReduceOperation op);
+
+/// Return true if `op` (typically a func/VF) runs in SIMT vector-function mode.
+bool isSIMTVF(Operation *op);
 
 void validateMultiBufferAttr(mlir::DictionaryAttr attrDict);
 } // namespace util

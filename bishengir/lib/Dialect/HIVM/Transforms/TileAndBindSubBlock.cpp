@@ -88,7 +88,6 @@ using namespace mlir::hivm;
 namespace {
 static constexpr llvm::StringLiteral kLimitedSubBlockOpAttrName =
     "limit_sub_block_id0";
-static constexpr llvm::StringLiteral tiledOp = "tiled_op";
 static constexpr llvm::StringLiteral tileAndBindLeaf =
     "hivm.tile_and_bind_leaf";
 } // namespace
