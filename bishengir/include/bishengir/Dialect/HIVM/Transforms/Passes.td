@@ -983,6 +983,11 @@ def InferSimtVFMemEffect : Pass<"infer-simt-vf-memory-effect"> {
   let constructor = "mlir::hivm::createInferSimtVFMemEffectPass()";
 }
 
+def SplitSimtModule : Pass<"split-simt-module"> {
+  let summary = "Split simt module for every simt vf";
+  let constructor = "mlir::hivm::createSplitSimtModulePass()";
+}
+
 def AutoScope : Pass<"auto-scope"> {
   let summary = "Create scope for gather_load and scatter_store";
   let constructor = "mlir::hivm::createAutoScopePass()";

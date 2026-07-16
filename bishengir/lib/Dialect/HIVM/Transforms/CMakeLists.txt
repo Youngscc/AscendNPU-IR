@@ -109,6 +109,7 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   RemoveCopyOps.cpp
   SetBufferSize.cpp
   SinkOpToConsumerInLoop.cpp
+  SplitSimtModule.cpp
   SplitMixedIfConditionals.cpp
   SplitMixKernel.cpp
   SyncBlockHoisting.cpp
