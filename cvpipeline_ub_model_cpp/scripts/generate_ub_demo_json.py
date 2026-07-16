@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -15,8 +16,8 @@ def repo_root() -> Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the before-CVPipeline UB model and save JSON for the demo.")
-    parser.add_argument("--pre-cvpipeline-ir", required=True,
+        description="Run from the CVPipelining-before boundary and save demo JSON.")
+    parser.add_argument("--before-cvpipelining-ir", required=True,
                         help="Generic IR captured before CVPipelining.")
     parser.add_argument("--output", required=True,
                         help="Destination JSON file.")
@@ -35,12 +36,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     root = repo_root()
-    wrapper = root / "cvpipeline_ub_model_cpp" / "scripts" / "plan_precvpipeline_ub.py"
+    wrapper = (root / "cvpipeline_ub_model_cpp" / "scripts" /
+               "plan_before_cvpipelining_ub.py")
     output = Path(args.output)
     command = [
         sys.executable,
         str(wrapper),
-        f"--pre-cvpipeline-ir={args.pre_cvpipeline_ir}",
+        f"--before-cvpipelining-ir={args.before_cvpipelining_ir}",
         f"--cv-pipeline-depth={args.cv_pipeline_depth}",
         f"--cv-disable-pipelining={str(args.cv_disable_pipelining).lower()}",
         f"--cv-enable-preload={str(args.cv_enable_preload).lower()}",
@@ -62,7 +64,14 @@ def main() -> int:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    if completed.returncode != 0:
+    expected_overflow = False
+    if completed.returncode == 2 and completed.stdout:
+        try:
+            payload = json.loads(completed.stdout)
+            expected_overflow = payload.get("result", {}).get("overflow") is True
+        except json.JSONDecodeError:
+            pass
+    if completed.returncode != 0 and not expected_overflow:
         sys.stderr.write(completed.stderr)
         return completed.returncode
     output.parent.mkdir(parents=True, exist_ok=True)

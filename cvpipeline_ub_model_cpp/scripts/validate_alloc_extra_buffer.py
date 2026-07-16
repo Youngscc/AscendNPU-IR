@@ -19,7 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--objects",
         type=Path,
-        default=module.parent / "Output/experiments/c2_c3_pass_oracles/objects",
+        default=module.parent / "Output/experiments/one_shot_bufferize_hivm_decompose_op/objects",
     )
     parser.add_argument(
         "--tool",

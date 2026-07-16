@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate connected C2-to-HIVMDecomposeOp UB buffer materialization."""
+"""Validate HIVMDecomposeOp UB buffer materialization."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--objects", type=Path,
-        default=repo / "Output/experiments/c2_c3_pass_oracles/objects")
+        default=repo / "Output/experiments/one_shot_bufferize_hivm_decompose_op/objects")
     parser.add_argument(
         "--tool", type=Path,
         default=module / "output/bin/cvpipeline_ub_model_dev_validate")
@@ -63,7 +63,7 @@ def main() -> int:
                  "--action=dump-hivm-decompose-operation-delta-oracle",
                  "--root", str(before), "--after-ir", str(after),
                  "--function", function, "--output", str(oracle_delta)],
-                [str(args.tool), "--action=validate-c3-operation-rewrites",
+                [str(args.tool), "--action=validate-hivm-decompose-op-rewrites",
                  "--root", str(source), "--attempt-root", str(before),
                  "--after-ir", str(after), "--function", function,
                  "--output", str(rewrite_report)],

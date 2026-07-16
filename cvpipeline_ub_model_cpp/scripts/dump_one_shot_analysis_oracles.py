@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dump upstream OneShotAnalysis decisions for source-forward C2 validation."""
+"""Dump upstream OneShotAnalysis decisions for source-forward validation."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--objects", type=Path,
-        default=repo / "Output/experiments/c2_c3_pass_oracles/objects")
+        default=repo / "Output/experiments/one_shot_bufferize_hivm_decompose_op/objects")
     parser.add_argument("--tool", type=Path,
                         default=repo / "build/bin/bishengir-opt")
     parser.add_argument("--output", type=Path,

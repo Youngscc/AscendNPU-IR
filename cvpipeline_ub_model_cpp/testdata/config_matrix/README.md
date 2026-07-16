@@ -3,16 +3,16 @@
 These manifests are deterministic test data generated with random seed
 `20260711`. They combine exhaustive boundary coverage with constrained random
 pairwise selection. Invalid combinations are normalized away: disabled
-CVPipeline cannot carry preload/depth/lazy options, skew mode does not carry an
+disabled CVPipelining cannot carry preload/depth/lazy options, skew mode does not carry an
 unroll depth, and inactive auto multi-buffer uses its default strategies.
 
 | Manifest | Coverage | Rows | PlanMemory runs per input before IR hash dedup |
 | - | - | -: | -: |
-| `p1_planmemory.tsv` | seeds 0..19 x restrict false/true | 40 | 40 |
-| `p2_cvpipeline.tsv` | CV off, depths -1/0/1/2/3/4, skew, lazy | 15 | 600 |
-| `p3_suffix_buffer.tsv` | multi-buffer, code motion, UB saving, tiling | 48 | 1920 |
-| `p4_layout.tsv` | exhaustive 2^4 size/alignment/layout toggles | 16 | 640 |
-| `p5_cross_priority.tsv` | fixed-seed random cross-layer interactions | 64 | 2560 |
+| `plan_memory.tsv` | seeds 0..19 x restrict false/true | 40 | 40 |
+| `cvpipelining.tsv` | CVPipelining off, depths -1/0/1/2/3/4, skew, lazy | 15 | 600 |
+| `suffix_ub_passes.tsv` | multi-buffer, code motion, UB saving, tiling | 48 | 1920 |
+| `align_storage_infer_data_layout.tsv` | exhaustive 2^4 size/alignment/layout toggles | 16 | 640 |
+| `cvpipelining_suffix_plan_memory_cross.tsv` | fixed-seed random cross-pass interactions | 64 | 2560 |
 | `all_configs.tsv` | all batches | 183 | 5760 |
 
 The run count is an upper bound. The runner groups identical config digests and

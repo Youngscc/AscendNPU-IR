@@ -1,0 +1,47 @@
+{"kind":"deck","id":"pr/11kpot","name":"Deck"}
+{"kind":"layout","layoutId":"b4639447-3d0f-4015-8831-aac32220e0c5","name":"Master","type":"master"}
+{"kind":"layout","layoutId":"ab920c96-116c-4258-afba-38fd58f6a1bd","name":"Title Slide","type":"title"}
+{"kind":"slide","id":"sl/roblae","slide":1,"title":"BOUND 建模｜问题与价值","textShapes":7}
+{"kind":"textbox","id":"sh/fepcfed0","slide":1,"name":"section-label","text":"BOUND 建模｜问题与价值","textPreview":"BOUND 建模｜问题与价值","textChars":14,"textLines":1,"bbox":[42,28,320,24]}
+{"kind":"textbox","id":"sh/0fydojul","slide":1,"name":"slide-title","text":"Bound 建模把“算子慢”转化为可定位的瓶颈","textPreview":"Bound 建模把“算子慢”转化为可定位的瓶颈","textChars":23,"textLines":1,"bbox":[42,58,1120,64]}
+{"kind":"textbox","id":"sh/1g7uhov6","slide":1,"name":"lead","text":"单看总耗时只能知道结果；Bound 模型把编译侧理论能力与 Profiling 实际执行放到同一口径，回答理论下限、主要限制和优化空间。","textPreview":"单看总耗时只能知道结果；Bound 模型把编译侧理论能力与 Profiling 实际执行放到同一口径，回答理论下限、主要限制和优化空间。","textChars":68,"textLines":1,"bbox":[42,148,1196,76]}
+{"kind":"shape","id":"sh/q9wvipwj","slide":1,"name":"theory-card","bbox":[42,276,572,178]}
+{"kind":"textbox","id":"sh/ra5cbud4","slide":1,"name":"theory-card-copy","text":"理论基线\n硬件最多能做到多快？\n按 Cube、Vector、MTE 的工作量与吞吐/带宽，计算各组件理论周期。","textPreview":"理论基线 | 硬件最多能做到多快？ | 按 Cube、Vector、MTE 的工作量与吞吐/带宽，计算各组件理论周期。","textChars":55,"textLines":3,"bbox":[72,300,512,138]}
+{"kind":"shape","id":"sh/sbedkzep","slide":1,"name":"actual-card","bbox":[666,276,572,178]}
+{"kind":"textbox","id":"sh/dc7ud4va","slide":1,"name":"actual-card-copy","text":"实际执行\n真实运行慢在哪里？\n将 Profiling 周期映射回组件，观察利用率、等待与理论—实际差距。","textPreview":"实际执行 | 真实运行慢在哪里？ | 将 Profiling 周期映射回组件，观察利用率、等待与理论—实际差距。","textChars":52,"textLines":3,"bbox":[696,300,512,138]}
+{"kind":"shape","id":"sh/ilwvepwn","slide":1,"name":"output-accent","bbox":[42,516,8,90]}
+{"kind":"textbox","id":"sh/3m5c7ud8","slide":1,"name":"output-summary","text":"最终输出\nBound 类型  ｜  理论性能下限  ｜  实际差距  ｜  优化优先级","textPreview":"最终输出 | Bound 类型  ｜  理论性能下限  ｜  实际差距  ｜  优化优先级","textChars":43,"textLines":2,"bbox":[72,521,1080,84]}
+{"kind":"textbox","id":"sh/vylcrix0","slide":1,"name":"page-marker","text":"BOUND / 01","textPreview":"BOUND / 01","textChars":10,"textLines":1,"bbox":[1120,672,118,20]}
+{"kind":"notes","id":"nt/roblae","slide":1,"text":""}
+{"kind":"slide","id":"sl/ni01go","slide":2,"title":"BOUND 建模｜核心方法","textShapes":11}
+{"kind":"textbox","id":"sh/m5gr6l8v","slide":2,"name":"section-label","text":"BOUND 建模｜核心方法","textPreview":"BOUND 建模｜核心方法","textChars":13,"textLines":1,"bbox":[42,28,320,24]}
+{"kind":"textbox","id":"sh/9s7ahg7m","slide":2,"name":"slide-title","text":"模型沿三步完成：拆分工作量、计算理论周期、对齐实测","textPreview":"模型沿三步完成：拆分工作量、计算理论周期、对齐实测","textChars":25,"textLines":1,"bbox":[42,58,1120,64]}
+{"kind":"shape","id":"sh/ory98bq1","slide":2,"name":"formula-strip","bbox":[42,150,1196,76]}
+{"kind":"textbox","id":"sh/z258b6pk","slide":2,"name":"formula","text":"Component 理论周期 ≈ 工作量 ÷ 吞吐   或   数据量 ÷ 带宽","textPreview":"Component 理论周期 ≈ 工作量 ÷ 吞吐   或   数据量 ÷ 带宽","textChars":40,"textLines":1,"bbox":[72,171,1136,38]}
+{"kind":"shape","id":"sh/e1wr218z","slide":2,"name":"timeline","bbox":[62,336,1112,0.1]}
+{"kind":"shape","id":"sh/14nqdg7a","slide":2,"name":"step-dot-1","bbox":[62,327,18,18]}
+{"kind":"shape","id":"sh/03e94bq5","slide":2,"name":"step-dot-2","bbox":[454,327,18,18]}
+{"kind":"shape","id":"sh/jy9snapo","slide":2,"name":"step-dot-3","bbox":[846,327,18,18]}
+{"kind":"textbox","id":"sh/yx0re5o3","slide":2,"name":"step-label-1","text":"01  静态解析","textPreview":"01  静态解析","textChars":8,"textLines":1,"bbox":[62,282,250,28]}
+{"kind":"textbox","id":"sh/sfyx0ri1","slide":2,"name":"step-label-2","text":"02  理论建模","textPreview":"02  理论建模","textChars":8,"textLines":1,"bbox":[454,282,250,28]}
+{"kind":"textbox","id":"sh/tg7ytwz6","slide":2,"name":"step-label-3","text":"03  对比诊断","textPreview":"03  对比诊断","textChars":8,"textLines":1,"bbox":[846,282,250,28]}
+{"kind":"textbox","id":"sh/6tgfyh0v","slide":2,"name":"step-copy-1","text":"识别工作负载\n从 HIVM / IR 提取指令类型、数据规模、循环次数与流水单元。","textPreview":"识别工作负载 | 从 HIVM / IR 提取指令类型、数据规模、循环次数与流水单元。","textChars":41,"textLines":2,"bbox":[62,382,316,155]}
+{"kind":"textbox","id":"sh/repgrmhg","slide":2,"name":"step-copy-2","text":"计算组件 Bound\n换算 Cube、Vector、MTE 理论周期；可并行时由最慢组件决定理论下限。","textPreview":"计算组件 Bound | 换算 Cube、Vector、MTE 理论周期；可并行时由最慢组件决定理论下限。","textChars":51,"textLines":2,"bbox":[454,382,316,155]}
+{"kind":"textbox","id":"sh/4ryxwrip","slide":2,"name":"step-copy-3","text":"对齐 Profiling\n比较理论与实际周期，计算利用率及差距，判断主要 Bound 类型。","textPreview":"对齐 Profiling | 比较理论与实际周期，计算利用率及差距，判断主要 Bound 类型。","textChars":46,"textLines":2,"bbox":[846,382,330,155]}
+{"kind":"textbox","id":"sh/5s7epwza","slide":2,"name":"method-takeaway","text":"核心判断：谁的理论周期最长，谁更可能成为性能上限；实际差距则反映尚未解释的流水、同步与并行损失。","textPreview":"核心判断：谁的理论周期最长，谁更可能成为性能上限；实际差距则反映尚未解释的流水、同步与并行损失。","textChars":48,"textLines":1,"bbox":[62,575,1114,54]}
+{"kind":"textbox","id":"sh/ipwfuh0j","slide":2,"name":"page-marker","text":"BOUND / 02","textPreview":"BOUND / 02","textChars":10,"textLines":1,"bbox":[1120,672,118,20]}
+{"kind":"notes","id":"nt/ni01go","slide":2,"text":""}
+{"kind":"slide","id":"sl/azdnzf","slide":3,"title":"BOUND 建模｜工作进展与价值","textShapes":8}
+{"kind":"textbox","id":"sh/lc7ip87y","slide":3,"name":"section-label","text":"BOUND 建模｜工作进展与价值","textPreview":"BOUND 建模｜工作进展与价值","textChars":16,"textLines":1,"bbox":[42,28,320,24]}
+{"kind":"textbox","id":"sh/y9gzudo7","slide":3,"name":"slide-title","text":"阶段产出：建立了一条可解释、可验证的性能分析链路","textPreview":"阶段产出：建立了一条可解释、可验证的性能分析链路","textChars":24,"textLines":1,"bbox":[42,58,1120,64]}
+{"kind":"shape","id":"sh/zap0nips","slide":3,"name":"v-rule","bbox":[638,188,1,378]}
+{"kind":"shape","id":"sh/8fyh0n69","slide":3,"name":"h-rule-left","bbox":[42,376,548,1]}
+{"kind":"shape","id":"sh/tgrits7u","slide":3,"name":"h-rule-right","bbox":[688,376,550,1]}
+{"kind":"textbox","id":"sh/mdgzydoj","slide":3,"name":"point-1","text":"01  打通数据链路\n梳理 IR / HIVM 中的指令、数据量和流水信息，并建立与 Profiling 字段的对应关系。","textPreview":"01  打通数据链路 | 梳理 IR / HIVM 中的指令、数据量和流水信息，并建立与 Profiling 字段的对应关系。","textChars":61,"textLines":2,"bbox":[42,198,548,142]}
+{"kind":"textbox","id":"sh/7ep0rip4","slide":3,"name":"point-2","text":"02  形成模型能力\n输出分组件理论周期、Bound 类型，以及 ERU、REU、利用率和理论—实际差距。","textPreview":"02  形成模型能力 | 输出分组件理论周期、Bound 类型，以及 ERU、REU、利用率和理论—实际差距。","textChars":53,"textLines":2,"bbox":[688,198,550,142]}
+{"kind":"textbox","id":"sh/gjih476l","slide":3,"name":"point-3","text":"03  建立验证方法\n用简单算例校验公式、典型算子检查偏差，并沿 Profiling → IR 回溯异常来源。","textPreview":"03  建立验证方法 | 用简单算例校验公式、典型算子检查偏差，并沿 Profiling → IR 回溯异常来源。","textChars":55,"textLines":2,"bbox":[42,409,548,140]}
+{"kind":"textbox","id":"sh/h4rixs76","slide":3,"name":"point-4","text":"04  支撑优化决策\n区分算力、搬运和并行问题，确定优化优先级，并为后续 UB 资源分析提供下钻入口。","textPreview":"04  支撑优化决策 | 区分算力、搬运和并行问题，确定优化优先级，并为后续 UB 资源分析提供下钻入口。","textChars":51,"textLines":2,"bbox":[688,409,550,140]}
+{"kind":"shape","id":"sh/tknaxcvi","slide":3,"name":"boundary-strip","bbox":[42,594,1196,54]}
+{"kind":"textbox","id":"sh/8jet47ex","slide":3,"name":"boundary","text":"阶段边界：模型结论依赖硬件参数、流水重叠假设与 Profiling 口径，仍需持续用真实算例校准。","textPreview":"阶段边界：模型结论依赖硬件参数、流水重叠假设与 Profiling 口径，仍需持续用真实算例校准。","textChars":49,"textLines":1,"bbox":[65,610,1148,26]}
+{"kind":"textbox","id":"sh/7i5sv2xc","slide":3,"name":"page-marker","text":"BOUND / 03","textPreview":"BOUND / 03","textChars":10,"textLines":1,"bbox":[1120,672,118,20]}
+{"kind":"notes","id":"nt/azdnzf","slide":3,"text":""}

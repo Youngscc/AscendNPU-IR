@@ -21,8 +21,14 @@
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/Dominance.h"
 #include "llvm/ADT/SmallVector.h"
+#include <cstdlib>
 
 namespace mlir::hivm::detail {
+static bool isTileAndBindOracleDumpEnabled() {
+  const char *value = std::getenv("BISHENGIR_DUMP_TILE_AND_BIND_ORACLE");
+  return value != nullptr && value[0] != '\0' && llvm::StringRef(value) != "0";
+}
+
 static bool isEqual(const Operation *lhsC, const Operation *rhsC) {
   auto *lhs = cast<Operation *>(lhsC);
   auto *rhs = cast<Operation *>(rhsC);
@@ -98,6 +104,13 @@ struct CSEAffineApplyPattern : public OpRewritePattern<affine::AffineApplyOp> {
     });
     if (siblingGroup.size() == 1)
       return failure();
+    if (isTileAndBindOracleDumpEnabled()) {
+      llvm::errs() << "TILE_BIND_ORACLE\tCSE_AFFINE\t";
+      baseOp.print(llvm::errs());
+      llvm::errs() << "\tREPRESENTATIVE\t";
+      siblingGroup.front().print(llvm::errs());
+      llvm::errs() << "\tSIBLINGS\t" << siblingGroup.size() << '\n';
+    }
     for (size_t i = 1; i < siblingGroup.size(); ++i) {
       rewriter.replaceAllUsesWith(siblingGroup[i], siblingGroup[0]);
     }

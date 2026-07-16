@@ -40,6 +40,8 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
 
+#include <cstdlib>
+
 namespace mlir {
 #define GEN_PASS_DEF_HIVMBUBBLEUPEXTRACTSLICE
 #include "bishengir/Dialect/HIVM/Transforms/Passes.h.inc"
@@ -53,6 +55,22 @@ using namespace mlir::hivm;
 namespace {
 
 using namespace mlir::hivm::detail;
+
+static bool isTileAndBindOracleDumpEnabled() {
+  return std::getenv("BISHENGIR_DUMP_TILE_AND_BIND_ORACLE") != nullptr;
+}
+
+static void dumpTileAndBindBubbleStage(func::FuncOp funcOp,
+                                       StringRef stage) {
+  if (!isTileAndBindOracleDumpEnabled())
+    return;
+  OpPrintingFlags flags;
+  flags.printGenericOpForm();
+  llvm::errs() << "TILE_BIND_ORACLE\tBUBBLE_STAGE_BEGIN\t" << stage << '\n';
+  funcOp->getParentOp()->print(llvm::errs(), flags);
+  llvm::errs() << "\nTILE_BIND_ORACLE\tBUBBLE_STAGE_END\t" << stage << '\n';
+}
+
 class HIVMBubbleUpExtractSlicePass
     : public impl::HIVMBubbleUpExtractSliceBase<HIVMBubbleUpExtractSlicePass> {
 public:
@@ -77,8 +95,12 @@ public:
         auto insertSliceOp = cast<tensor::InsertSliceOp>(op);
         // All marked insertslice is expected to be cancelled out
         // No matter strict mode or not.
-        if (isMarkedInsertSliceOp(insertSliceOp))
+        if (isMarkedInsertSliceOp(insertSliceOp)) {
+          if (isTileAndBindOracleDumpEnabled())
+            llvm::errs() << "TILE_BIND_ORACLE\tBUBBLE_VERIFY\tmarked-insert-slice\t"
+                         << insertSliceOp.getSource().getType() << '\n';
           return WalkResult::interrupt();
+        }
       }
       if (hacc::utils::isRegBasedArch(op->getParentOfType<ModuleOp>())) {
         if (auto reduceOp = dyn_cast<hivm::VReduceOp>(op)) {
@@ -106,18 +128,38 @@ public:
                 (extractSrc.getDefiningOp()))) {
           if (!traceAndCheckIsGMOrTightCoupledBuffer(bufferizeToTensor->getOperand(0)) &&
               strictMode) {
+            if (isTileAndBindOracleDumpEnabled())
+              llvm::errs()
+                  << "TILE_BIND_ORACLE\tBUBBLE_VERIFY\tnon-gm-to-tensor\t"
+                  << extractSliceOp.getType() << '\n';
             return WalkResult::interrupt();
           }
           return WalkResult::advance();
         }
         if (auto whileOp =
-                dyn_cast<scf::WhileOp>(srcDefOp)) {
+                dyn_cast<scf::WhileOp>((extractSrc.getDefiningOp()))) {
+          if (isTileAndBindOracleDumpEnabled())
+            llvm::errs() << "TILE_BIND_ORACLE\tBUBBLE_VERIFY\twhile-source\t"
+                         << extractSliceOp.getType() << '\n';
           return WalkResult::interrupt();
         }
         if (!isa<tensor::EmptyOp>(srcDefOp) &&
             !(isa<scf::ForOp>(srcDefOp) && srcDefOp->hasAttr("ExtractedLoadOrStore")) &&
             !srcDefOp->hasAttr(tiledOp)) {
           if (strictMode) {
+            if (isTileAndBindOracleDumpEnabled()) {
+              llvm::errs()
+                  << "TILE_BIND_ORACLE\tBUBBLE_VERIFY\tunbubbled-source\t"
+                  << extractSrc.getDefiningOp()->getName() << '\t'
+                  << extractSrc.getType() << '\t' << extractSliceOp.getType()
+                  << '\n';
+              llvm::errs() << "TILE_BIND_ORACLE\tBUBBLE_PARENT_OP\t";
+              extractSrc.getDefiningOp()->print(llvm::errs());
+              llvm::errs() << '\n'
+                           << "TILE_BIND_ORACLE\tBUBBLE_CHILD_OP\t";
+              extractSliceOp->print(llvm::errs());
+              llvm::errs() << '\n';
+            }
             return WalkResult::interrupt();
           }
           extractSliceOp->emitWarning("Extract slice is not fully bubbled up");
@@ -148,8 +190,11 @@ public:
     patterns.add<MarkEmptySliceBufferSize>(funcOp.getContext());
     tensor::populateFoldTensorEmptyPatterns(patterns, true);
     if (failed(applyPatternsGreedily(funcOp, std::move(patterns), config))) {
+      if (isTileAndBindOracleDumpEnabled())
+        llvm::errs() << "TILE_BIND_ORACLE\tBUBBLE_FAIL\tfirst-rewrite\n";
       return signalPassFailure();
     }
+    dumpTileAndBindBubbleStage(funcOp, "first-rewrite");
     PassManager pm(funcOp->getContext());
     CanonicalizerOptions options;
     SmallVector<std::string> disabledPatterns(
@@ -158,8 +203,11 @@ public:
     pm.addPass(bishengir::createExtendedCanonicalizerPass(options));
     pm.addPass(createCSEPass());
     if (failed(pm.run(funcOp))) {
+      if (isTileAndBindOracleDumpEnabled())
+        llvm::errs() << "TILE_BIND_ORACLE\tBUBBLE_FAIL\tcanonicalize-cse\n";
       return signalPassFailure();
     }
+    dumpTileAndBindBubbleStage(funcOp, "canonicalize-cse");
     // Apply bubble up once more, because canonicalize might bring more
     // opportunity.
     RewritePatternSet patterns2(funcOp.getContext());
@@ -170,8 +218,11 @@ public:
     patterns2.add<MarkEmptySliceBufferSize>(funcOp.getContext());
     tensor::populateFoldTensorEmptyPatterns(patterns2, true);
     if (failed(applyPatternsGreedily(funcOp, std::move(patterns2), config))) {
+      if (isTileAndBindOracleDumpEnabled())
+        llvm::errs() << "TILE_BIND_ORACLE\tBUBBLE_FAIL\tsecond-rewrite\n";
       return signalPassFailure();
     }
+    dumpTileAndBindBubbleStage(funcOp, "second-rewrite");
     if (failed(verifyMarkedExtractSlicesAreBubbledUp(funcOp))) {
       return signalPassFailure();
     }

@@ -4,7 +4,7 @@ set -euo pipefail
 MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "${MODULE_DIR}/.." && pwd)"
 GENERATED_DIR="${REPO_ROOT}/build/tools/bishengir/bishengir/include/bishengir/Dialect/HIVM/IR"
-REGISTRY="${MODULE_DIR}/src/semantic_ir/hivm_op_semantics.hpp"
+REGISTRY="${MODULE_DIR}/src/ir/hivm_op_semantics.hpp"
 EXTRA_BUFFER_SOURCE="${REPO_ROOT}/bishengir/lib/Dialect/HIVM/IR/ExtraBufferOpInterface/GetExtraBuffers.cpp"
 GENERATED_HEADERS=(
   "${GENERATED_DIR}/HIVMOps.h.inc"

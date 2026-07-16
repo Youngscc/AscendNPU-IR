@@ -1,93 +1,106 @@
-# CVPipeline UB Model Memory
+# CVPipelining UB Model Memory
 
-只保存当前可执行事实，不记录开发流水账。接手任务先读本文件；定位源码再读
-`code_map.md`。不要保存未授权的私有 IR。
+只保存当前可执行事实。源码与命令见 `code_map.md`，PlanMemory 输入验收记录见
+`plan_memory_input_validation.md`。不要保存未授权的私有 IR。
 
 ## 目标与约束
 
 ```text
-before-CVPipeline generic IR + CVPipeline/suffix/PlanMemory config
+generic IR before CVPipelining + pass/PlanMemory config
   -> lightweight C++ model
-  -> exact absolute local UB peak / exact overflow required_bits
+  -> exact absolute local UB peak or exact overflow required_bits
 ```
 
-- Oracle：`build/bin/bishengir-cvpipeline-suffix-compile` 的 minimal suffix。
-- 核心实现使用独立 C++；Python 仅用于生成数据和比较。
-- 只保留 UB 相关语义，但规则必须来自真实 pass/PlanMemory，禁止按 oracle
-  数值拟合。
-- 真实 suffix pass 逻辑不可为测试修改；compiler 改动只允许只读 dump。
-- 无法证明 exact 时返回 blocker，不能输出估计值冒充 exact。
+- Oracle 是 `build/bin/bishengir-cvpipeline-suffix-compile` 的真实 minimal suffix。
+- 核心模型使用独立 C++；Python 只生成数据、执行矩阵和比较结果。
+- 模块、类、action、脚本和产物只按真实 pass 或 pass 边界命名。
+- 生产代码固定为
+  `src/main.cpp -> src/pipeline/cvpipelining_ub_pipeline.hpp -> src/passes/<real-pass-name>`；
+  开发验证不得混入这条调用链。
+- 只复刻影响 UB 的语义，但规则必须来自真实 pass/PlanMemory 源码；禁止按 adapter
+  名称、SSA 编号、buffer 数量或最终数值拟合。
+- compiler 改动只允许只读 dump，不得修改真实 pass 逻辑。
+- 无法证明 exact 时返回 blocker，不得用估计值冒充 exact。
 
-## 当前状态
+## Pass 通路
 
-- PlanMemory-local model 完成：PlanMemory-before IR -> lifetime -> plan/offset/peak。
-  8040 个去重 input/config/seed tuples 的 lifetime 与 plan canonical TSV byte
-  exact；历史 8240 次执行另含 200 次重复 VV 验证。比较器 mutation test 有效。
-- Modeled suffix 已连接：before-OneShotBufferize generic IR ->
-  PlanMemory-before structured input，覆盖 OneShotBufferize、
-  post-bufferization rewrite、InferHIVMMemScope、AlignStorage、
-  AllocExtraBuffer、InlineLoadCopy、MarkMultiBuffer 和 PlanMemoryInputBridge。
-- PlanMemory-input bridge：1162 strategy tuples，17836 AIV/UB buffers、
-  23303 accesses byte exact；166 unique IR 中 165 byte exact。唯一动态
-  stride-aligned allocation 在生产入口显式 blocker。
-- CVPipelining model 已接入生产 CLI：`--action=plan-before-cvpipeline` 从
-  before-CVPipeline generic IR 直接输出 UB plan/peak。
-- 稳定测试数据位于 `cvpipeline_ub_model_cpp/data/`：174 adapters 中 171 个
-  生成了 before-CVPipeline generic IR，3 个已知 CANN helper 输入在边界前失败；
-  当前 171 snapshots 按内容 SHA256 去重后为 160 个对象。
-- Demo 入口 `cvpipeline_ub_model_cpp/run_demo_ub_plan.sh` 已同时运行
-  轻量模型和 `bishengir-cvpipeline-suffix-compile` oracle，并比较 UB peak 与
-  `(extent_bits, offset_bytes)` buffer placement；`--help` 可编辑 CVPipeline、
-  suffix、PlanMemory 参数。
-- 端到端当前证据：171 snapshots x 15 configs = 2565 tuples，生产
-  CVPipelining+suffix+PlanMemory 与保存的 after-CVPipeline suffix oracle 在
-  seed=0、restrict=false 上 JSON 摘要和文本 plan buffer 表一致；额外
-  20 cases x 20 seeds x 2 restrict modes = 800 tuples 也一致。
+当前主线按真实编译顺序组织：
 
-raw SemanticIR diff 仍可能包含 effects/properties 和 SSA 编号顺序差异；验收应使用
-规范化信息等价比较。
+```text
+CVPipelining
+  -> OneShotBufferize and post-bufferization normalization
+  -> HIVMDecomposeOp
+  -> InferHIVMMemScope / AlignStorage
+  -> AllocExtraBuffer
+  -> InlineLoadCopy
+  -> MarkMultiBuffer
+  -> PlanMemory
+```
 
-## 已建模的关键 pass
+模型还包含该通路中会改变下游 UB 的前置变换，包括
+`LoopInvariantCodeMotion`、`GlobalWorkspacePlan`、`CrossCoreGSS`、
+`SplitMixKernel`、`TileAndBindSubBlock` 和必要 canonicalization。
 
-- `CVPipelining.cpp`：普通路径和 preload 路径的 workspace expansion、work item
-  拆分、local tensor/memref output、workspace subview/collapse/to_tensor、
-  preload scope/extract_slice、DPS init remap、workspace yield 用户和 atomic
-  set/none/trailing 语义。
-- Suffix：OneShotAnalysis/OneShotBufferize、HIVMOptSinglePoint、
-  HIVMDecomposeOp、ConvertNonContiguousReshapeToCopy、InferHIVMMemScope、
-  AlignAllocSize/MarkStrideAlign/EnableStrideAlign、FlattenOps/
-  ReduceRankSubview/LiftLowestStride、AllocExtraBuffer、InlineLoadCopy、
-  MarkMultiBuffer、PlanMemoryInputBridge。
-- PlanMemory：gen/kill、ordered live set、ignore-inplace、multi-buffer、
-  shuffled planning attempts、offset/peak/overflow required bits。
+## 当前验证结果
 
-## 剩余风险
+- 代码结构已收口为单一生产入口、显式 Pass pipeline 和按真实 Pass 命名的实现目录；
+  重组后核心/开发工具可构建，4 组单测、HIVM registry 检查和 2565 tuple 固定 seed
+  完整文本 plan 回归通过。
+- `CVPipelining` 输出：171 inputs x 15 configs，共 2565/2565 boundary dump 和
+  SemanticIR exact；按内容去重为 166 个输出对象。
+- `OneShotBufferize` 输出：171 inputs x 15 CVPipelining configs，共 2565/2565
+  operation correspondence、allocation 和 value/access root exact。
+- `HIVMDecomposeOp`：166 个去重的 `CVPipelining` 输出，378 function pairs exact。
+- `AllocExtraBuffer`：2732 个 UB buffer 投影 exact。
+- `InlineLoadCopy`：388 function pairs 和对应 buffer rewrite exact。
+- `MarkMultiBuffer`：166 objects x 7 configs，共 1162 tuples exact。
+- `PlanMemory` 输入投影：1162 tuples，17836 buffers、23303 accesses exact。
+- 完整 `PlanMemory` 输入笛卡尔积：171 inputs、15 CVPipelining configs、17 unique
+  multi-buffer configs，共 43605/43605 canonical byte exact，0 mismatch、0 blocker；
+  其中 2250 次真实 compiler 在该边界后按预期报告 UB/CBUF overflow。
+- `PlanMemory`：1692 个可复用 input/config/seed tuples 的 lifetime 与 plan canonical
+  TSV byte exact；包含 20 seeds、两种 `restrict-inplace-as-isa` 和真实 multi-buffer。
+- `CVPipelining` 前入口到同一 suffix 入口的 seed 0、restrict=false 内部端到端比较
+  为 2565/2565 exact。
 
-- generic IR 生产路径当前用 `HasModeledOperationSemantics` 预过滤未知 op，导致
-  `ApplyOperationSemantics` 的 fail-fast 不可达；修复前不能将未知 generic op 的
-  UB 输出标为 exact。
-- `cvpipeline-ub-model-product` 当前缺少 suffix compiler target 及 PlanMemory
-  forced-seed/canonical dump 接口，产品脚本无法独立复现 oracle；补齐时只能移植
-  dump/seed 改动，禁止整文件覆盖真实 pass 逻辑。
-- 动态 stride-aligned allocation 的最终 rank-reduced subview 物化仍是 blocker。
-- 冻结 suffix 的正式逐 pass 编译器消融证据尚未全部保存；当前以
-  suffix-compile oracle 和 normalized byte comparison 作为主证据。
-- 开发验证脚本仍保留少量历史文件名/action 名称；生产入口和核心 C++ 类型/函数按
-  pass/边界命名。
+## 关键实现事实
 
-## 验收
+- 生产 CLI 只保留 `before CVPipelining -> PlanMemory -> overflow/plan` 主路径；旧的
+  lifetime dump、liveness dump 和 action 分发只保留在开发验证器中。替代输入边界
+  必须显式启用 `--debug --debug-entry=...`，普通模式不会执行或接受它们。
+- debug 摘要按真实 Pass 名写入 stderr；只有指定 `--debug-dir` 才惰性序列化并保存
+  完整阶段快照。非 debug 模式不创建 trace 对象、不执行快照序列化，stderr 保持静默，
+  开启 debug 前后的 stdout 结果必须逐字节一致。
+- 三个输入边界都必须是实际普通文件；缺失或目录输入在解析前 fail-fast，不能把空
+  module/plan 当成 exact。聚合测试对缺少的生成式 compiler oracle 明确报告 `SKIP`，
+  不允许以 0 个对象的 PASS 代替验证。
+- softmax 的首个真实差异来自 `LoopInvariantCodeMotion`；模型按 def-use 与 effect
+  条件提升循环不变量。
+- sparse-attention 的最后一批差异来自
+  `InsertSliceBubbleUpStrategy::handleExtractInsertExtractCase` 和后续
+  `ConvertToHIVMOpPass::applyPatternsGreedily`。模型按真实 slice 关系重写，从
+  `scf.for` 静态 lb/ub/step 构造 domain，只在 domain 上恒定时折叠 affine 表达式。
+- overflow 仍完成 fallback placement。`peakBits` 使用 byte-aligned 原始 extent；
+  `requiredBits` 使用 `StorageEntry` 对齐后的容量需求，overflow 退出码为 2。
+- 未建模 generic operation 必须 fail-fast；语义初始化必须幂等。
 
-- PlanMemory-input bridge 直接比较 model 与真实 PlanMemory-before canonical
-  input；不含 seed。
-- PlanMemory-local 再比较 lifetime 与 plan canonical TSV；固定
-  input/config/seed 必须逐字节一致。
-- 生产端到端比较 JSON 摘要与文本 plan buffer 表；blocker 不得输出
-  `exact_plan`。
-- 最终输出含 `ub_peak_bits`、`capacity_bits`、`overflow`、overflow 时的
-  `required_bits`。
+## 剩余边界
 
-## 维护
+- canonical PlanMemory 输入使用 `b0/b1/...` 规范化 allocation identity，因此验证
+  身份对应关系、operation order 和全部 UB 信息，但不验证 MLIR printer 的展示名。
+- `LoopInvariantSubsetHoisting` 尚无独立轻量实现；当前矩阵未观察到它造成 UB 差异。
+- `scf.while` 只有结构单测；动态 stride-aligned allocation 的最终 rank-reduced
+  subview 仍应返回 blocker。
+- exact 声明只适用于已记录的数据和配置域。新增差异必须先定位第一个真实 pass
+  边界，再对照 BiSheng 源码实现。
+- `all_configs.tsv` 展开为每个输入 5760 次 PlanMemory 运行，171 个输入共 984960
+  次；该近百万次最终 lifetime/offset/peak 矩阵尚未全部保存和验证，不能用 43605
+  个 PlanMemory 输入 exact 替代这一结论。
 
-- 本文件只更新当前数字、剩余问题和决策；历史过程不写入。
-- `code_map.md` 只放入口与命令。两文件总量尽量低于 150 行。
-- 测试默认报告总量；仅失败时分类。
+## 验收规则
+
+- pass 输入/输出：规范化后信息逐字节一致，不丢 buffer identity 或 operation order。
+- PlanMemory：固定 input/config/seed 后，lifetime 与 plan canonical TSV 逐字节一致。
+- 端到端：比较 status、selected seed、peak、required/capacity，以及每个 buffer 的
+  extent、lifetime 和 offset。
+- 测试默认只报告总量；失败时再按 adapter、config 和真实 pass 分类。

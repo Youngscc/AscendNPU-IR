@@ -43,6 +43,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/LogicalResult.h"
 #include <cstddef>
+#include <cstdlib>
 #include <cstdint>
 #include <utility>
 
@@ -54,6 +55,11 @@
   LLVM_DEBUG(DBGS() << __FILE__ << ":" << __LINE__ << " " << X << "\n")
 
 namespace mlir::hivm::detail {
+
+static bool isTileAndBindOracleDumpEnabled() {
+  const char *value = std::getenv("BISHENGIR_DUMP_TILE_AND_BIND_ORACLE");
+  return value != nullptr && value[0] != '\0' && llvm::StringRef(value) != "0";
+}
 
 static bool areOperandsUpperLevel(tensor::ExtractSliceOp sliceOp) {
   // can bubble up if all of the dependencies are on the equal or ancestor
@@ -243,6 +249,12 @@ BubbleUpPattern::matchAndRewrite(tensor::ExtractSliceOp sliceOp,
     if (isMarkedExtractSliceOp(sliceOp) &&
         strategy->isSupportedOperation(sliceOp)) {
       LDBG("Picked strategy for sliceOp " << source);
+      if (isTileAndBindOracleDumpEnabled()) {
+        llvm::errs() << "TILE_BIND_ORACLE\tBUBBLE_EXEC\t"
+                     << sourceDefiningOp->getName() << '\t';
+        sliceOp.print(llvm::errs());
+        llvm::errs() << '\n';
+      }
       return strategy->execute(sliceOp, rewriter);
     }
   }

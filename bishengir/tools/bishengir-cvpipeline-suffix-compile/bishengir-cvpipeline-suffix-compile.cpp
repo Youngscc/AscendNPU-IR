@@ -114,7 +114,7 @@ struct DumpIRAfterCVPipeliningPass
   }
 
   StringRef getDescription() const override {
-    return "Dump IR immediately after CVPipelining for C-stage oracle data";
+    return "Dump IR immediately after CVPipelining for semantic validation";
   }
 
   void runOnOperation() override {
@@ -162,15 +162,18 @@ static std::string hexEncode(StringRef value) {
   return result;
 }
 
-struct DumpC1SemanticOraclePass
-    : public PassWrapper<DumpC1SemanticOraclePass, OperationPass<ModuleOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(DumpC1SemanticOraclePass)
+struct DumpAfterCVPipeliningSemanticOraclePass
+    : public PassWrapper<DumpAfterCVPipeliningSemanticOraclePass,
+                         OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(
+      DumpAfterCVPipeliningSemanticOraclePass)
 
-  DumpC1SemanticOraclePass(StringRef semanticPath, StringRef genericPath)
+  DumpAfterCVPipeliningSemanticOraclePass(StringRef semanticPath,
+                                          StringRef genericPath)
       : semanticPath(semanticPath), genericPath(genericPath) {}
 
   StringRef getArgument() const override {
-    return "hivm-dump-c1-semantic-oracle-debug";
+    return "hivm-dump-after-cvpipelining-semantic-oracle-debug";
   }
 
   void runOnOperation() override {
@@ -193,7 +196,8 @@ private:
         path, ec, llvm::sys::fs::OF_Text);
     if (!ec)
       return success();
-    llvm::errs() << "[ERROR] Failed to open C1 oracle output " << path
+    llvm::errs() << "[ERROR] Failed to open after-CVPipelining semantic oracle "
+                 << path
                  << ": " << ec.message() << "\n";
     return failure();
   }
@@ -267,7 +271,7 @@ private:
       return "other";
     };
 
-    *os << "C1_SCHEMA\t1\n";
+    *os << "AFTER_CVPIPELINING_SEMANTIC_IR\t1\n";
     std::function<void(Operation *, int, int, int, unsigned)> emit =
         [&](Operation *operation, int parentId, int regionId, int blockId,
             unsigned ordinal) {
@@ -339,7 +343,8 @@ private:
 };
 
 static llvm::cl::opt<std::string> inputFilename(
-    llvm::cl::Positional, llvm::cl::desc("<input before-cvpipeline mlir>"),
+    llvm::cl::Positional,
+    llvm::cl::desc("<generic MLIR before CVPipelining>"),
     llvm::cl::init("-"));
 
 static llvm::cl::opt<std::string>
@@ -371,14 +376,15 @@ static llvm::cl::opt<bool> stopAfterCVPipelining(
     llvm::cl::desc("Stop the suffix pipeline at the CVPipelining-after boundary"),
     llvm::cl::init(false));
 
-static llvm::cl::opt<std::string> dumpC1SemanticOracle(
-    "dump-c1-semantic-oracle",
-    llvm::cl::desc("Dump canonical C1 SemanticIR from real MLIR objects"),
+static llvm::cl::opt<std::string> dumpAfterCVPipeliningSemanticOracle(
+    "dump-after-cvpipelining-semantic-oracle",
+    llvm::cl::desc(
+        "Dump canonical SemanticIR after the CVPipelining pass"),
     llvm::cl::value_desc("filename"), llvm::cl::init(""));
 
-static llvm::cl::opt<std::string> dumpC1GenericIR(
-    "dump-c1-generic-ir",
-    llvm::cl::desc("Dump generic-form MLIR at the C1 input boundary"),
+static llvm::cl::opt<std::string> dumpAfterCVPipeliningGenericIR(
+    "dump-after-cvpipelining-generic-ir",
+    llvm::cl::desc("Dump generic-form MLIR after the CVPipelining pass"),
     llvm::cl::value_desc("filename"), llvm::cl::init(""));
 
 static llvm::cl::opt<int> planMemorySeed(
@@ -707,9 +713,11 @@ static void buildSuffixPipeline(OpPassManager &pm) {
   if (!dumpIRAfterCVPipelining.empty())
     pm.addPass(
         createDumpIRAfterCVPipeliningPass(dumpIRAfterCVPipelining.getValue()));
-  if (!dumpC1SemanticOracle.empty() || !dumpC1GenericIR.empty())
-    pm.addPass(std::make_unique<DumpC1SemanticOraclePass>(
-        dumpC1SemanticOracle.getValue(), dumpC1GenericIR.getValue()));
+  if (!dumpAfterCVPipeliningSemanticOracle.empty() ||
+      !dumpAfterCVPipeliningGenericIR.empty())
+    pm.addPass(std::make_unique<DumpAfterCVPipeliningSemanticOraclePass>(
+        dumpAfterCVPipeliningSemanticOracle.getValue(),
+        dumpAfterCVPipeliningGenericIR.getValue()));
   if (stopAfterCVPipelining)
     return;
 
@@ -787,7 +795,7 @@ int main(int argc, char **argv) {
   llvm::cl::SetVersionPrinter(printVersion);
   llvm::cl::ParseCommandLineOptions(
       argc, argv,
-      "BiShengIR CVPipeline suffix compile tool\n\n"
+      "BiShengIR CVPipelining suffix compile tool\n\n"
       "Input must be an MLIR dump immediately before createCVPipeliningPass.\n");
 
   if (planMemorySeed < -1 || planMemorySeed >= 20) {
@@ -886,7 +894,7 @@ int main(int argc, char **argv) {
     if (dumpPlanMemoryOracle)
       llvm::errs() << "PLANMEM_RUN_RESULT\tfailure\n";
     llvm::errs()
-        << "[ERROR] Failed to run CVPipeline suffix to local PlanMemory\n";
+        << "[ERROR] Failed to run CVPipelining suffix to local PlanMemory\n";
     return EXIT_FAILURE;
   }
 

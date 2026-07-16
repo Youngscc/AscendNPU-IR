@@ -1,4 +1,5 @@
-#include "../src/planmemory/planmemory_model.hpp"
+#include "../src/passes/plan_memory/plan_memory_model.hpp"
+#include "../src/passes/infer_and_set_buffer_size.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -84,6 +85,20 @@ void testOperationSemantics() {
 }
 
 void testFlattenScalarLowering() {
+  const std::optional<cvub::MemRefTypeModel> implicitDynamicLayout =
+      cvub::ParseMemRefType("memref<128x?xf32>");
+  const std::optional<cvub::MemRefTypeModel> explicitDynamicLayout =
+      cvub::ParseMemRefType("memref<128x?xf32, strided<[?, 1]>>");
+  require(implicitDynamicLayout && explicitDynamicLayout,
+          "dynamic flattening test types must parse");
+  require(cvub::GetContiguousAxes({*implicitDynamicLayout}) ==
+              std::vector<bool>({true, true}),
+          "an implicit identity layout must remain uniformly collapsible");
+  require(cvub::GetContiguousAxes({*implicitDynamicLayout,
+                                   *explicitDynamicLayout}) ==
+              std::vector<bool>({true, false}),
+          "an explicit dynamic strided layout must block axis collapse");
+
   std::optional<cvub::MemRefTypeModel> trailingUnitType =
       cvub::ParseMemRefType(
           "memref<1x8x1xi32, strided<[8, 16, 1]>, "
@@ -438,6 +453,86 @@ void testDynamicExtentMatchesPlanMemoryBoundary() {
       "dynamic local extent must fail at PlanMemory's static-shape boundary");
 }
 
+void testSubByteBufferReportsOriginalExtent() {
+  const cvub::fs::path input = writeFixture(
+      "sub_byte_extent.mlir",
+      std::string("module {\n  func.func @test() attributes {") +
+          kAIVAttribute +
+          "} {\n"
+          "    %false = arith.constant false\n"
+          "    %buffer = memref.alloc() : memref<3xi1, "
+          "#hivm.address_space<ub>>\n"
+          "    hivm.hir.vbrc ins(%false : i1) outs(%buffer : "
+          "memref<3xi1, #hivm.address_space<ub>>)\n"
+          "    return\n  }\n}\n");
+  const cvub::PlanMemoryModelResult result =
+      cvub::PlanLocalMemoryForSeed(input, 0);
+  require(result.success && result.buffers.size() == 1,
+          "sub-byte buffer fixture must produce one successful plan entry");
+  require(result.buffers.front().constBits == 3 &&
+              result.buffers.front().extentBits == 3,
+          "planned output must preserve PlanMemory BufferInfo::constBits");
+  require(result.peakBits == 8,
+          "reported UB peak must still byte-align a sub-byte buffer");
+}
+
+void testOverflowReportsCompleteFallbackPlanPeak() {
+  const cvub::fs::path input = writeFixture(
+      "overflow_fallback_peak.mlir",
+      std::string("module {\n  func.func @test() attributes {") +
+          kAIVAttribute +
+          "} {\n"
+          "    %false = arith.constant false\n"
+          "    %buffer = memref.alloc() : memref<196609xi8, "
+          "#hivm.address_space<ub>>\n"
+          "    hivm.hir.vbrc ins(%false : i1) outs(%buffer : "
+          "memref<196609xi8, #hivm.address_space<ub>>)\n"
+          "    return\n  }\n}\n");
+  const cvub::PlanMemoryModelResult result =
+      cvub::PlanLocalMemoryForSeed(input, 0);
+  require(!result.success && result.overflow,
+          "oversized UB fixture must report overflow");
+  require(result.buffers.size() == 1 &&
+              result.buffers.front().offsetsBytes ==
+                  std::vector<uint64_t>{0},
+          "overflow fallback must retain the complete buffer placement");
+  require(result.requiredBits == 1573120,
+          "required capacity must preserve StorageEntry alignment");
+  require(result.peakBits == 1572872,
+          "overflow peak must use the planned offset and original extent");
+}
+
+void testSetBufferSizeErasesAttributeEmptyMark() {
+  const cvub::fs::path input = writeFixture(
+      "set_buffer_size_mark.mlir",
+      R"mlir("builtin.module"() ({
+  "func.func"() <{function_type = (memref<?xi8>, index) -> (), sym_name = "test"}> ({
+  ^bb0(%workspace: memref<?xi8>, %size: index):
+    %alloc = "memref_ext.alloc_workspace"(%workspace, %size) <{operandSegmentSizes = array<i32: 1, 1, 0>}> : (memref<?xi8>, index) -> memref<128x?xf32>
+    "annotation.mark"(%alloc) <{effects = ["write"]}> {buffer_size_in_byte = 16384 : i64} : (memref<128x?xf32>) -> ()
+    "func.return"() : () -> ()
+  }) : () -> ()
+}) : () -> ()
+)mlir");
+  cvub::GenericModule module = cvub::RunInferAndSetBufferSizePipeline(
+      cvub::ParseGenericIR(input, false));
+  bool foundBacking = false;
+  bool foundView = false;
+  for (const cvub::GenericOperation &operation : module.operations) {
+    require(operation.name != "annotation.mark",
+            "SetBufferSize must erase a mark with no discardable attributes");
+    if (operation.name == "memref_ext.alloc_workspace" &&
+        operation.resultTypes == std::vector<std::string>{"memref<16384xi8>"})
+      foundBacking = true;
+    if (operation.name == "memref.view" &&
+        operation.resultTypes ==
+            std::vector<std::string>{"memref<128x?xf32>"})
+      foundView = true;
+  }
+  require(foundBacking && foundView,
+          "SetBufferSize must materialize the static byte allocation and view");
+}
+
 } // namespace
 
 int main() {
@@ -453,6 +548,9 @@ int main() {
     testCheckedArithmetic();
     testWhileScopeBranchAndPreloadSemantics();
     testDynamicExtentMatchesPlanMemoryBoundary();
+    testSubByteBufferReportsOriginalExtent();
+    testOverflowReportsCompleteFallbackPlanPeak();
+    testSetBufferSizeErasesAttributeEmptyMark();
     std::cout << "MODEL_CORE_TESTS=PASS\n";
     return 0;
   } catch (const std::exception &error) {

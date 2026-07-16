@@ -167,7 +167,7 @@ if [[ -n "${MANIFEST}" ]]; then
   [[ -f "${MANIFEST}" ]] || die "manifest not found: ${MANIFEST}"
   while IFS=$'\t' read -r input classification _ _ _ case_dir; do
     [[ "${input}" != "input" ]] || continue
-    [[ "${classification}" == "reached_after_planmemory" ]] || continue
+    [[ "${classification}" == "reached_after_plan_memory" ]] || continue
     before_ir="${case_dir}/before_local_plan_memory.mlir"
     [[ -f "${before_ir}" ]] || die "missing PlanMemory-before IR: ${before_ir}"
     INPUT_NAMES+=("$(basename "${input}")")

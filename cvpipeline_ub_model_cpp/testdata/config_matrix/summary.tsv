@@ -1,6 +1,6 @@
-batch	config_rows	planmemory_runs_per_ir
-p1_planmemory	40	40
-p2_cvpipeline	15	600
-p3_suffix_buffer	48	1920
-p4_layout	16	640
-p5_cross_priority	64	2560
+batch	config_rows	plan_memory_runs_per_ir
+plan_memory	40	40
+cvpipelining	15	600
+suffix_ub_passes	48	1920
+align_storage_infer_data_layout	16	640
+cvpipelining_suffix_plan_memory_cross	64	2560

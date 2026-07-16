@@ -301,7 +301,7 @@ def main() -> int:
         writer = csv.writer(output, delimiter="\t", lineterminator="\n")
         writer.writerow((
             "case", "config_id", "status", "compiler_status", "ir_sha256",
-            "duplicate_of", "input", "before_planmemory_ir", "input_sha256",
+            "duplicate_of", "input", "before_plan_memory_ir", "input_sha256",
             "oracle_tool_sha256",
         ))
         writer.writerows(transform_rows)

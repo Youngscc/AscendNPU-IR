@@ -11,7 +11,7 @@ from pathlib import Path
 def main() -> int:
     module = Path(__file__).resolve().parent.parent
     repo = module.parent
-    objects = repo / "Output/experiments/c2_c3_pass_oracles/objects"
+    objects = repo / "Output/experiments/one_shot_bufferize_hivm_decompose_op/objects"
     tool = module / "output/bin/cvpipeline_ub_model_dev_validate"
     failures: list[str] = []
     allocations = 0
@@ -34,7 +34,7 @@ def main() -> int:
             commands = (
                 [str(tool), "--action=model-post-bufferization-allocations",
                  "--root", str(source), "--output", str(model)],
-                [str(tool), "--action=dump-c2-allocation-oracle",
+                [str(tool), "--action=dump-one-shot-bufferize-allocation-oracle",
                  "--root", str(before_decompose), "--output", str(oracle)],
                 [str(tool), "--action=model-canonicalized-iter-arg-results",
                  "--root", str(source), "--output", str(model_drops)],

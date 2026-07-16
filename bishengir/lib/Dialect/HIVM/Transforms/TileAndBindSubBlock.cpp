@@ -44,6 +44,7 @@
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/AffineMap.h"
+#include "mlir/IR/AsmState.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -68,6 +69,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/LogicalResult.h"
+#include <cstdlib>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -90,6 +92,21 @@ static constexpr llvm::StringLiteral kLimitedSubBlockOpAttrName =
     "limit_sub_block_id0";
 static constexpr llvm::StringLiteral tileAndBindLeaf =
     "hivm.tile_and_bind_leaf";
+
+static bool isTileAndBindOracleDumpEnabled() {
+  const char *value = std::getenv("BISHENGIR_DUMP_TILE_AND_BIND_ORACLE");
+  return value != nullptr && value[0] != '\0' && llvm::StringRef(value) != "0";
+}
+
+static void dumpTileAndBindStage(func::FuncOp funcOp, StringRef stage) {
+  if (!isTileAndBindOracleDumpEnabled())
+    return;
+  OpPrintingFlags flags;
+  flags.printGenericOpForm();
+  llvm::errs() << "TILE_BIND_ORACLE\tSTAGE_BEGIN\t" << stage << '\n';
+  funcOp->getParentOp()->print(llvm::errs(), flags);
+  llvm::errs() << "\nTILE_BIND_ORACLE\tSTAGE_END\t" << stage << '\n';
+}
 } // namespace
 
 namespace {
@@ -822,6 +839,14 @@ tileAndSliceOp(func::FuncOp func,
   if (analyzer.computeTilingDim()) {
     isBroadcastAxisCase = true;
   }
+  if (isTileAndBindOracleDumpEnabled()) {
+    func->walk([&](hivm::StoreOp storeOp) {
+      llvm::errs() << "TILE_BIND_ORACLE\tANALYZER\t" << func.getSymName()
+                   << '\t' << analyzer.getTilingDim(storeOp.getSrc()) << '\t'
+                   << storeOp.getSrc().getType() << '\t'
+                   << storeOp.getDst().getType() << '\n';
+    });
+  }
 
   func->walk([&](annotation::MarkOp markOp) {
     if (auto attr = markOp->getAttrOfType<hivm::HIVMTightlyCoupledBufferAttr>(
@@ -845,7 +870,8 @@ tileAndSliceOp(func::FuncOp func,
   func->walk([&allStoreOps](hivm::StoreOp storeOp) {
     allStoreOps.push_back(storeOp);
   });
-  if (llvm::any_of(allStoreOps, [&](hivm::StoreOp storeOp) {
+  const bool hasUnsupportedDynamicStore =
+      llvm::any_of(allStoreOps, [&](hivm::StoreOp storeOp) {
         auto srcShapedType = dyn_cast<ShapedType>(storeOp.getSrcOperandType());
         auto dstShapedType = dyn_cast<ShapedType>(storeOp.getDstOperandType());
         if (!srcShapedType || !dstShapedType)
@@ -876,7 +902,11 @@ tileAndSliceOp(func::FuncOp func,
                  srcShapedType.getShape() != dstShapedType.getShape();
         }
         return false;
-      })) {
+      });
+  if (hasUnsupportedDynamicStore) {
+    if (isTileAndBindOracleDumpEnabled())
+      llvm::errs() << "TILE_BIND_ORACLE\tFAIL\t" << func.getSymName()
+                   << "\tdynamic-store\n";
     return failure();
   }
 
@@ -972,12 +1002,22 @@ TileAndBindSubBlockPass::attemptBindSubBlock(func::FuncOp func) {
   PassManager pm(newFunc->getContext());
   pm.addPass(tensor::createReplicateOutEmptyTensorPass());
 
-  if (failed(pm.run((newFunc))) ||
-      failed(tileAndSliceOp(newFunc, tightlyCoupledBufferToTilingDim,
-                            isBroadcastAxisCase))) {
+  if (failed(pm.run((newFunc)))) {
+    if (isTileAndBindOracleDumpEnabled())
+      llvm::errs() << "TILE_BIND_ORACLE\tFAIL\t" << func.getSymName()
+                   << "\treplicate-empty\n";
     failAndRevert(newFunc);
     return failure();
   }
+  if (failed(tileAndSliceOp(newFunc, tightlyCoupledBufferToTilingDim,
+                            isBroadcastAxisCase))) {
+    if (isTileAndBindOracleDumpEnabled())
+      llvm::errs() << "TILE_BIND_ORACLE\tFAIL\t" << func.getSymName()
+                   << "\ttile-and-slice\n";
+    failAndRevert(newFunc);
+    return failure();
+  }
+  dumpTileAndBindStage(newFunc, "after-tile-and-slice");
 
   if (isBroadcastAxisCase) {
     emitRemark(newFunc.getLoc())
@@ -1014,6 +1054,9 @@ TileAndBindSubBlockPass::attemptBindSubBlock(func::FuncOp func) {
   });
 
   if (isFailed) {
+    if (isTileAndBindOracleDumpEnabled())
+      llvm::errs() << "TILE_BIND_ORACLE\tFAIL\t" << func.getSymName()
+                   << "\tno-tiled-store\n";
     failAndRevert(newFunc);
     return failure();
   }
@@ -1026,9 +1069,13 @@ TileAndBindSubBlockPass::attemptBindSubBlock(func::FuncOp func) {
   LogicalResult bubbleUpResult = pm2.run(newFunc);
   if (bubbleUpResult.failed() || newFunc.verify().failed() ||
       newFunc.verifyBody().failed() || newFunc.verifyRegions().failed()) {
+    if (isTileAndBindOracleDumpEnabled())
+      llvm::errs() << "TILE_BIND_ORACLE\tFAIL\t" << func.getSymName()
+                   << "\tbubble-or-verify\n";
     failAndRevert(newFunc);
     return failure();
   }
+  dumpTileAndBindStage(newFunc, "after-bubble-pass-manager");
 
   SmallVector<Operation *> toBeRemoved;
   newFunc->walk([&](annotation::MarkOp op) {
@@ -1038,14 +1085,23 @@ TileAndBindSubBlockPass::attemptBindSubBlock(func::FuncOp func) {
 
   for (auto *op : toBeRemoved)
     op->erase();
+  dumpTileAndBindStage(newFunc, "after-remove-leaf-marks");
 
   RewritePatternSet patternsPost(&getContext());
   patternsPost.add<mlir::hivm::detail::BubbleUpSubviewFromTiling>(
       &getContext());
   if (failed(applyPatternsGreedily(newFunc, std::move(patternsPost)))) {
+    if (isTileAndBindOracleDumpEnabled())
+      llvm::errs() << "TILE_BIND_ORACLE\tFAIL\t" << func.getSymName()
+                   << "\tpost-bubble-subview\n";
     failAndRevert(newFunc);
     return failure();
   }
+  dumpTileAndBindStage(newFunc, "after-bubble-subview");
+
+  if (isTileAndBindOracleDumpEnabled())
+    llvm::errs() << "TILE_BIND_ORACLE\tSUCCESS\t" << func.getSymName()
+                 << '\n';
 
   return newFunc;
 }

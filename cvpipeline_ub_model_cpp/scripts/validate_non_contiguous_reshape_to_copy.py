@@ -27,7 +27,7 @@ def run_model(tool: Path, source: Path, output: Path, after: Path | None = None)
 def main() -> int:
     module = Path(__file__).resolve().parent.parent
     repo = module.parent
-    objects = repo / "Output/experiments/c2_c3_pass_oracles/objects"
+    objects = repo / "Output/experiments/one_shot_bufferize_hivm_decompose_op/objects"
     model_tool = module / "output/bin/cvpipeline_ub_model_dev_validate"
     compiler = repo / "build/bin/bishengir-opt"
     failures: list[str] = []

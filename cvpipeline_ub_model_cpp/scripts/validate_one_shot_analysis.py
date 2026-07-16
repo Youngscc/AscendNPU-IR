@@ -14,7 +14,7 @@ def parse_args() -> argparse.Namespace:
     repo = module.parent
     parser = argparse.ArgumentParser()
     parser.add_argument("--objects", type=Path, default=repo / (
-        "Output/experiments/c2_c3_pass_oracles/objects"))
+        "Output/experiments/one_shot_bufferize_hivm_decompose_op/objects"))
     parser.add_argument("--analysis", type=Path, default=repo / (
         "Output/experiments/one_shot_analysis"))
     parser.add_argument("--tool", type=Path, default=module / (

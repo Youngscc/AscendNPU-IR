@@ -27,13 +27,13 @@ def main() -> int:
     repo = module.parent
     object_hash = (
         "18ad09d908eda36dd9a539576b94e575752cb0e09af03f34cccab83310f39026")
-    tree = (repo / "Output/experiments/c2_c3_pass_oracles/objects" /
+    tree = (repo / "Output/experiments/one_shot_bufferize_hivm_decompose_op/objects" /
             object_hash / "pass_tree/builtin_module_no-symbol-name")
     before = tree / "0_one-shot-bufferize.mlir"
     after = tree / "1_one-shot-bufferize.mlir"
     tool = module / "output/bin/cvpipeline_ub_model_dev_validate"
 
-    with tempfile.TemporaryDirectory(prefix="cvub-c2-sensitivity-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="cvub-one-shot-bufferize-sensitivity-") as tmp:
         temporary = Path(tmp)
         report = temporary / "report.tsv"
         if validate(tool, before, after, report):

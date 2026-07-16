@@ -1,7 +1,7 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_MEMORY_INFO_REPLAY_HPP
 #define CVPIPELINE_UB_MODEL_CPP_MEMORY_INFO_REPLAY_HPP
 
-#include "../model_core.hpp"
+#include "../passes/plan_memory/plan_memory_model.hpp"
 
 namespace cvub {
 

@@ -59,7 +59,7 @@ for ((shard = 0; shard < JOBS; ++shard)); do
 done | LC_ALL=C sort -t $'\t' -k1,1 -k2,2n >>"${combined_tmp}"
 mv "${combined_tmp}" "${OUTPUT_ROOT}/summary.tsv"
 
-expected_cases=$(awk -F '\t' 'NR > 1 && $2 == "reached_after_planmemory" { count++ } END { print count + 0 }' "${MANIFEST}")
+expected_cases=$(awk -F '\t' 'NR > 1 && $2 == "reached_after_plan_memory" { count++ } END { print count + 0 }' "${MANIFEST}")
 expected_runs=$((expected_cases * 20))
 actual_runs=$(awk 'END { print (NR > 0 ? NR - 1 : 0) }' "${OUTPUT_ROOT}/summary.tsv")
 unique_runs=$(awk -F '\t' 'NR > 1 { print $1 "\t" $2 "\t" $3 }' "${OUTPUT_ROOT}/summary.tsv" | LC_ALL=C sort -u | wc -l | tr -d ' ')

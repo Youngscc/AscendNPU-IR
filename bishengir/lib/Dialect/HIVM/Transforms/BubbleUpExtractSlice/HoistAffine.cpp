@@ -29,7 +29,24 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/LogicalResult.h"
 
+#include <cstdlib>
+
 namespace mlir::hivm::detail {
+
+static bool isTileAndBindOracleDumpEnabled() {
+  const char *value = std::getenv("BISHENGIR_DUMP_TILE_AND_BIND_ORACLE");
+  return value != nullptr && value[0] != '\0' && llvm::StringRef(value) != "0";
+}
+
+static void dumpHoistMove(Operation *op, Operation *insertPoint) {
+  if (!isTileAndBindOracleDumpEnabled())
+    return;
+  llvm::errs() << "TILE_BIND_ORACLE\tHOIST_MOVE\t";
+  op->print(llvm::errs());
+  llvm::errs() << "\tBEFORE\t";
+  insertPoint->print(llvm::errs());
+  llvm::errs() << '\n';
+}
 
 // We need this move up affine map patterns because
 // when we bubble up extract slice, extract slice might get bubbled
@@ -131,6 +148,7 @@ struct HoistAffinePattern : public OpRewritePattern<AffineOpTy> {
     }
 
     if (insertPoint->getBlock() != op->getBlock()) {
+      dumpHoistMove(op, insertPoint);
       rewriter.moveOpBefore(op, insertPoint);
       return success();
     }
@@ -180,6 +198,7 @@ struct HoistAffinePattern : public OpRewritePattern<AffineOpTy> {
       return rewriter.notifyMatchFailure(
           op, "op cannot be moved to a higher place in block");
 
+    dumpHoistMove(op, insertPoint);
     rewriter.moveOpBefore(op, insertPoint);
     return success();
   }

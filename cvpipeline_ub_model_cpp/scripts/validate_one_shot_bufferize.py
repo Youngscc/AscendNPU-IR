@@ -27,7 +27,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--objects", type=Path,
-        default=repo / "Output/experiments/c2_c3_pass_oracles/objects")
+        default=repo / "Output/experiments/one_shot_bufferize_hivm_decompose_op/objects")
     parser.add_argument(
         "--analysis", type=Path,
         default=repo / "Output/experiments/one_shot_analysis")
@@ -38,6 +38,9 @@ def main() -> int:
 
     inputs = sorted(args.objects.glob(
         "*/pass_tree/builtin_module_no-symbol-name/0_one-shot-bufferize.mlir"))
+    if not inputs:
+        print(f"[ERROR] no OneShotBufferize oracle objects under {args.objects}")
+        return 2
     failures: list[str] = []
     allocation_count = 0
     checked_values = 0
@@ -58,7 +61,7 @@ def main() -> int:
                  paths["oracle_analysis"]),
                 ("model-one-shot-bufferize-allocations", source,
                  paths["model_allocations"]),
-                ("dump-c2-allocation-oracle", after,
+                ("dump-one-shot-bufferize-allocation-oracle", after,
                  paths["oracle_allocations"]),
             )
             errors = [error for action, root, output in commands

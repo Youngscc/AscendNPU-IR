@@ -1,6 +1,6 @@
 # Code Map
 
-## Oracle 与 Pipeline
+## 真实 Pipeline
 
 ```text
 bishengir/lib/Tools/bishengir-compile/PassPipeline.cpp
@@ -10,93 +10,82 @@ bishengir/tools/bishengir-cvpipeline-suffix-compile/
 build/bin/bishengir-cvpipeline-suffix-compile
 ```
 
-需要 pass 顺序时直接读 pipeline 源码，不在记忆中复制。PlanMemory 前关键尾部为
-`AllocExtraBuffer -> InferHIVMMemScope -> canonicalization -> InlineLoadCopy ->
-MarkMultiBuffer -> PlanMemory(LOCAL)`。
+需要 pass 顺序时直接读取 pipeline 源码。compiler 中的改动只用于 dump。
 
-## 真实语义
+## 真实 Pass 与模型
 
 ```text
-bishengir/lib/Dialect/HIVM/Transforms/CVPipelining.cpp
-bishengir/lib/Dialect/HIVM/Transforms/HIVMDecomposeOp.cpp
-bishengir/lib/Dialect/HIVM/Transforms/FlattenOps.cpp
-bishengir/lib/Dialect/HIVM/Transforms/ComposeCollapseExpand.cpp
-bishengir/lib/Dialect/HIVM/Transforms/ConvertNonContiguousReshapeToCopy.cpp
-bishengir/lib/Dialect/HIVM/Transforms/LiftLowestStride.cpp
-bishengir/lib/Dialect/HIVM/Transforms/AllocExtraBuffer.cpp
-bishengir/lib/Dialect/HIVM/Transforms/InlineLoadCopy.cpp
-bishengir/lib/Dialect/HIVM/Transforms/MarkMultiBuffer.cpp
-bishengir/lib/Dialect/HIVM/Transforms/PlanMemory.cpp
-bishengir/include/bishengir/Dialect/HIVM/Transforms/PlanMemory.h
+BiSheng source                                            Lightweight model
+bishengir/.../Transforms/CVPipelining.cpp                  src/passes/cvpipelining/
+MLIR OneShotBufferize + post-bufferization passes          src/passes/one_shot_bufferize.hpp
+bishengir/.../Transforms/HIVMDecomposeOp.cpp                src/passes/hivm_decompose_op.hpp
+bishengir/.../Transforms/InferHIVMMemScope.cpp              src/passes/infer_hivm_mem_scope.hpp
+bishengir/.../Transforms/AlignStorage.cpp                   src/passes/align_storage.hpp
+bishengir/.../Transforms/AllocExtraBuffer.cpp               src/passes/alloc_extra_buffer.hpp
+bishengir/.../Transforms/InlineLoadCopy.cpp                 src/passes/inline_load_copy.hpp
+bishengir/.../Transforms/MarkMultiBuffer.cpp                src/passes/mark_multi_buffer.hpp
+bishengir/.../Transforms/PlanMemory.cpp                     src/passes/plan_memory/
 ```
 
-## 模型入口
+所有 UB 相关变换位于 `src/passes/`，文件名直接使用真实 Pass 名。生产主线组装在
+`src/pipeline/cvpipelining_ub_pipeline.hpp`；各 Pass 边界状态和 `PlanMemory` 输入构建
+也位于 `src/pipeline/`，不会伪装成 Pass。
+
+## 入口
 
 ```text
-cvpipeline_ub_model_cpp/src/semantic_ir/
-cvpipeline_ub_model_cpp/src/cvpipeline/cvpipelining.hpp
-cvpipeline_ub_model_cpp/src/cvpipeline/cvpipelining_analysis.hpp
-cvpipeline_ub_model_cpp/src/cvpipeline/cvpipelining_rewrite.hpp
-cvpipeline_ub_model_cpp/src/cvpipeline/cvpipelining_preload_rewrite.hpp
-cvpipeline_ub_model_cpp/src/cvpipeline/cvpipelining_pass.hpp
-cvpipeline_ub_model_cpp/src/semantic_ir/generic_rewriter.hpp
-cvpipeline_ub_model_cpp/src/suffix/planmemory_bridge.hpp
-cvpipeline_ub_model_cpp/src/planmemory/{mem_liveness_analysis,storage_entry,mem_plan}.hpp
-cvpipeline_ub_model_cpp/src/planmemory/planmemory_model.hpp
-cvpipeline_ub_model_cpp/src/cli/cvpipeline_ub_model.cpp
-cvpipeline_ub_model_cpp/src/cli/dev_validate.cpp
-cvpipeline_ub_model_cpp/tests/
+src/main.cpp                           唯一生产入口
+src/tools/dev_validate.cpp             开发 oracle/dump 入口
+src/pipeline/cvpipelining_ub_pipeline.hpp 真实 Pass 调用顺序
+scripts/plan_before_cvpipelining_ub.py
+run_demo_ub_plan.sh
 ```
 
-生产入口是 `cvpipeline_ub_model.cpp`；`dev_validate.cpp` 仅用于开发验证。
+生产入口：
+
+```bash
+./cvpipeline_ub_model_cpp/output/bin/cvpipeline_ub_model \
+  --before-cvpipelining-ir=<generic-before-cvpipelining.mlir> \
+  --cv-pipeline-depth=-1 \
+  --format=json
+```
+
+生产模式只有 `before CVPipelining -> PlanMemory` 一条入口。开发时可加 `--debug`
+在 stderr 输出真实 Pass 名和关键计数；再加 `--debug-dir=<dir>` 保存规范化阶段快照。
+`after-cvpipelining` 与 `before-plan-memory` 输入边界只允许和 `--debug-entry`、
+`--debug` 一起使用，不进入普通产品路径。
 
 ## 数据
 
 ```text
 cvpipeline_ub_model_cpp/data/adapter/
-cvpipeline_ub_model_cpp/data/before_cvpipeline/
-Output/adapters/<adapter>/<stage>/
-Output/index/
-Output/experiments/post_bufferization_pass_oracles/
-Output/index/c6_pass_oracles/summary.tsv
+cvpipeline_ub_model_cpp/data/before_cvpipelining/
+cvpipeline_ub_model_cpp/testdata/plan_memory/
+Output/adapters/<adapter>/<pass>/
+Output/index/<pass-or-boundary>/
 ```
 
-前两项是可提交的稳定输入数据；`Output/` 只保存可重新生成的 oracle、日志和
-中间 pass dump。
+`data/` 和 `testdata/` 是稳定输入；`Output/` 是可重新生成的 oracle、日志和 pass dump。
 
-## 常用命令
+## 验证命令
 
 ```bash
-cd cvpipeline_ub_model_cpp
-./scripts/build_dev_tools.sh
-./scripts/run_unit_tests.sh
-python3 scripts/validate_c7_planmemory_input.py --with-accesses
-python3 scripts/validate_planmemory_bridge_input.py --one-config-per-ir --max-failures=100
-python3 scripts/validate_d1_cvpipelining.py
-python3 scripts/validate_d3_end_to_end.py --seeds 0 --restrict-modes 0 --compare-text-plan
+bash cvpipeline_ub_model_cpp/scripts/build_dev_tools.sh
+bash cvpipeline_ub_model_cpp/scripts/run_unit_tests.sh
+python3 cvpipeline_ub_model_cpp/scripts/validate_config_test_matrix.py
+python3 cvpipeline_ub_model_cpp/scripts/validate_one_shot_bufferize_output.py --max-inputs=0 --jobs=8
+python3 cvpipeline_ub_model_cpp/scripts/validate_hivm_decompose_op.py
+python3 cvpipeline_ub_model_cpp/scripts/validate_alloc_extra_buffer.py
+python3 cvpipeline_ub_model_cpp/scripts/validate_inline_load_copy_buffer_projection.py
+python3 cvpipeline_ub_model_cpp/scripts/validate_mark_multi_buffer.py
+python3 cvpipeline_ub_model_cpp/scripts/validate_plan_memory_input.py --with-accesses
+python3 cvpipeline_ub_model_cpp/scripts/validate_plan_memory_input_matrix.py --axis-product --jobs=8
+python3 cvpipeline_ub_model_cpp/scripts/validate_before_cvpipelining_end_to_end.py \
+  --seeds 0 --restrict-modes 0 --compare-text-plan
 ```
 
-指定 PlanMemory-input bridge case：追加 `--only-hash=<full-sha256>`。构建真实 suffix：
+构建真实 suffix compiler：
 
 ```bash
 cmake --build build --target bishengir-cvpipeline-suffix-compile -j8
-```
-
-完整脚本说明以 `cvpipeline_ub_model_cpp/README.md` 为准。
-
-生产端到端入口：
-
-```bash
-python3 scripts/plan_precvpipeline_ub.py \
-  --pre-cvpipeline-ir=<generic-before-cvpipeline.mlir> \
-  --cv-pipeline-depth=-1 \
-  --random-seed=0 \
-  --format=text
-
-./output/bin/cvpipeline_ub_model \
-  --action=plan-before-cvpipeline \
-  --before-cvpipeline-ir=<generic-before-cvpipeline.mlir> \
-  --cv-pipeline-depth=-1 \
-  --random-seed=0 \
-  --format=json
 ```

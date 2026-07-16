@@ -2,7 +2,7 @@
 #define CVPIPELINE_UB_MODEL_CPP_ALLOC_EXTRA_BUFFER_ORACLE_HPP
 
 #include "bufferized_semantic_ir_oracle.hpp"
-#include "../suffix/after_alloc_extra_buffer.hpp"
+#include "../pipeline/after_alloc_extra_buffer.hpp"
 
 namespace cvub {
 

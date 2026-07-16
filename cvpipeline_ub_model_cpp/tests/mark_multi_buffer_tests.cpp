@@ -1,4 +1,4 @@
-#include "../src/suffix/mark_multi_buffer.hpp"
+#include "../src/passes/mark_multi_buffer.hpp"
 
 #include <iostream>
 #include <stdexcept>
@@ -41,7 +41,7 @@ cvub::AfterInlineLoadCopyState makeCopyCase(const std::string &name,
   cvub::ApplyOperationSemantics(module.operations[4]);
   afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized.accesses = {{4, 0, "arg:1:0"}, {4, 1, "local:0"}};
   afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.allocations.push_back(
-      {"memref<8xf32>", "", 0, "result:3:0", {}});
+      {"memref<8xf32>", "", 0, "result:3:0", {}, {}});
   afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.bufferMapping["local:0"] = "local:0";
   afterInlineLoadCopy.afterAllocExtraBuffer.buffers = {{"base:0", "base:0", "result:3:0", "memref<8xf32>",
                     space, 256, false, {8}}};
@@ -120,7 +120,7 @@ cvub::AfterInlineLoadCopyState makePreloadCase() {
   afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized.values.push_back(
       {30, "local:0", "memref<8xf32>", "result:3:0"});
   afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.allocations.push_back(
-      {"memref<8xf32>", "", 0, "result:3:0", {}});
+      {"memref<8xf32>", "", 0, "result:3:0", {}, {}});
   afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.bufferMapping["local:0"] = "local:0";
   afterInlineLoadCopy.afterAllocExtraBuffer.buffers = {{"base:0", "base:0", "result:3:0", "memref<8xf32>",
                     cvub::AddressSpace::UB, 256, false, {8}}};

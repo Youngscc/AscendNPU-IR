@@ -1,4 +1,4 @@
-#include "../src/suffix/inline_load_copy.hpp"
+#include "../src/passes/inline_load_copy.hpp"
 
 #include <iostream>
 #include <stdexcept>

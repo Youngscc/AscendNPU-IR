@@ -135,7 +135,7 @@ def greedy_pairwise(
     return selected
 
 
-def planmemory_batch() -> list[dict[str, object]]:
+def plan_memory_batch() -> list[dict[str, object]]:
     rows = []
     for restrict in (0, 1):
         for seed in range(20):
@@ -150,7 +150,7 @@ def planmemory_batch() -> list[dict[str, object]]:
     return rows
 
 
-def cvpipeline_batch() -> list[dict[str, object]]:
+def cvpipelining_batch() -> list[dict[str, object]]:
     rows = [{**default_config(), "disable_cv_pipelining": 1}]
     for lazy in (0, 1):
         rows.append({**default_config(), "enable_preload": 1,
@@ -317,11 +317,11 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random(RANDOM_SEED)
     batches = {
-        "p1_planmemory": planmemory_batch(),
-        "p2_cvpipeline": cvpipeline_batch(),
-        "p3_suffix_buffer": suffix_buffer_batch(rng),
-        "p4_layout": layout_batch(),
-        "p5_cross_priority": cross_priority_batch(rng),
+        "plan_memory": plan_memory_batch(),
+        "cvpipelining": cvpipelining_batch(),
+        "suffix_ub_passes": suffix_buffer_batch(rng),
+        "align_storage_infer_data_layout": layout_batch(),
+        "cvpipelining_suffix_plan_memory_cross": cross_priority_batch(rng),
     }
     summary = []
     all_rows: list[dict[str, object]] = []
@@ -340,11 +340,11 @@ def main() -> int:
         "w", newline="", encoding="utf-8"
     ) as output:
         writer = csv.writer(output, delimiter="\t", lineterminator="\n")
-        writer.writerow(("batch", "config_rows", "planmemory_runs_per_ir"))
+        writer.writerow(("batch", "config_rows", "plan_memory_runs_per_ir"))
         writer.writerows(summary)
     print(f"RANDOM_SEED={RANDOM_SEED}")
     for name, rows, expanded in summary:
-        print(f"{name}: configs={rows} planmemory_runs_per_ir={expanded}")
+        print(f"{name}: configs={rows} plan_memory_runs_per_ir={expanded}")
     return 0
 
 

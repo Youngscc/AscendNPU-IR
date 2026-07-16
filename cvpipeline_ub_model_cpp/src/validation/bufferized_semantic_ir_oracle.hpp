@@ -1,7 +1,8 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_BUFFERIZED_SEMANTIC_IR_ORACLE_HPP
 #define CVPIPELINE_UB_MODEL_CPP_BUFFERIZED_SEMANTIC_IR_ORACLE_HPP
 
-#include "../suffix/bufferized_semantic_ir.hpp"
+#include "../ir/generic_rewriter.hpp"
+#include "../pipeline/bufferized_semantic_ir.hpp"
 
 namespace cvub {
 
@@ -11,9 +12,58 @@ struct BufferizedSemanticIRValidation {
   std::vector<std::string> errors;
 };
 
+inline bool IsAIVFunctionForUBOracle(const GenericOperation &operation) {
+  if (operation.name != "func.func")
+    return false;
+  const std::string coreType =
+      FindDictionaryValue(operation.attributes, "hivm.func_core_type");
+  return coreType == "AIV" || coreType.find("<AIV>") != std::string::npos;
+}
+
+inline bool IsEntryFunctionForUBOracle(const GenericOperation &operation) {
+  return operation.name == "func.func" &&
+         HasSplitMixDictionaryEntry(operation.attributes, "hacc.entry");
+}
+
+inline GenericModule ProjectUBFunctionForOracle(GenericModule module) {
+  std::vector<int> aivFunctions;
+  std::vector<int> entryFunctions;
+  for (const GenericOperation &operation : module.operations) {
+    if (IsAIVFunctionForUBOracle(operation))
+      aivFunctions.push_back(operation.id);
+    if (IsEntryFunctionForUBOracle(operation))
+      entryFunctions.push_back(operation.id);
+  }
+  int selectedFunction = -1;
+  if (aivFunctions.size() == 1)
+    selectedFunction = aivFunctions.front();
+  else if (aivFunctions.empty() && entryFunctions.size() == 1)
+    selectedFunction = entryFunctions.front();
+  else
+    throw std::runtime_error(
+        "OneShotBufferize oracle: expected one AIV or one unsplit entry function");
+
+  GenericRewriter rewriter(module);
+  for (const GenericOperation &operation : module.operations) {
+    if (operation.name != "func.func")
+      continue;
+    if (operation.id == selectedFunction)
+      continue;
+    if (operation.blockId >= 0)
+      rewriter.removeFromBlock(operation.blockId, operation.id);
+  }
+  return CompactGenericModule(std::move(module));
+}
+
 inline bool HasShapedSemantics(const GenericOperation &operation) {
-  if (operation.name == "func.func")
-    return true;
+  if (operation.name == "func.func") {
+    const std::string functionType =
+        FindDictionaryValue(operation.properties, "function_type").empty()
+            ? FindDictionaryValue(operation.attributes, "function_type")
+            : FindDictionaryValue(operation.properties, "function_type");
+    return functionType.find("tensor<") != std::string::npos ||
+           functionType.find("memref<") != std::string::npos;
+  }
   return std::any_of(operation.operandTypes.begin(), operation.operandTypes.end(),
                      [](const std::string &type) {
                        return IsTensorType(type) || IsMemRefType(type);

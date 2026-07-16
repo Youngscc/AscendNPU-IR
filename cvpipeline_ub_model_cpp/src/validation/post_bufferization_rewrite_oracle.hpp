@@ -3,7 +3,7 @@
 
 #include "bufferized_semantic_ir_oracle.hpp"
 #include "hivm_decompose_op_oracle.hpp"
-#include "../suffix/post_bufferization_rewrites.hpp"
+#include "../passes/post_bufferization_rewrites.hpp"
 
 namespace cvub {
 

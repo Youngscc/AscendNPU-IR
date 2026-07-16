@@ -1,7 +1,7 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_HIVM_DECOMPOSE_OP_ORACLE_HPP
 #define CVPIPELINE_UB_MODEL_CPP_HIVM_DECOMPOSE_OP_ORACLE_HPP
 
-#include "../suffix/hivm_decompose_op.hpp"
+#include "../passes/hivm_decompose_op.hpp"
 
 namespace cvub {
 

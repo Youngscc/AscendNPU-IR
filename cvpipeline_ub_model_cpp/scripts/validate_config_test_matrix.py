@@ -12,11 +12,11 @@ from pathlib import Path
 
 
 EXPECTED_COUNTS = {
-    "p1_planmemory": 40,
-    "p2_cvpipeline": 15,
-    "p3_suffix_buffer": 48,
-    "p4_layout": 16,
-    "p5_cross_priority": 64,
+    "plan_memory": 40,
+    "cvpipelining": 15,
+    "suffix_ub_passes": 48,
+    "align_storage_infer_data_layout": 16,
+    "cvpipelining_suffix_plan_memory_cross": 64,
 }
 
 
@@ -48,11 +48,11 @@ def main() -> int:
 
     p1_pairs = {
         (item["plan_memory_seeds"], item["restrict_modes"])
-        for item in loaded["p1_planmemory"]
+        for item in loaded["plan_memory"]
     }
     require(p1_pairs == {(str(seed), str(restrict))
                          for seed in range(20) for restrict in (0, 1)},
-            "p1_planmemory is not the complete 20x2 matrix")
+            "plan_memory is not the complete 20x2 matrix")
 
     for batch, items in loaded.items():
         for item in items:
@@ -69,59 +69,61 @@ def main() -> int:
                         item["mix_multi_buffer_strategy"] == "only-cube",
                         f"{item['config_id']}: inactive multi-buffer strategy")
 
-    p2 = loaded["p2_cvpipeline"]
-    require(values(p2, "disable_cv_pipelining") == {"0", "1"},
-            "p2 missing CV on/off")
-    require(values(p2, "enable_preload") == {"0", "1"},
-            "p2 missing unroll/skew")
-    require(values(p2, "cv_pipeline_depth") ==
+    cvpipelining = loaded["cvpipelining"]
+    require(values(cvpipelining, "disable_cv_pipelining") == {"0", "1"},
+            "cvpipelining missing on/off")
+    require(values(cvpipelining, "enable_preload") == {"0", "1"},
+            "cvpipelining missing unroll/skew")
+    require(values(cvpipelining, "cv_pipeline_depth") ==
             {"-1", "0", "1", "2", "3", "4"},
-            "p2 missing depth boundary")
-    require(values(p2, "enable_cv_lazy_loading") == {"0", "1"},
-            "p2 missing lazy-loading mode")
+            "cvpipelining missing depth boundary")
+    require(values(cvpipelining, "enable_cv_lazy_loading") == {"0", "1"},
+            "cvpipelining missing lazy-loading mode")
 
-    p3 = loaded["p3_suffix_buffer"]
-    require(values(p3, "enable_auto_multi_buffer") == {"0", "1"},
-            "p3 missing auto multi-buffer mode")
-    require(values(p3, "local_multi_buffer_strategy") ==
+    suffix_ub_passes = loaded["suffix_ub_passes"]
+    require(values(suffix_ub_passes, "enable_auto_multi_buffer") == {"0", "1"},
+            "suffix_ub_passes missing auto multi-buffer mode")
+    require(values(suffix_ub_passes, "local_multi_buffer_strategy") ==
             {"no-l0c", "only-cube", "only-vector", "no-limit"},
-            "p3 missing local multi-buffer strategy")
-    require(values(p3, "mix_multi_buffer_strategy") ==
+            "suffix_ub_passes missing local multi-buffer strategy")
+    require(values(suffix_ub_passes, "mix_multi_buffer_strategy") ==
             {"no-l0c", "only-cube", "only-vector", "no-limit"},
-            "p3 missing mix multi-buffer strategy")
+            "suffix_ub_passes missing mix multi-buffer strategy")
     for field in ("enable_code_motion", "enable_ubuf_saving"):
-        require(values(p3, field) == {"0", "1"}, f"p3 missing {field}")
+        require(values(suffix_ub_passes, field) == {"0", "1"},
+                f"suffix_ub_passes missing {field}")
     for field in ("tile_mix_cube_loop", "tile_mix_vector_loop"):
-        require(values(p3, field) == {"1", "2", "4"},
-                f"p3 missing {field}")
+        require(values(suffix_ub_passes, field) == {"1", "2", "4"},
+                f"suffix_ub_passes missing {field}")
 
-    p4 = loaded["p4_layout"]
+    align_storage = loaded["align_storage_infer_data_layout"]
     layout_fields = (
         "disable_align_alloc_size", "enable_hivm_auto_storage_align",
         "disable_enable_stride_align", "disable_infer_hivm_data_layout",
     )
-    require(len({tuple(item[field] for field in layout_fields) for item in p4})
-            == 16, "p4 is not the exhaustive 2^4 layout matrix")
+    require(len({tuple(item[field] for field in layout_fields)
+                 for item in align_storage}) == 16,
+            "align_storage_infer_data_layout is not the exhaustive 2^4 matrix")
 
-    p5 = loaded["p5_cross_priority"]
+    cross_pass = loaded["cvpipelining_suffix_plan_memory_cross"]
     for field in layout_fields + (
         "disable_cv_pipelining", "enable_preload",
         "enable_cv_lazy_loading", "enable_auto_multi_buffer",
         "enable_code_motion", "enable_ubuf_saving",
     ):
-        require(values(p5, field) == {"0", "1"},
-                f"p5 missing binary domain for {field}")
-    require(values(p5, "cv_pipeline_depth") ==
+        require(values(cross_pass, field) == {"0", "1"},
+                f"cross-pass matrix missing binary domain for {field}")
+    require(values(cross_pass, "cv_pipeline_depth") ==
             {"-1", "0", "1", "2", "3", "4"},
-            "p5 missing CV depth domain")
+            "cross-pass matrix missing CVPipelining depth domain")
     for field in ("local_multi_buffer_strategy",
                   "mix_multi_buffer_strategy"):
-        require(values(p5, field) ==
+        require(values(cross_pass, field) ==
                 {"no-l0c", "only-cube", "only-vector", "no-limit"},
-                f"p5 missing strategy domain for {field}")
+                f"cross-pass matrix missing strategy domain for {field}")
     for field in ("tile_mix_cube_loop", "tile_mix_vector_loop"):
-        require(values(p5, field) == {"1", "2", "4"},
-                f"p5 missing tile domain for {field}")
+        require(values(cross_pass, field) == {"1", "2", "4"},
+                f"cross-pass matrix missing tile domain for {field}")
     require(len(rows(matrix / "all_configs.tsv")) == 183,
             "all_configs must contain all 183 rows")
 
@@ -136,7 +138,7 @@ def main() -> int:
                     f"{name}: checked-in data is not reproducible")
 
     print("CONFIG_TEST_MATRIX_VALIDATION=PASS")
-    print("configs=183 planned_planmemory_runs_per_input_before_hash_dedup=5760")
+    print("configs=183 planned_plan_memory_runs_per_input_before_hash_dedup=5760")
     return 0
 
 

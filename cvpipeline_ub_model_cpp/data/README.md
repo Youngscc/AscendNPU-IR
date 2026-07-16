@@ -6,7 +6,7 @@ inputs together under one development module.
 ```text
 data/
   adapter/             source ttadapter corpus
-  before_cvpipeline/   generic-form IR consumed by the lightweight model
+  before_cvpipelining/   generic-form IR consumed by the lightweight model
 ```
 
 ## Corpus
@@ -37,11 +37,11 @@ Keep adapters directly under `adapter/`. Generate or refresh the paired
 before-CVPipeline dataset with:
 
 ```bash
-bash cvpipeline_ub_model_cpp/scripts/dump_before_cvpipeline_dataset.sh
+bash cvpipeline_ub_model_cpp/scripts/dump_before_cvpipelining_dataset.sh
 ```
 
 Each generated adapter directory contains one file per CVPipelining boundary.
-`before_cvpipeline/manifest.tsv` records source hashes, compiler provenance,
+`before_cvpipelining/manifest.tsv` records source hashes, compiler provenance,
 and every generated relative path. Compiler logs and pass trees remain under
 the ignored `Output/` workspace and are not part of the checked-in dataset.
 
