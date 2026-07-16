@@ -1,8 +1,8 @@
 # 贡献指南
 
-本项目欢迎广大开发者体验并参与贡献。在参与社区贡献之前，请参见[ascend-community](https://gitcode.com/ascend/community)了解行为准则，完成[CLA 协议签署](https://clasign.osinfra.cn/sign/690ca9ddf91c03dee6082ab1)，并了解源码仓的贡献流程。
+本项目欢迎广大开发者体验并参与贡献。在参与社区贡献之前，请参见[ascend-community](https://gitcode.com/ascend/community)了解行为准则，完成[CLA协议签署](https://clasign.osinfra.cn/sign/690ca9ddf91c03dee6082ab1)，并了解源码仓的贡献流程。
 
-## ✍️ 如何签署 Ascend 社区贡献者许可协议（CLA）
+## ✍️如何签署Ascend社区贡献者许可协议（CLA）
 
 在参与社区贡献前，您需要签署Ascend社区贡献者许可协议（CLA）：
 
@@ -25,9 +25,9 @@
   您可以新建[Requirement|需求建议](https://gitcode.com/Ascend/AscendNPU-IR/issues/create?type=template&title=%E6%96%B0%E9%9C%80%E6%B1%82&template=.gitcode%252FISSUE_TEMPLATE%252Ffeature.yml)类Issue对新的样例算子予以说明，并提供您的设计方案，然后在评论框中输入“/assign”或“/assign @yourself”，将该Issue分配给您进行处理。
 
   对于您浏览的其他Issue：
-  - 若该问题正是您要解决的，请在问题下评论说明您将负责处理。
-  - 若问题已打开较久，解决前请先做预检查。
-  - 若您解决了自己报告的问题，关闭前请简要说明处理结果。
+    - 若该问题正是您要解决的，请在问题下评论说明您将负责处理。
+    - 若问题已打开较久，解决前请先做预检查。
+    - 若您解决了自己报告的问题，关闭前请简要说明处理结果。
 
 - 问题咨询
 
@@ -45,14 +45,14 @@
 
 ### 代码风格
 
-本代码仓采用LLVM社区通用的代码规范与编程风格，参见[LLVM 编码规范](https://llvm.org/docs/CodingStandards.html)。可使用以下工具进行代码风格检查：
+本代码仓采用LLVM社区通用的代码规范与编程风格，参见[LLVM编码规范](https://llvm.org/docs/CodingStandards.html)。可使用以下工具进行代码风格检查：
 
 - [Clang-Tidy](https://github.com/llvm/llvm-project/blob/main/.clang-tidy)
 - [CppLint](https://github.com/cpplint/cpplint)
 - [Cppcheck](http://cppcheck.sourceforge.net/)
 - [CMakeLint](https://github.com/cmake-lint/cmake-lint)
 
-### 提交 PR
+### 提交PR
 
 - 在[GitCode](https://gitcode.com/Ascend/AscendNPU-IR)上提出您的想法作为Issue。
 - 若新功能涉及较多设计细节，请同时提交设计方案。
@@ -60,7 +60,7 @@
 - PR经充分讨论后，将根据讨论结果进行合并、拒绝或关闭。
 - PR合入需2位Reviewer评论`/lgtm`（Looks Good To Me）及1位Approver评论`/approve`；PR提交者本人无法执行合入操作。
 
-### Fork-Pull 开发模式
+### Fork-Pull开发模式
 
 在向AscendNPU IR项目提交代码前，请先将项目Fork到您自己的仓库。后续在您Fork的仓库中进行开发，并通过Pull Request将变更合并到本项目。
 

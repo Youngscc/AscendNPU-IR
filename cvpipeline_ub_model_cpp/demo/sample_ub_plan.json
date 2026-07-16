@@ -1,16 +1,16 @@
 {
   "schema_version": 1,
   "input": {
-    "pre_cvpipeline_ir": "sample/before_cvpipeline_generic.mlir"
+    "before_cvpipelining_ir": "sample/before_cvpipelining_generic.mlir"
   },
   "options": {
-    "cvpipeline": {
+    "cvpipelining": {
       "disable_pipelining": false,
       "enable_lazy_loading": false,
       "enable_preload": false,
       "pipeline_depth": -1
     },
-    "suffix_planmemory": {
+    "suffix_plan_memory": {
       "enable_auto_multi_buffer": false,
       "local_multi_buffer_strategy": "no-limit",
       "mix_multi_buffer_strategy": "no-limit",
@@ -45,7 +45,7 @@
         "offset_bytes": 64
       }
     ],
-    "precision": "before_cvpipeline_model",
+    "precision": "before_cvpipelining_model",
     "required_bits": 768,
     "restrict_inplace_as_isa": false,
     "selected_seed": 0,

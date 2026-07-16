@@ -106,8 +106,11 @@ def plan_multiset_from_model(payload: dict) -> Counter[PlanKey]:
     if isinstance(payload.get("functions"), list):
         for function in payload["functions"]:
             for buffer in function.get("buffers", []):
-                multiset[(int(buffer["extent_bits"]),
-                          int(buffer["offset_bytes"]))] += 1
+                offsets = buffer.get("offsets_bytes")
+                if offsets is None:
+                    offsets = [buffer["offset_bytes"]]
+                for offset in offsets:
+                    multiset[(int(buffer["extent_bits"]), int(offset))] += 1
         return multiset
     result = payload.get("result", {})
     for buffer in result.get("plan", []):
@@ -127,10 +130,13 @@ def normalized_lifetimes_from_model(payload: dict) -> Counter[LifetimeKey]:
         })
         ranks = {time: rank for rank, time in enumerate(event_times)}
         for buffer in buffers:
-            result[(name, int(buffer["extent_bits"]),
-                    int(buffer["offset_bytes"]),
-                    ranks[int(buffer["alloc_time"])],
-                    ranks[int(buffer["free_time"])])] += 1
+            offsets = buffer.get("offsets_bytes")
+            if offsets is None:
+                offsets = [buffer["offset_bytes"]]
+            for offset in offsets:
+                result[(name, int(buffer["extent_bits"]), int(offset),
+                        ranks[int(buffer["alloc_time"])],
+                        ranks[int(buffer["free_time"])])] += 1
     return result
 
 

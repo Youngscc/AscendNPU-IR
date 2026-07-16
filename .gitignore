@@ -33,6 +33,9 @@ dist/
 # --- OS ---
 .DS_Store
 Thumbs.db
+cvpipeline_ub_model_cpp/output/
+memory_info_aic.json
+memory_info_aiv.json
 
 # --- Optional: Cursor agent / logs (uncomment if you want to ignore)
 # .cursor/agent-transcripts/

@@ -91,8 +91,7 @@ def main() -> int:
             for seed in selected_seeds:
                 model_command = [
                     str(args.model),
-                    "--action=plan-before-cvpipeline",
-                    f"--before-cvpipeline-ir={input_path}",
+                    f"--before-cvpipelining-ir={input_path}",
                     f"--random-seed={seed}",
                     "--format=json",
                     f"--enable-auto-multi-buffer={'true' if args.enable_auto_multi_buffer else 'false'}",
@@ -211,23 +210,32 @@ def main() -> int:
                 model_plan = plan_multiset_from_model(payload)
                 model_lifetimes = normalized_lifetimes_from_model(payload)
                 model_multi, model_inplace = model_multi_and_inplace(payload)
-                if (oracle_peak != model_peak or oracle_plan != model_plan or
-                        oracle_lifetimes != model_lifetimes or
-                        oracle_status != payload.get("status") or
-                        oracle_required != int(payload["required_bits"]) or
-                        oracle_multi != model_multi or
-                        oracle_inplace != model_inplace):
+                differences = []
+                if oracle_status != payload.get("status"):
+                    differences.append("status")
+                if oracle_required != int(payload["required_bits"]):
+                    differences.append("required")
+                if oracle_peak != model_peak:
+                    differences.append("peak")
+                if oracle_plan != model_plan:
+                    differences.append("plan")
+                if oracle_lifetimes != model_lifetimes:
+                    differences.append("lifetime")
+                if oracle_multi != model_multi:
+                    differences.append("multi")
+                if oracle_inplace != model_inplace:
+                    differences.append("inplace")
+                if differences:
                     failures.append(
-                        f"{relative} seed {seed}: status/required/peak/plan/"
-                        "lifetime/multi/inplace differ "
+                        f"{relative} seed {seed}: {','.join(differences)} differ "
                         f"(model peak={model_peak}, oracle peak={oracle_peak}, "
                         f"model buffers={sum(model_plan.values())}, "
                         f"oracle buffers={sum(oracle_plan.values())})")
                     break
             if not case_was_blocker and args.check_retry:
                 retry_model_command = [
-                    str(args.model), "--action=plan-before-cvpipeline",
-                    f"--before-cvpipeline-ir={input_path}", "--format=json",
+                    str(args.model),
+                    f"--before-cvpipelining-ir={input_path}", "--format=json",
                     f"--enable-auto-multi-buffer={'true' if args.enable_auto_multi_buffer else 'false'}",
                     "--limit-auto-multi-buffer-of-local-buffer",
                     args.local_multi_buffer_strategy,
