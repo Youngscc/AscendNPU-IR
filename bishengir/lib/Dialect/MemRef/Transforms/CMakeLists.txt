@@ -14,6 +14,9 @@ add_bishengir_library(BiShengIRMemRefTransforms
 
   LINK_LIBS PUBLIC
   MLIRMemRefDialect
+  BiShengIRDialectUtils
+  BiShengIRHACCUtils
+  BiShengIRHIVMDialect
   MLIRIR
   MLIRDialect
   MLIRPass

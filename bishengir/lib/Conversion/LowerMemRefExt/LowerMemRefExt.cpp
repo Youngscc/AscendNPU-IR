@@ -89,13 +89,27 @@ public:
       }
 
       assert(selectCounter);
-      for (size_t i = 1; i < offset.size(); i++) {
-        Value curIdx = rewriter.create<arith::ConstantOp>(
-          loc, rewriter.getIndexAttr(i));
-        Value selectCondition = rewriter.create<arith::CmpIOp>(
-          loc, arith::CmpIPredicate::eq, selectCounter, curIdx);
+      const bool isRegBased =
+          hacc::utils::isRegBasedArch(op->getParentOfType<ModuleOp>());
+      if (isRegBased) {
+        // A5 regbase: hardcoded size-2 IndexCastOp+SelectOp
+        assert(offset.size() <= 2 &&
+               "regbase path only supports size-2 double-buffer offsets");
+        Value selectCondition = rewriter.create<arith::IndexCastOp>(
+            loc, rewriter.getI1Type(), selectCounter);
         localOffset = rewriter.create<arith::SelectOp>(
-          loc, selectCondition, offset[i], localOffset);
+            loc, rewriter.getIndexType(), selectCondition, offset[1],
+            offset[0]);
+      } else {
+        // A3 membase: general for-loop supporting offset.size() 1/2/4
+        for (size_t i = 1; i < offset.size(); i++) {
+          Value curIdx = rewriter.create<arith::ConstantOp>(
+            loc, rewriter.getIndexAttr(i));
+          Value selectCondition = rewriter.create<arith::CmpIOp>(
+            loc, arith::CmpIPredicate::eq, selectCounter, curIdx);
+          localOffset = rewriter.create<arith::SelectOp>(
+            loc, selectCondition, offset[i], localOffset);
+        }
       }
     }
 
@@ -165,6 +179,20 @@ std::optional<int64_t> getLocalWorkSpaceSize(ModuleOp moduleOp) {
 // block sync injection and this lower step.
 void MemrefExtLowering::runOnOperation() {
   ModuleOp moduleOp = cast<ModuleOp>(getOperation());
+
+  // regbase-only
+  if (hacc::utils::isRegBasedArch(moduleOp)) {
+    moduleOp->walk([&](func::FuncOp funcOp) {
+      auto subWorkspaceArg =
+          hacc::utils::getBlockArgument(funcOp,
+                                        hacc::KernelArgType::kSubWorkspace);
+      if (subWorkspaceArg) {
+        if (!subWorkspaceArg->use_empty())
+          return signalPassFailure();
+        funcOp.eraseArgument(subWorkspaceArg->getArgNumber());
+      }
+    });
+  }
 
   auto localWorkSpaceSize = getLocalWorkSpaceSize(moduleOp);
   if (!localWorkSpaceSize.has_value())

@@ -58,7 +58,8 @@ const std::map<HACCFuncType, std::set<std::string>> kFuncType2DisallowedAttrs =
           GetTilingStructSizeFunctionAttr::name.str(),
           InferSyncBlockLockNumFunctionAttr::name.str(),
           InferSyncBlockLockInitFunctionAttr::name.str(),
-          InferTaskTypeFunctionAttr::name.str()}},
+          InferTaskTypeFunctionAttr::name.str(),
+          InferVFModeFunctionAttr::name.str()}},
      {HACCFuncType::DEVICE, {HostFuncTypeAttr::name.str()}}};
 
 void setFuncType(Operation *op, HACCFuncType funcType) {

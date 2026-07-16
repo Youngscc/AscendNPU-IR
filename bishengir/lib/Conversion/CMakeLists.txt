@@ -1,5 +1,7 @@
 add_subdirectory(ArithToAffine)
 add_subdirectory(ArithToHFusion)
+add_subdirectory(ArithToHIVMLLVM)
+add_subdirectory(HACCToLLVM)
 add_subdirectory(GPUToHFusion)
 add_subdirectory(HIVMToStandard)
 add_subdirectory(HFusionToHIVM)

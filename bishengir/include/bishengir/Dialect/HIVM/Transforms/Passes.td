@@ -558,6 +558,22 @@ def AlignAllocSize : Pass<"hivm-align-alloc-size", "func::FuncOp"> {
                            "annotation::AnnotationDialect"];
 }
 
+def PreMarkStrideAlign : Pass<"hivm-pre-mark-stride-align", "func::FuncOp"> {
+  let summary =
+      "Pre-analysis for stride alignment: mark allocs that must skip alignment";
+  let description = [{
+    Detect DMA-loaded buffers that will be vload'd in vector functions
+    where stride alignment would create inter-row gaps, and annotate
+    their root allocs for the subsequent MarkStrideAlign pass to skip.
+  }];
+  let constructor = "mlir::hivm::createPreMarkStrideAlignPass()";
+  let dependentDialects = ["mlir::func::FuncDialect",
+                           "mlir::memref::MemRefDialect",
+                           "hivm::HIVMDialect",
+                           "annotation::AnnotationDialect",
+  ];
+}
+
 def MarkStrideAlign : Pass<"hivm-mark-stride-align", "func::FuncOp"> {
   let summary =
       "Automatically annotate stride_align marks for operands of hivm ops";
@@ -777,6 +793,13 @@ def HIVMInlineOTFLoadStore : Pass<"hivm-inline-otf-load-store", "func::FuncOp"> 
   let dependentDialects = ["bufferization::BufferizationDialect",
                            "memref::MemRefDialect","tensor::TensorDialect",
                            "hivm::HIVMDialect"];
+}
+
+def AnalyzeArithVectorMask : Pass<"arith-vector-mask-analyze", "func::FuncOp"> {
+  let summary = "Analyze arith/vector mask to eliminate select OP";
+  let constructor = "mlir::hivm::createArithVectorMaskAnalysisPass()";
+  let dependentDialects = ["arith::ArithDialect", "vector::VectorDialect",
+                           "annotation::AnnotationDialect"];
 }
 
 def TileAndBindSubBlock : Pass<"hivm-bind-sub-block", "ModuleOp"> {

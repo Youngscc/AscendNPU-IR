@@ -17,9 +17,12 @@
 
 #include "bishengir/Conversion/ArithToAffine/ArithToAffine.h"
 
+#include "bishengir/Dialect/HACC/Utils/Utils.h"
+
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -116,18 +119,31 @@ struct ArithToAffineConversionPass
 
 void ArithToAffineConversionPass::runOnOperation() {
   auto *module = getOperation();
+  auto moduleOp = dyn_cast<ModuleOp>(module);
+  const bool isMembase =
+      moduleOp && hacc::utils::isMemBasedArch(moduleOp);
+
   ConversionTarget target(getContext());
   target.addLegalDialect<affine::AffineDialect>();
+
+  auto isNonIndexTyped = [](Operation *op) {
+    assert(op->getNumOperands() ==
+           2); // candidate arith must have 2 operands
+    Value lhs = op->getOperand(0);
+    Value rhs = op->getOperand(1);
+    return !lhs.getType().isIndex() || !rhs.getType().isIndex();
+  };
+
   target.addDynamicallyLegalOp<arith::AddIOp, arith::SubIOp, arith::MulIOp,
                                arith::CeilDivSIOp, arith::DivSIOp,
-                               arith::RemSIOp, arith::MaxSIOp, arith::MinSIOp>(
-      [](Operation *op) {
-        assert(op->getNumOperands() ==
-               2); // candidate arith must have 2 operands
-        Value lhs = op->getOperand(0);
-        Value rhs = op->getOperand(1);
-        return !lhs.getType().isIndex() || !rhs.getType().isIndex();
-      });
+                               arith::RemSIOp>(isNonIndexTyped);
+
+  // membase-only
+  if (isMembase) {
+    target.addDynamicallyLegalOp<arith::MaxSIOp, arith::MinSIOp>(
+        isNonIndexTyped);
+  }
+
   RewritePatternSet patterns(&getContext());
   arith::populateArithToAffineConversionPatterns(patterns);
   if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
