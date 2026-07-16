@@ -771,8 +771,8 @@ inline PlanMemoryModelResult PlanLocalMemoryImpl(
       const LifetimeRecord &life = lifeByName.at(name);
       plannedByName.emplace(
           name, PlannedBufferRecord{name, info.constBits, info.constBits,
-                                    std::move(item.second), life.allocTime,
-                                    life.freeTime});
+                                    std::move(item.second), life.directAllocTime,
+                                    life.directFreeTime});
     }
     for (auto &item : plannedByName)
       result.buffers.push_back(std::move(item.second));

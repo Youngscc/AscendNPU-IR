@@ -43,6 +43,7 @@ CVPipelining 参数：
 
 suffix / PlanMemory 参数：
   --suffix-enable-auto-multi-buffer true|false
+  --suffix-enable-triton-kernel-compile true|false
   --suffix-local-multi-buffer-strategy no-limit|only-cube|only-vector|no-l0c
   --suffix-mix-multi-buffer-strategy no-limit|only-cube|only-vector|no-l0c
   --restrict-inplace-as-isa true|false
@@ -126,6 +127,7 @@ cvpipeline_ub_model_cpp/output/bin/cvpipeline_ub_model \
   --enable-preload=false \
   --enable-cv-lazy-loading=false \
   --enable-auto-multi-buffer=false \
+  --enable-triton-kernel-compile=false \
   --limit-auto-multi-buffer-of-local-buffer no-l0c \
   --limit-auto-multi-buffer-buffer only-cube \
   --format=json
@@ -148,6 +150,7 @@ CVPipelining：
 
 suffix / PlanMemory：
   --enable-auto-multi-buffer true|false
+  --enable-triton-kernel-compile true|false
   --limit-auto-multi-buffer-of-local-buffer STRATEGY
   --limit-auto-multi-buffer-buffer STRATEGY
   --restrict-inplace-as-isa
@@ -204,6 +207,7 @@ build/bin/bishengir-cvpipeline-suffix-compile \
   --enable-preload=false \
   --enable-cv-lazy-loading=false \
   --enable-auto-multi-buffer=false \
+  --enable-triton-kernel-compile=false \
   --limit-auto-multi-buffer-of-local-buffer no-l0c \
   --limit-auto-multi-buffer-buffer only-cube \
   -o cvpipeline_ub_model_cpp/output/demo/suffix_after_planmemory.mlir

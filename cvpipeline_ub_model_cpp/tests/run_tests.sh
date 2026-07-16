@@ -15,3 +15,5 @@ cvpipeline_ub_model_cpp/output/tests/test_capability_parity
 
 python3 cvpipeline_ub_model_cpp/tests/test_capability_manifest.py
 python3 cvpipeline_ub_model_cpp/tests/test_merged_report.py
+python3 cvpipeline_ub_model_cpp/tests/test_oracle_comparison.py
+python3 cvpipeline_ub_model_cpp/tests/test_triton_option_sync.py

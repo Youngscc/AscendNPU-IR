@@ -50,7 +50,7 @@ assert [item["ub_peak_bits"] for item in report["functions"]] == [
 
 print("[PASS] merged CLI reports independent AIV plans")
 
-blocked = subprocess.run(
+inplace = subprocess.run(
     [
         str(MODEL),
         f"--before-cvpipelining-ir={VECTOR_ADD}",
@@ -61,16 +61,19 @@ blocked = subprocess.run(
     capture_output=True,
     check=False,
 )
-assert blocked.returncode == 1, blocked
-blocked_report = json.loads(blocked.stdout)
-assert blocked_report["precision"] == "incomplete", blocked_report
-assert blocked_report["status"] == "blocker", blocked_report
-assert blocked_report["ub_peak_bits"] is None, blocked_report
-assert blocked_report["required_bits"] is None, blocked_report
-assert blocked_report["functions"] == [], blocked_report
-assert blocked_report["debug_estimate"]["ub_peak_bits"] == 65536, blocked_report
+assert inplace.returncode == 0, inplace
+inplace_report = json.loads(inplace.stdout)
+assert inplace_report["precision"] == "exact", inplace_report
+assert inplace_report["status"] == "success", inplace_report
+assert inplace_report["ub_peak_bits"] == 65536, inplace_report
+assert inplace_report["required_bits"] == 65536, inplace_report
+assert inplace_report["functions"][0]["inplace_pairs"], inplace_report
+assert [
+    (buffer["alloc_time"], buffer["free_time"])
+    for buffer in inplace_report["functions"][0]["buffers"]
+] == [(25, 39), (34, 39), (39, 43)], inplace_report
 
-print("[PASS] unproved inplace planning is debug-only")
+print("[PASS] default PlanMemory inplace pairs remain exact")
 
 exception_blocked = subprocess.run(
     [
@@ -105,12 +108,11 @@ wrapped = subprocess.run(
     capture_output=True,
     check=False,
 )
-assert wrapped.returncode == 1, wrapped
+assert wrapped.returncode == 0, wrapped
 wrapped_report = json.loads(wrapped.stdout)
-assert wrapped_report["result"]["precision"] == "incomplete", wrapped_report
-assert wrapped_report["result"]["functions"] == [], wrapped_report
-assert wrapped_report["result"]["plan"] == [], wrapped_report
-assert wrapped_report["result"]["peak_bits"] is None, wrapped_report
-assert wrapped_report["result"]["debug_estimate"]["ub_peak_bits"] == 65536, wrapped_report
+assert wrapped_report["result"]["precision"] == "exact", wrapped_report
+assert wrapped_report["result"]["functions"][0]["inplace_pairs"], wrapped_report
+assert wrapped_report["result"]["plan"], wrapped_report
+assert wrapped_report["result"]["peak_bits"] == 65536, wrapped_report
 
-print("[PASS] Python wrapper preserves structured blocker reports")
+print("[PASS] Python wrapper preserves exact inplace reports")

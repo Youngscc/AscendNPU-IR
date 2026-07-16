@@ -1479,6 +1479,20 @@ void MemPlan::DumpDebugState(llvm::raw_ostream &os, uint32_t attempt,
   os << "PLANMEM_PLAN_ATTEMPT\t" << func_.getSymName() << '\t' << attempt
      << '\t'
      << (success ? "success" : "failure") << '\n';
+  os << "PLANMEM_APPLIED_INPLACE_COUNT\t" << attempt << '\t'
+     << inplacePairList.size() << '\n';
+  for (const ValuePair &pair : inplacePairList) {
+    os << "PLANMEM_APPLIED_INPLACE\t" << attempt << '\t';
+    printDebugValue(os, pair.first);
+    os << '\t';
+    printDebugValue(os, pair.second);
+    os << '\n';
+    auto firstId = bufferDebugIds.find(pair.first);
+    auto secondId = bufferDebugIds.find(pair.second);
+    if (firstId != bufferDebugIds.end() && secondId != bufferDebugIds.end())
+      os << "PLANMEM_EXACT_APPLIED_INPLACE\t" << attempt << '\t'
+         << firstId->second << '\t' << secondId->second << '\n';
+  }
   for (const auto &entryPtr : StorageEntryVec) {
     const StorageEntry &entry = *entryPtr;
     os << "PLANMEM_STORAGE\t" << attempt << '\t'
@@ -1601,9 +1615,9 @@ void MemPlan::UpdateMultiBufferReuseExtraOffset() {
 
 void MemPlan::MergeInplaceSE() {
   // get the list of inplace value pair.
-  SmallVector<ValuePair> inplaceList = GenerateInplaceList();
+  inplacePairList = GenerateInplaceList();
   // try to merge storage entries. genSE is replaced by KillSE.
-  for (const auto &pairIter : inplaceList) {
+  for (const auto &pairIter : inplacePairList) {
     const StorageEntry *genSE = buffer2storageEntry[pairIter.first];
     StorageEntry *killSE = buffer2storageEntry[pairIter.second];
     if (genSE == killSE) {

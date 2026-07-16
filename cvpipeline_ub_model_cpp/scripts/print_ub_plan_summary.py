@@ -88,6 +88,7 @@ def main() -> int:
     print("Suffix / PlanMemory options")
     print(divider())
     print(f"auto_multi_buffer  : {bool_text(suffix.get('enable_auto_multi_buffer'))}")
+    print(f"triton_compile     : {bool_text(suffix.get('enable_triton_kernel_compile'))}")
     print(f"local_strategy     : {suffix.get('local_multi_buffer_strategy')}")
     print(f"mix_strategy       : {suffix.get('mix_multi_buffer_strategy')}")
     print(f"random_seed input  : {suffix.get('random_seed')}")

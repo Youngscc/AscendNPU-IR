@@ -12,24 +12,62 @@ from typing import Counter
 
 PlanKey = tuple[int, int]
 LifetimeKey = tuple[str, int, int, int, int]
+BufferIdentity = tuple[str, int, tuple[int, ...], int, int]
+InplaceKey = tuple[BufferIdentity, BufferIdentity]
 
 
-def model_multi_and_inplace(payload: dict) -> tuple[Counter[int], int]:
+def canonical_function_name(name: str) -> str:
+    for suffix in ("_mix_aiv", "_mix_aic"):
+        if name.endswith(suffix):
+            return name[:-len(suffix)]
+    return name
+
+
+def model_result_payload(payload: dict) -> dict:
+    result = payload.get("result")
+    return result if isinstance(result, dict) else payload
+
+
+def model_multi_and_inplace(
+    payload: dict,
+) -> tuple[Counter[int], Counter[InplaceKey]]:
+    payload = model_result_payload(payload)
     multi: Counter[int] = collections.Counter()
-    inplace = 0
+    inplace: Counter[InplaceKey] = collections.Counter()
     for function in payload.get("functions", []):
+        function_name = canonical_function_name(
+            str(function.get("function", ""))
+        )
         by_name: dict[str, int] = {}
+        identity_by_name: dict[str, BufferIdentity] = {}
         for buffer in function.get("buffers", []):
             name = str(buffer.get("name", ""))
             by_name[name] = int(buffer.get("multi_buffer_num", 1))
+            offsets = buffer.get("offsets_bytes")
+            if offsets is None:
+                offsets = [buffer["offset_bytes"]]
+            identity_by_name[name] = (
+                function_name,
+                int(buffer["extent_bits"]),
+                tuple(sorted(int(offset) for offset in offsets)),
+                int(buffer["alloc_time"]),
+                int(buffer["free_time"]),
+            )
         multi.update(by_name.values())
-        inplace += len(function.get("inplace_pairs", []))
+        for pair in function.get("inplace_pairs", []):
+            if len(pair) != 2:
+                raise ValueError(f"invalid model inplace pair: {pair!r}")
+            first = str(pair[0])
+            second = str(pair[1])
+            if first not in identity_by_name or second not in identity_by_name:
+                raise ValueError(f"model inplace pair references unknown buffer: {pair!r}")
+            inplace[(identity_by_name[first], identity_by_name[second])] += 1
     return multi, inplace
 
 
 def parse_oracle_contract(
     path: Path, attempt: int, scope: str,
-) -> tuple[str, int, Counter[int], int]:
+) -> tuple[str, int, Counter[int], Counter[InplaceKey]]:
     """Parse status/required/multi/inplace facts omitted by the legacy tuple."""
     current_function = ""
     statuses: list[str] = []
@@ -38,16 +76,21 @@ def parse_oracle_contract(
     planned_required = 0
     peak = 0
     ub_buffers: set[tuple[str, str]] = set()
+    buffer_lives: dict[tuple[str, str], tuple[int, int, int]] = {}
+    planned_offsets: dict[tuple[str, str], list[int]] = collections.defaultdict(list)
     multi_by_buffer: dict[tuple[str, str], int] = {}
-    inplace = 0
+    initial_inplace_ids: list[tuple[str, str, str]] = []
+    applied_inplace_ids: list[tuple[str, str, str]] = []
+    applied_inplace_expected = 0
+    applied_inplace_dumped = False
     for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         fields = raw_line.split("\t")
         if not fields:
             continue
         if fields[0] == "PLANMEM_LIVENESS_ATTEMPT" and len(fields) >= 4:
-            current_function = fields[1]
+            current_function = canonical_function_name(fields[1])
         elif fields[0] == "PLANMEM_PLAN_ATTEMPT" and len(fields) >= 4:
-            current_function = fields[1]
+            current_function = canonical_function_name(fields[1])
             if int(fields[2]) == attempt:
                 statuses.append(fields[3])
         elif (fields[0] == "PLANMEM_REQUIRED" and len(fields) >= 4 and
@@ -64,25 +107,59 @@ def parse_oracle_contract(
               len(fields) >= 6 and int(fields[1]) == attempt and
               fields[2] == scope):
             extent = int(fields[4])
+            key = (current_function, fields[3])
             aligned_extent = ((extent + 255) // 256) * 256
             for offset in fields[5:]:
+                planned_offsets[key].append(int(offset))
                 planned_required = max(
                     planned_required, int(offset) * 8 + aligned_extent)
         elif (fields[0] == "PLANMEM_EXACT_BUFFER" and len(fields) >= 8 and
               int(fields[1]) == attempt and fields[4] == scope):
-            ub_buffers.add((current_function, fields[2]))
+            key = (current_function, fields[2])
+            ub_buffers.add(key)
+            buffer_lives[key] = (int(fields[3]), int(fields[6]), int(fields[7]))
         elif (fields[0] == "PLANMEM_EXACT_MULTI" and len(fields) >= 4 and
               int(fields[1]) == attempt):
             multi_by_buffer[(current_function, fields[2])] = int(fields[3])
         elif (fields[0] == "PLANMEM_EXACT_INPLACE" and len(fields) >= 4 and
               int(fields[1]) == attempt):
-            inplace += 1
+            initial_inplace_ids.append((current_function, fields[2], fields[3]))
+        elif (fields[0] == "PLANMEM_APPLIED_INPLACE_COUNT" and
+              len(fields) >= 3 and int(fields[1]) == attempt):
+            applied_inplace_dumped = True
+            applied_inplace_expected += int(fields[2])
+        elif (fields[0] == "PLANMEM_EXACT_APPLIED_INPLACE" and
+              len(fields) >= 4 and int(fields[1]) == attempt):
+            applied_inplace_ids.append((current_function, fields[2], fields[3]))
     status = "success" if statuses and all(value == "success" for value in statuses) \
         else "overflow"
     if status == "success" and required == 0:
         required = planned_required or storage_required or peak
     multi: Counter[int] = collections.Counter(
         multi_by_buffer.get(buffer, 1) for buffer in ub_buffers)
+    if applied_inplace_dumped and len(applied_inplace_ids) != \
+            applied_inplace_expected:
+        raise ValueError("oracle applied inplace dump is incomplete")
+    selected_inplace_ids = (
+        applied_inplace_ids if applied_inplace_dumped else initial_inplace_ids
+    )
+    inplace: Counter[InplaceKey] = collections.Counter()
+    for function, first_id, second_id in selected_inplace_ids:
+        first_key = (function, first_id)
+        second_key = (function, second_id)
+        if first_key not in buffer_lives or second_key not in buffer_lives:
+            continue
+        first_extent, first_alloc, first_free = buffer_lives[first_key]
+        second_extent, second_alloc, second_free = buffer_lives[second_key]
+        first_identity: BufferIdentity = (
+            function, first_extent,
+            tuple(sorted(planned_offsets[first_key])), first_alloc, first_free,
+        )
+        second_identity: BufferIdentity = (
+            function, second_extent,
+            tuple(sorted(planned_offsets[second_key])), second_alloc, second_free,
+        )
+        inplace[(first_identity, second_identity)] += 1
     return status, required, multi, inplace
 
 
@@ -101,6 +178,7 @@ def parse_args() -> argparse.Namespace:
 
 def plan_multiset_from_model(payload: dict) -> Counter[PlanKey]:
     multiset: Counter[PlanKey] = collections.Counter()
+    payload = model_result_payload(payload)
     # Current plan-before-cvpipeline reports are flat and group buffers under
     # functions[].  Keep the historical nested shape readable for old artifacts.
     if isinstance(payload.get("functions"), list):
@@ -112,16 +190,16 @@ def plan_multiset_from_model(payload: dict) -> Counter[PlanKey]:
                 for offset in offsets:
                     multiset[(int(buffer["extent_bits"]), int(offset))] += 1
         return multiset
-    result = payload.get("result", {})
-    for buffer in result.get("plan", []):
+    for buffer in payload.get("plan", []):
         multiset[(int(buffer["extent_bits"]), int(buffer["offset_bytes"]))] += 1
     return multiset
 
 
 def normalized_lifetimes_from_model(payload: dict) -> Counter[LifetimeKey]:
     result: Counter[LifetimeKey] = collections.Counter()
+    payload = model_result_payload(payload)
     for function in payload.get("functions", []):
-        name = str(function.get("function", ""))
+        name = canonical_function_name(str(function.get("function", "")))
         buffers = function.get("buffers", [])
         event_times = sorted({
             int(buffer[key])
@@ -159,10 +237,10 @@ def parse_oracle(
             continue
         tag = fields[0]
         if tag == "PLANMEM_LIVENESS_ATTEMPT" and len(fields) >= 4:
-            current_function = fields[1]
+            current_function = canonical_function_name(fields[1])
             function_for_attempt[int(fields[2])] = current_function
         elif tag == "PLANMEM_PLAN_ATTEMPT" and len(fields) >= 4:
-            current_function = fields[1]
+            current_function = canonical_function_name(fields[1])
             function_for_attempt[int(fields[2])] = current_function
             if fields[3] == "success":
                 success_attempts.append(int(fields[2]))
@@ -233,9 +311,9 @@ def parse_oracle_retry(
         if not fields:
             continue
         if fields[0] == "PLANMEM_LIVENESS_ATTEMPT" and len(fields) >= 4:
-            current_function = fields[1]
+            current_function = canonical_function_name(fields[1])
         elif fields[0] == "PLANMEM_PLAN_ATTEMPT" and len(fields) >= 4:
-            current_function = fields[1]
+            current_function = canonical_function_name(fields[1])
             if fields[3] == "success" and current_function not in successful:
                 successful[current_function] = int(fields[2])
         elif fields[0] == "PLANMEM_PEAK" and len(fields) >= 4:
@@ -304,9 +382,9 @@ def print_counter_diff(
 def main() -> int:
     args = parse_args()
     payload = json.loads(args.model_json.read_text(encoding="utf-8"))
-    if payload.get("precision") == "incomplete" or payload.get("status") == "blocker":
+    result = model_result_payload(payload)
+    if result.get("precision") == "incomplete" or result.get("status") == "blocker":
         raise ValueError("model report is not an authoritative exact plan")
-    result = payload.get("result", payload)
     model_peak = int(result.get("peak_bits") or result.get("ub_peak_bits") or 0)
     model_attempt = result.get("selected_seed")
     selected_attempt = args.attempt
@@ -324,8 +402,8 @@ def main() -> int:
     peak_match = oracle_peak == model_peak
     plan_match = oracle_plan == model_plan
     lifetime_match = oracle_lifetimes == model_lifetimes
-    status_match = oracle_status == payload.get("status")
-    model_required = int(payload.get("required_bits") or model_peak)
+    status_match = oracle_status == result.get("status")
+    model_required = int(result.get("required_bits") or model_peak)
     required_match = oracle_required == model_required
     multi_match = oracle_multi == model_multi
     inplace_match = oracle_inplace == model_inplace

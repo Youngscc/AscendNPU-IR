@@ -26,6 +26,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cv-enable-preload", action="store_true")
     parser.add_argument("--cv-enable-lazy-loading", action="store_true")
     parser.add_argument("--suffix-enable-auto-multi-buffer", action="store_true")
+    parser.add_argument("--suffix-enable-triton-kernel-compile",
+                        action="store_true")
     parser.add_argument("--suffix-local-multi-buffer-strategy", default="no-limit")
     parser.add_argument("--suffix-mix-multi-buffer-strategy", default="no-limit")
     parser.add_argument("--restrict-inplace-as-isa", action="store_true")
@@ -48,6 +50,7 @@ def main() -> int:
         f"--cv-enable-preload={str(args.cv_enable_preload).lower()}",
         f"--cv-enable-lazy-loading={str(args.cv_enable_lazy_loading).lower()}",
         f"--suffix-enable-auto-multi-buffer={str(args.suffix_enable_auto_multi_buffer).lower()}",
+        f"--suffix-enable-triton-kernel-compile={str(args.suffix_enable_triton_kernel_compile).lower()}",
         f"--suffix-local-multi-buffer-strategy={args.suffix_local_multi_buffer_strategy}",
         f"--suffix-mix-multi-buffer-strategy={args.suffix_mix_multi_buffer_strategy}",
         "--format=json",

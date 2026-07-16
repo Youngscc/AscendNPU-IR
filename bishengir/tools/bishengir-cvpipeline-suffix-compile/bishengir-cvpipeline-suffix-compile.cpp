@@ -409,7 +409,7 @@ static llvm::cl::opt<bool> restrictInplaceAsISA(
 static llvm::cl::opt<bool> enableTritonKernelCompile(
     "enable-triton-kernel-compile",
     llvm::cl::desc("Keep Triton-specific suffix passes enabled"),
-    llvm::cl::init(true));
+    llvm::cl::init(false));
 
 static llvm::cl::opt<bool> disableAutoCVWorkSpaceManage(
     "disable-auto-cv-work-space-manage",
@@ -946,6 +946,8 @@ int main(int argc, char **argv) {
                  << static_cast<int>(enableCVLazyLoading.getValue())
                  << "\tenable_auto_multi_buffer\t"
                  << static_cast<int>(enableAutoMultiBuffer.getValue())
+                 << "\tenable_triton_kernel_compile\t"
+                 << static_cast<int>(enableTritonKernelCompile.getValue())
                  << "\tlocal_multi_buffer_strategy\t"
                  << limitAutoMultiBufferOfLocalBuffer.getValue()
                  << "\tmix_multi_buffer_strategy\t"

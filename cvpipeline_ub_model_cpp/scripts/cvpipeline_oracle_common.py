@@ -17,6 +17,7 @@ BOOL_OPTIONS = {
     "enable_preload": "enable-preload",
     "enable_cv_lazy_loading": "enable-cv-lazy-loading",
     "enable_auto_multi_buffer": "enable-auto-multi-buffer",
+    "enable_triton_kernel_compile": "enable-triton-kernel-compile",
     "enable_code_motion": "enable-code-motion",
     "enable_ubuf_saving": "enable-ubuf-saving",
     "disable_align_alloc_size": "disable-align-alloc-size",

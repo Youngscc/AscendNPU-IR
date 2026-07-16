@@ -24,6 +24,7 @@ CV_ENABLE_LAZY_LOADING=false
 
 # Suffix / PlanMemory parameters only affect UB planning after CVPipelining.
 SUFFIX_ENABLE_AUTO_MULTI_BUFFER=false
+SUFFIX_ENABLE_TRITON_KERNEL_COMPILE=false
 SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY=no-l0c
 SUFFIX_MIX_MULTI_BUFFER_STRATEGY=only-cube
 RESTRICT_INPLACE_AS_ISA=false
@@ -53,6 +54,7 @@ CVPipelining options:
 
 Suffix / PlanMemory options:
   --suffix-enable-auto-multi-buffer true|false
+  --suffix-enable-triton-kernel-compile true|false
   --suffix-local-multi-buffer-strategy no-limit|only-cube|only-vector|no-l0c
   --suffix-mix-multi-buffer-strategy no-limit|only-cube|only-vector|no-l0c
   --restrict-inplace-as-isa true|false
@@ -86,6 +88,8 @@ while [[ $# -gt 0 ]]; do
     --cv-enable-lazy-loading) CV_ENABLE_LAZY_LOADING="$2"; shift 2 ;;
     --suffix-enable-auto-multi-buffer=*) SUFFIX_ENABLE_AUTO_MULTI_BUFFER="${1#*=}"; shift ;;
     --suffix-enable-auto-multi-buffer) SUFFIX_ENABLE_AUTO_MULTI_BUFFER="$2"; shift 2 ;;
+    --suffix-enable-triton-kernel-compile=*) SUFFIX_ENABLE_TRITON_KERNEL_COMPILE="${1#*=}"; shift ;;
+    --suffix-enable-triton-kernel-compile) SUFFIX_ENABLE_TRITON_KERNEL_COMPILE="$2"; shift 2 ;;
     --suffix-local-multi-buffer-strategy=*) SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY="${1#*=}"; shift ;;
     --suffix-local-multi-buffer-strategy) SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY="$2"; shift 2 ;;
     --suffix-mix-multi-buffer-strategy=*) SUFFIX_MIX_MULTI_BUFFER_STRATEGY="${1#*=}"; shift ;;
@@ -144,6 +148,7 @@ model_args=(
   --cv-enable-preload="${CV_ENABLE_PRELOAD}"
   --cv-enable-lazy-loading="${CV_ENABLE_LAZY_LOADING}"
   --suffix-enable-auto-multi-buffer="${SUFFIX_ENABLE_AUTO_MULTI_BUFFER}"
+  --suffix-enable-triton-kernel-compile="${SUFFIX_ENABLE_TRITON_KERNEL_COMPILE}"
   --suffix-local-multi-buffer-strategy="${SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY}"
   --suffix-mix-multi-buffer-strategy="${SUFFIX_MIX_MULTI_BUFFER_STRATEGY}"
   --format=json
@@ -194,6 +199,7 @@ if [[ "${RUN_ORACLE}" == "true" ]]; then
     --enable-preload="${CV_ENABLE_PRELOAD}"
     --enable-cv-lazy-loading="${CV_ENABLE_LAZY_LOADING}"
     --enable-auto-multi-buffer="${SUFFIX_ENABLE_AUTO_MULTI_BUFFER}"
+    --enable-triton-kernel-compile="${SUFFIX_ENABLE_TRITON_KERNEL_COMPILE}"
     --limit-auto-multi-buffer-of-local-buffer "${SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY}"
     --limit-auto-multi-buffer-buffer "${SUFFIX_MIX_MULTI_BUFFER_STRATEGY}"
     -o "${oracle_ir}"

@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 
 from compare_ub_plan_with_suffix_oracle import (
+    canonical_function_name,
     model_multi_and_inplace,
     normalized_lifetimes_from_model,
     parse_oracle,
@@ -31,6 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seeds", default="0-19")
     parser.add_argument("--restrict-inplace-as-isa", action="store_true")
     parser.add_argument("--enable-auto-multi-buffer", action="store_true")
+    parser.add_argument("--enable-triton-kernel-compile", action="store_true")
     parser.add_argument("--local-multi-buffer-strategy", default="no-l0c",
                         choices=("no-limit", "only-cube", "only-vector", "no-l0c"))
     parser.add_argument("--mix-multi-buffer-strategy", default="only-cube",
@@ -95,6 +97,7 @@ def main() -> int:
                     f"--random-seed={seed}",
                     "--format=json",
                     f"--enable-auto-multi-buffer={'true' if args.enable_auto_multi_buffer else 'false'}",
+                    f"--enable-triton-kernel-compile={'true' if args.enable_triton_kernel_compile else 'false'}",
                     "--limit-auto-multi-buffer-of-local-buffer",
                     args.local_multi_buffer_strategy,
                     "--limit-auto-multi-buffer-buffer",
@@ -128,6 +131,7 @@ def main() -> int:
                             str(blocker_output), f"--plan-memory-seed={seed}",
                             "--mlir-disable-threading",
                             f"--enable-auto-multi-buffer={'true' if args.enable_auto_multi_buffer else 'false'}",
+                            f"--enable-triton-kernel-compile={'true' if args.enable_triton_kernel_compile else 'false'}",
                             f"--limit-auto-multi-buffer-of-local-buffer={args.local_multi_buffer_strategy}",
                             f"--limit-auto-multi-buffer-buffer={args.mix_multi_buffer_strategy}",
                         ]
@@ -176,6 +180,7 @@ def main() -> int:
                     str(args.compiler), str(input_path), "-o", str(oracle_output),
                     f"--plan-memory-seed={seed}", "--mlir-disable-threading",
                     f"--enable-auto-multi-buffer={'true' if args.enable_auto_multi_buffer else 'false'}",
+                    f"--enable-triton-kernel-compile={'true' if args.enable_triton_kernel_compile else 'false'}",
                     f"--limit-auto-multi-buffer-of-local-buffer={args.local_multi_buffer_strategy}",
                     f"--limit-auto-multi-buffer-buffer={args.mix_multi_buffer_strategy}",
                 ]
@@ -237,6 +242,7 @@ def main() -> int:
                     str(args.model),
                     f"--before-cvpipelining-ir={input_path}", "--format=json",
                     f"--enable-auto-multi-buffer={'true' if args.enable_auto_multi_buffer else 'false'}",
+                    f"--enable-triton-kernel-compile={'true' if args.enable_triton_kernel_compile else 'false'}",
                     "--limit-auto-multi-buffer-of-local-buffer",
                     args.local_multi_buffer_strategy,
                     "--limit-auto-multi-buffer-buffer",
@@ -262,6 +268,7 @@ def main() -> int:
                             str(retry_output), "--plan-memory-seed=-1",
                             "--mlir-disable-threading",
                             f"--enable-auto-multi-buffer={'true' if args.enable_auto_multi_buffer else 'false'}",
+                            f"--enable-triton-kernel-compile={'true' if args.enable_triton_kernel_compile else 'false'}",
                             f"--limit-auto-multi-buffer-of-local-buffer={args.local_multi_buffer_strategy}",
                             f"--limit-auto-multi-buffer-buffer={args.mix_multi_buffer_strategy}",
                         ]
@@ -282,7 +289,8 @@ def main() -> int:
                             selected_by_function, retry_peak, retry_plan, retry_lifetimes = (
                                 parse_oracle_retry(retry_oracle, "6"))
                             model_selected = {
-                                str(function["function"]): int(function["selected_seed"])
+                                canonical_function_name(str(function["function"])):
+                                int(function["selected_seed"])
                                 for function in retry_payload.get("functions", [])
                                 if (function.get("buffers") or
                                     int(function.get("ub_peak_bits", 0)) != 0)

@@ -397,12 +397,6 @@ inline ModulePlanResult RunUBModuleFromAfterCVPipelining(
     result.overflow = result.overflow || plan.overflow;
     result.peakBits = std::max(result.peakBits, plan.peakBits);
     result.requiredBits = std::max(result.requiredBits, plan.requiredBits);
-    if (!restrictInplaceAsISA && !plan.inplacePairs.empty()) {
-      result.precision = ModulePlanPrecision::Incomplete;
-      result.diagnostics.push_back(
-          "PlanMemory: default inplace inference is not oracle-proven for " +
-          function);
-    }
     result.functions.push_back({function, std::move(plan)});
   }
   return result;

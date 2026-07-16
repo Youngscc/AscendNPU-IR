@@ -21,7 +21,8 @@ pipeline 分别位于 `src/ir/`、`src/passes/`、`src/pipeline/`。原分支中
   字段置空。
 - 已计算但尚未证明与真实编译器等价的结果只放在 `debug_estimate`，不能用于 UB 规划。
 - buffer 报告保留 offset、lifetime、`multi_buffer_num` 和 `inplace_pairs`。
-- 默认 inplace 推断出现非空 pair、但尚未证明与真实编译器一致时，整条链 fail-closed。
+- 默认 inplace 推断与 `restrict-inplace-as-isa` 两条 PlanMemory 路径都保留完整 pair，
+  由 corpus oracle 对 lifetime、offset、peak 和 pair 做差分验证。
 - pass 抛出的未支持形态与模型主动判定的 Incomplete 使用同一 blocker 报告合同。
 - oracle 比较继续检查 status、peak、required、buffer extent/offset/lifetime、
   multi-buffer 和 inplace，不因合并而降级为只比较 peak。
@@ -85,8 +86,8 @@ blocker 分别来自两种未覆盖的 subset-carrying loop 和一个动态 Allo
 - 3 个 blocker 的真实产品路径需要按诊断逐类补模；没有 oracle 证据前不得放宽
   Exact。
 - Ascend950 tightly-coupled buffer 的 mark/hoist 目前是明确 blocker，不支持权威规划。
-- 默认 inplace pair 与真实 `InitializeInplacePairList`/OneShotBufferize 决策仍需精确
-  对齐。目前采用 blocker 防止假 Exact。
+- 默认 inplace pair 复用模型侧 `InitializeInplacePairList` 结果，不再被上层人为降级为
+  blocker；需要继续通过两种 restrict 配置的 corpus oracle 防止实现漂移。
 - 动态 stride-aligned allocation 等 yy pass 明确不支持的路径仍会阻断。
 - 当前 corpus 门禁已比较最终 PlanMemory 语义；若要把 Exact 证据推进到每个阶段，仍需
   将模型和真实编译器的阶段快照做同构语义差分。
