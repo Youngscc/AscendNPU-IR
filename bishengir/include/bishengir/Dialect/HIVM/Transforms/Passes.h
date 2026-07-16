@@ -329,6 +329,9 @@ std::unique_ptr<Pass> createSinkOpToConsumerInLoopPass();
 std::unique_ptr<Pass> createPropagateConvertLayoutPass(
     const PropagateConvertLayoutOptions &options = {});
 
+// Create a pass to insert memory semantic for simt vf.
+std::unique_ptr<Pass> createInsertMemSemanticForSimtVFPass();
+
 /// Create a pass to insert convert layout operations for matmul ops
 std::unique_ptr<Pass> createInsertConvertLayoutPass();
 

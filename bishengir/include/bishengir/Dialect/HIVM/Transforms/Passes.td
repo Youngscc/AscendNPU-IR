@@ -1034,6 +1034,11 @@ def PropagateConvertLayout : Pass<"hivm-propagate-convert-layout", "func::FuncOp
                         "Enable elementwise convert layout propagation patterns.">];
 }
 
+def InsertMemSemanticForSimtVF : Pass<"insert-memory-semantic-for-simtvf"> {
+  let summary = "Insert memory semantic for simt vf";
+  let constructor = "mlir::hivm::createInsertMemSemanticForSimtVFPass()";
+}
+
 def ConvertLayoutToTranspose : Pass<"hivm-convert-layout-to-transpose", "func::FuncOp"> {
   let summary = "Convert layout to transpose decomposition";
   let constructor = "mlir::hivm::createConvertLayoutToTransposePass()";
