@@ -37,6 +37,9 @@
 #define CEIL_FACTOR(x, y) (((x) + ((y)-1)) / (y) * (y))
 #define CEIL_DIV(x, y) (((x) + ((y)-1)) / (y))
 #define UINT8_WIDTH 8
+#define DEBUG_LINE_BEG(m) "===[" #m "]===[BEG]>>>\n"
+#define DEBUG_LINE_END(m) "<<<[" #m "]===[END]===\n"
+
 namespace mlir {
 namespace utils {
 constexpr const uint8_t kBitsToByte = 8;
@@ -47,6 +50,10 @@ constexpr static int64_t kUBAlignSizeInBits = 32 * 8;
 static constexpr llvm::StringLiteral kEnableAutoMarkBufferSize =
     "enable_auto_mark_buffer_size";
 static constexpr llvm::StringLiteral kMemrefAsPtr = "memref.memref_as_ptr";
+static constexpr llvm::StringLiteral maskOpIdx = "mask_op_idx";
+static constexpr llvm::StringLiteral reachedMaskOpsIdx = "reached_mask_ops_idx";
+static constexpr llvm::StringLiteral maskBitWidth = "mask_bit_width";
+static const llvm::StringLiteral kMapForToForallAttrName = "map_for_to_forall";
 
 namespace debugger {
 
@@ -286,6 +293,10 @@ std::optional<Value> extractScalarValue(PatternRewriter &rewriter, Location loc,
 
 /// Return true if op is from arith dialect.
 bool isArithOp(Operation *op);
+
+/// Gets a suitable vector size from the element type. Vector size is fixed
+/// for regbase; returns an integer representing a vector size.
+int64_t getVectorSizeByElementType(Type t);
 
 /// Return true if op is annotation mark op with attr `name`
 bool isAnnotationWithAttr(Operation *op, StringRef name);
@@ -599,6 +610,17 @@ bool isAlignedInUB(Type type);
 bool isUnstructuredMemAccLoop(Operation *op);
 
 ModuleOp getTopLevelModuleOp(Operation *op);
+
+bool isValidHIVMTileElementType(Type type);
+
+unsigned getHIVMTileSliceMinNumElts(Type type);
+
+bool isValidHIVMTileVectorType(VectorType vType);
+
+bool isValidTwoDimVectorType(VectorType vType);
+
+/// Return true if transfer write op suits for change to StoreWithStride
+bool isTransferWriteSuitForStoreWithStride(Operation *op);
 
 } // namespace utils
 

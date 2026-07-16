@@ -444,7 +444,7 @@ LogicalResult inferAndPropagateMemScopeForExternFunc(func::FuncOp op) {
     if (auto memrefType = dyn_cast<BaseMemRefType>(argType)) {
       if (memrefType.getMemorySpace())
         continue;
-      argType = util::getBaseMemRefTypeWithNewScope(memrefType, gmSpaceAttr);
+      argType = getBaseMemRefTypeWithNewScope(memrefType, gmSpaceAttr);
     }
   }
   // For extern functions that have results, we assume that the memory scope
@@ -455,7 +455,7 @@ LogicalResult inferAndPropagateMemScopeForExternFunc(func::FuncOp op) {
     if (auto memrefType = dyn_cast<BaseMemRefType>(resultType)) {
       if (memrefType.getMemorySpace())
         continue;
-      resultType = util::getBaseMemRefTypeWithNewScope(memrefType, gmSpaceAttr);
+      resultType = getBaseMemRefTypeWithNewScope(memrefType, gmSpaceAttr);
     }
   }
   auto newFt = op.getFunctionType().clone(newArgTypes, newReturnTypes);
@@ -536,7 +536,7 @@ LogicalResult hivm::inferAndPropagateMemScopeForDistributed(hivm::CustomOp op) {
     if (auto memrefType = dyn_cast<BaseMemRefType>(resultType)) {
       if (memrefType.getMemorySpace())
         continue;
-      resultType = util::getBaseMemRefTypeWithNewScope(memrefType, gmSpaceAttr);
+      resultType = getBaseMemRefTypeWithNewScope(memrefType, gmSpaceAttr);
     }
   }
   // Update the operation's result types by asking the helper to set the

@@ -1,5 +1,6 @@
 add_bishengir_dialect_library(BiShengIRSCFTransforms
   CanonicalizeIterArg.cpp
+  LegalizeLoopIterArg.cpp
   MapForToForall.cpp
   RemoveRedundantLoopInit.cpp
 

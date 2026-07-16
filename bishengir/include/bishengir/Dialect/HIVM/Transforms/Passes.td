@@ -385,7 +385,8 @@ def ConstantizeBufferSize
     the original shape for further use.
   }];
   let constructor = "mlir::hivm::createConstantizeBufferSizePass()";
-  let dependentDialects = ["memref::MemRefDialect"];
+  let dependentDialects = ["affine::AffineDialect", "arith::ArithDialect",
+                           "memref::MemRefDialect"];
 }
 
 def HIVMOptFuncOutput : Pass<"hivm-opt-func-output", "ModuleOp"> {

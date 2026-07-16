@@ -35,6 +35,12 @@ namespace reshape_utils {
 
 enum class ElementKind { HasMutation, NoMutation, Unit };
 
+// helper func: stringtify ElementKind
+std::string stringtifyElementKind(ElementKind kind);
+
+// overloaded << operator to support cout << ElementKind
+llvm::raw_ostream& operator<<(llvm::raw_ostream& os, ElementKind kind);
+
 using namespace llvm;
 // The structure to hold the mapping for each dimension.
 struct HyperrectangularSlice {

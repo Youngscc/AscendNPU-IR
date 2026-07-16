@@ -303,7 +303,7 @@ func.func @unit_bind_drop(%arg0: tensor<1x?x4096xf32>, %arg1: tensor<1x24576xbf1
 
 // -----
 // CHECK-LABEL: func.func @dynamic_flatten_dependency(
-// CHECK: %{{.*}} = linalg.transpose ins(%{{.*}} : tensor<?x1x16x128xbf16>) outs(%{{.*}} : tensor<1x16x?x128xbf16>) permutation = [1, 2, 0, 3]
+// CHECK: %{{.*}} = linalg.transpose ins(%{{.*}} : tensor<?x16x128xbf16>) outs(%{{.*}} : tensor<16x?x128xbf16>) permutation = [1, 0, 2]
 func.func @dynamic_flatten_dependency(%arg0: tensor<?x4096xbf16>, %arg1: i64) -> tensor<1x16x?x128xbf16> attributes {hacc.entry, hacc.function_kind = #hacc.function_kind<HOST>} {
   %c0 = arith.constant 0 : index
   %cst = arith.constant 0.29730177875068026 : f64

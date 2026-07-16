@@ -1019,7 +1019,7 @@ static Value getReshapedValue(OpBuilder &builder, Location loc, Value v,
 
   auto prevMemSpace = cast<MemRefType>(v.getType()).getMemorySpace();
   if (prevMemSpace) {
-    newType = cast<MemRefType>(util::getBaseMemRefTypeWithNewScope(
+    newType = cast<MemRefType>(getBaseMemRefTypeWithNewScope(
         newType, cast<AddressSpaceAttr>(prevMemSpace)));
   }
 
@@ -1029,7 +1029,7 @@ static Value getReshapedValue(OpBuilder &builder, Location loc, Value v,
   auto gmSpaceAttr =
       AddressSpaceAttr::get(builder.getContext(), hivm::AddressSpace::UB);
   idxsType = cast<MemRefType>(
-      util::getBaseMemRefTypeWithNewScope(idxsType, gmSpaceAttr));
+      getBaseMemRefTypeWithNewScope(idxsType, gmSpaceAttr));
 
   auto memrefIdxs = builder.create<memref::AllocOp>(loc, idxsType);
   for (auto [idx, dim] : llvm::enumerate(newShape)) {

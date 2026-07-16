@@ -282,6 +282,35 @@ SmallVector<Value> getMemRefAllocs(Value operand) {
   return {Value(*alloc)};                          // wrap in vector
 }
 
+// New helper function to get the updated BaseMemRefType
+BaseMemRefType getBaseMemRefTypeWithNewScope(BaseMemRefType type,
+                                             AddressSpaceAttr targetMemScope) {
+  if (auto memRefType = dyn_cast<MemRefType>(type)) {
+    return MemRefType::Builder(memRefType).setMemorySpace(targetMemScope);
+  } else if (auto unrankedMemRefType = dyn_cast<UnrankedMemRefType>(type)) {
+    return UnrankedMemRefType::get(unrankedMemRefType.getElementType(),
+                                   targetMemScope);
+  }
+  llvm_unreachable("Unexpected BaseMemRefType");
+  return type;
+}
+
+// New helper function to get the updated BaseMemRefType
+BaseMemRefType getBaseMemRefTypeWithNewScope(BaseMemRefType type,
+                                             unsigned targetMemScope) {
+  if (auto memRefType = dyn_cast<MemRefType>(type)) {
+    auto targetMemScopeAttr = IntegerAttr::get(
+        IntegerType::get(type.getContext(), 64), targetMemScope);
+    return MemRefType::Builder(memRefType).setMemorySpace(targetMemScopeAttr);
+  }
+  if (auto unrankedMemRefType = dyn_cast<UnrankedMemRefType>(type)) {
+    return UnrankedMemRefType::get(unrankedMemRefType.getElementType(),
+                                   targetMemScope);
+  }
+  llvm_unreachable("Unexpected BaseMemRefType");
+  return type;
+}
+
 void setBaseMemRefTypeScope(Value val, AddressSpaceAttr targetMemScope) {
   Type type = val.getType();
   if (!isa<BaseMemRefType>(type)) {
@@ -296,7 +325,20 @@ void setBaseMemRefTypeScope(Value val, AddressSpaceAttr targetMemScope) {
 
   auto memRefType = cast<BaseMemRefType>(type);
   auto newMemRefType =
-      util::getBaseMemRefTypeWithNewScope(memRefType, targetMemScope);
+      getBaseMemRefTypeWithNewScope(memRefType, targetMemScope);
+  val.setType(newMemRefType);
+}
+
+void modifyBaseMemRefTypeScope(Value val, AddressSpaceAttr targetMemScope) {
+  Type type = val.getType();
+  if (!isa<BaseMemRefType>(type)) {
+    LDBG("type = " << type << " is not BaseMemRefType\n");
+    return;
+  }
+
+  auto memRefType = cast<BaseMemRefType>(type);
+  auto newMemRefType =
+      getBaseMemRefTypeWithNewScope(memRefType, targetMemScope);
   val.setType(newMemRefType);
 }
 
@@ -1200,6 +1242,27 @@ SmallVector<unsigned> traceVFWriteOpArgIds(func::CallOp callOp) {
   return writeOpArgIds;
 }
 
+uint32_t getHWAlignBytes(Attribute spaceAttr) {
+  auto hivmSpace = dyn_cast<hivm::AddressSpaceAttr>(spaceAttr);
+  assert(hivmSpace && "Empty address space attr");
+  switch (hivmSpace.getAddressSpace()) {
+  case hivm::AddressSpace::UB:
+  case hivm::AddressSpace::L1:
+    return hivm::util::BL;
+  default:
+    llvm_unreachable("Unsupported address space");
+  }
+}
+
+std::optional<uint32_t> getHWAlignBytes(Type t) {
+  auto memrefType = dyn_cast<MemRefType>(t);
+  if (!memrefType) {
+    return std::nullopt;
+  }
+  auto hwAlignBytes = getHWAlignBytes(memrefType.getMemorySpace());
+  return hwAlignBytes;
+}
+
 namespace util {
 //===----------------------------------------------------------------------===//
 // This file contains code from the LLVM Project.
@@ -1402,6 +1465,32 @@ void validateMultiBufferAttr(mlir::DictionaryAttr attrDict) {
   if (attrValue < 1) {
     llvm::report_fatal_error("MultiBufferAttr should be >= 1!!");
   }
+}
+
+/// Trims non-scalable one dimensions from `oldType` and returns the result
+/// type. Copy from
+/// mlir/lib/Dialect/Vector/Transforms/VectorTransferOpTransforms.cpp
+VectorType trimNonScalableUnitDims(VectorType oldType) {
+  SmallVector<int64_t> newShape;
+  SmallVector<bool> newScalableDims;
+  for (auto [dimIdx, dimSize] : llvm::enumerate(oldType.getShape())) {
+    if (dimSize == 1 && !oldType.getScalableDims()[dimIdx])
+      continue;
+    newShape.push_back(dimSize);
+    newScalableDims.push_back(oldType.getScalableDims()[dimIdx]);
+  }
+  return VectorType::get(newShape, oldType.getElementType(), newScalableDims);
+}
+
+bool isOneDimLikeVecType(VectorType vecType) {
+  if (vecType.getRank() == 1)
+    return true;
+  auto shape = vecType.getShape();
+  for (int64_t i = 0, e = vecType.getRank() - 1; i < e; ++i) {
+    if (shape[i] != 1)
+      return false;
+  }
+  return true;
 }
 } // namespace util
 } // namespace hivm
