@@ -430,6 +430,21 @@ static FailureOr<Value> getVBrcPadBuffer(Value dst, OpBuilder &b) {
   auto allocMemRefType = dyn_cast<MemRefType>(allocOp.getType());
   if (!allocMemRefType)
     return failure();
+
+  // Page-load mark (OptimizeDpsOpWithYieldedInsertSlice): the alloc has
+  // an annotation.mark {hivm.slice_load} carrying the page subview as a
+  // value. Use that subview directly as the vbrc target.
+  auto maybePageMark =
+      utils::getAnnotateOpWithAttr(alloc, "hivm.slice_load");
+  if (maybePageMark.has_value()) {
+    auto markOp = cast<annotation::MarkOp>(*maybePageMark);
+    if (!markOp.getValues().empty()) {
+      Value subview = markOp.getValues().front();
+      markOp->erase();
+      return subview;
+    }
+  }
+
   // The cv-pipelining pass marks multi-buffered allocs with an
   // `annotation.mark` carrying `hivm.cv_pipelined_multi_buffer`. In
   // that case `dst` is the current tile inside one slot of a multi-slot
