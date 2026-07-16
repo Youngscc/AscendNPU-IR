@@ -12,6 +12,7 @@ add_bishengir_dialect_library(BiShengIRHFusionTransforms
   ${NORMALIZE_UTILS}
   AdaptTritonKernel.cpp
   AddFFTSAddr.cpp
+  AutoVectorize.cpp
   AutoVectorize/AutoVectorizeInterpreter.cpp
   AutoVectorize/Verify.cpp
   AutoVectorizeV2.cpp
@@ -57,6 +58,7 @@ add_bishengir_dialect_library(BiShengIRHFusionTransforms
   SimplifyOps.cpp
   TensorResToOutParams.cpp
   TilingInterfaceImpl.cpp
+  TreeReduce.cpp
   TreeReduceV2.cpp
   UnfoldSymbolicDim.cpp
   UpliftWhileToFor.cpp

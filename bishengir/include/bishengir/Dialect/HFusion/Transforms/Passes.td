@@ -89,6 +89,23 @@ def AutoSchedule : Pass<"hfusion-auto-schedule", "ModuleOp"> {
   ];
 }
 
+def AutoVectorize : Pass<"hfusion-auto-vectorize", "ModuleOp"> {
+  let summary = "Auto vectorizer for all linalg named ops.";
+  let constructor = "mlir::hfusion::createHFusionAutoVectorizePass()";
+  let dependentDialects = ["linalg::LinalgDialect",
+                           "transform::TransformDialect",
+                           "arith::ArithDialect",
+                           "vector::VectorDialect"];
+  let options = [
+    Option<"vectorLength", "vector-length", "unsigned", "256", "Length of the vector in bytes">,
+    Option<"peelLoops", "peel-loops", "bool", "false", "Try to peel the tile loops.">,
+    Option<"maxVectorizeAxes", "max-vectorize-axes", "int64_t", "-1",
+           "Max number of inner-most axes to vectorize."
+           "Default value -1 means no limit on the max vectorize axes">,
+    Option<"treeReduce", "tree-reduce", "bool", "false", "use tree reduce">,
+  ];
+}
+
 def GenericUnroller : Pass<"hfusion-generic-unroller", "func::FuncOp"> {
   let summary = "Provides lowering of non-vectorizeable linalg ops (currently only linalg.reduce)";
   let constructor = "mlir::hfusion::createGenericUnrollerPass()";
@@ -146,6 +163,7 @@ def AutoVectorizeV2 : Pass<"hfusion-auto-vectorize-v2", "ModuleOp"> {
            "Enable multiple consumer fusion in AutoVectorizeV2.">,
     Option<"emitTransformSequence", "emit-transform-sequence", "bool", "false",
            "Emit AutoVectorizeV2 payload tags and transform sequence without applying it.">,
+    Option<"treeReduce", "tree-reduce", "bool", "false", "use tree reduce">,
   ];
 }
 

@@ -103,6 +103,10 @@ createHFusionOpFusionPass(const HFusionOpFusionOptions &options = {});
 std::unique_ptr<Pass>
 createHFusionAutoSchedulePass(const AutoScheduleOptions &options = {});
 
+/// Create an auto vectorizer pass.
+std::unique_ptr<Pass>
+createHFusionAutoVectorizePass(const AutoVectorizeOptions &options = {});
+
 /// Create a pass to handle non-vectorizeable linalg.generic cases
 std::unique_ptr<Pass> createGenericUnrollerPass();
 

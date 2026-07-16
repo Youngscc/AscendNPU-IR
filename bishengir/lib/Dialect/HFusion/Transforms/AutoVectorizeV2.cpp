@@ -34,6 +34,7 @@
 #include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.h"
 #include "mlir/Dialect/Transform/Transforms/TransformInterpreterUtils.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/Support/Debug.h"
 #include <cassert>
@@ -1797,6 +1798,7 @@ void AutoVectorizeV2::runOnOperation() {
   MLIRContext *context = op->getContext();
   IRRewriter rewriter(context);
   OpBuilder builder(context);
+  bool fallback = false;
 
   SmallVector<func::FuncOp> fusableFuncList;
   collectFusableFuncInModule(op, fusableFuncList);
@@ -1843,15 +1845,25 @@ void AutoVectorizeV2::runOnOperation() {
     }
 
     if (failed(result)) {
-      // NOTE(A3 migration): upstream falls back to the legacy V1
-      // HFusionAutoVectorize pass here, which has not been migrated to A3.
-      // Fail hard instead of silently dropping vectorization.
-      failedFunc.emitError()
+      failedFunc.emitWarning()
           << (retried ? "AutoVectorizeV2 retry failed"
                       : "AutoVectorizeV2 failed")
-          << "; no fallback pass available on this architecture";
-      return signalPassFailure();
+          << "; falling back to legacy HFusionAutoVectorize pass";
+      fallback = true;
+      break;
     }
+  }
+
+  if (fallback) {
+    PassManager pm(op->getContext());
+    AutoVectorizeOptions vecOptions;
+    // Set maxVectorizeAxes to be 1 for compatiblity.
+    // TODO: Remove this constraint after e2e support for multi axes
+    // vectorization.
+    vecOptions.maxVectorizeAxes = 2;
+    vecOptions.treeReduce = treeReduce;
+    pm.addPass(hfusion::createHFusionAutoVectorizePass());
+    std::ignore = pm.run(op);
   }
 }
 
