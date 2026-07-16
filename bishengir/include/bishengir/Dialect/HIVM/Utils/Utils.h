@@ -307,9 +307,15 @@ SmallVector<Value> getTensorDynamicValues(OpBuilder &builder, Location loc,
 
 // Create local workspace of current block
 Value createAllocLocalWorkSpace(OpBuilder &builder, Location loc,
+                                ArrayRef<int64_t> shape, Type elementType);
+
+Value createAllocLocalWorkSpace(OpBuilder &builder, Location loc,
                                 SmallVector<int64_t> targetShape,
                                 SmallVector<Value> dynamicSizes,
                                 Type elementType);
+
+Value getLocalWorkSpaceTensor(PatternRewriter &rewriter, Location loc,
+                              ArrayRef<int64_t> targetShapes, Type elementType);
 
 // Create local workspace and to_tensor ops. When staticAllocShape is provided,
 // add annotation::MarkOp to mark the static buffer size in byte (for dynamic

@@ -20,12 +20,15 @@
 #include "bishengir/Dialect/HIVM/IR/HIVMImpl.h"
 #include "bishengir/Dialect/HIVM/Transforms/Passes.h"
 #include "bishengir/Dialect/HIVM/Utils/Utils.h"
+#include "bishengir/Dialect/Utils/Util.h"
+
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/Casting.h"
 
@@ -96,7 +99,9 @@ struct DuplicateTensorExtractForCube
       // Check current operation and its nested operations
       currentOp->walk([&hasCubeUser](Operation *nestedOp) {
         if (getCoreType(nestedOp) == TCoreType::CUBE ||
-            getCoreType(nestedOp) == TCoreType::CUBE_OR_VECTOR) {
+            (hacc::utils::isMemBasedArch(
+                 nestedOp->getParentOfType<ModuleOp>()) &&
+             getCoreType(nestedOp) == TCoreType::CUBE_OR_VECTOR)) {
           hasCubeUser = true;
           return WalkResult::interrupt();
         }
@@ -111,9 +116,27 @@ struct DuplicateTensorExtractForCube
       }
 
       // Add all users of currentOp to worklist for indirect user checking
-      for (Operation *userOp : currentOp->getUsers()) {
-        if (visited.insert(userOp).second)
+      auto enqueue = [&](Operation *userOp) {
+        if (userOp && visited.insert(userOp).second)
           worklist.push_back(userOp);
+      };
+
+      for (Operation *userOp : currentOp->getUsers()) {
+        // Follow scf.for loop-carried deps: yield operand -> region iter arg.
+        if (auto yieldOp = dyn_cast<scf::YieldOp>(userOp)) {
+          if (auto forOp = dyn_cast<scf::ForOp>(yieldOp->getParentOp())) {
+            for (OpOperand &operand : yieldOp->getOpOperands()) {
+              if (operand.get().getDefiningOp() != currentOp)
+                continue;
+              for (Operation *u :
+                   forOp.getRegionIterArg(operand.getOperandNumber())
+                       .getUsers())
+                enqueue(u);
+            }
+            continue;
+          }
+        }
+        enqueue(userOp);
       }
     }
 
@@ -136,6 +159,7 @@ struct DuplicateTensorExtractForCube
       return failure();
     }
 
+    // only process cases with vector sources or direct load
     Value originTensor = extractOp.getTensor();
     Operation *definingOp = originTensor.getDefiningOp();
     if (!definingOp) {
@@ -147,71 +171,103 @@ struct DuplicateTensorExtractForCube
       return failure();
     }
 
-    // only process cases with vector sources or direct load
     TensorType tensorType = cast<TensorType>(originTensor.getType());
-    TCoreType originCoreType = getCoreType(definingOp).value();
-    if (originCoreType != TCoreType::VECTOR) {
-      // handle the case of direct load
-      // TODO: (plan A) bubble up (plan B) infer load to vector type
-      auto presumedAllocOp = traceDefOp<memref::AllocOp>(originTensor);
-      if (presumedAllocOp.has_value()) {
-        auto allocOp = cast<memref::AllocOp>(presumedAllocOp.value());
-        Value memrefValue = allocOp.getMemref();
-        bool foundLoad = false;
-        bool foundBufferization = false;
-        SmallVector<Operation *, 2> tmpOps;
-        for (Operation *userOp : memrefValue.getUsers()) {
-          if (auto loadOp = dyn_cast<hivm::LoadOp>(userOp);
-              loadOp && loadOp.getDst() == memrefValue) {
-            foundLoad = true;
-            tmpOps.push_back(userOp);
-          } else if (auto toTensorOp =
-                         dyn_cast<bufferization::ToTensorOp>(userOp);
-                     toTensorOp && toTensorOp.getOperand() == memrefValue) {
-            foundBufferization = true;
-            tmpOps.push_back(userOp);
+    if (hacc::utils::isMemBasedArch(extractOp->getParentOfType<ModuleOp>())) {
+      TCoreType originCoreType = getCoreType(definingOp).value();
+      if (originCoreType != TCoreType::VECTOR) {
+        // handle the case of direct load
+        // TODO: (plan A) bubble up (plan B) infer load to vector type
+        auto presumedAllocOp = traceDefOp<memref::AllocOp>(originTensor);
+        if (presumedAllocOp.has_value()) {
+          auto allocOp = cast<memref::AllocOp>(presumedAllocOp.value());
+          Value memrefValue = allocOp.getMemref();
+          bool foundLoad = false;
+          bool foundBufferization = false;
+          SmallVector<Operation *, 2> tmpOps;
+          for (Operation *userOp : memrefValue.getUsers()) {
+            if (auto loadOp = dyn_cast<hivm::LoadOp>(userOp);
+                loadOp && loadOp.getDst() == memrefValue) {
+              foundLoad = true;
+              tmpOps.push_back(userOp);
+            } else if (auto toTensorOp =
+                           dyn_cast<bufferization::ToTensorOp>(userOp);
+                       toTensorOp && toTensorOp.getOperand() == memrefValue) {
+              foundBufferization = true;
+              tmpOps.push_back(userOp);
+            }
           }
-        }
-        if (!(tmpOps.size() == 2 && foundLoad && foundBufferization)) {
+          if (!(tmpOps.size() == 2 && foundLoad && foundBufferization)) {
+            return failure();
+          }
+          // the op need eraseLabel only if when the bufferization is from load
+          allocOp->setAttr(cubeErasureLabel, rewriter.getI32IntegerAttr(1));
+          for (auto *op : tmpOps) {
+            op->setAttr(cubeErasureLabel, rewriter.getI32IntegerAttr(1));
+          }
+        } else {
           return failure();
         }
-        // the op need eraseLabel only if when the bufferization is from load
-        allocOp->setAttr(cubeErasureLabel, rewriter.getI32IntegerAttr(1));
-        for (auto *op : tmpOps) {
-          op->setAttr(cubeErasureLabel, rewriter.getI32IntegerAttr(1));
-        }
-      } else {
+      }
+    } else {
+      bool originCoreTypeIsVector = traceVector<
+#define GET_OP_LIST
+#include "bishengir/Dialect/HIVM/IR/HIVMVectorOps.cpp.inc"
+          >(originTensor);
+      if (!originCoreTypeIsVector) {
         return failure();
       }
     }
 
     // prepare for insertion
     Location loc = extractOp->getLoc();
-    rewriter.setInsertionPointAfterValue(extractOp.getResult());
+    auto extracted = extractOp.getResult();
+    rewriter.setInsertionPointAfterValue(extracted);
 
     // HIVM store does not support i1 element type, so convert to i8 before
     // storing, and convert back to i1 after extraction.
     bool isElementI1 = getElementTypeOrSelf(tensorType).isInteger(1);
-    Value convertedTensor = originTensor;
-    auto roundMode =
-        rewriter.getAttr<hivm::RoundModeAttr>(hivm::RoundMode::RINT);
-    if (isElementI1) {
-      auto castOp =
-          castTo(rewriter, loc, originTensor, roundMode, rewriter.getI8Type());
-      convertedTensor = castOp->getResult(0);
-    }
 
     // insert operations
-    Value workSpaceTensor = getLocalWorkSpaceTensor(
-        rewriter, loc, tensorType.getShape(),
-        hivm::getTensorDynamicValues(rewriter, loc, convertedTensor),
-        getElementTypeOrSelf(convertedTensor.getType()));
-    hivm::StoreOp storeOp = rewriter.create<hivm::StoreOp>(
-        loc, TypeRange(convertedTensor.getType()), convertedTensor, workSpaceTensor);
-    markCoreType(rewriter, loc, storeOp.getResults()[0], TCoreType::VECTOR);
-    storeOp->setAttr("inserted-store", rewriter.getUnitAttr());
-    tensor::ExtractOp newExtractOp = rewriter.create<tensor::ExtractOp>(
-        loc, storeOp.getResultTensor(), extractOp.getIndices());
+    tensor::ExtractOp newExtractOp;
+    if (tensorType.getNumElements() == 1) {
+      Value srcTensor = extractOp.getTensor();
+      if (isElementI1) {
+        auto roundMode =
+            rewriter.getAttr<hivm::RoundModeAttr>(hivm::RoundMode::RINT);
+        auto castOp = castTo(rewriter, loc, originTensor, roundMode,
+                             rewriter.getI8Type());
+        srcTensor = castOp->getResult(0);
+      }
+      Value workSpaceTensor = getLocalWorkSpaceTensor(
+          rewriter, loc, tensorType.getShape(),
+          hivm::getTensorDynamicValues(rewriter, loc, srcTensor),
+          getElementTypeOrSelf(srcTensor.getType()));
+      hivm::StoreOp storeOp = rewriter.create<hivm::StoreOp>(
+          loc, TypeRange(srcTensor.getType()), srcTensor, workSpaceTensor);
+      markCoreType(rewriter, loc, storeOp.getResults()[0], TCoreType::VECTOR);
+      storeOp->setAttr("inserted-store", rewriter.getUnitAttr());
+      newExtractOp = rewriter.create<tensor::ExtractOp>(
+          loc, storeOp.getResultTensor(), extractOp.getIndices());
+    } else {
+      if (isElementI1) {
+        extracted = rewriter.create<arith::ExtUIOp>(
+            extracted.getLoc(), rewriter.getI8Type(), extracted);
+      }
+      Value workSpaceTensor =
+          getLocalWorkSpaceTensor(rewriter, loc, {1}, extracted.getType());
+      Value emptyOp = rewriter.create<tensor::EmptyOp>(
+          loc, ArrayRef<int64_t>{1}, extracted.getType());
+      Value zero =
+          rewriter.create<arith::ConstantOp>(loc, rewriter.getIndexAttr(0));
+      Value inserted =
+          rewriter.create<tensor::InsertOp>(loc, extracted, emptyOp, zero);
+      hivm::StoreOp storeOp = rewriter.create<hivm::StoreOp>(
+          loc, TypeRange(inserted.getType()), inserted, workSpaceTensor);
+      markCoreType(rewriter, loc, storeOp.getResults()[0], TCoreType::VECTOR);
+      storeOp->setAttr("inserted-store", rewriter.getUnitAttr());
+      newExtractOp = rewriter.create<tensor::ExtractOp>(
+          loc, storeOp.getResultTensor(), zero);
+    }
     newExtractOp.getOperation()->setAttr(visitedLabel,
                                          rewriter.getI32IntegerAttr(1));
     newExtractOp.getOperation()->setAttr(newExtractLabel,

@@ -882,6 +882,40 @@ SmallVector<Value> getTensorDynamicValues(OpBuilder &builder, Location loc,
 }
 
 Value createAllocLocalWorkSpace(OpBuilder &builder, Location loc,
+                                ArrayRef<int64_t> shape, Type elementType) {
+  assert(!ShapedType::isDynamicShape(shape) &&
+         "AllocWorkspaceOp only supports static shape");
+  Type allocWorkspaceType = MemRefType::get(shape, elementType);
+
+  auto allocWorkspaceOp =
+      builder.create<bishengir::memref_ext::AllocWorkspaceOp>(
+          loc, allocWorkspaceType,
+          /*workspaceArg*/ Value(), ValueRange{},
+          /*offset*/ ValueRange{});
+  return allocWorkspaceOp.getMemref();
+}
+
+Value getLocalWorkSpaceTensor(PatternRewriter &rewriter, Location loc,
+                              ArrayRef<int64_t> targetShapes,
+                              Type elementType) {
+#ifndef NDEBUG
+  std::optional<int64_t> totalStaticSize =
+      utils::getStaticTotalSize(targetShapes);
+  // TODO：support dynamic shape.
+  assert(totalStaticSize.has_value() && "Can only handle static shape");
+#endif
+
+  // 1. Get AllocWorkspaceOp of current block
+  Value localWorkSpace = createAllocLocalWorkSpace(
+      rewriter, loc, targetShapes, elementType);
+
+  // 2. Use bufferization::ToTensorOp to convert current workspace to tensor
+  auto toTensor = rewriter.create<bufferization::ToTensorOp>(
+      loc, localWorkSpace, true, true);
+  return toTensor;
+}
+
+Value createAllocLocalWorkSpace(OpBuilder &builder, Location loc,
                                 SmallVector<int64_t> targetShape,
                                 SmallVector<Value> dynamicSizes,
                                 Type elementType) {
