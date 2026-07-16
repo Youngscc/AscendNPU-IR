@@ -14,7 +14,8 @@ def parse_args() -> argparse.Namespace:
         description="Print a compact terminal summary for a UB plan JSON file.")
     parser.add_argument("json_file", type=Path)
     parser.add_argument("--max-buffers", type=int, default=12)
-    parser.add_argument("--html", default="cvpipeline_ub_model_cpp/demo/ub_plan_visualizer.html")
+    parser.add_argument(
+        "--html", default="cvpipeline_ub_model_cpp/demo/ub_plan_visualizer.html")
     return parser.parse_args()
 
 
@@ -55,8 +56,8 @@ def main() -> int:
     payload = json.loads(args.json_file.read_text(encoding="utf-8"))
     result = payload.get("result", {})
     options = payload.get("options", {})
-    cvpipeline = options.get("cvpipeline", {})
-    suffix = options.get("suffix_planmemory", {})
+    cvpipelining = options.get("cvpipelining", {})
+    suffix = options.get("suffix_plan_memory", {})
     plan = result.get("plan", [])
 
     status = "OVERFLOW" if result.get("overflow") else (
@@ -65,23 +66,24 @@ def main() -> int:
     capacity_bits = int(result.get("capacity_bits") or 0)
     usage = (required_bits / capacity_bits * 100.0) if capacity_bits else 0.0
 
-    print("CVPipeline UB Plan Demo")
+    print("CVPipelining UB Plan Demo")
     print(divider())
     print(f"Status        : {status}")
     print(f"Precision     : {result.get('precision', '')}")
-    print(f"Peak          : {bit_size(result.get('peak_bits'))}")
+    peak = bit_size(result.get("peak_bits"))
+    print(f"Peak          : {peak}")
     print(f"Required      : {bit_size(required_bits)}")
     print(f"Capacity      : {bit_size(capacity_bits)}")
     print(f"Usage         : {usage:.4f}%")
     print(f"Selected seed : {result.get('selected_seed', '')}")
     print(f"Buffers       : {len(plan)}")
     print()
-    print("CVPipeline options")
+    print("CVPipelining options")
     print(divider())
-    print(f"disable_pipelining : {bool_text(cvpipeline.get('disable_pipelining'))}")
-    print(f"pipeline_depth     : {cvpipeline.get('pipeline_depth')}")
-    print(f"enable_preload     : {bool_text(cvpipeline.get('enable_preload'))}")
-    print(f"enable_lazy_loading: {bool_text(cvpipeline.get('enable_lazy_loading'))}")
+    print(f"disable_pipelining : {bool_text(cvpipelining.get('disable_pipelining'))}")
+    print(f"pipeline_depth     : {cvpipelining.get('pipeline_depth')}")
+    print(f"enable_preload     : {bool_text(cvpipelining.get('enable_preload'))}")
+    print(f"enable_lazy_loading: {bool_text(cvpipelining.get('enable_lazy_loading'))}")
     print()
     print("Suffix / PlanMemory options")
     print(divider())
@@ -115,7 +117,7 @@ def main() -> int:
         if len(plan) > args.max_buffers:
             print(f"... {len(plan) - args.max_buffers} more buffers")
 
-    input_path = payload.get("input", {}).get("pre_cvpipeline_ir", "")
+    input_path = payload.get("input", {}).get("before_cvpipelining_ir", "")
     print()
     print("Artifacts")
     print(divider())

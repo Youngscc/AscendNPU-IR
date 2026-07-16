@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CVPipeline UB Plan Visualizer v2</title>
+  <title>CVPipelining UB Plan Visualizer v2</title>
   <style>
     :root {
       --bg: #f6f7f9;
@@ -111,6 +111,11 @@
       padding: 14px;
     }
 
+    .summary .metric:last-child:nth-child(odd) {
+      grid-column: 1 / -1;
+      min-height: 64px;
+    }
+
     .metric {
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -140,6 +145,15 @@
 
     .capacity {
       padding: 0 14px 14px;
+    }
+
+    .capacity-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 12px;
     }
 
     .capacity-track {
@@ -172,6 +186,12 @@
       overflow-wrap: anywhere;
     }
 
+    .kv .input-path {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .input-panel textarea {
       display: block;
       width: calc(100% - 28px);
@@ -202,11 +222,18 @@
       padding: 14px;
     }
 
+    .chart-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 10px;
+    }
+
     .legend {
       display: flex;
       flex-wrap: wrap;
       gap: 8px 12px;
-      margin-bottom: 10px;
       color: var(--muted);
       font-size: 12px;
     }
@@ -226,12 +253,73 @@
       flex: 0 0 auto;
     }
 
+    .swatch.shared {
+      border: 2px solid var(--ink);
+    }
+
+    .swatch.reused {
+      border: 2px dashed var(--accent);
+    }
+
+    .zoom-controls {
+      display: grid;
+      grid-template-columns: auto minmax(86px, 120px) 42px;
+      align-items: center;
+      gap: 5px 8px;
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .zoom-controls input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+    }
+
+    .zoom-value {
+      color: var(--ink);
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+    }
+
+    .view-options {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 12px;
+      grid-column: 1 / -1;
+    }
+
+    .view-options label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+    }
+
+    .view-options button {
+      min-height: 28px;
+      padding: 4px 8px;
+      font-size: 12px;
+    }
+
     .chart-wrap {
+      position: relative;
       overflow: auto;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: #fbfcfd;
     }
+
+    .plan-chart-wrap {
+      height: 480px;
+      overflow: hidden;
+      cursor: grab;
+      touch-action: none;
+      user-select: none;
+    }
+
+    .plan-chart-wrap.is-dragging { cursor: grabbing; }
 
     svg {
       display: block;
@@ -239,8 +327,10 @@
       width: 100%;
     }
 
-    svg#planChart {
-      height: 480px;
+    #chart {
+      width: 100%;
+      height: 100%;
+      min-width: 0;
     }
 
     .axis text {
@@ -256,6 +346,30 @@
     .buffer-rect {
       stroke: rgba(23, 32, 51, 0.35);
       stroke-width: 1;
+      cursor: crosshair;
+      transition: opacity 100ms ease, stroke-width 100ms ease;
+    }
+
+    .buffer-rect.shared-placement {
+      stroke: var(--ink);
+      stroke-width: 2.5;
+    }
+
+    .buffer-rect.reused-address {
+      stroke: var(--accent);
+      stroke-width: 2;
+      stroke-dasharray: 5 3;
+    }
+
+    .buffer-rect.is-dimmed {
+      opacity: 0.14;
+    }
+
+    .buffer-rect.is-active {
+      opacity: 1;
+      stroke: #111827;
+      stroke-width: 3;
+      stroke-dasharray: none;
     }
 
     .buffer-label {
@@ -265,15 +379,43 @@
     }
 
     .peak-line {
-      stroke: var(--danger);
+      stroke: var(--accent);
       stroke-width: 2;
       stroke-dasharray: 6 4;
     }
 
+    .peak-line.overflow { stroke: var(--danger); }
+
     .peak-label {
-      fill: var(--danger);
+      fill: var(--accent);
       font-size: 12px;
       font-weight: 700;
+    }
+
+    .peak-label.overflow { fill: var(--danger); }
+
+    .chart-tooltip {
+      position: fixed;
+      z-index: 10;
+      display: none;
+      min-width: 210px;
+      max-width: 340px;
+      padding: 9px 11px;
+      border: 1px solid #c8d0dc;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.97);
+      box-shadow: 0 8px 24px rgba(24, 35, 50, 0.16);
+      color: var(--ink);
+      font-size: 12px;
+      pointer-events: none;
+    }
+
+    .chart-tooltip strong,
+    .chart-tooltip span { display: block; }
+
+    .chart-tooltip span {
+      margin-top: 3px;
+      color: var(--muted);
     }
 
     table {
@@ -295,7 +437,12 @@
       background: #f8fafc;
       position: sticky;
       top: 0;
+      z-index: 1;
     }
+
+    tbody tr { transition: background 100ms ease; }
+    tbody tr:hover, tbody tr.is-active { background: #eaf5f4; }
+    tbody tr.is-dimmed { opacity: 0.42; }
 
     td.name {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -317,7 +464,9 @@
       header { display: block; }
       .toolbar { justify-content: flex-start; margin-top: 12px; min-width: 0; }
       .grid { grid-template-columns: 1fr; }
-      svg { height: 430px; }
+      .chart-head { display: block; }
+      .zoom-controls { margin-top: 12px; }
+      .plan-chart-wrap { height: 430px; }
     }
   </style>
 </head>
@@ -325,14 +474,14 @@
   <main>
     <header>
       <div>
-        <h1>CVPipeline UB Plan Visualizer</h1>
+        <h1>CVPipelining UB Plan Visualizer</h1>
         <div class="subtitle">
           Inspect the exact local UB plan from the lightweight model: peak,
           capacity, buffer offsets, and live intervals.
         </div>
       </div>
       <div class="toolbar">
-        <label class="file-button" title="Load a JSON file produced by plan_precvpipeline_ub.py">
+        <label class="file-button" title="Load JSON produced by plan_before_cvpipelining_ub.py">
           Open JSON
           <input id="fileInput" type="file" accept=".json,application/json,text/plain">
         </label>
@@ -347,7 +496,11 @@
           <h2>Summary</h2>
           <div class="summary" id="summary"></div>
           <div class="capacity">
-            <div class="capacity-track" title="required bits over capacity bits">
+            <div class="capacity-label">
+              <span>UB usage</span>
+              <span id="capacityLabel">-</span>
+            </div>
+            <div class="capacity-track" title="displayed peak or required memory over capacity">
               <div class="capacity-fill" id="capacityFill"></div>
             </div>
           </div>
@@ -356,7 +509,7 @@
 
         <section class="panel input-panel" style="margin-top: 16px;">
           <h2>Input</h2>
-          <textarea id="inputText" spellcheck="false" placeholder="Paste JSON from plan_precvpipeline_ub.py --format=json, or paste the text table output."></textarea>
+          <textarea id="inputText" spellcheck="false" placeholder="Paste JSON from plan_before_cvpipelining_ub.py --format=json, or paste the text table output."></textarea>
           <div class="input-actions">
             <button id="renderButton" class="primary" type="button">Render</button>
             <button id="copySampleButton" type="button">Copy Sample</button>
@@ -369,8 +522,23 @@
         <section class="panel">
           <h2>UB Offset x Lifetime</h2>
           <div class="viz">
-            <div class="legend" id="legend"></div>
-            <div class="chart-wrap">
+            <div class="chart-head">
+              <div class="legend" id="legend"></div>
+              <div class="zoom-controls" aria-label="Chart zoom controls">
+                <label for="timeZoom">Time</label>
+                <input id="timeZoom" type="range" min="1" max="8" step="0.25" value="1">
+                <output id="timeZoomValue" class="zoom-value" for="timeZoom">100%</output>
+                <label for="addressZoom">Address</label>
+                <input id="addressZoom" type="range" min="1" max="8" step="0.25" value="1">
+                <output id="addressZoomValue" class="zoom-value" for="addressZoom">100%</output>
+                <div class="view-options">
+                  <label><input id="showLabels" type="checkbox" checked> Labels</label>
+                  <button id="resetView" type="button">Reset view</button>
+                </div>
+              </div>
+            </div>
+            <div class="chart-wrap plan-chart-wrap" id="planChartWrap" tabindex="0"
+                 aria-label="Pannable UB memory plan viewport">
               <svg id="chart" role="img" aria-label="UB memory plan chart"></svg>
             </div>
           </div>
@@ -396,6 +564,7 @@
                   <th>Offset</th>
                   <th>Live Range</th>
                   <th>End Byte</th>
+                  <th>Storage</th>
                 </tr>
               </thead>
               <tbody id="planTable"></tbody>
@@ -405,19 +574,20 @@
       </section>
     </section>
   </main>
+  <div id="chartTooltip" class="chart-tooltip" role="tooltip"></div>
 
   <script>
     const sample = {
       schema_version: 1,
-      input: { pre_cvpipeline_ir: "sample/before_cvpipeline_generic.mlir" },
+      input: { before_cvpipelining_ir: "sample/before_cvpipelining_generic.mlir" },
       options: {
-        cvpipeline: {
+        cvpipelining: {
           disable_pipelining: false,
           pipeline_depth: -1,
           enable_preload: false,
           enable_lazy_loading: false
         },
-        suffix_planmemory: {
+        suffix_plan_memory: {
           enable_auto_multi_buffer: false,
           local_multi_buffer_strategy: "no-limit",
           mix_multi_buffer_strategy: "no-limit",
@@ -426,7 +596,7 @@
         }
       },
       result: {
-        precision: "before_cvpipeline_model",
+        precision: "before_cvpipelining_model",
         success: true,
         overflow: false,
         selected_seed: 0,
@@ -451,6 +621,24 @@
     const inputText = document.getElementById("inputText");
     const fileInput = document.getElementById("fileInput");
     const status = document.getElementById("status");
+    const timeZoom = document.getElementById("timeZoom");
+    const addressZoom = document.getElementById("addressZoom");
+    const showLabels = document.getElementById("showLabels");
+    const tooltip = document.getElementById("chartTooltip");
+    const planChartWrap = document.getElementById("planChartWrap");
+    let currentModel = null;
+    let resizeTimer = null;
+    const viewState = {
+      timeScale: 1,
+      addressScale: 1,
+      panX: 0,
+      panY: 0,
+      pointerId: null,
+      startX: 0,
+      startY: 0,
+      startPanX: 0,
+      startPanY: 0
+    };
 
     document.getElementById("sampleButton").addEventListener("click", () => render(sample));
     document.getElementById("copySampleButton").addEventListener("click", () => {
@@ -458,6 +646,44 @@
       status.textContent = "Sample JSON copied into the input box.";
     });
     document.getElementById("clearButton").addEventListener("click", clearView);
+    document.getElementById("resetView").addEventListener("click", () => {
+      timeZoom.value = "1";
+      addressZoom.value = "1";
+      showLabels.checked = true;
+      viewState.timeScale = 1;
+      viewState.addressScale = 1;
+      viewState.panX = 0;
+      viewState.panY = 0;
+      updateZoomLabels();
+      rerenderCharts();
+    });
+    for (const control of [timeZoom, addressZoom]) {
+      control.addEventListener("input", () => {
+        const nextScale = Number(control.value);
+        if (control === timeZoom) {
+          viewState.panX = preserveViewCenter(
+            viewState.panX, viewState.timeScale, nextScale);
+          viewState.timeScale = nextScale;
+        } else {
+          viewState.panY = preserveViewCenter(
+            viewState.panY, viewState.addressScale, nextScale);
+          viewState.addressScale = nextScale;
+        }
+        updateZoomLabels();
+        rerenderCharts();
+      });
+    }
+    showLabels.addEventListener("change", rerenderCharts);
+    planChartWrap.addEventListener("wheel", handleChartWheel, { passive: false });
+    planChartWrap.addEventListener("pointerdown", startChartDrag);
+    planChartWrap.addEventListener("pointermove", moveChartDrag);
+    planChartWrap.addEventListener("pointerup", finishChartDrag);
+    planChartWrap.addEventListener("pointercancel", finishChartDrag);
+    planChartWrap.addEventListener("keydown", handleChartKey);
+    window.addEventListener("resize", () => {
+      window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(rerenderCharts, 120);
+    });
     document.getElementById("renderButton").addEventListener("click", () => {
       try {
         render(parseInput(inputText.value));
@@ -536,17 +762,174 @@
                            Number.isFinite(buffer.allocTime) &&
                            Number.isFinite(buffer.freeTime));
       if (plan.length === 0) throw new Error("The plan table is empty.");
-      return { data, result, plan };
+      const placements = groupPlacements(plan);
+      const addresses = analyzeAddresses(placements);
+      return { data, result, plan, placements, addresses };
+    }
+
+    function groupPlacements(plan) {
+      const byGeometry = new Map();
+      const placements = [];
+      for (const buffer of plan) {
+        const key = geometryKey(buffer);
+        let placement = byGeometry.get(key);
+        if (!placement) {
+          placement = {
+            extentBits: buffer.extentBits,
+            offsetBytes: buffer.offsetBytes,
+            allocTime: buffer.allocTime,
+            freeTime: buffer.freeTime,
+            names: []
+          };
+          byGeometry.set(key, placement);
+          placements.push(placement);
+        }
+        placement.names.push(buffer.name);
+      }
+      return placements;
+    }
+
+    function analyzeAddresses(placements) {
+      const addresses = new Map();
+      for (const placement of placements) {
+        const key = addressKey(placement);
+        if (!addresses.has(key)) addresses.set(key, []);
+        addresses.get(key).push(placement);
+      }
+      return addresses;
+    }
+
+    function geometryKey(buffer) {
+      return [buffer.extentBits, buffer.offsetBytes,
+              buffer.allocTime, buffer.freeTime].join("|");
+    }
+
+    function addressKey(buffer) {
+      return String(buffer.offsetBytes);
+    }
+
+    function placementLabel(names) {
+      if (names.length <= 2) return names.join(" / ");
+      return `${names[0]} / ${names[1]} +${names.length - 2}`;
     }
 
     function render(data) {
       const model = normalize(data);
+      currentModel = model;
       renderSummary(model);
       renderChart(model);
-      renderTable(model.plan);
+      renderTable(model);
       renderUtilChart(model.result, model.plan);
       inputText.value = JSON.stringify(data, null, 2);
-      status.textContent = `Rendered ${model.plan.length} buffers.`;
+      status.textContent =
+        `Rendered ${model.plan.length} buffers in ${model.placements.length} visual placements.`;
+    }
+
+    function updateZoomLabels() {
+      document.getElementById("timeZoomValue").textContent =
+        `${Math.round(Number(timeZoom.value) * 100)}%`;
+      document.getElementById("addressZoomValue").textContent =
+        `${Math.round(Number(addressZoom.value) * 100)}%`;
+    }
+
+    function preserveViewCenter(pan, oldScale, newScale) {
+      if (newScale <= 1) return 0;
+      const oldVisible = 1 / Math.max(1, oldScale);
+      const oldCenter = pan * (1 - oldVisible) + oldVisible / 2;
+      const newVisible = 1 / newScale;
+      return clamp((oldCenter - newVisible / 2) / (1 - newVisible), 0, 1);
+    }
+
+    function handleChartWheel(event) {
+      if (!currentModel) return;
+      let nextX = viewState.panX;
+      let nextY = viewState.panY;
+      let handled = false;
+      const horizontalDelta = event.shiftKey ? event.deltaY : event.deltaX;
+      const verticalDelta = event.shiftKey ? 0 : event.deltaY;
+
+      if (viewState.timeScale > 1 && Math.abs(horizontalDelta) > 0.1) {
+        nextX += horizontalDelta / (600 * (viewState.timeScale - 1));
+        handled = true;
+      }
+      if (viewState.addressScale > 1 && Math.abs(verticalDelta) > 0.1) {
+        nextY -= verticalDelta / (600 * (viewState.addressScale - 1));
+        handled = true;
+      } else if (viewState.timeScale > 1 && viewState.addressScale === 1 &&
+                 Math.abs(verticalDelta) > 0.1) {
+        nextX += verticalDelta / (600 * (viewState.timeScale - 1));
+        handled = true;
+      }
+      if (!handled) return;
+      event.preventDefault();
+      setChartPan(nextX, nextY);
+    }
+
+    function startChartDrag(event) {
+      if (event.button !== 0 || !currentModel ||
+          (viewState.timeScale === 1 && viewState.addressScale === 1)) return;
+      viewState.pointerId = event.pointerId;
+      viewState.startX = event.clientX;
+      viewState.startY = event.clientY;
+      viewState.startPanX = viewState.panX;
+      viewState.startPanY = viewState.panY;
+      planChartWrap.classList.add("is-dragging");
+      planChartWrap.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    }
+
+    function moveChartDrag(event) {
+      if (event.pointerId !== viewState.pointerId) return;
+      const width = Math.max(1, planChartWrap.clientWidth);
+      const height = Math.max(1, planChartWrap.clientHeight);
+      const deltaX = event.clientX - viewState.startX;
+      const deltaY = event.clientY - viewState.startY;
+      const nextX = viewState.timeScale > 1
+        ? viewState.startPanX - deltaX / (width * (viewState.timeScale - 1))
+        : 0;
+      const nextY = viewState.addressScale > 1
+        ? viewState.startPanY + deltaY / (height * (viewState.addressScale - 1))
+        : 0;
+      setChartPan(nextX, nextY);
+    }
+
+    function finishChartDrag(event) {
+      if (event.pointerId !== viewState.pointerId) return;
+      if (planChartWrap.hasPointerCapture(event.pointerId))
+        planChartWrap.releasePointerCapture(event.pointerId);
+      viewState.pointerId = null;
+      planChartWrap.classList.remove("is-dragging");
+    }
+
+    function handleChartKey(event) {
+      const stepX = viewState.timeScale > 1
+        ? 0.1 / (viewState.timeScale - 1) : 0;
+      const stepY = viewState.addressScale > 1
+        ? 0.1 / (viewState.addressScale - 1) : 0;
+      const directions = {
+        ArrowLeft: [-stepX, 0],
+        ArrowRight: [stepX, 0],
+        ArrowDown: [0, -stepY],
+        ArrowUp: [0, stepY]
+      };
+      if (!directions[event.key]) return;
+      event.preventDefault();
+      const [deltaX, deltaY] = directions[event.key];
+      setChartPan(viewState.panX + deltaX, viewState.panY + deltaY);
+    }
+
+    function setChartPan(x, y) {
+      const nextX = clamp(x, 0, 1);
+      const nextY = clamp(y, 0, 1);
+      if (nextX === viewState.panX && nextY === viewState.panY) return;
+      viewState.panX = nextX;
+      viewState.panY = nextY;
+      rerenderCharts();
+    }
+
+    function rerenderCharts() {
+      if (!currentModel) return;
+      renderChart(currentModel);
     }
 
     function clearView() {
@@ -557,29 +940,39 @@
       document.getElementById("legend").innerHTML = "";
       document.getElementById("planTable").innerHTML = "";
       document.getElementById("capacityFill").style.width = "0%";
+      document.getElementById("capacityLabel").textContent = "-";
       document.getElementById("chart").innerHTML = "";
+      document.getElementById("utilChart").innerHTML = "";
+      currentModel = null;
+      hideTooltip();
     }
 
-    function renderSummary({ data, result, plan }) {
+    function renderSummary({ data, result, plan, placements }) {
       const requiredBits = Number(result.required_bits ?? result.requiredBits ?? 0);
       const peakBits = Number(result.peak_bits ?? result.peakBits ?? requiredBits);
       const capacityBits = Number(result.capacity_bits ?? result.capacityBits ?? 0);
       const overflow = Boolean(result.overflow);
       const success = result.success !== false && !overflow;
-      const usage = capacityBits > 0 ? requiredBits / capacityBits : 0;
+      const displayBits = overflow ? requiredBits : peakBits;
+      const usage = capacityBits > 0 ? displayBits / capacityBits : 0;
       const summary = document.getElementById("summary");
       summary.innerHTML = "";
       summary.append(
         metric("Status", overflow ? "Overflow" : success ? "Success" : "Blocked", overflow ? "danger" : success ? "ok" : "warn"),
-        metric("Peak", formatBits(peakBits), overflow ? "danger" : "ok"),
-        metric("Required", formatBits(requiredBits), overflow ? "danger" : ""),
-        metric("Buffers", String(plan.length), "")
+        metric(overflow ? "Required" : "Peak",
+               formatBits(displayBits),
+               overflow ? "danger" : success ? "ok" : "warn"),
+        metric("Buffers / Placements", `${plan.length} / ${placements.length}`, "")
       );
       const fill = document.getElementById("capacityFill");
       fill.style.width = `${Math.min(100, Math.max(0, usage * 100))}%`;
       fill.classList.toggle("overflow", overflow);
+      document.getElementById("capacityLabel").textContent = capacityBits > 0
+        ? `${formatBits(displayBits)} / ${formatBits(capacityBits)} (${formatPercent(usage)})`
+        : "Capacity unavailable";
 
-      const inputPath = data.input && data.input.pre_cvpipeline_ir ? data.input.pre_cvpipeline_ir : "";
+      const inputPath = data.input && data.input.before_cvpipelining_ir
+        ? data.input.before_cvpipelining_ir : "";
       const metadata = document.getElementById("metadata");
       metadata.innerHTML = "";
       const rows = [
@@ -594,7 +987,11 @@
         const k = document.createElement("div");
         const v = document.createElement("div");
         k.textContent = key;
-        v.textContent = String(value);
+        v.textContent = key === "Input" ? shortPath(String(value)) : String(value);
+        if (key === "Input") {
+          v.className = "input-path";
+          v.title = String(value);
+        }
         metadata.append(k, v);
       }
     }
@@ -612,248 +1009,199 @@
       return node;
     }
 
-    function renderChart({ result, plan }) {
+    function renderChart({ result, plan, placements, addresses }) {
       const svg = document.getElementById("chart");
+      const wrap = document.getElementById("planChartWrap");
       svg.innerHTML = "";
-      const width = Math.max(760, svg.clientWidth || 920);
-      const height = 480;
-      const margin = { top: 24, right: 65, bottom: 46, left: 70 };
+      hideTooltip();
+
+      const timeScale = viewState.timeScale;
+      const addressScale = viewState.addressScale;
+      const width = Math.max(320, wrap.clientWidth - 2 || 920);
+      const height = Math.max(300, wrap.clientHeight - 2 || 480);
+      const margin = { top: 32, right: 72, bottom: 46, left: 70 };
       svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+      svg.setAttribute("width", width);
+      svg.setAttribute("height", height);
+      svg.style.width = "100%";
+      svg.style.height = "100%";
 
       const minTime = Math.min(...plan.map(buffer => buffer.allocTime));
       const maxTime = Math.max(...plan.map(buffer => buffer.freeTime), minTime + 1);
-      const maxEndByte = Math.max(...plan.map(buffer => buffer.offsetBytes + bitsToBytes(buffer.extentBits)));
+      const maxEndByte = Math.max(...plan.map(buffer =>
+        buffer.offsetBytes + bitsToBytes(buffer.extentBits)));
+      const overflow = Boolean(result.overflow);
       const requiredBits = Number(result.required_bits ?? result.requiredBits ?? maxEndByte * 8);
-
-      const normalBuffers = plan.filter(b => b.allocTime !== b.freeTime);
-      const zeroDurationBuffers = plan.filter(b => b.allocTime === b.freeTime);
-
-      const events = [];
-      normalBuffers.forEach(buffer => {
-        events.push({ time: buffer.allocTime, type: 'alloc', offset: buffer.offsetBytes, extent: bitsToBytes(buffer.extentBits) });
-        events.push({ time: buffer.freeTime, type: 'free', offset: buffer.offsetBytes, extent: bitsToBytes(buffer.extentBits) });
-      });
-      events.sort((a, b) => {
-        if (a.time !== b.time) return a.time - b.time;
-        return a.type === 'free' ? -1 : 1;
-      });
-
-      const activeRanges = [];
-      let utilPoints = [];
-
-      const mergeRanges = () => {
-        if (activeRanges.length === 0) return 0;
-        activeRanges.sort((a, b) => a.start - b.start);
-        let total = 0;
-        let lastEnd = activeRanges[0].start;
-        for (const r of activeRanges) {
-          if (r.start >= lastEnd) {
-            total += r.end - r.start;
-            lastEnd = r.end;
-          } else if (r.end > lastEnd) {
-            total += r.end - lastEnd;
-            lastEnd = r.end;
-          }
-        }
-        return total;
-      };
-
-      const baseUtilAtTime = {};
-      let currentTime = minTime;
-      let i = 0;
-      while (i < events.length) {
-        const evt = events[i];
-        if (evt.time > currentTime) {
-          const bytes = mergeRanges();
-          utilPoints.push({ time: currentTime, bytes });
-          baseUtilAtTime[currentTime] = bytes;
-          currentTime = evt.time;
-        }
-        const sameTimeEvts = [];
-        while (i < events.length && events[i].time === currentTime) {
-          sameTimeEvts.push(events[i]);
-          i++;
-        }
-        sameTimeEvts.filter(e => e.type === 'free').forEach(e => {
-          const idx = activeRanges.findIndex(r => r.start === e.offset && r.end === e.offset + e.extent);
-          if (idx !== -1) activeRanges.splice(idx, 1);
-        });
-        sameTimeEvts.filter(e => e.type === 'alloc').forEach(e => {
-          activeRanges.push({ start: e.offset, end: e.offset + e.extent });
-        });
-        const bytes = mergeRanges();
-        utilPoints.push({ time: currentTime, bytes });
-        baseUtilAtTime[currentTime] = bytes;
-      }
-      if (utilPoints.length === 0 || utilPoints[utilPoints.length - 1].time !== maxTime) {
-        utilPoints.push({ time: maxTime, bytes: 0 });
-      }
-
-      const zeroDurationPeaks = [];
-      zeroDurationBuffers.forEach(buffer => {
-        const time = buffer.allocTime;
-        zeroDurationPeaks.push({ time, bytes: (baseUtilAtTime[time] || 0) + bitsToBytes(buffer.extentBits), baseBytes: baseUtilAtTime[time] || 0 });
-      });
-
-      const maxUtil = Math.max(...utilPoints.map(p => p.bytes), ...zeroDurationPeaks.map(p => p.bytes), 1);
-      const yMax = Math.max(maxEndByte, bitsToBytes(requiredBits), 1);
-
-      const capacityBits = Number(result.capacity_bits ?? result.capacityBits ?? 0);
-      const capacityBytes = bitsToBytes(capacityBits);
-      const utilToPercent = bytes => (bytes / capacityBytes) * 100;
-
+      const peakBits = Number(result.peak_bits ?? result.peakBits ?? requiredBits);
+      const displayBits = overflow ? requiredBits : peakBits;
+      const yMax = Math.max(maxEndByte, bitsToBytes(displayBits), 1);
+      const timeSpan = Math.max(1, maxTime - minTime);
+      const visibleTimeSpan = timeSpan / timeScale;
+      const visibleMinTime = minTime + viewState.panX * (timeSpan - visibleTimeSpan);
+      const visibleByteSpan = yMax / addressScale;
+      const visibleMinByte = viewState.panY * (yMax - visibleByteSpan);
+      const visibleMaxByte = visibleMinByte + visibleByteSpan;
       const innerWidth = width - margin.left - margin.right;
       const innerHeight = height - margin.top - margin.bottom;
-      const x = time => margin.left + ((time - minTime) / Math.max(1, maxTime - minTime)) * innerWidth;
-      const y = byte => margin.top + innerHeight - (byte / yMax) * innerHeight;
-      const y2 = percent => margin.top + innerHeight - (percent / 100) * innerHeight;
-
+      const x = time => margin.left +
+        ((time - visibleMinTime) / visibleTimeSpan) * innerWidth;
+      const y = byte => margin.top + innerHeight -
+        ((byte - visibleMinByte) / visibleByteSpan) * innerHeight;
       const group = element("g", {});
+      const defs = element("defs", {});
+      const clipPath = element("clipPath", { id: "planPlotClip" });
+      clipPath.append(element("rect", {
+        x: margin.left,
+        y: margin.top,
+        width: innerWidth,
+        height: innerHeight
+      }));
+      defs.append(clipPath);
+      svg.append(defs);
       svg.append(group);
+      const dataGroup = element("g", { "clip-path": "url(#planPlotClip)" });
 
-      for (let index = 0; index <= 5; ++index) {
-        const byte = (yMax / 5) * index;
+      const yTicks = 5;
+      for (let index = 0; index <= yTicks; ++index) {
+        const byte = visibleMinByte + (visibleByteSpan / yTicks) * index;
         group.append(element("line", {
-          class: "gridline",
-          x1: margin.left,
-          y1: y(byte),
-          x2: width - margin.right,
-          y2: y(byte)
+          class: "gridline", x1: margin.left, y1: y(byte),
+          x2: width - margin.right, y2: y(byte)
         }));
         const label = element("text", {
-          x: margin.left - 10,
-          y: y(byte) + 4,
-          "text-anchor": "end",
-          fill: "var(--muted)",
-          "font-size": 11
+          x: margin.left - 10, y: y(byte) + 4, "text-anchor": "end",
+          fill: "var(--muted)", "font-size": 11
         });
         label.textContent = formatBytes(byte);
         group.append(label);
       }
 
-      for (let index = 0; index <= 6; ++index) {
-        const time = minTime + ((maxTime - minTime) / 6) * index;
+      for (const time of integerTimeTicks(
+             visibleMinTime, visibleMinTime + visibleTimeSpan, 6)) {
         group.append(element("line", {
-          class: "gridline",
-          x1: x(time),
-          y1: margin.top,
-          x2: x(time),
-          y2: margin.top + innerHeight
+          class: "gridline", x1: x(time), y1: margin.top,
+          x2: x(time), y2: margin.top + innerHeight
         }));
         const label = element("text", {
-          x: x(time),
-          y: height - 18,
-          "text-anchor": "middle",
-          fill: "var(--muted)",
-          "font-size": 11
+          x: x(time), y: height - 18, "text-anchor": "middle",
+          fill: "var(--muted)", "font-size": 11
         });
-        label.textContent = String(Math.round(time));
+        label.textContent = String(time);
         group.append(label);
       }
 
       const yAxis = element("text", {
-        x: 18,
-        y: margin.top + innerHeight / 2,
+        x: 18, y: margin.top + innerHeight / 2,
         transform: `rotate(-90 18 ${margin.top + innerHeight / 2})`,
-        "text-anchor": "middle",
-        fill: "var(--muted)",
-        "font-size": 12
+        "text-anchor": "middle", fill: "var(--muted)", "font-size": 12
       });
       yAxis.textContent = "UB offset";
       group.append(yAxis);
       const xAxis = element("text", {
-        x: margin.left + innerWidth / 2,
-        y: height - 4,
-        "text-anchor": "middle",
-        fill: "var(--muted)",
-        "font-size": 12
+        x: margin.left + innerWidth / 2, y: height - 4,
+        "text-anchor": "middle", fill: "var(--muted)", "font-size": 12
       });
       xAxis.textContent = "PlanMemory operation time";
       group.append(xAxis);
+      group.append(dataGroup);
 
-      plan.forEach((buffer, index) => {
-        const top = buffer.offsetBytes + bitsToBytes(buffer.extentBits);
-        const duration = buffer.freeTime - buffer.allocTime;
-        const isZeroDuration = duration === 0;
+      const addressColors = new Map();
+      [...addresses.keys()].sort((a, b) => Number(a) - Number(b))
+        .forEach((key, index) => addressColors.set(key, palette[index % palette.length]));
+
+      placements.forEach(placement => {
+        const top = placement.offsetBytes + bitsToBytes(placement.extentBits);
+        const isZeroDuration = placement.allocTime === placement.freeTime;
+        const key = addressKey(placement);
+        const shared = placement.names.length > 1;
+        const reused = addresses.get(key).length > 1;
+        const classes = ["buffer-rect"];
+        if (shared) classes.push("shared-placement");
+        if (reused) classes.push("reused-address");
         const rect = element("rect", {
-          class: "buffer-rect",
-          x: isZeroDuration ? x(buffer.allocTime) - 1.5 : x(buffer.allocTime),
+          class: classes.join(" "),
+          "data-address-key": key,
+          x: isZeroDuration ? x(placement.allocTime) - 1.5 : x(placement.allocTime),
           y: y(top),
-          width: isZeroDuration ? 3 : Math.max(3, x(buffer.freeTime) - x(buffer.allocTime)),
-          height: Math.max(3, y(buffer.offsetBytes) - y(top)),
+          width: isZeroDuration ? 3 :
+            Math.max(3, x(placement.freeTime) - x(placement.allocTime)),
+          height: Math.max(3, y(placement.offsetBytes) - y(top)),
           rx: isZeroDuration ? 0 : 3,
-          fill: palette[index % palette.length],
+          fill: addressColors.get(key),
           opacity: isZeroDuration ? 0.7 : 1
         });
-        rect.append(element("title", {}));
-        rect.querySelector("title").textContent =
-          `${buffer.name}\n${formatBits(buffer.extentBits)} at ${formatBytes(buffer.offsetBytes)}\n${buffer.allocTime} -> ${buffer.freeTime}`;
-        group.append(rect);
+        const storage = storageLabel(shared, reused, placement.names.length,
+                                     addresses.get(key).length);
+        rect.addEventListener("pointerenter", event => {
+          highlightAddress(key);
+          showTooltip(event, placement, storage);
+        });
+        rect.addEventListener("pointermove", moveTooltip);
+        rect.addEventListener("pointerleave", () => {
+          clearHighlight();
+          hideTooltip();
+        });
+        dataGroup.append(rect);
 
-        if (x(buffer.freeTime) - x(buffer.allocTime) > 54 &&
-            y(buffer.offsetBytes) - y(top) > 16) {
+        if (showLabels.checked &&
+            x(placement.freeTime) - x(placement.allocTime) > 54 &&
+            y(placement.offsetBytes) - y(top) > 16) {
           const label = element("text", {
             class: "buffer-label",
-            x: x(buffer.allocTime) + 5,
+            x: x(placement.allocTime) + 5,
             y: y(top) + 14
           });
-          label.textContent = buffer.name;
-          group.append(label);
+          label.textContent = placementLabel(placement.names);
+          dataGroup.append(label);
         }
       });
 
-      const peakByte = bitsToBytes(requiredBits);
-      group.append(element("line", {
-        class: "peak-line",
-        x1: margin.left,
-        y1: y(peakByte),
-        x2: width - margin.right,
-        y2: y(peakByte)
-      }));
-      const requiredLabel = element("text", {
-        class: "peak-label",
-        x: width - margin.right - 4,
-        y: y(peakByte) - 6,
-        "text-anchor": "end"
-      });
-      requiredLabel.textContent = `required ${formatBits(requiredBits)}`;
-      group.append(requiredLabel);
-
-      const legend = document.getElementById("legend");
-      legend.innerHTML = "";
-      plan.slice(0, 24).forEach((buffer, index) => {
-        const item = document.createElement("span");
-        item.className = "legend-item";
-        const swatch = document.createElement("span");
-        swatch.className = "swatch";
-        swatch.style.background = palette[index % palette.length];
-        const name = document.createElement("span");
-        name.textContent = buffer.name;
-        item.append(swatch, name);
-        legend.append(item);
-      });
-      if (plan.length > 24) {
-        const more = document.createElement("span");
-        more.textContent = `+${plan.length - 24} more`;
-        legend.append(more);
+      const displayByte = bitsToBytes(displayBits);
+      if (displayByte >= visibleMinByte && displayByte <= visibleMaxByte) {
+        dataGroup.append(element("line", {
+          class: `peak-line${overflow ? " overflow" : ""}`,
+          x1: margin.left, y1: y(displayByte),
+          x2: width - margin.right, y2: y(displayByte)
+        }));
+        const limitLabel = element("text", {
+          class: `peak-label${overflow ? " overflow" : ""}`,
+          x: width - margin.right - 4,
+          y: Math.max(margin.top + 14, y(displayByte) - 7),
+          "text-anchor": "end"
+        });
+        limitLabel.textContent = `${overflow ? "required" : "peak"} ${formatBits(displayBits)}`;
+        dataGroup.append(limitLabel);
       }
+
+      renderSemanticLegend();
     }
 
-    function renderTable(plan) {
+    function renderTable({ plan, placements, addresses }) {
       const tbody = document.getElementById("planTable");
       tbody.innerHTML = "";
+      const placementByGeometry = new Map();
+      for (const placement of placements)
+        placementByGeometry.set(geometryKey(placement), placement);
       const sorted = [...plan].sort((a, b) =>
         a.allocTime - b.allocTime || a.offsetBytes - b.offsetBytes ||
         a.name.localeCompare(b.name));
       for (const buffer of sorted) {
         const tr = document.createElement("tr");
         const endByte = buffer.offsetBytes + bitsToBytes(buffer.extentBits);
+        const placement = placementByGeometry.get(geometryKey(buffer));
+        const key = addressKey(buffer);
+        const shared = placement.names.length > 1;
+        const reused = addresses.get(key).length > 1;
+        const storage = storageLabel(shared, reused, placement.names.length,
+                                     addresses.get(key).length);
+        tr.dataset.addressKey = key;
         const cells = [
           [buffer.name, "name"],
           [formatBits(buffer.extentBits), ""],
           [formatBytes(buffer.offsetBytes), ""],
           [`${buffer.allocTime} -> ${buffer.freeTime}`, ""],
-          [formatBytes(endByte), ""]
+          [formatBytes(endByte), ""],
+          [storage, ""]
         ];
         for (const [value, className] of cells) {
           const td = document.createElement("td");
@@ -861,8 +1209,94 @@
           if (className) td.className = className;
           tr.append(td);
         }
+        tr.addEventListener("pointerenter", event => {
+          highlightAddress(key);
+          showTooltip(event, placement, storage);
+        });
+        tr.addEventListener("pointermove", moveTooltip);
+        tr.addEventListener("pointerleave", () => {
+          clearHighlight();
+          hideTooltip();
+        });
         tbody.append(tr);
       }
+    }
+
+    function storageLabel(shared, reused, sharedCount, reuseCount) {
+      const labels = [];
+      if (shared) labels.push(`Inplace x${sharedCount}`);
+      if (reused) labels.push(`Reused x${reuseCount}`);
+      return labels.length > 0 ? labels.join(" + ") : "Unique";
+    }
+
+    function renderSemanticLegend() {
+      const legend = document.getElementById("legend");
+      legend.innerHTML = "";
+      const entries = [
+        ["Unique placement", ""],
+        ["Inplace / shared", "shared"],
+        ["Address reused over time", "reused"]
+      ];
+      for (const [label, tone] of entries) {
+        const item = document.createElement("span");
+        item.className = "legend-item";
+        const swatch = document.createElement("span");
+        swatch.className = `swatch ${tone}`.trim();
+        swatch.style.background = tone === "reused" ? "#dff2f0" : "#58a6a6";
+        const textNode = document.createElement("span");
+        textNode.textContent = label;
+        item.append(swatch, textNode);
+        legend.append(item);
+      }
+      const note = document.createElement("span");
+      note.textContent = "Color identifies the UB base address";
+      legend.append(note);
+    }
+
+    function highlightAddress(key) {
+      document.querySelectorAll(".buffer-rect[data-address-key]").forEach(node => {
+        const active = node.dataset.addressKey === key;
+        node.classList.toggle("is-active", active);
+        node.classList.toggle("is-dimmed", !active);
+      });
+      document.querySelectorAll("#planTable tr[data-address-key]").forEach(node => {
+        const active = node.dataset.addressKey === key;
+        node.classList.toggle("is-active", active);
+        node.classList.toggle("is-dimmed", !active);
+      });
+    }
+
+    function clearHighlight() {
+      document.querySelectorAll(".is-active, .is-dimmed").forEach(node =>
+        node.classList.remove("is-active", "is-dimmed"));
+    }
+
+    function showTooltip(event, placement, storage) {
+      const title = document.createElement("strong");
+      title.textContent = placementLabel(placement.names);
+      const detail = document.createElement("span");
+      detail.textContent = `${formatBits(placement.extentBits)} at ${formatBytes(placement.offsetBytes)}`;
+      const lifetime = document.createElement("span");
+      lifetime.textContent = `Lifetime ${placement.allocTime} -> ${placement.freeTime}`;
+      const storageNode = document.createElement("span");
+      storageNode.textContent = storage;
+      tooltip.replaceChildren(title, detail, lifetime, storageNode);
+      tooltip.style.display = "block";
+      moveTooltip(event);
+    }
+
+    function moveTooltip(event) {
+      const gap = 14;
+      const width = tooltip.offsetWidth;
+      const height = tooltip.offsetHeight;
+      const left = Math.min(event.clientX + gap, window.innerWidth - width - 8);
+      const top = Math.min(event.clientY + gap, window.innerHeight - height - 8);
+      tooltip.style.left = `${Math.max(8, left)}px`;
+      tooltip.style.top = `${Math.max(8, top)}px`;
+    }
+
+    function hideTooltip() {
+      tooltip.style.display = "none";
     }
 
     function renderUtilChart(result, plan) {
@@ -1135,6 +1569,41 @@
       return `${Math.round(value)} B`;
     }
 
+    function formatPercent(ratio) {
+      const percent = Number(ratio || 0) * 100;
+      const digits = percent >= 10 ? 1 : percent >= 1 ? 2 : 3;
+      return `${percent.toFixed(digits)}%`;
+    }
+
+    function integerTimeTicks(minimum, maximum, targetCount) {
+      const first = Math.ceil(minimum - 1e-9);
+      const last = Math.floor(maximum + 1e-9);
+      if (first > last) return [];
+
+      const rawStep = Math.max(1, Math.ceil((last - first) / targetCount));
+      const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+      const normalized = rawStep / magnitude;
+      const niceStep = (normalized <= 1 ? 1 : normalized <= 2 ? 2 :
+                        normalized <= 5 ? 5 : 10) * magnitude;
+      const ticks = [];
+      for (let time = Math.ceil(first / niceStep) * niceStep;
+           time <= last; time += niceStep) {
+        ticks.push(time);
+      }
+      return ticks;
+    }
+
+    function shortPath(path) {
+      if (!path) return "";
+      const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
+      return parts.slice(-2).join("/");
+    }
+
+    function clamp(value, minimum, maximum) {
+      return Math.min(maximum, Math.max(minimum, value));
+    }
+
+    updateZoomLabels();
     render(sample);
   </script>
 </body>

@@ -32,9 +32,13 @@ def plan_multiset_from_model(payload: dict) -> Counter[tuple[int, int]]:
     return multiset
 
 
-def parse_oracle(path: Path, attempt: int | None, scope: str) -> tuple[int, int | None, Counter[tuple[int, int]]]:
+def parse_oracle(
+    path: Path, attempt: int | None, scope: str
+) -> tuple[int, str | None, int | None, int | None, Counter[tuple[int, int]]]:
     success_attempts: list[int] = []
+    statuses: dict[int, str] = {}
     peaks: dict[int, int] = {}
+    required: dict[int, int] = {}
     buffers_by_attempt: dict[int, Counter[tuple[int, int]]] = collections.defaultdict(collections.Counter)
 
     for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -43,8 +47,13 @@ def parse_oracle(path: Path, attempt: int | None, scope: str) -> tuple[int, int 
             continue
         tag = fields[0]
         if tag == "PLANMEM_PLAN_ATTEMPT" and len(fields) >= 4:
+            statuses[int(fields[2])] = fields[3]
             if fields[3] == "success":
                 success_attempts.append(int(fields[2]))
+        elif tag == "PLANMEM_REQUIRED" and len(fields) >= 4:
+            line_attempt = int(fields[1])
+            if fields[2] == scope:
+                required[line_attempt] = int(fields[3])
         elif tag == "PLANMEM_PEAK" and len(fields) >= 4:
             line_attempt = int(fields[1])
             if fields[2] == scope:
@@ -60,8 +69,14 @@ def parse_oracle(path: Path, attempt: int | None, scope: str) -> tuple[int, int 
 
     selected = attempt
     if selected is None:
-        selected = success_attempts[0] if success_attempts else 0
-    return selected, peaks.get(selected), buffers_by_attempt[selected]
+        selected = success_attempts[0] if success_attempts else max(statuses, default=0)
+    return (
+        selected,
+        statuses.get(selected),
+        peaks.get(selected),
+        required.get(selected),
+        buffers_by_attempt[selected],
+    )
 
 
 def format_pair(pair: tuple[int, int], count: int) -> str:
@@ -90,31 +105,44 @@ def main() -> int:
     args = parse_args()
     payload = json.loads(args.model_json.read_text(encoding="utf-8"))
     result = payload.get("result", {})
+    model_overflow = bool(result.get("overflow"))
     model_peak = int(result.get("peak_bits") or result.get("ub_peak_bits") or 0)
+    model_required = int(result.get("required_bits") or 0)
     model_attempt = result.get("selected_seed")
     selected_attempt = args.attempt
     if selected_attempt is None and model_attempt is not None:
         selected_attempt = int(model_attempt)
 
-    oracle_attempt, oracle_peak, oracle_plan = parse_oracle(
+    oracle_attempt, oracle_status, oracle_peak, oracle_required, oracle_plan = parse_oracle(
         args.oracle_tsv, selected_attempt, args.scope)
     model_plan = plan_multiset_from_model(payload)
 
-    peak_match = oracle_peak == model_peak
+    status_match = ((oracle_status == "failure") if model_overflow
+                    else (oracle_status == "success"))
+    size_match = ((oracle_required == model_required) if model_overflow
+                  else (oracle_peak == model_peak))
     plan_match = oracle_plan == model_plan
 
     print("Suffix-Compile Oracle Comparison")
     print("----------------------------------------------------------------------------")
     print(f"attempt        : {oracle_attempt}")
     print(f"scope          : {args.scope}")
-    print(f"model peak     : {model_peak}")
-    print(f"oracle peak    : {oracle_peak}")
-    print(f"peak match     : {'yes' if peak_match else 'no'}")
+    print(f"model status   : {'overflow' if model_overflow else 'success'}")
+    print(f"oracle status  : {oracle_status}")
+    print(f"status match   : {'yes' if status_match else 'no'}")
+    if model_overflow:
+        print(f"model required : {model_required}")
+        print(f"oracle required: {oracle_required}")
+        print(f"required match : {'yes' if size_match else 'no'}")
+    else:
+        print(f"model peak     : {model_peak}")
+        print(f"oracle peak    : {oracle_peak}")
+        print(f"peak match     : {'yes' if size_match else 'no'}")
     print(f"model buffers  : {sum(model_plan.values())}")
     print(f"oracle buffers : {sum(oracle_plan.values())}")
     print(f"offset match   : {'yes' if plan_match else 'no'}")
 
-    if not peak_match or not plan_match:
+    if not status_match or not size_match or not plan_match:
         print()
         print_counter_diff("Only in model:", model_plan, oracle_plan, args.max_diff)
         print_counter_diff("Only in oracle:", oracle_plan, model_plan, args.max_diff)
