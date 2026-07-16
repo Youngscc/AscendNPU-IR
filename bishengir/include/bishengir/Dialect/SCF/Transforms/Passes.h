@@ -31,6 +31,10 @@ namespace mlir {
 #include "bishengir/Dialect/SCF/Transforms/Passes.h.inc"
 
 namespace scf {
+
+/// Adds a pass to convert loop iter_arg to hardware types
+std::unique_ptr<Pass> createLegalizeLoopIterArgsPass();
+
 std::unique_ptr<Pass> createMapForToForallPass();
 
 std::unique_ptr<Pass> createRemoveRedundantLoopInitPass();

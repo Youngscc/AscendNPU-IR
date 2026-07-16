@@ -28,6 +28,7 @@
 #include "bishengir/Dialect/HACC/IR/HACC.h"
 #include "bishengir/Dialect/HFusion/IR/HFusion.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
+#include "bishengir/Dialect/HIVMAVE/IR/HIVMAVE.h"
 #include "bishengir/Dialect/MathExt/IR/MathExt.h"
 #include "bishengir/Dialect/MemRefExt/IR/MemRefExt.h"
 #include "bishengir/Dialect/Scope/IR/Scope.h"
@@ -62,6 +63,7 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
                   mlir::hacc::HACCDialect,
                   mlir::hfusion::HFusionDialect,
                   mlir::hivm::HIVMDialect,
+                  mlir::hivmave::AVEDialect,
                   mlir::mathExt::MathExtDialect,
                   mlir::scope::ScopeDialect,
                   mlir::symbol::SymbolDialect,
