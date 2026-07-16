@@ -119,6 +119,8 @@ struct PlanMemoryModelResult {
   uint64_t requiredBits = 0;
   uint64_t capacityBits = kUBCapacityBits;
   std::vector<PlannedBufferRecord> buffers;
+  std::vector<std::pair<std::string, std::string>> inplacePairs;
+  std::map<std::string, uint32_t> multiBufferNums;
 };
 
 inline std::string readFile(const fs::path &path) {

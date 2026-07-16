@@ -95,8 +95,9 @@ inline std::string PlanMemoryFormatMemRefTypeWithAddressSpace(
 
 class PlanMemoryInputBuilder {
 public:
-  explicit PlanMemoryInputBuilder(const PlanMemoryInputSemanticIR &inputModule)
-      : module(inputModule),
+  explicit PlanMemoryInputBuilder(const PlanMemoryInputSemanticIR &inputModule,
+                                  std::string targetFunction = {})
+      : module(inputModule), targetFunction(std::move(targetFunction)),
         logical(inputModule.afterMarkMultiBuffer.afterInlineLoadCopy
                     .afterAllocExtraBuffer.postBufferization.bufferized
                     .logicalModule) {
@@ -127,11 +128,17 @@ public:
     for (const GenericOperation &operation : logical.operations) {
       if (operation.name != "func.func" || !IsAIVFunction(operation))
         continue;
+      if (!targetFunction.empty() &&
+          GenericFunctionName(operation) != targetFunction)
+        continue;
       if (function)
         throw std::runtime_error(
             "PlanMemory input builder: multiple AIV functions are not supported");
       function = &operation;
     }
+    if (!function && !targetFunction.empty())
+      throw std::runtime_error("PlanMemory input builder: unknown AIV function " +
+                               targetFunction);
     if (!function)
       return {};
     if (function->regions.size() != 1)
@@ -5011,6 +5018,7 @@ private:
   }
 
   const PlanMemoryInputSemanticIR &module;
+  std::string targetFunction;
   const GenericModule &logical;
   PlanMemoryInput result;
   int nextOperationId = 1000000;
@@ -5094,6 +5102,12 @@ private:
 inline PlanMemoryInput
 BuildPlanMemoryInput(const PlanMemoryInputSemanticIR &module) {
   return PlanMemoryInputBuilder(module).Build();
+}
+
+inline PlanMemoryInput
+BuildPlanMemoryInput(const PlanMemoryInputSemanticIR &module,
+                     const std::string &targetFunction) {
+  return PlanMemoryInputBuilder(module, targetFunction).Build();
 }
 
 inline std::string SerializePlanMemoryInput(const PlanMemoryInput &input) {

@@ -1,0 +1,16 @@
+order	stage	disposition
+1	TileCubeVectorLoop	partial
+2	InferAndSetBufferSize	partial
+3	WorkspaceSemanticProjection	ub-invariant
+4	CanonicalizationBeforeSplit	partial
+5	CrossCoreSyncInvariant	ub-invariant
+6	MarkTightlyCoupledBuffer;HoistTightlyCoupledAlloc	partial
+7	SplitMixKernelAIVProjection	partial
+8	InlineScope	partial
+9	TileAndBindSubBlock	partial
+10	FoldTensorEmpty	partial
+11	CanonicalizationAfterSplit	partial
+12	LoopInvariantCodeMotion	partial
+13	LoopInvariantSubsetHoisting	partial
+14	CloneTensorEmpty	partial
+15	InlineOTFLoadStore	partial

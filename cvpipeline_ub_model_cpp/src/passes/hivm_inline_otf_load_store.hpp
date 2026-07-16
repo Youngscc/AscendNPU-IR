@@ -1,6 +1,7 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_HIVM_INLINE_OTF_LOAD_STORE_HPP
 #define CVPIPELINE_UB_MODEL_CPP_HIVM_INLINE_OTF_LOAD_STORE_HPP
 
+#include "canonicalization_hivm_pipeline.hpp"
 #include "one_shot_bufferize.hpp"
 
 namespace cvub {
@@ -23,7 +24,31 @@ HIVMInlineElementBytes(const std::string &elementType) {
     return 4;
   if (elementType == "f64" || elementType == "i64")
     return 8;
+  if (elementType.size() > 1 &&
+      (elementType.front() == 'i' || elementType.front() == 'f')) {
+    try {
+      const uint64_t bits = std::stoull(elementType.substr(1));
+      return bits / 8;
+    } catch (const std::exception &) {
+    }
+  }
   return std::nullopt;
+}
+
+inline bool HIVMInlineUsesValue(const GenericOperation &operation, int value) {
+  const auto contains = [&](const std::vector<int> &values) {
+    return std::find(values.begin(), values.end(), value) != values.end();
+  };
+  return contains(operation.operands) || contains(operation.dpsInputs) ||
+         contains(operation.dpsInits);
+}
+
+inline bool HIVMInlineIsBufferSizeMark(const GenericOperation &operation) {
+  return operation.name == "annotation.mark" &&
+         (operation.attributes.find("buffer_size_in_byte") !=
+              std::string::npos ||
+          operation.properties.find("buffer_size_in_byte") !=
+              std::string::npos);
 }
 
 inline int64_t HIVMInlineConcatDim(const GenericOperation &operation) {
@@ -59,6 +84,9 @@ inline std::string HIVMInlineInsertSliceProperties(
 
 // Mirrors UnalignedLastDimConcatStorePattern.
 inline GenericModule RunHIVMInlineOTFLoadStore(GenericModule module) {
+  GenericModule original = module;
+  ApplyOperationSemanticsToAll(module.operations);
+  bool rewritten = false;
   const auto definitions = DefiningOperations(module);
   for (const GenericOperation &storeSnapshot : module.operations) {
     if (storeSnapshot.name != "hivm.hir.store" ||
@@ -106,6 +134,15 @@ inline GenericModule RunHIVMInlineOTFLoadStore(GenericModule module) {
     }
     if (aligned)
       continue;
+    for (const GenericOperation &user : module.operations) {
+      if (user.id == storeSnapshot.id ||
+          !HIVMInlineUsesValue(user, concat.results.front()) ||
+          HIVMInlineIsBufferSizeMark(user))
+        continue;
+      throw std::runtime_error(
+          "HIVMInlineOTFLoadStore: vconcat result has users beyond the store "
+          "and size mark");
+    }
     if (std::any_of(inputTypes.begin(), inputTypes.end(),
                     [](const MemRefTypeModel &type) {
                       return type.shape.empty() ||
@@ -153,7 +190,10 @@ inline GenericModule RunHIVMInlineOTFLoadStore(GenericModule module) {
     for (int &operand : store.dpsInputs)
       if (operand == concat.results.front())
         operand = accumulator;
+    rewritten = true;
   }
+  if (!rewritten)
+    return original;
   while (EliminateCanonicalizationDeadCode(module)) {
   }
   return CompactGenericModule(std::move(module));

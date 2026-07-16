@@ -127,7 +127,7 @@ inline GenericModule RunGlobalWorkspacePlan(GenericModule module) {
     RunGreedyOperationFolder(module, functionId);
   }
   ApplyOperationSemanticsToAll(module.operations);
-  return module;
+  return CompactGenericModule(std::move(module));
 }
 
 } // namespace cvub

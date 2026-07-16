@@ -32,7 +32,8 @@ inline bool HasModeledOperationSemantics(const std::string &name) {
       "hivm.hir.vsel", "hivm.hir.vshr", "hivm.hir.vsort",
       "hivm.hir.vsqrt", "hivm.hir.vsub", "hivm.hir.vtranspose",
       "llvm.inline_asm", "llvm.intr.assume", "memref.alloc",
-      "memref.collapse_shape", "memref.load", "memref.reinterpret_cast",
+      "memref.collapse_shape", "memref.load", "memref.store",
+      "memref.reinterpret_cast",
       "memref.subview", "memref.view", "memref_ext.alloc_workspace", "scf.condition",
       "scf.for", "scf.if", "scf.while", "scf.yield", "scope.return",
       "scope.scope",
@@ -237,6 +238,10 @@ inline void ApplyOperationSemantics(Operation &operation) {
              !operation.operands.empty()) {
     operation.effects = GenericMemoryEffect(
         "read", std::to_string(operation.operands.front()), false);
+  } else if (operation.name == "memref.store" &&
+             operation.operands.size() >= 2) {
+    operation.effects = GenericMemoryEffect(
+        "write", std::to_string(operation.operands[1]), false);
   } else if (operation.name == "hivm.hir.atomic_cas") {
     std::vector<std::string> effects;
     for (size_t index = 0; index < operation.operands.size(); ++index) {

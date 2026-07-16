@@ -89,6 +89,13 @@ def parse_args() -> argparse.Namespace:
     add_optional_bool(
         suffix_group, "--suffix-enable-auto-multi-buffer", default=False,
         help_text="Enable modeled MarkMultiBuffer before local PlanMemory.")
+    add_optional_bool(
+        suffix_group, "--suffix-enable-code-motion", default=True,
+        help_text="Match the real LICM and subset-hoisting pipeline option.")
+    add_optional_bool(
+        suffix_group, "--suffix-enable-triton-kernel-compile", default=False,
+        help_text=("Run Triton-only DPS insert-slice optimization before "
+                   "OneShotBufferize."))
     suffix_group.add_argument(
         "--suffix-local-multi-buffer-strategy", default="no-limit",
         choices=["no-limit", "only-cube", "only-vector", "no-l0c"],
@@ -122,10 +129,13 @@ def model_command(args: argparse.Namespace) -> list[str]:
         f"--enable-preload={str(args.cv_enable_preload).lower()}",
         f"--enable-cv-lazy-loading={str(args.cv_enable_lazy_loading).lower()}",
         f"--enable-auto-multi-buffer={str(args.suffix_enable_auto_multi_buffer).lower()}",
+        f"--enable-code-motion={str(args.suffix_enable_code_motion).lower()}",
+        f"--enable-triton-kernel-compile={str(args.suffix_enable_triton_kernel_compile).lower()}",
         "--limit-auto-multi-buffer-of-local-buffer",
         args.suffix_local_multi_buffer_strategy,
         "--limit-auto-multi-buffer-buffer",
         args.suffix_mix_multi_buffer_strategy,
+        f"--format={args.format}",
     ]
     if args.random_seed is not None:
         command.append(f"--random-seed={args.random_seed}")
@@ -147,8 +157,14 @@ def parse_model_text(stdout: str) -> dict[str, Any]:
             in_plan = True
             continue
         if in_plan:
-            name, extent_bits, offset_bytes, alloc_time, free_time = line.split("\t")
+            columns = line.split("\t")
+            if len(columns) == 6:
+                function, name, extent_bits, offset_bytes, alloc_time, free_time = columns
+            else:
+                function = ""
+                name, extent_bits, offset_bytes, alloc_time, free_time = columns
             plan.append({
+                "function": function,
                 "name": name,
                 "extent_bits": int(extent_bits),
                 "offset_bytes": int(offset_bytes),
@@ -162,7 +178,7 @@ def parse_model_text(stdout: str) -> dict[str, Any]:
         if key in {"success", "overflow", "restrict_inplace_as_isa"}:
             result[key] = value == "true"
         elif key in {"selected_seed", "peak_bits", "required_bits", "capacity_bits"}:
-            result[key] = int(value)
+            result[key] = None if value == "null" else int(value)
         else:
             result[key] = value
     result["plan"] = plan
@@ -179,12 +195,41 @@ def options_payload(args: argparse.Namespace) -> dict[str, Any]:
         },
         "suffix_plan_memory": {
             "enable_auto_multi_buffer": args.suffix_enable_auto_multi_buffer,
+            "enable_code_motion": args.suffix_enable_code_motion,
+            "enable_triton_kernel_compile":
+                args.suffix_enable_triton_kernel_compile,
             "local_multi_buffer_strategy": args.suffix_local_multi_buffer_strategy,
             "mix_multi_buffer_strategy": args.suffix_mix_multi_buffer_strategy,
             "random_seed": args.random_seed,
             "restrict_inplace_as_isa": args.restrict_inplace_as_isa,
         },
     }
+
+
+def normalize_model_json(stdout: str) -> dict[str, Any]:
+    """Preserve the product report and add legacy demo projection fields."""
+    result = json.loads(stdout)
+    result["peak_bits"] = result.get("ub_peak_bits")
+    result["success"] = result.get("status") == "success"
+    functions = result.get("functions", [])
+    result["selected_seed"] = (
+        functions[0].get("selected_seed") if len(functions) == 1 else None
+    )
+    plan: list[dict[str, Any]] = []
+    for function in functions:
+        for buffer in function.get("buffers", []):
+            for offset in buffer.get("offsets_bytes", []):
+                plan.append({
+                    "function": function.get("function", ""),
+                    "name": buffer.get("name", ""),
+                    "extent_bits": buffer.get("extent_bits"),
+                    "offset_bytes": offset,
+                    "alloc_time": buffer.get("alloc_time"),
+                    "free_time": buffer.get("free_time"),
+                    "multi_buffer_num": buffer.get("multi_buffer_num", 1),
+                })
+    result["plan"] = plan
+    return result
 
 
 def text_report(args: argparse.Namespace,
@@ -197,6 +242,8 @@ def text_report(args: argparse.Namespace,
         f"cvpipelining.enable_preload\t{str(args.cv_enable_preload).lower()}",
         f"cvpipelining.enable_lazy_loading\t{str(args.cv_enable_lazy_loading).lower()}",
         f"suffix.enable_auto_multi_buffer\t{str(args.suffix_enable_auto_multi_buffer).lower()}",
+        f"suffix.enable_code_motion\t{str(args.suffix_enable_code_motion).lower()}",
+        f"suffix.enable_triton_kernel_compile\t{str(args.suffix_enable_triton_kernel_compile).lower()}",
         f"suffix.local_multi_buffer_strategy\t{args.suffix_local_multi_buffer_strategy}",
         f"suffix.mix_multi_buffer_strategy\t{args.suffix_mix_multi_buffer_strategy}",
         f"plan.random_seed\t{'' if args.random_seed is None else args.random_seed}",
@@ -212,6 +259,7 @@ def text_report(args: argparse.Namespace,
 
 def json_report(args: argparse.Namespace,
                 process: subprocess.CompletedProcess[str]) -> str:
+    result = normalize_model_json(process.stdout) if process.stdout else None
     payload = {
         "schema_version": 1,
         "input": {
@@ -220,7 +268,7 @@ def json_report(args: argparse.Namespace,
         "options": options_payload(args),
         "model_returncode": process.returncode,
         "model_stderr": process.stderr.strip(),
-        "result": parse_model_text(process.stdout) if process.stdout else None,
+        "result": result,
     }
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
@@ -232,7 +280,10 @@ def main() -> int:
     args.model = require_file(args.model, "cvpipeline_ub_model", executable=True)
 
     process = run_model(args)
-    parsed_result = parse_model_text(process.stdout) if process.stdout else None
+    if args.format == "json":
+        parsed_result = normalize_model_json(process.stdout) if process.stdout else None
+    else:
+        parsed_result = parse_model_text(process.stdout) if process.stdout else None
     expected_overflow = (
         process.returncode == 2
         and parsed_result is not None

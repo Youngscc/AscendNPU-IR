@@ -754,6 +754,8 @@ inline PlanMemoryModelResult PlanLocalMemoryImpl(
     result.requiredBits = requiredBits;
     result.peakBits = requiredBits;
     result.capacityBits = kUBCapacityBits;
+    result.inplacePairs = liveness.inplacePairList;
+    result.multiBufferNums = liveness.buffer2MultiNum;
     std::map<std::string, LifetimeRecord> lifeByName;
     for (const LifetimeRecord &life : liveness.records)
       lifeByName[life.name] = life;

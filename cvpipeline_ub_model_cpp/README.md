@@ -4,6 +4,10 @@
 PlanMemory 的 UB buffer、lifetime、offset 和 UB peak。Python 只负责命令封装、
 JSON 转换和结果比较，不参与核心计算。
 
+产品报告采用 fail-closed 合同：只有 `precision=exact` 的 peak、required 和 buffer
+布局可用于 UB 规划；`precision=incomplete` 返回退出码 1，权威字段为空，已有计算值
+仅放在 `debug_estimate`。模块中有多个 AIV 函数时会分别规划，模块容量取各函数最大值。
+
 默认演示输入来自统一测试数据集：
 
 ```text

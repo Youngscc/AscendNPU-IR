@@ -10,11 +10,15 @@
 #include "../passes/hivm_inline_otf_load_store.hpp"
 #include "../passes/infer_and_set_buffer_size.hpp"
 #include "../passes/inline_scope.hpp"
+#include "../passes/inline_scope_strict.hpp"
 #include "../passes/loop_invariant_code_motion.hpp"
+#include "../passes/loop_invariant_subset_hoisting.hpp"
 #include "../passes/mark_real_core_type.hpp"
 #include "../passes/optimize_dps_op_with_yielded_insert_slice.hpp"
 #include "../passes/split_mix_kernel.hpp"
 #include "../passes/tile_and_bind_sub_block.hpp"
+#include "../passes/tile_cube_vector_loop.hpp"
+#include "../passes/tightly_coupled_buffer_guard.hpp"
 #include "../support/debug_trace.hpp"
 #include "plan_memory_input_builder.hpp"
 
@@ -25,7 +29,10 @@
 namespace cvub {
 
 struct UBAffectingPassOptions {
+  unsigned tileMixVectorLoop = 2;
+  unsigned tileMixCubeLoop = 2;
   bool enableCodeMotion = true;
+  bool enableTritonKernelCompile = false;
   bool enableAutoMultiBuffer = false;
   MultiBufferStrategy limitAutoMultiBufferOfLocalBuffer =
       MultiBufferStrategy::NoLimit;
@@ -33,8 +40,31 @@ struct UBAffectingPassOptions {
       MultiBufferStrategy::NoLimit;
 };
 
+inline GenericModule RequireExactStage(StageResult stage) {
+  if (stage.precision == Precision::Exact) {
+    ValidateGenericModule(stage.module);
+    return std::move(stage.module);
+  }
+  if (stage.diagnostics.empty())
+    throw std::runtime_error("UB-affecting pass is not modeled exactly");
+  const PostCVPipelineDiagnostic &diagnostic = stage.diagnostics.front();
+  std::string message = diagnostic.pipelineStage;
+  if (!diagnostic.function.empty())
+    message += "[" + diagnostic.function + "]";
+  if (!diagnostic.operation.empty())
+    message += ": " + diagnostic.operation;
+  if (!diagnostic.reason.empty())
+    message += ": " + diagnostic.reason;
+  throw std::runtime_error(message);
+}
+
 inline void TraceGenericPass(DebugTrace *trace, const std::string &passName,
                              const GenericModule &module) {
+  try {
+    ValidateGenericModule(module);
+  } catch (const std::runtime_error &error) {
+    throw std::runtime_error(passName + ": " + error.what());
+  }
   if (!trace)
     return;
   trace->Pass(passName,
@@ -94,8 +124,13 @@ inline void TracePlanMemoryResult(DebugTrace *trace,
 }
 
 inline GenericModule RunPassesBeforeLoopInvariantCodeMotion(
-    GenericModule module, DebugTrace *trace = nullptr) {
+    GenericModule module, const UBAffectingPassOptions &options = {},
+    DebugTrace *trace = nullptr) {
   ApplyOperationSemanticsToAll(module.operations);
+  module = RequireExactStage(RunTileCubeVectorLoop(
+      std::move(module), options.tileMixVectorLoop,
+      options.tileMixCubeLoop));
+  TraceGenericPass(trace, "TileCubeVectorLoop", module);
   module = RunInferAndSetBufferSizePipeline(std::move(module));
   TraceGenericPass(trace, "InferAndSetBufferSize", module);
   module = RunGlobalWorkspacePlan(std::move(module));
@@ -110,9 +145,13 @@ inline GenericModule RunPassesBeforeLoopInvariantCodeMotion(
   TraceGenericPass(trace, "CrossCoreGSS", module);
   module = RunMarkRealCoreType(std::move(module), true);
   TraceGenericPass(trace, "MarkRealCoreType", module);
+  module = RequireExactStage(
+      GuardTightlyCoupledBufferPasses(std::move(module)));
+  TraceGenericPass(trace, "MarkTightlyCoupledBuffer;HoistTightlyCoupledAlloc",
+                   module);
   module = RunSplitMixKernel(std::move(module));
   TraceGenericPass(trace, "SplitMixKernel", module);
-  module = RunInlineScope(std::move(module));
+  module = RequireExactStage(RunStrictInlineScope(std::move(module)));
   TraceGenericPass(trace, "InlineScope", module);
   module = RunTileAndBindSubBlock(std::move(module));
   TraceGenericPass(trace, "TileAndBindSubBlock", module);
@@ -123,6 +162,7 @@ inline GenericModule RunPassesBeforeLoopInvariantCodeMotion(
   ApplyOperationSemanticsToAll(module.operations);
   TraceGenericPass(trace, "CanonicalizationHIVMPipelineSourceAligned",
                    module);
+  ValidateGenericModule(module);
   return module;
 }
 
@@ -130,27 +170,38 @@ inline GenericModule RunPassesBeforeOneShotBufferize(
     GenericModule module, const UBAffectingPassOptions &options = {},
     DebugTrace *trace = nullptr) {
   module =
-      RunPassesBeforeLoopInvariantCodeMotion(std::move(module), trace);
+      RunPassesBeforeLoopInvariantCodeMotion(std::move(module), options, trace);
   if (options.enableCodeMotion) {
     RunLoopInvariantCodeMotion(module);
     TraceGenericPass(trace, "LoopInvariantCodeMotion", module);
+    module = RequireExactStage(
+        RunLoopInvariantSubsetHoisting(std::move(module), true));
+    TraceGenericPass(trace, "LoopInvariantSubsetHoisting", module);
   } else if (trace) {
     trace->Pass("LoopInvariantCodeMotion", {{"executed", 0}});
+    trace->Pass("LoopInvariantSubsetHoisting", {{"executed", 0}});
   }
   module = RunCloneTensorEmpty(std::move(module));
   TraceGenericPass(trace, "CloneTensorEmpty", module);
   module = RunHIVMInlineOTFLoadStore(std::move(module));
   TraceGenericPass(trace, "HIVMInlineOTFLoadStore", module);
-  module = RunOptimizeDpsOpWithYieldedInsertSlice(std::move(module));
-  TraceGenericPass(trace, "OptimizeDpsOpWithYieldedInsertSlice", module);
-  module = RunCloneTensorEmpty(std::move(module));
-  TraceGenericPass(trace, "CloneTensorEmpty", module);
+  if (options.enableTritonKernelCompile) {
+    module = RunOptimizeDpsOpWithYieldedInsertSlice(std::move(module));
+    TraceGenericPass(trace, "OptimizeDpsOpWithYieldedInsertSlice", module);
+    module = RunCloneTensorEmpty(std::move(module));
+    TraceGenericPass(trace, "CloneTensorEmptyBeforeBufferize", module);
+  } else if (trace) {
+    trace->Pass("OptimizeDpsOpWithYieldedInsertSlice", {{"executed", 0}});
+    trace->Pass("CloneTensorEmptyBeforeBufferize", {{"executed", 0}});
+  }
+  ValidateGenericModule(module);
   return module;
 }
 
 inline PlanMemoryInput BuildPlanMemoryInputFromAfterCVPipelining(
     GenericModule module,
-    const UBAffectingPassOptions &options = {}, DebugTrace *trace = nullptr) {
+    const UBAffectingPassOptions &options = {}, DebugTrace *trace = nullptr,
+    const std::string &targetFunction = {}) {
   module =
       RunPassesBeforeOneShotBufferize(std::move(module), options, trace);
 
@@ -270,7 +321,9 @@ inline PlanMemoryInput BuildPlanMemoryInputFromAfterCVPipelining(
       throw std::runtime_error(
           "AlignStorage: dynamic stride-aligned allocation is unsupported");
   }
-  PlanMemoryInput input = BuildPlanMemoryInput(semantic);
+  PlanMemoryInput input = targetFunction.empty()
+                              ? BuildPlanMemoryInput(semantic)
+                              : BuildPlanMemoryInput(semantic, targetFunction);
   if (trace) {
     trace->Pass("PlanMemory",
                 {{"allocations", input.allocations.size()},
@@ -284,9 +337,87 @@ inline PlanMemoryInput BuildPlanMemoryInputFromAfterCVPipelining(
 
 inline PlanMemoryInput BuildPlanMemoryInputFromAfterCVPipelining(
     const fs::path &afterCVPipeliningGenericIR,
-    const UBAffectingPassOptions &options = {}, DebugTrace *trace = nullptr) {
+    const UBAffectingPassOptions &options = {}, DebugTrace *trace = nullptr,
+    const std::string &targetFunction = {}) {
   return BuildPlanMemoryInputFromAfterCVPipelining(
-      ParseGenericIR(afterCVPipeliningGenericIR, false), options, trace);
+      ParseGenericIR(afterCVPipeliningGenericIR, false), options, trace,
+      targetFunction);
+}
+
+enum class ModulePlanPrecision { Exact, Incomplete };
+
+struct FunctionPlanResult {
+  std::string function;
+  PlanMemoryModelResult plan;
+};
+
+struct ModulePlanResult {
+  ModulePlanPrecision precision = ModulePlanPrecision::Exact;
+  bool success = true;
+  bool overflow = false;
+  uint64_t peakBits = 0;
+  uint64_t requiredBits = 0;
+  uint64_t capacityBits = kUBCapacityBits;
+  std::vector<FunctionPlanResult> functions;
+  std::vector<std::string> diagnostics;
+};
+
+inline std::vector<std::string>
+AIVFunctionNames(const GenericModule &module) {
+  std::vector<std::string> result;
+  for (const GenericOperation &operation : module.operations) {
+    if (operation.name != "func.func" || !IsAIVFunction(operation))
+      continue;
+    const std::string name = GenericFunctionName(operation);
+    if (name.empty())
+      throw std::runtime_error("module planning: AIV function has no symbol");
+    result.push_back(name);
+  }
+  return result;
+}
+
+inline ModulePlanResult RunUBModuleFromAfterCVPipelining(
+    const GenericModule &module,
+    const UBAffectingPassOptions &options = {},
+    std::optional<uint32_t> planMemorySeed = std::nullopt,
+    bool restrictInplaceAsISA = false, DebugTrace *trace = nullptr) {
+  const GenericModule projected =
+      RunPassesBeforeOneShotBufferize(module, options, trace);
+  const std::vector<std::string> functions = AIVFunctionNames(projected);
+  ModulePlanResult result;
+  for (const std::string &function : functions) {
+    const PlanMemoryInput input = BuildPlanMemoryInputFromAfterCVPipelining(
+        module, options, nullptr, function);
+    PlanMemoryModelResult plan =
+        planMemorySeed
+            ? PlanLocalMemoryForSeed(input, *planMemorySeed,
+                                     restrictInplaceAsISA)
+            : PlanLocalMemory(input, restrictInplaceAsISA);
+    result.success = result.success && plan.success;
+    result.overflow = result.overflow || plan.overflow;
+    result.peakBits = std::max(result.peakBits, plan.peakBits);
+    result.requiredBits = std::max(result.requiredBits, plan.requiredBits);
+    if (!restrictInplaceAsISA && !plan.inplacePairs.empty()) {
+      result.precision = ModulePlanPrecision::Incomplete;
+      result.diagnostics.push_back(
+          "PlanMemory: default inplace inference is not oracle-proven for " +
+          function);
+    }
+    result.functions.push_back({function, std::move(plan)});
+  }
+  return result;
+}
+
+inline ModulePlanResult
+ModulePlanFromSingle(std::string function, PlanMemoryModelResult plan) {
+  ModulePlanResult result;
+  result.success = plan.success;
+  result.overflow = plan.overflow;
+  result.peakBits = plan.peakBits;
+  result.requiredBits = plan.requiredBits;
+  result.capacityBits = plan.capacityBits;
+  result.functions.push_back({std::move(function), std::move(plan)});
+  return result;
 }
 
 struct CVPipeliningUBPipelineOptions {
@@ -296,6 +427,23 @@ struct CVPipeliningUBPipelineOptions {
   bool restrictInplaceAsISA = false;
   DebugTrace *debugTrace = nullptr;
 };
+
+inline ModulePlanResult RunCVPipeliningUBModulePipeline(
+    GenericModule module, const CVPipeliningUBPipelineOptions &options = {}) {
+  ApplyOperationSemanticsToAll(module.operations);
+  module = RunCVPipeliningPass(std::move(module), options.cvPipelining);
+  TraceCVPipelining(options.debugTrace, module);
+  return RunUBModuleFromAfterCVPipelining(
+      module, options.ubAffectingPasses, options.planMemorySeed,
+      options.restrictInplaceAsISA, options.debugTrace);
+}
+
+inline ModulePlanResult RunCVPipeliningUBModulePipeline(
+    const fs::path &beforeCVPipeliningIR,
+    const CVPipeliningUBPipelineOptions &options = {}) {
+  return RunCVPipeliningUBModulePipeline(
+      ParseGenericIR(beforeCVPipeliningIR, false), options);
+}
 
 inline PlanMemoryModelResult RunCVPipeliningUBPipeline(
     GenericModule module, const CVPipeliningUBPipelineOptions &options = {}) {

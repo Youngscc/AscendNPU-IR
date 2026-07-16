@@ -28,6 +28,7 @@ struct Options {
   bool enablePreload = false;
   bool enableCVLazyLoading = false;
   bool enableCodeMotion = true;
+  bool enableTritonKernelCompile = false;
   bool enableAutoMultiBuffer = false;
   cvub::MultiBufferStrategy localMultiBufferStrategy =
       cvub::MultiBufferStrategy::NoLimit;
@@ -77,6 +78,7 @@ void PrintHelp() {
       << "  --enable-cv-lazy-loading=<bool>\n"
       << "\nUB-affecting pass and PlanMemory options:\n"
       << "  --enable-code-motion=<bool>\n"
+      << "  --enable-triton-kernel-compile=<bool>\n"
       << "  --enable-auto-multi-buffer=<bool>\n"
       << "  --limit-auto-multi-buffer-of-local-buffer=<strategy>\n"
       << "  --limit-auto-multi-buffer-buffer=<strategy>\n"
@@ -132,6 +134,11 @@ Options ParseOptions(int argc, char **argv) {
       options.enableCVLazyLoading = ParseBool(*lazyLoading);
     else if (auto codeMotion = readValue("--enable-code-motion"))
       options.enableCodeMotion = ParseBool(*codeMotion);
+    else if (argument == "--enable-triton-kernel-compile")
+      options.enableTritonKernelCompile = true;
+    else if (auto enableTriton =
+                 readValue("--enable-triton-kernel-compile"))
+      options.enableTritonKernelCompile = ParseBool(*enableTriton);
     else if (argument == "--enable-auto-multi-buffer")
       options.enableAutoMultiBuffer = true;
     else if (auto autoMultiBuffer = readValue("--enable-auto-multi-buffer"))
@@ -204,6 +211,7 @@ cvub::CVPipeliningOptions CVPipeliningOptions(const Options &options) {
 cvub::UBAffectingPassOptions UBAffectingPassOptions(const Options &options) {
   cvub::UBAffectingPassOptions result;
   result.enableCodeMotion = options.enableCodeMotion;
+  result.enableTritonKernelCompile = options.enableTritonKernelCompile;
   result.enableAutoMultiBuffer = options.enableAutoMultiBuffer;
   result.limitAutoMultiBufferOfLocalBuffer =
       options.localMultiBufferStrategy;
@@ -219,8 +227,8 @@ cvub::PlanMemoryModelResult PlanMemory(const cvub::PlanMemoryInput &input,
   return cvub::PlanLocalMemory(input, options.restrictInplaceAsISA);
 }
 
-cvub::PlanMemoryModelResult RunModel(const Options &options,
-                                     cvub::DebugTrace *trace) {
+cvub::ModulePlanResult RunModel(const Options &options,
+                                cvub::DebugTrace *trace) {
   if (options.debugEntry == DebugEntry::BeforeCVPipelining) {
     cvub::CVPipeliningUBPipelineOptions pipelineOptions;
     pipelineOptions.cvPipelining = CVPipeliningOptions(options);
@@ -228,37 +236,35 @@ cvub::PlanMemoryModelResult RunModel(const Options &options,
     pipelineOptions.planMemorySeed = options.randomSeed;
     pipelineOptions.restrictInplaceAsISA = options.restrictInplaceAsISA;
     pipelineOptions.debugTrace = trace;
-    return cvub::RunCVPipeliningUBPipeline(options.beforeCVPipeliningIR,
-                                           pipelineOptions);
+    return cvub::RunCVPipeliningUBModulePipeline(
+        options.beforeCVPipeliningIR, pipelineOptions);
   }
 
-  cvub::PlanMemoryInput input;
   if (options.debugEntry == DebugEntry::AfterCVPipelining) {
-    input = cvub::BuildPlanMemoryInputFromAfterCVPipelining(
-        options.afterCVPipeliningIR, UBAffectingPassOptions(options), trace);
-  } else {
-    input = cvub::ParsePlanMemoryInput(options.beforePlanMemoryIR, "AIV");
-    if (trace) {
-      trace->Pass("PlanMemory",
-                  {{"allocations", input.allocations.size()},
-                   {"operations", input.operations.size()},
-                   {"function_arguments", input.functionArguments.size()}});
-      trace->Artifact("PlanMemoryInput", [&] {
-        return cvub::SerializeCanonicalPlanMemoryInput(input);
-      });
-    }
+    return cvub::RunUBModuleFromAfterCVPipelining(
+        cvub::ParseGenericIR(options.afterCVPipeliningIR, false),
+        UBAffectingPassOptions(options), options.randomSeed,
+        options.restrictInplaceAsISA, trace);
+  }
+  const cvub::PlanMemoryInput input =
+      cvub::ParsePlanMemoryInput(options.beforePlanMemoryIR, "AIV");
+  if (trace) {
+    trace->Pass("PlanMemory",
+                {{"allocations", input.allocations.size()},
+                 {"operations", input.operations.size()},
+                 {"function_arguments", input.functionArguments.size()}});
+    trace->Artifact("PlanMemoryInput", [&] {
+      return cvub::SerializeCanonicalPlanMemoryInput(input);
+    });
   }
   cvub::PlanMemoryModelResult result = PlanMemory(input, options);
   cvub::TracePlanMemoryResult(trace, result);
-  return result;
+  return cvub::ModulePlanFromSingle("debug_aiv", std::move(result));
 }
 
-std::string Precision(const Options &options) {
-  if (options.debugEntry == DebugEntry::AfterCVPipelining)
-    return "after_cvpipelining_model";
-  if (options.debugEntry == DebugEntry::BeforePlanMemory)
-    return "plan_memory_model";
-  return "before_cvpipelining_model";
+std::string Precision(const cvub::ModulePlanResult &result) {
+  return result.precision == cvub::ModulePlanPrecision::Exact ? "exact"
+                                                              : "incomplete";
 }
 
 std::string Oracle(const Options &options) {
@@ -309,46 +315,140 @@ std::string JsonEscape(const std::string &value) {
   return result;
 }
 
-int PrintResult(const Options &options,
-                const cvub::PlanMemoryModelResult &result) {
+void PrintFunctionsJson(const std::vector<cvub::FunctionPlanResult> &functions,
+                        const std::string &indent) {
+  std::cout << "[";
+  for (size_t functionIndex = 0; functionIndex < functions.size();
+       ++functionIndex) {
+    const cvub::FunctionPlanResult &function = functions[functionIndex];
+    if (functionIndex)
+      std::cout << ",";
+    std::cout << "\n" << indent << "  {\"function\": \""
+              << JsonEscape(function.function) << "\", \"status\": \""
+              << (function.plan.success ? "success" : "overflow")
+              << "\", \"ub_peak_bits\": " << function.plan.peakBits
+              << ", \"required_bits\": " << function.plan.requiredBits
+              << ", \"selected_seed\": " << function.plan.selectedSeed
+              << ", \"buffers\": [";
+    for (size_t bufferIndex = 0; bufferIndex < function.plan.buffers.size();
+         ++bufferIndex) {
+      const cvub::PlannedBufferRecord &buffer =
+          function.plan.buffers[bufferIndex];
+      if (bufferIndex)
+        std::cout << ", ";
+      std::cout << "{\"name\": \"" << JsonEscape(buffer.name)
+                << "\", \"extent_bits\": " << buffer.extentBits
+                << ", \"multi_buffer_num\": ";
+      const auto multi = function.plan.multiBufferNums.find(buffer.name);
+      std::cout << (multi == function.plan.multiBufferNums.end()
+                        ? static_cast<uint32_t>(1)
+                        : multi->second)
+                << ", \"offsets_bytes\": [";
+      for (size_t offsetIndex = 0; offsetIndex < buffer.offsetsBytes.size();
+           ++offsetIndex) {
+        if (offsetIndex)
+          std::cout << ", ";
+        std::cout << buffer.offsetsBytes[offsetIndex];
+      }
+      std::cout << "], \"alloc_time\": " << buffer.allocTime
+                << ", \"free_time\": " << buffer.freeTime << "}";
+    }
+    std::cout << "], \"inplace_pairs\": [";
+    for (size_t pairIndex = 0;
+         pairIndex < function.plan.inplacePairs.size(); ++pairIndex) {
+      if (pairIndex)
+        std::cout << ", ";
+      const auto &pair = function.plan.inplacePairs[pairIndex];
+      std::cout << "[\"" << JsonEscape(pair.first) << "\", \""
+                << JsonEscape(pair.second) << "\"]";
+    }
+    std::cout << "]}";
+  }
+  if (!functions.empty())
+    std::cout << "\n" << indent;
+  std::cout << "]";
+}
+
+int PrintResult(const Options &options, const cvub::ModulePlanResult &result) {
+  const bool exact = result.precision == cvub::ModulePlanPrecision::Exact;
   if (options.format == "json") {
     std::cout << "{\n"
-              << "  \"precision\": \"" << Precision(options) << "\",\n"
+              << "  \"precision\": \"" << Precision(result) << "\",\n"
               << "  \"oracle\": \"" << Oracle(options) << "\",\n"
-              << "  \"status\": \""
-              << (result.success ? "success" : "overflow") << "\",\n"
-              << "  \"ub_peak_bits\": " << result.peakBits
-              << ",\n  \"required_bits\": ";
-    if (result.overflow)
-      std::cout << result.requiredBits;
+              << "  \"status\": \"";
+    if (!exact)
+      std::cout << "blocker";
     else
-      std::cout << "null";
+      std::cout << (result.success ? "success" : "overflow");
+    std::cout << "\",\n  \"ub_peak_bits\": ";
+    exact ? std::cout << result.peakBits : std::cout << "null";
+    std::cout << ",\n  \"required_bits\": ";
+    exact ? std::cout << result.requiredBits : std::cout << "null";
     std::cout << ",\n"
               << "  \"capacity_bits\": " << result.capacityBits << ",\n"
               << "  \"restrict_inplace_as_isa\": "
               << (options.restrictInplaceAsISA ? "true" : "false") << ",\n"
               << "  \"overflow\": "
-              << (result.overflow ? "true" : "false") << ",\n"
-              << "  \"selected_seed\": " << result.selectedSeed << ",\n"
-              << "  \"blockers\": []\n"
-              << "}\n";
+              << (exact && result.overflow ? "true" : "false") << ",\n"
+              << "  \"functions\": ";
+    exact ? PrintFunctionsJson(result.functions, "  ")
+          : PrintFunctionsJson({}, "  ");
+    std::cout << ",\n  \"diagnostics\": [";
+    for (size_t index = 0; index < result.diagnostics.size(); ++index) {
+      if (index)
+        std::cout << ", ";
+      std::cout << "\"" << JsonEscape(result.diagnostics[index]) << "\"";
+    }
+    std::cout << "]";
+    if (!exact) {
+      std::cout << ",\n  \"debug_estimate\": {\"ub_peak_bits\": "
+                << result.peakBits << ", \"required_bits\": "
+                << result.requiredBits << ", \"functions\": ";
+      PrintFunctionsJson(result.functions, "    ");
+      std::cout << "}";
+    }
+    std::cout << "\n}\n";
+    if (!exact)
+      return 1;
     return result.success ? 0 : 2;
   }
 
-  std::cout << "precision\t" << Precision(options) << '\n'
-            << "success\t" << (result.success ? "true" : "false") << '\n'
-            << "overflow\t" << (result.overflow ? "true" : "false") << '\n'
-            << "selected_seed\t" << result.selectedSeed << '\n'
+  std::cout << "precision\t" << Precision(result) << '\n'
+            << "status\t"
+            << (!exact ? "blocker"
+                       : (result.success ? "success" : "overflow"))
+            << '\n'
+            << "success\t"
+            << (exact && result.success ? "true" : "false") << '\n'
+            << "overflow\t"
+            << (!exact ? "null" : (result.overflow ? "true" : "false"))
+            << '\n'
             << "restrict_inplace_as_isa\t"
             << (options.restrictInplaceAsISA ? "true" : "false") << '\n'
-            << "peak_bits\t" << result.peakBits << '\n'
-            << "required_bits\t" << result.requiredBits << '\n'
-            << "capacity_bits\t" << result.capacityBits << '\n'
-            << "name\textent_bits\toffset_bytes\talloc_time\tfree_time\n";
-  for (const cvub::PlannedBufferRecord &buffer : result.buffers)
-    for (uint64_t offset : buffer.offsetsBytes)
-      std::cout << buffer.name << '\t' << buffer.extentBits << '\t' << offset
-                << '\t' << buffer.allocTime << '\t' << buffer.freeTime << '\n';
+            << "peak_bits\t";
+  exact ? std::cout << result.peakBits : std::cout << "null";
+  std::cout << '\n' << "required_bits\t";
+  exact ? std::cout << result.requiredBits : std::cout << "null";
+  std::cout << '\n'
+            << "capacity_bits\t" << result.capacityBits << '\n';
+  if (exact) {
+    std::cout << "name\textent_bits\toffset_bytes\talloc_time\tfree_time\n";
+    for (const cvub::FunctionPlanResult &function : result.functions)
+      for (const cvub::PlannedBufferRecord &buffer : function.plan.buffers)
+        for (uint64_t offset : buffer.offsetsBytes)
+          std::cout << function.function << '\t' << buffer.name << '\t'
+                    << buffer.extentBits << '\t' << offset << '\t'
+                    << buffer.allocTime << '\t' << buffer.freeTime << '\n';
+  }
+  if (!exact) {
+    std::cout << "debug_estimate_peak_bits\t" << result.peakBits << '\n'
+              << "debug_estimate_required_bits\t" << result.requiredBits
+              << '\n';
+    for (const std::string &diagnostic : result.diagnostics)
+      std::cout << "diagnostic\t" << diagnostic << '\n';
+  }
+  if (!exact)
+    return 1;
   return result.success ? 0 : 2;
 }
 
@@ -356,14 +456,15 @@ void PrintBlocker(const Options &options, const std::string &message) {
   if (options.format != "json")
     return;
   std::cout << "{\n"
-            << "  \"precision\": \"blocked\",\n"
+            << "  \"precision\": \"incomplete\",\n"
             << "  \"oracle\": \"" << Oracle(options) << "\",\n"
             << "  \"status\": \"blocker\",\n"
             << "  \"ub_peak_bits\": null,\n"
             << "  \"required_bits\": null,\n"
             << "  \"capacity_bits\": " << cvub::kUBCapacityBits << ",\n"
             << "  \"overflow\": null,\n"
-            << "  \"blockers\": [\"" << JsonEscape(message) << "\"]\n"
+            << "  \"functions\": [],\n"
+            << "  \"diagnostics\": [\"" << JsonEscape(message) << "\"]\n"
             << "}\n";
 }
 
@@ -377,7 +478,7 @@ int main(int argc, char **argv) {
     std::optional<cvub::DebugTrace> debugTrace;
     if (options.debug)
       debugTrace.emplace(std::cerr, options.debugDirectory);
-    const cvub::PlanMemoryModelResult result =
+    const cvub::ModulePlanResult result =
         RunModel(options, debugTrace ? &*debugTrace : nullptr);
     return PrintResult(options, result);
   } catch (const std::exception &error) {

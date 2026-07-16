@@ -1,12 +1,12 @@
-order	compiler_pass_group	model_module	ub_role
-1	OneShotBufferize	one_shot_analysis.hpp;bufferized_semantic_ir.hpp	materialize tensor buffers and aliases
-2	CanonicalizeIterArg;HIVMOptSinglePoint	hivm_opt_single_point.hpp	remove or scalarize local buffers
-3	HIVMDecomposeOp	hivm_decompose_op.hpp	materialize decomposition temporaries
-4	ConvertNonContiguousReshapeToCopy	convert_non_contiguous_reshape_to_copy.hpp	materialize reshape copies
-5	InferHIVMMemScope	infer_hivm_mem_scope.hpp	select UB address space
-6	AlignAllocSize;MarkStrideAlign;EnableStrideAlign	align_storage.hpp	change physical UB extents and layouts
-7	FlattenOps;ReduceRankSubview;LiftLowestStride	after_alloc_extra_buffer.hpp;plan_memory_input_builder.hpp	produce PlanMemory-visible buffer views
-8	AllocExtraBuffer	alloc_extra_buffer.hpp	materialize operation scratch buffers
-9	InlineLoadCopy	inline_load_copy.hpp	remove eligible intermediate UB buffers
-10	MarkMultiBuffer	mark_multi_buffer.hpp	multiply selected buffer instances
-11	PlanMemory	plan_memory_input_semantic_ir.hpp;plan_memory_input_builder.hpp	produce PlanMemory operations and allocations
+order	compiler_pass_group	model_module	ub_role	input_contract
+1	OneShotBufferize	one_shot_analysis.hpp;bufferized_semantic_ir.hpp	materialize tensor buffers and aliases	Tensor-level AIV functions accepted by the reviewed one-shot analysis; unresolved ownership blocks.
+2	CanonicalizeIterArg;HIVMOptSinglePoint	hivm_opt_single_point.hpp	remove or scalarize local buffers	Reviewed single-point and iter-arg shapes only; unsupported scalarization blocks.
+3	HIVMDecomposeOp	hivm_decompose_op.hpp	materialize decomposition temporaries	Reviewed HIVM operations with explicit temporary-buffer rules only.
+4	ConvertNonContiguousReshapeToCopy	convert_non_contiguous_reshape_to_copy.hpp	materialize reshape copies	Static reviewed non-contiguous reshape forms only.
+5	InferHIVMMemScope	infer_hivm_mem_scope.hpp	select UB address space	AIV-local buffers and reviewed aliases; non-UB scopes are excluded from UB planning.
+6	AlignAllocSize;MarkStrideAlign;EnableStrideAlign	align_storage.hpp	change physical UB extents and layouts	Static physical layouts or proven bounds; unresolved dynamic stride alignment blocks.
+7	FlattenOps;ReduceRankSubview;LiftLowestStride	after_alloc_extra_buffer.hpp;plan_memory_input_builder.hpp	produce PlanMemory-visible buffer views	Reviewed view/cast/subview topology with resolvable physical sizes and aliases.
+8	AllocExtraBuffer	alloc_extra_buffer.hpp	materialize operation scratch buffers	Operations with audited scratch-buffer rules only.
+9	InlineLoadCopy	inline_load_copy.hpp	remove eligible intermediate UB buffers	Only copies whose alias and lifetime rewrite is structurally proven.
+10	MarkMultiBuffer	mark_multi_buffer.hpp	multiply selected buffer instances	Reviewed AIV multi-buffer marks and configured default strategies.
+11	PlanMemoryInputBridge	plan_memory_input_semantic_ir.hpp;plan_memory_input_builder.hpp	produce PlanMemory operations and allocations	Exactly one selected AIV function per builder invocation; module planning invokes it independently per AIV.

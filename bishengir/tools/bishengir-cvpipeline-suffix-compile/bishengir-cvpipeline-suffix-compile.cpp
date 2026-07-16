@@ -49,10 +49,15 @@
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Support/FileUtilities.h"
+#include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/InitLLVM.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/SHA256.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Support/raw_ostream.h"
@@ -381,6 +386,16 @@ static llvm::cl::opt<std::string> dumpC1GenericIR(
     llvm::cl::desc("Dump generic-form MLIR at the C1 input boundary"),
     llvm::cl::value_desc("filename"), llvm::cl::init(""));
 
+static llvm::cl::opt<std::string> dumpStageOracleDir(
+    "dump-stage-oracle-dir",
+    llvm::cl::desc("Dump semantic and generic IR after every registered UB stage"),
+    llvm::cl::value_desc("directory"), llvm::cl::init(""));
+
+static llvm::cl::opt<std::string> dumpPipelineStageManifest(
+    "dump-pipeline-stage-manifest",
+    llvm::cl::desc("Write the registered UB stages and textual pipeline hash"),
+    llvm::cl::value_desc("filename"), llvm::cl::init(""));
+
 static llvm::cl::opt<int> planMemorySeed(
     "plan-memory-seed",
     llvm::cl::desc("Run local PlanMemory once with seed N; -1 keeps retries"),
@@ -428,11 +443,11 @@ static llvm::cl::opt<bool> enableAutoBindSubBlock(
 
 static llvm::cl::opt<int> tileMixCubeLoop(
     "tile-mix-cube-loop", llvm::cl::desc("Cube loop tiling factor"),
-    llvm::cl::init(1));
+    llvm::cl::init(2));
 
 static llvm::cl::opt<int> tileMixVectorLoop(
     "tile-mix-vector-loop", llvm::cl::desc("Vector loop tiling factor"),
-    llvm::cl::init(1));
+    llvm::cl::init(2));
 
 static llvm::cl::opt<bool> enablePreload(
     "enable-preload",
@@ -519,6 +534,70 @@ static llvm::cl::opt<std::string> ignoredTarget(
     llvm::cl::desc("Accepted for bishengir-compile command-line similarity"),
     llvm::cl::init("Ascend910_9382"));
 
+struct OracleStageRecord {
+  std::string phase;
+  std::string name;
+};
+
+static SmallVector<OracleStageRecord> oracleStageRecords;
+
+static std::string oracleStageStem(StringRef phase, size_t ordinal,
+                                   StringRef name) {
+  std::string safeName;
+  for (char character : name)
+    safeName.push_back(llvm::isAlnum(character) ? character : '_');
+  return (Twine(phase) + "-" + Twine(ordinal) + "-" + safeName).str();
+}
+
+static void addOracleStageSnapshot(OpPassManager &pm, StringRef phase,
+                                   StringRef name) {
+  size_t ordinal = 1;
+  for (const OracleStageRecord &record : oracleStageRecords)
+    if (record.phase == phase)
+      ++ordinal;
+  oracleStageRecords.push_back({phase.str(), name.str()});
+  // Always register the no-op snapshot pass so the textual pipeline hash is
+  // independent of whether snapshot files are requested on this invocation.
+  if (dumpStageOracleDir.empty()) {
+    pm.addPass(std::make_unique<DumpC1SemanticOraclePass>("", ""));
+    return;
+  }
+  const std::string stem = oracleStageStem(phase, ordinal, name);
+  SmallString<256> semantic(dumpStageOracleDir.getValue());
+  llvm::sys::path::append(semantic, stem + ".semantic.tsv");
+  SmallString<256> generic(dumpStageOracleDir.getValue());
+  llvm::sys::path::append(generic, stem + ".generic.mlir");
+  pm.addPass(std::make_unique<DumpC1SemanticOraclePass>(semantic, generic));
+}
+
+static LogicalResult writePipelineStageManifest(PassManager &pm) {
+  if (dumpPipelineStageManifest.empty())
+    return success();
+  std::error_code error;
+  llvm::raw_fd_ostream output(dumpPipelineStageManifest.getValue(), error,
+                              llvm::sys::fs::OF_Text);
+  if (error) {
+    llvm::errs() << "[ERROR] Failed to write pipeline stage manifest: "
+                 << error.message() << '\n';
+    return failure();
+  }
+  std::string textualPipeline;
+  llvm::raw_string_ostream pipelineStream(textualPipeline);
+  pm.printAsTextualPipeline(pipelineStream);
+  pipelineStream.flush();
+  llvm::SHA256 hasher;
+  hasher.update(textualPipeline);
+  const auto digest = hasher.final();
+  output << "ORACLE_PIPELINE_SCHEMA\t1\n";
+  output << "PIPELINE_SHA256\t" << llvm::toHex(digest) << '\n';
+  llvm::StringMap<size_t> ordinals;
+  for (const OracleStageRecord &record : oracleStageRecords)
+    output << "STAGE\t" << record.phase << '\t' << ++ordinals[record.phase]
+           << '\t' << record.name << '\n';
+  output << "PIPELINE_TEXT_HEX\t" << hexEncode(textualPipeline) << '\n';
+  return success();
+}
+
 static MultiBufferStrategy parseMultiBufferStrategy(StringRef value) {
   return llvm::StringSwitch<MultiBufferStrategy>(value)
       .Case("no-limit", MultiBufferStrategy::NO_LIMIT)
@@ -549,6 +628,7 @@ static void addInferAndSetBufferSizePipeline(OpPassManager &pm) {
 
 static void addCrossCoreSyncPipeline(OpPassManager &pm) {
   addCanonicalizationHIVMPipeline(pm);
+  addOracleStageSnapshot(pm, "post", "CanonicalizationBeforeSplit");
   pm.addPass(createMarkRealCoreTypePass());
   if (enableHIVMCrossCoreGSS && !enableHIVMInjectBlockAllSync &&
       !disableAutoInjectBlockSync) {
@@ -563,6 +643,7 @@ static void addCrossCoreSyncPipeline(OpPassManager &pm) {
   MarkRealCoreTypeOptions markRealCoreTypeOptions;
   markRealCoreTypeOptions.removeCoreTypeAttrs = true;
   pm.addPass(createMarkRealCoreTypePass(markRealCoreTypeOptions));
+  addOracleStageSnapshot(pm, "post", "CrossCoreSyncInvariant");
 }
 
 static void addBufferizationPipeline(OpPassManager &pm) {
@@ -581,6 +662,7 @@ static void addBufferizationPipeline(OpPassManager &pm) {
   oneShotOptions.allowReturnAllocsFromLoops = true;
   oneShotOptions.allowUnknownOps = true;
   pm.addPass(bufferization::createOneShotBufferizePass(oneShotOptions));
+  addOracleStageSnapshot(pm, "suffix", "OneShotBufferize");
   addCanonicalizationHIVMPipeline(pm);
   if (enableTritonKernelCompile)
     pm.addPass(createConvertToHIVMOpPass());
@@ -589,6 +671,8 @@ static void addBufferizationPipeline(OpPassManager &pm) {
   pm.addPass(bufferization::createDropEquivalentBufferResultsPass());
   if (!enableTritonKernelCompile)
     pm.addPass(createConvertToHIVMOpPass());
+  addOracleStageSnapshot(pm, "suffix",
+                         "CanonicalizeIterArg;HIVMOptSinglePoint");
 }
 
 static void addAlignStoragePipeline(OpPassManager &pm) {
@@ -615,8 +699,11 @@ static void addPostBufferizationToLocalPlanMemoryPipeline(OpPassManager &pm) {
   pm.nest<func::FuncOp>().addPass(createHIVMMapForallToBlocksPass());
   pm.nest<func::FuncOp>().addPass(createHIVMDecomposeOpPass());
   addSyncBlockLockPreparePipeline(pm);
+  addOracleStageSnapshot(pm, "suffix", "HIVMDecomposeOp");
   pm.addPass(createNonContiguousReshapeToCopyPass());
+  addOracleStageSnapshot(pm, "suffix", "ConvertNonContiguousReshapeToCopy");
   pm.addPass(createInferHIVMMemScopePass());
+  addOracleStageSnapshot(pm, "suffix", "InferHIVMMemScope");
   pm.nest<func::FuncOp>().addPass(createHIVMDecomposeOpPass());
 
   HIVMAggregatedDecomposeOpOptions decomposeOption;
@@ -636,6 +723,8 @@ static void addPostBufferizationToLocalPlanMemoryPipeline(OpPassManager &pm) {
       createHIVMAggregatedDecomposeOpPass(decomposeOption));
 
   addAlignStoragePipeline(pm);
+  addOracleStageSnapshot(pm, "suffix",
+                         "AlignAllocSize;MarkStrideAlign;EnableStrideAlign");
 
   decomposeOption.decomposePhase =
       bishengir::DecomposePhase::AFTER_HIVM_STRIDE_ALIGNMENT;
@@ -661,14 +750,18 @@ static void addPostBufferizationToLocalPlanMemoryPipeline(OpPassManager &pm) {
       createHIVMAggregatedDecomposeOpPass(decomposeOption));
   pm.nest<func::FuncOp>().addPass(createReduceRankSubviewPass());
   pm.nest<func::FuncOp>().addPass(createLiftLowestStridePass());
+  addOracleStageSnapshot(pm, "suffix",
+                         "FlattenOps;ReduceRankSubview;LiftLowestStride");
   decomposeOption.decomposePhase =
       bishengir::DecomposePhase::AFTER_LIFT_LOWEST_STRIDE;
   pm.nest<func::FuncOp>().addPass(
       createHIVMAggregatedDecomposeOpPass(decomposeOption));
   pm.nest<func::FuncOp>().addPass(createAllocExtraBufferPass());
+  addOracleStageSnapshot(pm, "suffix", "AllocExtraBuffer");
   pm.addPass(createInferHIVMMemScopePass());
   addCanonicalizationHIVMPipeline(pm);
   pm.nest<func::FuncOp>().addPass(createInlineLoadCopyPass());
+  addOracleStageSnapshot(pm, "suffix", "InlineLoadCopy");
 
   MarkMultiBufferOptions multiBufferOptions;
   multiBufferOptions.enableAuto = enableAutoMultiBuffer;
@@ -679,7 +772,9 @@ static void addPostBufferizationToLocalPlanMemoryPipeline(OpPassManager &pm) {
       parseMultiBufferStrategy(limitAutoMultiBufferBuffer);
   pm.nest<func::FuncOp>().addPass(
       createMarkMultiBufferPass(multiBufferOptions));
+  addOracleStageSnapshot(pm, "suffix", "MarkMultiBuffer");
   pm.addPass(createDumpIRBeforeLocalPlanMemoryPass());
+  addOracleStageSnapshot(pm, "suffix", "PlanMemoryInputBridge");
 
   PlanMemoryOptions planMemoryOption;
   planMemoryOption.enableMemoryDisplay = enableMemoryDisplay;
@@ -719,14 +814,19 @@ static void buildSuffixPipeline(OpPassManager &pm) {
             static_cast<unsigned>(tileMixVectorLoop.getValue()),
             static_cast<unsigned>(tileMixCubeLoop.getValue())}));
   }
+  addOracleStageSnapshot(pm, "post", "TileCubeVectorLoop");
 
   if (!disableAutoCVWorkSpaceManage && !disableAutoCVGlobalWorkspacePlan) {
     addInferAndSetBufferSizePipeline(pm);
+    addOracleStageSnapshot(pm, "post", "InferAndSetBufferSize");
     PlanMemoryOptions planMemoryOption;
     planMemoryOption.memMode = MemPlanMode::GLOBAL_WORKSPACE_PLAN;
     planMemoryOption.enableGlobalReuse = enableHIVMGlobalWorkspaceReuse;
     pm.nest<func::FuncOp>().addPass(createPlanMemoryPass(planMemoryOption));
+  } else {
+    addOracleStageSnapshot(pm, "post", "InferAndSetBufferSize");
   }
+  addOracleStageSnapshot(pm, "post", "WorkspaceSemanticProjection");
 
   addCrossCoreSyncPipeline(pm);
 
@@ -737,19 +837,33 @@ static void buildSuffixPipeline(OpPassManager &pm) {
 
   if (enableTritonKernelCompile)
     pm.addPass(createInsertInferTaskTypeFuncPass());
+  pm.nest<func::FuncOp>().addPass(createMarkTightlyCoupledBufferPass());
+  pm.nest<func::FuncOp>().addPass(createHoistTightlyCoupledAllocPass());
+  addOracleStageSnapshot(
+      pm, "post", "MarkTightlyCoupledBuffer;HoistTightlyCoupledAlloc");
   if (!disableSplitMixKernel)
     pm.addPass(createSplitMixKernelPass());
+  addOracleStageSnapshot(pm, "post", "SplitMixKernelAIVProjection");
   pm.addPass(scope::createInlineScopePass());
+  addOracleStageSnapshot(pm, "post", "InlineScope");
   if (enableAutoBindSubBlock)
     pm.addPass(createTileAndBindSubBlockPass());
+  addOracleStageSnapshot(pm, "post", "TileAndBindSubBlock");
   pm.nest<func::FuncOp>().addPass(tensor::createFoldTensorEmptyPass());
+  addOracleStageSnapshot(pm, "post", "FoldTensorEmpty");
   addCanonicalizationHIVMPipeline(pm);
+  addOracleStageSnapshot(pm, "post", "CanonicalizationAfterSplit");
   if (enableCodeMotion) {
     pm.addPass(createLoopInvariantCodeMotionPass());
-    pm.addPass(createLoopInvariantSubsetHoistingPass());
   }
+  addOracleStageSnapshot(pm, "post", "LoopInvariantCodeMotion");
+  if (enableCodeMotion)
+    pm.addPass(createLoopInvariantSubsetHoistingPass());
+  addOracleStageSnapshot(pm, "post", "LoopInvariantSubsetHoisting");
   pm.nest<func::FuncOp>().addPass(createCloneTensorEmptyPass());
+  addOracleStageSnapshot(pm, "post", "CloneTensorEmpty");
   pm.nest<func::FuncOp>().addPass(createHIVMInlineOTFLoadStorePass());
+  addOracleStageSnapshot(pm, "post", "InlineOTFLoadStore");
 
   addBufferizationPipeline(pm);
   addPostBufferizationToLocalPlanMemoryPipeline(pm);
@@ -875,12 +989,23 @@ int main(int argc, char **argv) {
   }
 
   ModuleOp module = moduleRef.get();
+  if (!dumpStageOracleDir.empty()) {
+    std::error_code error =
+        llvm::sys::fs::create_directories(dumpStageOracleDir.getValue());
+    if (error) {
+      llvm::errs() << "[ERROR] Failed to create stage oracle directory: "
+                   << error.message() << '\n';
+      return EXIT_FAILURE;
+    }
+  }
   PassManager pm(&context);
   buildSuffixPipeline(pm);
   if (failed(applyPassManagerCLOptions(pm))) {
     llvm::errs() << "[ERROR] Failed to apply pass manager options\n";
     return EXIT_FAILURE;
   }
+  if (failed(writePipelineStageManifest(pm)))
+    return EXIT_FAILURE;
 
   if (failed(pm.run(module))) {
     if (dumpPlanMemoryOracle)
