@@ -44,6 +44,9 @@ public:
     GenericRegion region;
     region.id = static_cast<int>(module.regions.size());
     region.parentOperation = parentOperation;
+    region.ordinal = static_cast<int>(
+        module.operations.at(static_cast<size_t>(parentOperation))
+            .regions.size());
     module.regions.push_back(std::move(region));
     module.operations.at(static_cast<size_t>(parentOperation))
         .regions.push_back(static_cast<int>(module.regions.size() - 1));
@@ -54,6 +57,8 @@ public:
     GenericBlock block;
     block.id = static_cast<int>(module.blocks.size());
     block.regionId = region;
+    block.ordinal = static_cast<int>(
+        module.regions.at(static_cast<size_t>(region)).blocks.size());
     block.argumentTypes = argumentTypes;
     for (size_t index = 0; index < argumentTypes.size(); ++index)
       block.arguments.push_back(nextValue++);

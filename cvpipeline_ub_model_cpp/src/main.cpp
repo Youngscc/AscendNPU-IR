@@ -28,6 +28,7 @@ struct Options {
   bool enablePreload = false;
   bool enableCVLazyLoading = false;
   bool enableCodeMotion = true;
+  bool enableTritonKernelCompile = false;
   bool enableAutoMultiBuffer = false;
   cvub::MultiBufferStrategy localMultiBufferStrategy =
       cvub::MultiBufferStrategy::NoLimit;
@@ -77,6 +78,7 @@ void PrintHelp() {
       << "  --enable-cv-lazy-loading=<bool>\n"
       << "\nUB-affecting pass and PlanMemory options:\n"
       << "  --enable-code-motion=<bool>\n"
+      << "  --enable-triton-kernel-compile=<bool>\n"
       << "  --enable-auto-multi-buffer=<bool>\n"
       << "  --limit-auto-multi-buffer-of-local-buffer=<strategy>\n"
       << "  --limit-auto-multi-buffer-buffer=<strategy>\n"
@@ -132,6 +134,11 @@ Options ParseOptions(int argc, char **argv) {
       options.enableCVLazyLoading = ParseBool(*lazyLoading);
     else if (auto codeMotion = readValue("--enable-code-motion"))
       options.enableCodeMotion = ParseBool(*codeMotion);
+    else if (argument == "--enable-triton-kernel-compile")
+      options.enableTritonKernelCompile = true;
+    else if (auto enableTriton =
+                 readValue("--enable-triton-kernel-compile"))
+      options.enableTritonKernelCompile = ParseBool(*enableTriton);
     else if (argument == "--enable-auto-multi-buffer")
       options.enableAutoMultiBuffer = true;
     else if (auto autoMultiBuffer = readValue("--enable-auto-multi-buffer"))
@@ -204,6 +211,7 @@ cvub::CVPipeliningOptions CVPipeliningOptions(const Options &options) {
 cvub::UBAffectingPassOptions UBAffectingPassOptions(const Options &options) {
   cvub::UBAffectingPassOptions result;
   result.enableCodeMotion = options.enableCodeMotion;
+  result.enableTritonKernelCompile = options.enableTritonKernelCompile;
   result.enableAutoMultiBuffer = options.enableAutoMultiBuffer;
   result.limitAutoMultiBufferOfLocalBuffer =
       options.localMultiBufferStrategy;
@@ -406,20 +414,39 @@ int PrintResult(const Options &options, const cvub::ModulePlanResult &result) {
   }
 
   std::cout << "precision\t" << Precision(result) << '\n'
-            << "success\t" << (result.success ? "true" : "false") << '\n'
-            << "overflow\t" << (result.overflow ? "true" : "false") << '\n'
+            << "status\t"
+            << (!exact ? "blocker"
+                       : (result.success ? "success" : "overflow"))
+            << '\n'
+            << "success\t"
+            << (exact && result.success ? "true" : "false") << '\n'
+            << "overflow\t"
+            << (!exact ? "null" : (result.overflow ? "true" : "false"))
+            << '\n'
             << "restrict_inplace_as_isa\t"
             << (options.restrictInplaceAsISA ? "true" : "false") << '\n'
-            << "peak_bits\t" << result.peakBits << '\n'
-            << "required_bits\t" << result.requiredBits << '\n'
-            << "capacity_bits\t" << result.capacityBits << '\n'
-            << "name\textent_bits\toffset_bytes\talloc_time\tfree_time\n";
-  for (const cvub::FunctionPlanResult &function : result.functions)
-    for (const cvub::PlannedBufferRecord &buffer : function.plan.buffers)
-      for (uint64_t offset : buffer.offsetsBytes)
-        std::cout << function.function << '\t' << buffer.name << '\t'
-                  << buffer.extentBits << '\t' << offset << '\t'
-                  << buffer.allocTime << '\t' << buffer.freeTime << '\n';
+            << "peak_bits\t";
+  exact ? std::cout << result.peakBits : std::cout << "null";
+  std::cout << '\n' << "required_bits\t";
+  exact ? std::cout << result.requiredBits : std::cout << "null";
+  std::cout << '\n'
+            << "capacity_bits\t" << result.capacityBits << '\n';
+  if (exact) {
+    std::cout << "name\textent_bits\toffset_bytes\talloc_time\tfree_time\n";
+    for (const cvub::FunctionPlanResult &function : result.functions)
+      for (const cvub::PlannedBufferRecord &buffer : function.plan.buffers)
+        for (uint64_t offset : buffer.offsetsBytes)
+          std::cout << function.function << '\t' << buffer.name << '\t'
+                    << buffer.extentBits << '\t' << offset << '\t'
+                    << buffer.allocTime << '\t' << buffer.freeTime << '\n';
+  }
+  if (!exact) {
+    std::cout << "debug_estimate_peak_bits\t" << result.peakBits << '\n'
+              << "debug_estimate_required_bits\t" << result.requiredBits
+              << '\n';
+    for (const std::string &diagnostic : result.diagnostics)
+      std::cout << "diagnostic\t" << diagnostic << '\n';
+  }
   if (!exact)
     return 1;
   return result.success ? 0 : 2;

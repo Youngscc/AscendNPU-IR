@@ -837,6 +837,10 @@ static void buildSuffixPipeline(OpPassManager &pm) {
 
   if (enableTritonKernelCompile)
     pm.addPass(createInsertInferTaskTypeFuncPass());
+  pm.nest<func::FuncOp>().addPass(createMarkTightlyCoupledBufferPass());
+  pm.nest<func::FuncOp>().addPass(createHoistTightlyCoupledAllocPass());
+  addOracleStageSnapshot(
+      pm, "post", "MarkTightlyCoupledBuffer;HoistTightlyCoupledAlloc");
   if (!disableSplitMixKernel)
     pm.addPass(createSplitMixKernelPass());
   addOracleStageSnapshot(pm, "post", "SplitMixKernelAIVProjection");

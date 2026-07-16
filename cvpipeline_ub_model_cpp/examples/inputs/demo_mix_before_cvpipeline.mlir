@@ -19,8 +19,8 @@
 // TileCubeVectorLoop finds no hivm.loop_core_type candidates and is a recognized
 // no-op.  No stage reports Incomplete, so the module reports precision=exact.
 "builtin.module"() ({
-  "func.func"() <{arg_attrs = [{tt.divisibility = 16 : i32, tt.tensor_kind = 0 : i32}], function_type = (memref<?xf16>) -> (), sym_name = "kernel"}> ({
-  ^bb0(%arg0: memref<?xf16>):
+  "func.func"() <{arg_attrs = [{ffts_base_address}, {tt.divisibility = 16 : i32, tt.tensor_kind = 0 : i32}], function_type = (i64, memref<?xf16>) -> (), sym_name = "kernel"}> ({
+  ^bb0(%ffts_base: i64, %arg0: memref<?xf16>):
     %c0 = "arith.constant"() <{value = 0 : index}> : () -> index
     // Vector load: source is a reinterpret_cast of %arg0.  The result feeds vadd,
     // so ClassifyLoadFromUsers resolves the load to Vector (retained on AIV).
@@ -63,5 +63,5 @@
     %store_view = "memref.reinterpret_cast"(%arg0, %c0) <{operandSegmentSizes = array<i32: 1, 1, 0, 0>, static_offsets = array<i64: 0>, static_sizes = array<i64: 16, 16>, static_strides = array<i64: 16, 1>}> : (memref<?xf16>, index) -> memref<16x16xf16, strided<[16, 1], offset: ?>>
     "hivm.hir.store"(%loaded, %store_view) <{operandSegmentSizes = array<i32: 2, 0>}> : (tensor<16x16xf16>, memref<16x16xf16, strided<[16, 1], offset: ?>>) -> ()
     "func.return"() : () -> ()
-  }) {SyncBlockLockArgIdx = 0 : i64, WorkspaceArgIdx = -1 : i64, hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<MIX>, mix_mode = "mix"} : () -> ()
+  }) {SyncBlockLockArgIdx = 1 : i64, WorkspaceArgIdx = -1 : i64, hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<MIX>, mix_mode = "mix"} : () -> ()
 }) {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #hacc.target_device_spec<#dlti.dl_entry<"AI_CORE_COUNT", 24 : i32>, #dlti.dl_entry<"CUBE_CORE_COUNT", 24 : i32>, #dlti.dl_entry<"VECTOR_CORE_COUNT", 48 : i32>, #dlti.dl_entry<"UB_SIZE", 1572864 : i32>, #dlti.dl_entry<"L1_SIZE", 4194304 : i32>, #dlti.dl_entry<"L0A_SIZE", 524288 : i32>, #dlti.dl_entry<"L0B_SIZE", 524288 : i32>, #dlti.dl_entry<"L0C_SIZE", 1048576 : i32>, #dlti.dl_entry<"UB_ALIGN_SIZE", 256 : i32>, #dlti.dl_entry<"L1_ALIGN_SIZE", 256 : i32>, #dlti.dl_entry<"L0C_ALIGN_SIZE", 4096 : i32>>>, hacc.hivmc_compatible_print = false, hacc.hivmc_version = #hacc.hivmc_version<"0.0.0">, hivm.module_core_type = #hivm.module_core_type<MIX>} : () -> ()

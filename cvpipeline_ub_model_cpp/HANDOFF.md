@@ -29,6 +29,29 @@ pipeline 分别位于 `src/ir/`、`src/passes/`、`src/pipeline/`。原分支中
 `memref.store` 已纳入 generic operation 的内存写语义，用于正确构造多 AIV 测试和
 PlanMemory 生存期。
 
+## yy 重构后的能力保全
+
+旧 `src/post_cvpipeline` 文件并非全部重复。本分支没有恢复第二套产品 pipeline，而是
+把其中独有能力迁入 yy 的 `src/ir`、`src/passes`、`src/pipeline`：
+
+- 恢复默认 2/2 `TileCubeVectorLoop` 的 Cube/Vector UB tile、allocation shrink 和
+  fail-closed matcher；
+- 恢复 loop-carried subset hoisting，且不匹配时事务性返回 blocker；
+- 产品路径改用严格的 private/internal call inline，递归或未证明 call 不再假 Exact；
+- 恢复 Generic IR verifier，并在每个影响 UB 的阶段后检查 parent、region/block ordinal、
+  SSA dominance/type 和跨函数引用；
+- 补回 OTF concat extra-user blocker 与 sub-byte aligned no-op；
+- Task7 成功 tiling和 early alloc/to_tensor canonicalization 均有 yy 路径回归；
+- 修复 `GenericRewriter` 新建多 region/block 时 ordinal 恒为 0 的结构错误，以及
+  `GlobalWorkspacePlan` folder 后残留 detached operation 的问题；
+- `OptimizeDpsOpWithYieldedInsertSlice` 改为仅在 Triton 模式执行；
+- 真实主线新增的 Ascend950 `MarkTightlyCoupledBuffer` / `HoistTightlyCoupledAlloc`
+  已进入 oracle/manifest；模型在适用但尚未精确建模时 fail-closed。
+
+旧 166 个 C++ capability test 已逐项登记在 `tests/capability_parity.tsv`。其中标为
+`ported` 的独有能力已有新架构实现；`yy-retained` 表示由 yy 实现保留，仍需真实
+compiler oracle 逐阶段补齐证据，不能仅凭映射表升级为 OracleExact。
+
 ## 验证入口
 
 构建和测试：
@@ -48,13 +71,20 @@ python3 cvpipeline_ub_model_cpp/scripts/run_corpus_oracle.py \
   --seeds 0
 ```
 
-本次合并后的 seed 0 结果为：171 个输入，58 个 Exact，113 个安全 blocker，0 个
-差分或报告合同失败。这里的 blocker 是有意的保守结果，不代表已精确覆盖该输入。
+当前模型侧 seed 0（`restrictInplaceAsISA=true`）结果为：171 个输入，168 个 Exact，
+3 个安全 blocker，0 个非结构化失败，其中 1 个 Exact 输入报告真实 overflow。3 个
+blocker 分别来自两种未覆盖的 subset-carrying loop 和一个动态 AllocExtraBuffer。
+
+本机没有 `cmake`，因此本次修改后的
+`bishengir-cvpipeline-suffix-compile` 尚未在此工作树重建；上述 168 个 Exact 只是
+模型侧执行成功，不能替代真实编译器逐阶段和最终 PlanMemory 差分。合入前仍应在有
+完整工具链的环境运行上面的 corpus oracle 命令。
 
 ## 仍需继续补齐的范围
 
-- 113 个 blocker 中的真实产品路径需要按诊断逐类补模；没有 oracle 证据前不得放宽
+- 3 个 blocker 的真实产品路径需要按诊断逐类补模；没有 oracle 证据前不得放宽
   Exact。
+- Ascend950 tightly-coupled buffer 的 mark/hoist 目前是明确 blocker，不支持权威规划。
 - 默认 inplace pair 与真实 `InitializeInplacePairList`/OneShotBufferize 决策仍需精确
   对齐。目前采用 blocker 防止假 Exact。
 - 动态 stride-aligned allocation 等 yy pass 明确不支持的路径仍会阻断。

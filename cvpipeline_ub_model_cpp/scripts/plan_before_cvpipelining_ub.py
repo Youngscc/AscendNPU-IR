@@ -89,6 +89,13 @@ def parse_args() -> argparse.Namespace:
     add_optional_bool(
         suffix_group, "--suffix-enable-auto-multi-buffer", default=False,
         help_text="Enable modeled MarkMultiBuffer before local PlanMemory.")
+    add_optional_bool(
+        suffix_group, "--suffix-enable-code-motion", default=True,
+        help_text="Match the real LICM and subset-hoisting pipeline option.")
+    add_optional_bool(
+        suffix_group, "--suffix-enable-triton-kernel-compile", default=False,
+        help_text=("Run Triton-only DPS insert-slice optimization before "
+                   "OneShotBufferize."))
     suffix_group.add_argument(
         "--suffix-local-multi-buffer-strategy", default="no-limit",
         choices=["no-limit", "only-cube", "only-vector", "no-l0c"],
@@ -122,6 +129,8 @@ def model_command(args: argparse.Namespace) -> list[str]:
         f"--enable-preload={str(args.cv_enable_preload).lower()}",
         f"--enable-cv-lazy-loading={str(args.cv_enable_lazy_loading).lower()}",
         f"--enable-auto-multi-buffer={str(args.suffix_enable_auto_multi_buffer).lower()}",
+        f"--enable-code-motion={str(args.suffix_enable_code_motion).lower()}",
+        f"--enable-triton-kernel-compile={str(args.suffix_enable_triton_kernel_compile).lower()}",
         "--limit-auto-multi-buffer-of-local-buffer",
         args.suffix_local_multi_buffer_strategy,
         "--limit-auto-multi-buffer-buffer",
@@ -169,7 +178,7 @@ def parse_model_text(stdout: str) -> dict[str, Any]:
         if key in {"success", "overflow", "restrict_inplace_as_isa"}:
             result[key] = value == "true"
         elif key in {"selected_seed", "peak_bits", "required_bits", "capacity_bits"}:
-            result[key] = int(value)
+            result[key] = None if value == "null" else int(value)
         else:
             result[key] = value
     result["plan"] = plan
@@ -186,6 +195,9 @@ def options_payload(args: argparse.Namespace) -> dict[str, Any]:
         },
         "suffix_plan_memory": {
             "enable_auto_multi_buffer": args.suffix_enable_auto_multi_buffer,
+            "enable_code_motion": args.suffix_enable_code_motion,
+            "enable_triton_kernel_compile":
+                args.suffix_enable_triton_kernel_compile,
             "local_multi_buffer_strategy": args.suffix_local_multi_buffer_strategy,
             "mix_multi_buffer_strategy": args.suffix_mix_multi_buffer_strategy,
             "random_seed": args.random_seed,
@@ -230,6 +242,8 @@ def text_report(args: argparse.Namespace,
         f"cvpipelining.enable_preload\t{str(args.cv_enable_preload).lower()}",
         f"cvpipelining.enable_lazy_loading\t{str(args.cv_enable_lazy_loading).lower()}",
         f"suffix.enable_auto_multi_buffer\t{str(args.suffix_enable_auto_multi_buffer).lower()}",
+        f"suffix.enable_code_motion\t{str(args.suffix_enable_code_motion).lower()}",
+        f"suffix.enable_triton_kernel_compile\t{str(args.suffix_enable_triton_kernel_compile).lower()}",
         f"suffix.local_multi_buffer_strategy\t{args.suffix_local_multi_buffer_strategy}",
         f"suffix.mix_multi_buffer_strategy\t{args.suffix_mix_multi_buffer_strategy}",
         f"plan.random_seed\t{'' if args.random_seed is None else args.random_seed}",

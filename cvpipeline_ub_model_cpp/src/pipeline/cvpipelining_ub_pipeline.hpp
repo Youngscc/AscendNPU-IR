@@ -10,11 +10,15 @@
 #include "../passes/hivm_inline_otf_load_store.hpp"
 #include "../passes/infer_and_set_buffer_size.hpp"
 #include "../passes/inline_scope.hpp"
+#include "../passes/inline_scope_strict.hpp"
 #include "../passes/loop_invariant_code_motion.hpp"
+#include "../passes/loop_invariant_subset_hoisting.hpp"
 #include "../passes/mark_real_core_type.hpp"
 #include "../passes/optimize_dps_op_with_yielded_insert_slice.hpp"
 #include "../passes/split_mix_kernel.hpp"
 #include "../passes/tile_and_bind_sub_block.hpp"
+#include "../passes/tile_cube_vector_loop.hpp"
+#include "../passes/tightly_coupled_buffer_guard.hpp"
 #include "../support/debug_trace.hpp"
 #include "plan_memory_input_builder.hpp"
 
@@ -25,7 +29,10 @@
 namespace cvub {
 
 struct UBAffectingPassOptions {
+  unsigned tileMixVectorLoop = 2;
+  unsigned tileMixCubeLoop = 2;
   bool enableCodeMotion = true;
+  bool enableTritonKernelCompile = false;
   bool enableAutoMultiBuffer = false;
   MultiBufferStrategy limitAutoMultiBufferOfLocalBuffer =
       MultiBufferStrategy::NoLimit;
@@ -33,8 +40,31 @@ struct UBAffectingPassOptions {
       MultiBufferStrategy::NoLimit;
 };
 
+inline GenericModule RequireExactStage(StageResult stage) {
+  if (stage.precision == Precision::Exact) {
+    ValidateGenericModule(stage.module);
+    return std::move(stage.module);
+  }
+  if (stage.diagnostics.empty())
+    throw std::runtime_error("UB-affecting pass is not modeled exactly");
+  const PostCVPipelineDiagnostic &diagnostic = stage.diagnostics.front();
+  std::string message = diagnostic.pipelineStage;
+  if (!diagnostic.function.empty())
+    message += "[" + diagnostic.function + "]";
+  if (!diagnostic.operation.empty())
+    message += ": " + diagnostic.operation;
+  if (!diagnostic.reason.empty())
+    message += ": " + diagnostic.reason;
+  throw std::runtime_error(message);
+}
+
 inline void TraceGenericPass(DebugTrace *trace, const std::string &passName,
                              const GenericModule &module) {
+  try {
+    ValidateGenericModule(module);
+  } catch (const std::runtime_error &error) {
+    throw std::runtime_error(passName + ": " + error.what());
+  }
   if (!trace)
     return;
   trace->Pass(passName,
@@ -94,8 +124,13 @@ inline void TracePlanMemoryResult(DebugTrace *trace,
 }
 
 inline GenericModule RunPassesBeforeLoopInvariantCodeMotion(
-    GenericModule module, DebugTrace *trace = nullptr) {
+    GenericModule module, const UBAffectingPassOptions &options = {},
+    DebugTrace *trace = nullptr) {
   ApplyOperationSemanticsToAll(module.operations);
+  module = RequireExactStage(RunTileCubeVectorLoop(
+      std::move(module), options.tileMixVectorLoop,
+      options.tileMixCubeLoop));
+  TraceGenericPass(trace, "TileCubeVectorLoop", module);
   module = RunInferAndSetBufferSizePipeline(std::move(module));
   TraceGenericPass(trace, "InferAndSetBufferSize", module);
   module = RunGlobalWorkspacePlan(std::move(module));
@@ -110,9 +145,13 @@ inline GenericModule RunPassesBeforeLoopInvariantCodeMotion(
   TraceGenericPass(trace, "CrossCoreGSS", module);
   module = RunMarkRealCoreType(std::move(module), true);
   TraceGenericPass(trace, "MarkRealCoreType", module);
+  module = RequireExactStage(
+      GuardTightlyCoupledBufferPasses(std::move(module)));
+  TraceGenericPass(trace, "MarkTightlyCoupledBuffer;HoistTightlyCoupledAlloc",
+                   module);
   module = RunSplitMixKernel(std::move(module));
   TraceGenericPass(trace, "SplitMixKernel", module);
-  module = RunInlineScope(std::move(module));
+  module = RequireExactStage(RunStrictInlineScope(std::move(module)));
   TraceGenericPass(trace, "InlineScope", module);
   module = RunTileAndBindSubBlock(std::move(module));
   TraceGenericPass(trace, "TileAndBindSubBlock", module);
@@ -123,6 +162,7 @@ inline GenericModule RunPassesBeforeLoopInvariantCodeMotion(
   ApplyOperationSemanticsToAll(module.operations);
   TraceGenericPass(trace, "CanonicalizationHIVMPipelineSourceAligned",
                    module);
+  ValidateGenericModule(module);
   return module;
 }
 
@@ -130,21 +170,31 @@ inline GenericModule RunPassesBeforeOneShotBufferize(
     GenericModule module, const UBAffectingPassOptions &options = {},
     DebugTrace *trace = nullptr) {
   module =
-      RunPassesBeforeLoopInvariantCodeMotion(std::move(module), trace);
+      RunPassesBeforeLoopInvariantCodeMotion(std::move(module), options, trace);
   if (options.enableCodeMotion) {
     RunLoopInvariantCodeMotion(module);
     TraceGenericPass(trace, "LoopInvariantCodeMotion", module);
+    module = RequireExactStage(
+        RunLoopInvariantSubsetHoisting(std::move(module), true));
+    TraceGenericPass(trace, "LoopInvariantSubsetHoisting", module);
   } else if (trace) {
     trace->Pass("LoopInvariantCodeMotion", {{"executed", 0}});
+    trace->Pass("LoopInvariantSubsetHoisting", {{"executed", 0}});
   }
   module = RunCloneTensorEmpty(std::move(module));
   TraceGenericPass(trace, "CloneTensorEmpty", module);
   module = RunHIVMInlineOTFLoadStore(std::move(module));
   TraceGenericPass(trace, "HIVMInlineOTFLoadStore", module);
-  module = RunOptimizeDpsOpWithYieldedInsertSlice(std::move(module));
-  TraceGenericPass(trace, "OptimizeDpsOpWithYieldedInsertSlice", module);
-  module = RunCloneTensorEmpty(std::move(module));
-  TraceGenericPass(trace, "CloneTensorEmpty", module);
+  if (options.enableTritonKernelCompile) {
+    module = RunOptimizeDpsOpWithYieldedInsertSlice(std::move(module));
+    TraceGenericPass(trace, "OptimizeDpsOpWithYieldedInsertSlice", module);
+    module = RunCloneTensorEmpty(std::move(module));
+    TraceGenericPass(trace, "CloneTensorEmptyBeforeBufferize", module);
+  } else if (trace) {
+    trace->Pass("OptimizeDpsOpWithYieldedInsertSlice", {{"executed", 0}});
+    trace->Pass("CloneTensorEmptyBeforeBufferize", {{"executed", 0}});
+  }
+  ValidateGenericModule(module);
   return module;
 }
 
