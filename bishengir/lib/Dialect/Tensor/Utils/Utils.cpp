@@ -31,6 +31,19 @@ namespace mlir {
 namespace tensor {
 namespace reshape_utils {
 
+std::string stringtifyElementKind(ElementKind kind) {
+  switch (kind) {
+      case ElementKind::HasMutation: return "HasMutation";
+      case ElementKind::NoMutation:  return "NoMutation";
+      case ElementKind::Unit:        return "Unit";
+  }
+}
+
+llvm::raw_ostream& operator<<(llvm::raw_ostream& os, ElementKind kind) {
+  os << stringtifyElementKind(kind);
+  return os;
+}
+
 using Hyperrectangle = SmallVector<HyperrectangularSlice>;
 std::optional<Hyperrectangle>
 getHyperrectangleFromArray(int64_t superviewShape, int64_t offset, int64_t size,

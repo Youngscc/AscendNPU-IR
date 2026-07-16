@@ -980,13 +980,12 @@ module attributes {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #h
 // CHECK:           scf.for %[[VAL_6:.*]] = %[[VAL_3]] to %[[VAL_5]] step %[[VAL_4]] {
 // CHECK:             %[[VAL_7:.*]] = affine.apply #[[$ATTR_0]](){{\[}}%[[VAL_6]]]
 // CHECK:             %[[VAL_8:.*]] = affine.apply #[[$ATTR_0]](){{\[}}%[[VAL_6]]]
-// CHECK:             %[[VAL_9:.*]] = scf.for %[[VAL_10:.*]] = %[[VAL_3]] to %[[VAL_2]] step %[[VAL_4]] iter_args(%[[VAL_11:.*]] = %{{.*}}) -> (tensor<512xf32>) {
+// CHECK:             %[[VAL_9:.*]] = scf.for %[[VAL_10:.*]] = %[[VAL_3]] to %[[VAL_2]] step %[[VAL_4]] iter_args(%[[VAL_11:.*]] = %{{.*}}) -> (tensor<256xf32>) {
 // CHECK:               %[[VAL_12:.*]] = affine.apply #[[$ATTR_1]](){{\[}}%[[VAL_10]]]
 // CHECK:               %[[VAL_13:.*]] = affine.apply #[[$ATTR_1]](){{\[}}%[[VAL_10]]]
-// CHECK:               %[[VAL_14:.*]] = tensor.extract_slice %[[VAL_11]]{{\[}}%[[VAL_8]]] [256] [1] {to_be_bubbled_slice} : tensor<512xf32> to tensor<256xf32>
-// CHECK:               %[[VAL_15:.*]] = tensor.extract_slice %[[VAL_14]]{{\[}}%[[VAL_13]]] [32] [1] : tensor<256xf32> to tensor<32xf32>
+// CHECK:               %[[VAL_14:.*]] = tensor.extract_slice %[[VAL_11]]{{\[}}%[[VAL_13]]] [32] [1] : tensor<256xf32> to tensor<32xf32>
 // CHECK:               hivm.hir.store ins(%{{.*}} : tensor<32xf32>) outs(%{{.*}} : memref<32xf32, strided<[1], offset: ?>>) {tiled_op}
-// CHECK:               scf.yield %{{.*}} : tensor<512xf32>
+// CHECK:               scf.yield %{{.*}} : tensor<256xf32>
 // CHECK:             }
 // CHECK:           } {map_for_to_forall, mapping = [#hivm.sub_block<x>]}
 // CHECK:           return
@@ -1213,7 +1212,6 @@ func.func @broadcast_two_different_dims(%arg0: tensor<64xf32>, %arg1: memref<64x
   %expanded = tensor.expand_shape %2 [[0, 1]] output_shape [64, 1] : tensor<64xf32> into tensor<64x1xf32>
   %expanded_0 = tensor.expand_shape %2 [[0, 1]] output_shape [1, 64] : tensor<64xf32> into tensor<1x64xf32>
   %3 = hivm.hir.vadd ins(%expanded, %expanded_0 : tensor<64x1xf32>, tensor<1x64xf32>) outs(%1 : tensor<64x64xf32>) broadcast = [0, 1] -> tensor<64x64xf32>
-// expected-warning @+1{{Detected dimensions are in the same group in one storeOp.}}
   hivm.hir.store ins(%3 : tensor<64x64xf32>) outs(%arg1 : memref<64x64xf32>)
   return
 }
@@ -1528,7 +1526,6 @@ module attributes {hivm.module_core_type = #hivm.module_core_type<MIX>} {
     %14 = hivm.hir.vadd ins(%9, %13 : tensor<16x16xf32>, tensor<16x16xf32>) outs(%0 : tensor<16x16xf32>) -> tensor<16x16xf32>
     %inserted_slice = tensor.insert_slice %extracted_slice into %14[0, 0] [%arg2, 16] [1, 1] : tensor<?x16xf32> into tensor<16x16xf32>
     %reinterpret_cast = memref.reinterpret_cast %arg1 to offset: [0], sizes: [16, 16], strides: [16, 1] : memref<?xf32> to memref<16x16xf32>
-    // expected-warning @+1{{Detected dimensions are in the same group in one storeOp.}}
     hivm.hir.store ins(%inserted_slice : tensor<16x16xf32>) outs(%reinterpret_cast : memref<16x16xf32>)
     return
   }
@@ -1597,6 +1594,7 @@ module attributes {hivm.module_core_type = #hivm.module_core_type<MIX>} {
 #map1 = affine_map<()[s0, s1] -> (s0 - s1)>
 #map2 = affine_map<()[s0, s1] -> (s0 + s1 * 1024 + 32)>
 #map3 = affine_map<()[s0] -> (s0 + 1)>
+// expected-remark@+1 {{Selected tiling dim might have broadcast two different axis. Automatically disables strict mode.}}
   func.func @prepare_wy_repr_fwd_kernel_chunk64_mix_aiv(%arg0: memref<?xi8> {hacc.arg_type = #hacc.arg_type<sync_block_lock>}, %arg1: memref<?xi8> {hacc.arg_type = #hacc.arg_type<workspace>}, %arg2: memref<?xf32> {tt.divisibility = 16 : i32, tt.tensor_kind = 0 : i32}, %arg3: memref<?xf32> {tt.divisibility = 16 : i32, tt.tensor_kind = 1 : i32}, %arg4: i32, %arg5: i32, %arg6: i32, %arg7: i32) attributes { hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<AIV>, hivm.part_of_mix, mix_mode = "mix", parallel_mode = "simd"} {
     %c1_i32 = arith.constant 1 : i32
     %cst = arith.constant 1.000000e+00 : f32
@@ -1680,6 +1678,7 @@ module attributes {hivm.module_core_type = #hivm.module_core_type<MIX>} {
     %50 = hivm.hir.vbrc ins(%expanded_9 : tensor<1x32xi32>) outs(%48 : tensor<32x32xi32>) broadcast_dims = [0] -> tensor<32x32xi32>
     %51 = tensor.empty() : tensor<32x32xi1>
     %52 = hivm.hir.vcmp ins(%49, %50 : tensor<32x32xi32>, tensor<32x32xi32>) outs(%51 : tensor<32x32xi1>) compare_mode = <gt> -> tensor<32x32xi1>
+    // expected-warning@+1 {{Extract slice is not fully bubbled up}}
     %53 = hivm.hir.vsel ins(%52, %35, %cst_0 : tensor<32x32xi1>, tensor<32x32xf32>, f32) outs(%7 : tensor<32x32xf32>) -> tensor<32x32xf32>
     %54 = hivm.hir.vsel ins(%52, %45, %cst_0 : tensor<32x32xi1>, tensor<32x32xf32>, f32) outs(%7 : tensor<32x32xf32>) -> tensor<32x32xf32>
     %55:2 = scf.for %arg8 = %c1_i32 to %c32_i32 step %c1_i32 iter_args(%arg9 = %53, %arg10 = %54) -> (tensor<32x32xf32>, tensor<32x32xf32>)  : i32 {

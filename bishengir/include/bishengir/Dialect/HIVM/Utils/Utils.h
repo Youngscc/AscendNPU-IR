@@ -110,6 +110,17 @@ const std::map<std::string, int> membarType = {
 /// Set the input type's memory scope to the input HIVM Address Space.
 void setBaseMemRefTypeScope(Value val, AddressSpaceAttr targetMemScope);
 
+/// Set the input type's memory scope to the input HIVM Address Space.
+void modifyBaseMemRefTypeScope(Value val, AddressSpaceAttr targetMemScope);
+
+// New helper function to get the updated BaseMemRefType
+BaseMemRefType getBaseMemRefTypeWithNewScope(BaseMemRefType type,
+                                             AddressSpaceAttr targetMemScope);
+
+// New helper function to get the updated BaseMemRefType
+BaseMemRefType getBaseMemRefTypeWithNewScope(BaseMemRefType type,
+                                             unsigned targetMemScope);
+
 /// Get the root MemRef AllocOp for the input operand, return failure if there
 /// is unsupported Ops on the search path or if the defining op is not a MemRef
 /// AllocOp.

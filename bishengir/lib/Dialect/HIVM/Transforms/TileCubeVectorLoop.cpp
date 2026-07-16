@@ -32,6 +32,7 @@
 #include "mlir/Dialect/Transform/IR/Utils.h"
 #include "mlir/Dialect/Transform/Transforms/TransformInterpreterUtils.h"
 #include "mlir/IR/AsmState.h"
+#include "mlir/IR/Visitors.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassRegistry.h"
 
@@ -1172,6 +1173,10 @@ LogicalResult TileCubeVectorLoopPass::collectVectorLoopInfo(OpType vectorLoop) {
 
           return WalkResult::advance();
         }
+        
+        // TODO: Support unstructure mem access tiling
+        if (utils::isUnstructuredMemAccLoop(op))
+          return WalkResult::interrupt();
 
         // TODO:: Use MarkStrideAlign to annotate the unaligned axis and
         // rely on StrideAlign to make it aligned

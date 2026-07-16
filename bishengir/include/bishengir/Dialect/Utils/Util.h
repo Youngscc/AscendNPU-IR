@@ -37,6 +37,9 @@
 #define CEIL_FACTOR(x, y) (((x) + ((y)-1)) / (y) * (y))
 #define CEIL_DIV(x, y) (((x) + ((y)-1)) / (y))
 #define UINT8_WIDTH 8
+#define DEBUG_LINE_BEG(m) "===[" #m "]===[BEG]>>>\n"
+#define DEBUG_LINE_END(m) "<<<[" #m "]===[END]===\n"
+
 namespace mlir {
 namespace utils {
 constexpr const uint8_t kBitsToByte = 8;

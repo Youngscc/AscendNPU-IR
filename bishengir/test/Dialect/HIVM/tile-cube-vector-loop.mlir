@@ -569,6 +569,15 @@ module attributes {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #h
     %c64 = arith.constant 64 : index
     // CHECK-CUBE: scf.for %[[OUTER_IV:.*]] = %[[C0]] to %[[C4]] step %[[C1]] {
     scf.for %iv = %c0 to %c4 step %c1 {
+      // CHECK-CUBE:     %[[EMPTY_1:.*]] = tensor.empty() : tensor<256x64xf32>
+      // CHECK-CUBE:     %[[EMPTY_2:.*]] = tensor.empty() : tensor<256x128xf32>
+      // CHECK-CUBE:     scf.for %[[INNER_IV1:.*]] = %[[C0]] to %[[C256]] step %[[C64]] {
+      // CHECK-CUBE:       %[[MMAD1:.*]] = hivm.hir.mmadL1 {cube_producer_to_fuse_0_group_0}
+      // CHECK-CUBE:       hivm.hir.fixpipe {dma_mode = #hivm.dma_mode<nz2nd>, op_to_tile_0_branch_0} ins(%[[MMAD1]] : tensor<64x64xf32>)
+      // CHECK-CUBE:       %[[C_RELOADED:.*]] = hivm.hir.load {{.*}} {cube_producer_to_fuse_0_group_0}
+      // CHECK-CUBE:       %[[E_F32:.*]] = hivm.hir.mmadL1 {cube_producer_to_fuse_0_group_0} ins(%[[C_RELOADED]], {{.*}}
+      // CHECK-CUBE:       hivm.hir.fixpipe {dma_mode = #hivm.dma_mode<nz2nd>, op_to_tile_0_branch_1} ins(%[[E_F32]] : tensor<64x128xf32>)
+      // CHECK-CUBE:     }
       %alloc_A = memref.alloc() : memref<256x128xf32>
       hivm.hir.load ins(%global_A : memref<256x128xf32>) outs(%alloc_A : memref<256x128xf32>)
       %tensor_A = bufferization.to_tensor %alloc_A restrict writable : memref<256x128xf32>
@@ -581,11 +590,6 @@ module attributes {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #h
       hivm.hir.fixpipe {dma_mode = #hivm.dma_mode<nz2nd>} 
                       ins(%C_f32 : tensor<256x64xf32>) 
                       outs(%out_C : memref<256x64xf32>)
-      // CHECK-CUBE:     %[[EMPTY_1:.*]] = tensor.empty() : tensor<256x64xf32>
-      // CHECK-CUBE:     scf.for %[[INNER_IV1:.*]] = %[[C0]] to %[[C256]] step %[[C64]] {
-      // CHECK-CUBE:       %[[MMAD1:.*]] = hivm.hir.mmadL1 {cube_producer_to_fuse_0_group_0}
-      // CHECK-CUBE:       hivm.hir.fixpipe {dma_mode = #hivm.dma_mode<nz2nd>, op_to_tile_0_branch_0} ins(%[[MMAD1]] : tensor<64x64xf32>)
-      // CHECK-CUBE:     }
       %alloc_C_reload = memref.alloc() : memref<256x64xf32>
       hivm.hir.load ins(%out_C : memref<256x64xf32>) outs(%alloc_C_reload : memref<256x64xf32>)
       %tensor_C_reloaded = bufferization.to_tensor %alloc_C_reload restrict writable : memref<256x64xf32>
@@ -598,12 +602,6 @@ module attributes {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #h
       hivm.hir.fixpipe {dma_mode = #hivm.dma_mode<nz2nd>} 
                       ins(%E_f32 : tensor<256x128xf32>) 
                       outs(%out_E : memref<256x128xf32>)
-      // CHECK-CUBE:     %[[EMPTY_2:.*]] = tensor.empty() : tensor<256x128xf32>
-      // CHECK-CUBE:     scf.for %[[INNER_IV2:.*]] = %[[C0]] to %[[C256]] step %[[C64]] {
-      // CHECK-CUBE:       %[[C_RELOADED:.*]] = hivm.hir.load {{.*}} {cube_producer_to_fuse_0_group_1}
-      // CHECK-CUBE:       %[[E_F32:.*]] = hivm.hir.mmadL1 {cube_producer_to_fuse_0_group_1} ins(%[[C_RELOADED]], {{.*}}
-      // CHECK-CUBE:       hivm.hir.fixpipe {dma_mode = #hivm.dma_mode<nz2nd>, op_to_tile_0_branch_1} ins(%[[E_F32]] : tensor<64x128xf32>)
-      // CHECK-CUBE:     }
     } {hivm.loop_core_type = #hivm.tcore_type<CUBE>}
     // CHECK-CUBE:   } {hivm.loop_core_type = #hivm.tcore_type<CUBE>}
     return
