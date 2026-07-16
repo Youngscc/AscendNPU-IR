@@ -29,5 +29,9 @@ add_bishengir_publish_tool(bishengir-cvpipeline-suffix-compile
 
 target_include_directories(bishengir-cvpipeline-suffix-compile
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  target_compile_options(bishengir-cvpipeline-suffix-compile
+    PRIVATE -Wshadow -Werror=shadow)
+endif()
 target_link_libraries(bishengir-cvpipeline-suffix-compile PRIVATE ${LIBS})
 mlir_check_all_link_libraries(bishengir-cvpipeline-suffix-compile)

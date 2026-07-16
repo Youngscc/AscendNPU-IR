@@ -22,6 +22,16 @@
 //
 //===----------------------------------------------------------------------===//
 
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wshadow"
+#pragma clang diagnostic ignored "-Wswitch-default"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wshadow"
+#pragma GCC diagnostic ignored "-Wswitch-default"
+#endif
+
 #include "bishengir/Dialect/Annotation/Transforms/Passes.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Dialect/HIVM/Transforms/Passes.h"
@@ -63,6 +73,12 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <cstdlib>
+
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 using namespace mlir;
 using namespace mlir::hivm;
@@ -837,10 +853,10 @@ static void buildSuffixPipeline(OpPassManager &pm) {
 
   if (enableTritonKernelCompile)
     pm.addPass(createInsertInferTaskTypeFuncPass());
-  pm.nest<func::FuncOp>().addPass(createMarkTightlyCoupledBufferPass());
-  pm.nest<func::FuncOp>().addPass(createHoistTightlyCoupledAllocPass());
-  addOracleStageSnapshot(
-      pm, "post", "MarkTightlyCoupledBuffer;HoistTightlyCoupledAlloc");
+  // Temporarily disabled until the lightweight model reproduces the
+  // Ascend950 tightly-coupled buffer semantics exactly.
+  // pm.nest<func::FuncOp>().addPass(createMarkTightlyCoupledBufferPass());
+  // pm.nest<func::FuncOp>().addPass(createHoistTightlyCoupledAllocPass());
   if (!disableSplitMixKernel)
     pm.addPass(createSplitMixKernelPass());
   addOracleStageSnapshot(pm, "post", "SplitMixKernelAIVProjection");

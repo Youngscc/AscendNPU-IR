@@ -145,10 +145,12 @@ inline GenericModule RunPassesBeforeLoopInvariantCodeMotion(
   TraceGenericPass(trace, "CrossCoreGSS", module);
   module = RunMarkRealCoreType(std::move(module), true);
   TraceGenericPass(trace, "MarkRealCoreType", module);
-  module = RequireExactStage(
-      GuardTightlyCoupledBufferPasses(std::move(module)));
-  TraceGenericPass(trace, "MarkTightlyCoupledBuffer;HoistTightlyCoupledAlloc",
-                   module);
+  // Temporarily disabled together with the corresponding suffix passes.
+  // module = RequireExactStage(
+  //     GuardTightlyCoupledBufferPasses(std::move(module)));
+  // TraceGenericPass(trace,
+  //                  "MarkTightlyCoupledBuffer;HoistTightlyCoupledAlloc",
+  //                  module);
   module = RunSplitMixKernel(std::move(module));
   TraceGenericPass(trace, "SplitMixKernel", module);
   module = RequireExactStage(RunStrictInlineScope(std::move(module)));

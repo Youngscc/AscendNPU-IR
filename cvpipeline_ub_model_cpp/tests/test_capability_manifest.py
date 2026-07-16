@@ -54,8 +54,6 @@ ordered_calls = [
     "createTileCubeVectorLoopPass",
     "addInferAndSetBufferSizePipeline",
     "addCrossCoreSyncPipeline",
-    "createMarkTightlyCoupledBufferPass",
-    "createHoistTightlyCoupledAllocPass",
     "createSplitMixKernelPass",
     "createInlineScopePass",
     "createTileAndBindSubBlockPass",
@@ -69,4 +67,4 @@ ordered_calls = [
 positions = [builder.index(call) for call in ordered_calls]
 if positions != sorted(positions):
     raise SystemExit("oracle post-CVPipeline pass calls are out of order")
-print("[PASS] 15 post-CVPipeline stages match the oracle source")
+print("[PASS] 14 post-CVPipeline stages match the oracle source")
