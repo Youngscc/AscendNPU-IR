@@ -228,6 +228,30 @@ func.func @test_truncf_f32_f16(%arg0 : tensor<6x6xf32>) -> tensor<6x6xf16> {
 
 // -----
 
+// CHECK-LABEL: func.func @test_truncf_f32_f8
+module attributes {hacc.target = #hacc.target<"Ascend950PR_957b">} {
+  func.func @test_truncf_f32_f8(%arg0 : tensor<6x6xf32>) -> tensor<6x6xf8E4M3FN> {
+    // CHECK:       %[[EMPTY:.*]] = tensor.empty()
+    // CHECK:       %[[RET:.*]] = hfusion.cast {cast = #hfusion.type_fn<cast_signed>, round_mode = #hfusion.round_mode<rint>}
+    %ret = arith.truncf %arg0 {round_mode = #hfusion.round_mode<rint>} : tensor<6x6xf32> to tensor<6x6xf8E4M3FN>
+    return %ret : tensor<6x6xf8E4M3FN>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_extf_f8_bf16
+module attributes {hacc.target = #hacc.target<"Ascend950PR_957b">} {
+  func.func @test_extf_f8_bf16(%arg0 : tensor<6x6xf8E5M2>) -> tensor<6x6xbf16> {
+    // CHECK:       %[[EMPTY:.*]] = tensor.empty()
+    // CHECK:       %[[RET:.*]] = hfusion.cast {cast = #hfusion.type_fn<cast_signed>, round_mode = #hfusion.round_mode<rint>}
+    %ret = arith.extf %arg0 {round_mode = #hfusion.round_mode<rint>} : tensor<6x6xf8E5M2> to tensor<6x6xbf16>
+    return %ret : tensor<6x6xbf16>
+  }
+}
+
+// -----
+
 // CHECK-LABEL: func.func @test_truncf_f32_bf16
 func.func @test_truncf_f32_bf16(%arg0 : tensor<6x6xf32>) -> tensor<6x6xbf16> {
   // CHECK:       %[[EMPTY:.*]] = tensor.empty()
@@ -422,7 +446,7 @@ func.func @test_ceildivsi(%arg0 : tensor<6x6xi32>, %arg1 : tensor<6x6xi32>) -> t
   return %ret : tensor<6x6xi32>
 }
 
-// ----
+// -----
 
 // CHECK-LABEL: func.func @test_negf
 func.func @test_negf(%arg0 : tensor<6x6xf32>) -> tensor<6x6xf32> {
@@ -432,7 +456,7 @@ func.func @test_negf(%arg0 : tensor<6x6xf32>) -> tensor<6x6xf32> {
   return %ret : tensor<6x6xf32>
 }
 
-// ----
+// -----
 
 // CHECK-LABEL: func.func @test_arith_cmpf
 func.func @test_arith_cmpf(%arg1 : tensor<32xf32>, %arg2 : tensor<32xf32>) -> tensor<32xi1> {
@@ -442,7 +466,7 @@ func.func @test_arith_cmpf(%arg1 : tensor<32xf32>, %arg2 : tensor<32xf32>) -> te
   return %1 : tensor<32xi1>
 }
 
-// ----
+// -----
 
 // CHECK-LABEL: func.func @test_arith_bitcast
 func.func @test_arith_bitcast(%arg : tensor<32xf32>) -> tensor<32xi32> {
@@ -460,4 +484,156 @@ func.func @test_arith_remui(%arg0 : tensor<1024xi8>, %arg1 : tensor<1024xi8>) ->
   // CHECK: %[[RET:.*]] = hfusion.elemwise_binary {fun = #hfusion.binary_fn<modui>}
   %ret = arith.remui %arg0, %arg1 : tensor<1024xi8>
   return %ret : tensor<1024xi8>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_arith_cmpi_i1
+module attributes {hacc.target = #hacc.target<"Ascend950PR_957b">} {
+  func.func @test_arith_cmpi_i1(%arg1 : tensor<32xi1>, %arg2 : tensor<32xi1>) -> (tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>) {
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<veq>} ins({{.*}}, {{.*}} : tensor<32xi1>, tensor<32xi1>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %eq = arith.cmpi eq, %arg1, %arg2 : tensor<32xi1>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vne>} ins({{.*}}, {{.*}} : tensor<32xi1>, tensor<32xi1>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %ne = arith.cmpi ne, %arg1, %arg2 : tensor<32xi1>
+    // CHECK: %[[ULT_ARG1:.*]] = hfusion.cast {cast = #hfusion.type_fn<cast_signed>, round_mode = #hfusion.round_mode<rint>} ins({{.*}} : tensor<32xi1>) outs({{.*}} : tensor<32xi8>) -> tensor<32xi8>
+    // CHECK: %[[ULT_ARG2:.*]] = hfusion.cast {cast = #hfusion.type_fn<cast_signed>, round_mode = #hfusion.round_mode<rint>} ins({{.*}} : tensor<32xi1>) outs({{.*}} : tensor<32xi8>) -> tensor<32xi8>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vlt>} ins(%[[ULT_ARG1]], %[[ULT_ARG2]] : tensor<32xi8>, tensor<32xi8>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %ult = arith.cmpi ult, %arg1, %arg2 : tensor<32xi1>
+    // CHECK: %[[UGT_ARG1:.*]] = hfusion.cast {cast = #hfusion.type_fn<cast_signed>, round_mode = #hfusion.round_mode<rint>} ins({{.*}} : tensor<32xi1>) outs({{.*}} : tensor<32xi8>) -> tensor<32xi8>
+    // CHECK: %[[UGT_ARG2:.*]] = hfusion.cast {cast = #hfusion.type_fn<cast_signed>, round_mode = #hfusion.round_mode<rint>} ins({{.*}} : tensor<32xi1>) outs({{.*}} : tensor<32xi8>) -> tensor<32xi8>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vgt>} ins(%[[UGT_ARG1]], %[[UGT_ARG2]] : tensor<32xi8>, tensor<32xi8>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %ugt = arith.cmpi ugt, %arg1, %arg2 : tensor<32xi1>
+    // CHECK: %[[ULE_ARG1:.*]] = hfusion.cast {cast = #hfusion.type_fn<cast_signed>, round_mode = #hfusion.round_mode<rint>} ins({{.*}} : tensor<32xi1>) outs({{.*}} : tensor<32xi8>) -> tensor<32xi8>
+    // CHECK: %[[ULE_ARG2:.*]] = hfusion.cast {cast = #hfusion.type_fn<cast_signed>, round_mode = #hfusion.round_mode<rint>} ins({{.*}} : tensor<32xi1>) outs({{.*}} : tensor<32xi8>) -> tensor<32xi8>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vle>} ins(%[[ULE_ARG1]], %[[ULE_ARG2]] : tensor<32xi8>, tensor<32xi8>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %ule = arith.cmpi ule, %arg1, %arg2 : tensor<32xi1>
+    // CHECK: %[[UGE_ARG1:.*]] = hfusion.cast {cast = #hfusion.type_fn<cast_signed>, round_mode = #hfusion.round_mode<rint>} ins({{.*}} : tensor<32xi1>) outs({{.*}} : tensor<32xi8>) -> tensor<32xi8>
+    // CHECK: %[[UGE_ARG2:.*]] = hfusion.cast {cast = #hfusion.type_fn<cast_signed>, round_mode = #hfusion.round_mode<rint>} ins({{.*}} : tensor<32xi1>) outs({{.*}} : tensor<32xi8>) -> tensor<32xi8>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vge>} ins(%[[UGE_ARG1]], %[[UGE_ARG2]] : tensor<32xi8>, tensor<32xi8>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %uge = arith.cmpi uge, %arg1, %arg2 : tensor<32xi1>
+    return %eq, %ne, %ult, %ugt, %ule, %uge : tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_arith_cmpi_i8
+module attributes {hacc.target = #hacc.target<"Ascend950PR_957b">} {
+  func.func @test_arith_cmpi_i8(%arg1 : tensor<32xi8>, %arg2 : tensor<32xi8>) -> (tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>) {
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<veq>} ins({{.*}}, {{.*}} : tensor<32xi8>, tensor<32xi8>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %eq = arith.cmpi eq, %arg1, %arg2 : tensor<32xi8>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vne>} ins({{.*}}, {{.*}} : tensor<32xi8>, tensor<32xi8>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %ne = arith.cmpi ne, %arg1, %arg2 : tensor<32xi8>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vlt>} ins({{.*}}, {{.*}} : tensor<32xi8>, tensor<32xi8>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %slt = arith.cmpi slt, %arg1, %arg2 : tensor<32xi8>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vgt>} ins({{.*}}, {{.*}} : tensor<32xi8>, tensor<32xi8>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %sgt = arith.cmpi sgt, %arg1, %arg2 : tensor<32xi8>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vle>} ins({{.*}}, {{.*}} : tensor<32xi8>, tensor<32xi8>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %sle = arith.cmpi sle, %arg1, %arg2 : tensor<32xi8>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vge>} ins({{.*}}, {{.*}} : tensor<32xi8>, tensor<32xi8>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %sge = arith.cmpi sge, %arg1, %arg2 : tensor<32xi8>
+    return %eq, %ne, %slt, %sgt, %sle, %sge : tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_arith_cmpi_i16
+module attributes {hacc.target = #hacc.target<"Ascend950PR_957b">} {
+  func.func @test_arith_cmpi_i16(%arg1 : tensor<32xi16>, %arg2 : tensor<32xi16>) -> (tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>) {
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<veq>} ins({{.*}}, {{.*}} : tensor<32xi16>, tensor<32xi16>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %eq = arith.cmpi eq, %arg1, %arg2 : tensor<32xi16>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vne>} ins({{.*}}, {{.*}} : tensor<32xi16>, tensor<32xi16>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %ne = arith.cmpi ne, %arg1, %arg2 : tensor<32xi16>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vlt>} ins({{.*}}, {{.*}} : tensor<32xi16>, tensor<32xi16>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %slt = arith.cmpi slt, %arg1, %arg2 : tensor<32xi16>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vgt>} ins({{.*}}, {{.*}} : tensor<32xi16>, tensor<32xi16>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %sgt = arith.cmpi sgt, %arg1, %arg2 : tensor<32xi16>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vle>} ins({{.*}}, {{.*}} : tensor<32xi16>, tensor<32xi16>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %sle = arith.cmpi sle, %arg1, %arg2 : tensor<32xi16>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vge>} ins({{.*}}, {{.*}} : tensor<32xi16>, tensor<32xi16>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %sge = arith.cmpi sge, %arg1, %arg2 : tensor<32xi16>
+    return %eq, %ne, %slt, %sgt, %sle, %sge : tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_arith_cmpi_i32
+module attributes {hacc.target = #hacc.target<"Ascend950PR_957b">} {
+  func.func @test_arith_cmpi_i32(%arg1 : tensor<32xi32>, %arg2 : tensor<32xi32>) -> (tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>) {
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<veq>} ins({{.*}}, {{.*}} : tensor<32xi32>, tensor<32xi32>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %eq = arith.cmpi eq, %arg1, %arg2 : tensor<32xi32>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vne>} ins({{.*}}, {{.*}} : tensor<32xi32>, tensor<32xi32>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %ne = arith.cmpi ne, %arg1, %arg2 : tensor<32xi32>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vlt>} ins({{.*}}, {{.*}} : tensor<32xi32>, tensor<32xi32>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %slt = arith.cmpi slt, %arg1, %arg2 : tensor<32xi32>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vgt>} ins({{.*}}, {{.*}} : tensor<32xi32>, tensor<32xi32>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %sgt = arith.cmpi sgt, %arg1, %arg2 : tensor<32xi32>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vle>} ins({{.*}}, {{.*}} : tensor<32xi32>, tensor<32xi32>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %sle = arith.cmpi sle, %arg1, %arg2 : tensor<32xi32>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vge>} ins({{.*}}, {{.*}} : tensor<32xi32>, tensor<32xi32>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %sge = arith.cmpi sge, %arg1, %arg2 : tensor<32xi32>
+    return %eq, %ne, %slt, %sgt, %sle, %sge : tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_arith_cmpi_i64
+module attributes {hacc.target = #hacc.target<"Ascend950PR_957b">} {
+  func.func @test_arith_cmpi_i64(%arg1 : tensor<32xi64>, %arg2 : tensor<32xi64>) -> (tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>) {
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<veq>} ins({{.*}}, {{.*}} : tensor<32xi64>, tensor<32xi64>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %eq = arith.cmpi eq, %arg1, %arg2 : tensor<32xi64>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vne>} ins({{.*}}, {{.*}} : tensor<32xi64>, tensor<32xi64>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %ne = arith.cmpi ne, %arg1, %arg2 : tensor<32xi64>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vlt>} ins({{.*}}, {{.*}} : tensor<32xi64>, tensor<32xi64>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %slt = arith.cmpi slt, %arg1, %arg2 : tensor<32xi64>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vgt>} ins({{.*}}, {{.*}} : tensor<32xi64>, tensor<32xi64>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %sgt = arith.cmpi sgt, %arg1, %arg2 : tensor<32xi64>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vle>} ins({{.*}}, {{.*}} : tensor<32xi64>, tensor<32xi64>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %sle = arith.cmpi sle, %arg1, %arg2 : tensor<32xi64>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vge>} ins({{.*}}, {{.*}} : tensor<32xi64>, tensor<32xi64>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %sge = arith.cmpi sge, %arg1, %arg2 : tensor<32xi64>
+    return %eq, %ne, %slt, %sgt, %sle, %sge : tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_arith_cmpi_u8
+module attributes {hacc.target = #hacc.target<"Ascend950PR_957b">} {
+  func.func @test_arith_cmpi_u8(%arg1 : tensor<32xi8>, %arg2 : tensor<32xi8>) -> (tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>) {
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vule>} ins({{.*}}, {{.*}} : tensor<32xi8>, tensor<32xi8>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %ule = arith.cmpi ule, %arg1, %arg2 : tensor<32xi8>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vuge>} ins({{.*}}, {{.*}} : tensor<32xi8>, tensor<32xi8>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %uge = arith.cmpi uge, %arg1, %arg2 : tensor<32xi8>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vugt>} ins({{.*}}, {{.*}} : tensor<32xi8>, tensor<32xi8>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %ugt = arith.cmpi ugt, %arg1, %arg2 : tensor<32xi8>
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vult>} ins({{.*}}, {{.*}} : tensor<32xi8>, tensor<32xi8>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %ult = arith.cmpi ult, %arg1, %arg2 : tensor<32xi8>
+    return %ule, %uge, %ugt, %ult : tensor<32xi1>, tensor<32xi1>, tensor<32xi1>, tensor<32xi1>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_arith_cmpi_u16
+module attributes {hacc.target = #hacc.target<"Ascend950PR_957b">} {
+  func.func @test_arith_cmpi_u16(%arg1 : tensor<32xi16>, %arg2 : tensor<32xi16>) -> (tensor<32xi1>) {
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vule>} ins({{.*}}, {{.*}} : tensor<32xi16>, tensor<32xi16>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %ule = arith.cmpi ule, %arg1, %arg2 : tensor<32xi16>
+    return %ule : tensor<32xi1>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_arith_cmpi_u32
+module attributes {hacc.target = #hacc.target<"Ascend950PR_957b">} {
+  func.func @test_arith_cmpi_u32(%arg1 : tensor<32xi32>, %arg2 : tensor<32xi32>) -> (tensor<32xi1>) {
+    // CHECK: hfusion.compare {compare_fn = #hfusion.compare_fn<vule>} ins({{.*}}, {{.*}} : tensor<32xi32>, tensor<32xi32>) outs({{.*}} : tensor<32xi1>) -> tensor<32xi1>
+    %ule = arith.cmpi ule, %arg1, %arg2 : tensor<32xi32>
+    return %ule : tensor<32xi1>
+  }
 }
