@@ -2,7 +2,7 @@
 
 - [入门指南]()
   - [项目简介](introduction/introduction.md)
-  - [快速开始](introduction/quick_start/version_compatibility.md)
+  - [快速开始]()
     - [版本配套说明](introduction/quick_start/version_compatibility.md)
     - [安装与构建](introduction/quick_start/installing_guide.md)
     - [示例](introduction/quick_start/examples.md)
