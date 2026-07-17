@@ -284,27 +284,15 @@ DimensionAnalyzer::getHigherDimCounts(ArrayRef<Dimension> candidate,
   return higherDimCnt;
 }
 
-/// Tells us if we can still treat axis \p i as a tiling candidate for every
-/// \c StoreOpTy, even when the *view* on that axis has unknown size or
-/// size 1. This will try to recover the size of the parent buffer.
-///
-/// Example: axis \p i is 0. The store operands are \c memref.subview results;
-/// axis 0 of each view may be `?` (or a length-1 row), but the parent buffers
-/// are still \c 16x16, so the helper can recover size 16 for both sides.
-/// \code
-/// %subSrc = memref.subview %ub[0, 0] [1, 16] [1, 1]
-///     : memref<16x16xf16, #hivm.address_space<ub>>
-///     to memref<?x16xf16, strided<[16, 1]>, #hivm.address_space<ub>>
-/// %subDst = memref.subview %gm[0, 0] [1, 16] [1, 1]
-///     : memref<16x16xf16, #hivm.address_space<gm>>
-///     to memref<?x16xf16, strided<[16, 1]>, #hivm.address_space<gm>>
-/// hivm.store
-///     ins(%subSrc : memref<?x16xf16, strided<[16, 1]>,
-///     #hivm.address_space<ub>>) outs(%subDst : memref<?x16xf16, strided<[16,
-///     1]>, #hivm.address_space<gm>>)
-/// \endcode
+bool DimensionAnalyzer::isValidTilingSize(int64_t dim) const {
+  if (isRegbased)
+    return !ShapedType::isDynamic(dim) && dim != 1;
+  return !ShapedType::isDynamic(dim) && dim % 2 == 0;
+}
+
 template <typename StoreOpTy>
-static bool checkTileableMaskedStore(StoreOpTy storeOp, size_t i) {
+bool DimensionAnalyzer::checkTileableMaskedStore(StoreOpTy storeOp,
+                                                 size_t i) const {
   auto src = storeOp.getSrc();
   Value dst;
   if constexpr (std::is_same_v<StoreOpTy, hivm::VReduceOp>) {
@@ -327,11 +315,12 @@ static bool checkTileableMaskedStore(StoreOpTy storeOp, size_t i) {
   } else if (auto subviewOp = dst.template getDefiningOp<memref::SubViewOp>()) {
     dstOrigDim = subviewOp.getSourceType().getDimSize(i);
   }
-  return srcOrigDim != ShapedType::kDynamic && srcOrigDim != 1 &&
-         srcOrigDim == dstOrigDim;
+  return isValidTilingSize(srcOrigDim) && srcOrigDim == dstOrigDim;
 }
 
-template <> bool checkTileableMaskedStore(scf::YieldOp storeOp, size_t i) {
+template <>
+bool DimensionAnalyzer::checkTileableMaskedStore(scf::YieldOp storeOp,
+                                                 size_t i) const {
   return false;
 }
 
@@ -399,7 +388,7 @@ void DimensionAnalyzer::computeTilingDimImpl(
         }
         Dimension dim(src, i);
         if (isParallelDim(dim)) {
-          if (ShapedType::isDynamic(shape[i]) || shape[i] == 1) {
+          if (!isValidTilingSize(shape[i])) {
             if (!checkTileableMaskedStore(op, i))
               continue;
           }
