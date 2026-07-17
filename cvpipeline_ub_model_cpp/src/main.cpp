@@ -31,9 +31,9 @@ struct Options {
   bool enableTritonKernelCompile = false;
   bool enableAutoMultiBuffer = false;
   cvub::MultiBufferStrategy localMultiBufferStrategy =
-      cvub::MultiBufferStrategy::NoLimit;
+      cvub::MultiBufferStrategy::CubeNoL0C;
   cvub::MultiBufferStrategy mixMultiBufferStrategy =
-      cvub::MultiBufferStrategy::NoLimit;
+      cvub::MultiBufferStrategy::OnlyCube;
   std::string format = "text";
   bool debug = false;
   DebugEntry debugEntry = DebugEntry::BeforeCVPipelining;

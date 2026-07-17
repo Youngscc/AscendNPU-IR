@@ -16,17 +16,29 @@ SUFFIX_TOOL="build/bin/bishengir-cvpipeline-suffix-compile"
 RUN_ORACLE=true
 BUILD_SUFFIX_ORACLE=true
 
-# CVPipelining parameters only affect the CVPipelining pass model.
+# ---------------------------------------------------------------------------
+# CVPipelining pass parameters
+# These control loop pipelining and determine the IR entering the suffix.
+# ---------------------------------------------------------------------------
 CV_DISABLE_PIPELINING=false
 CV_PIPELINE_DEPTH=-1
 CV_ENABLE_PRELOAD=false
 CV_ENABLE_LAZY_LOADING=false
 
-# Suffix / PlanMemory parameters only affect UB planning after CVPipelining.
-SUFFIX_ENABLE_AUTO_MULTI_BUFFER=false
+# ---------------------------------------------------------------------------
+# MarkMultiBuffer pass parameters (directly affect UB buffer count and peak)
+# false keeps only explicit marks already present in IR; true also infers marks.
+# Local strategy: no-l0c matches bishengir-compile/suffix default.
+# Mix strategy: only-cube enables cube-side auto marks in MIX functions.
+# ---------------------------------------------------------------------------
+MULTIBUFFER_ENABLE_AUTO=false
+MULTIBUFFER_LOCAL_STRATEGY=no-l0c
+MULTIBUFFER_MIX_STRATEGY=only-cube
+
+# ---------------------------------------------------------------------------
+# Remaining suffix / PlanMemory parameters
+# ---------------------------------------------------------------------------
 SUFFIX_ENABLE_TRITON_KERNEL_COMPILE=false
-SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY=no-l0c
-SUFFIX_MIX_MULTI_BUFFER_STRATEGY=only-cube
 RESTRICT_INPLACE_AS_ISA=false
 # Keep empty for PlanMemory retry mode; set only to reproduce one attempt.
 RANDOM_SEED=""
@@ -52,11 +64,13 @@ CVPipelining options:
   --cv-enable-preload true|false
   --cv-enable-lazy-loading true|false
 
-Suffix / PlanMemory options:
+MarkMultiBuffer options (affect UB buffer count and peak):
   --suffix-enable-auto-multi-buffer true|false
-  --suffix-enable-triton-kernel-compile true|false
   --suffix-local-multi-buffer-strategy no-limit|only-cube|only-vector|no-l0c
   --suffix-mix-multi-buffer-strategy no-limit|only-cube|only-vector|no-l0c
+
+Remaining suffix / PlanMemory options:
+  --suffix-enable-triton-kernel-compile true|false
   --restrict-inplace-as-isa true|false
   --random-seed N        # omit for PlanMemory retry mode
 EOF
@@ -86,14 +100,14 @@ while [[ $# -gt 0 ]]; do
     --cv-enable-preload) CV_ENABLE_PRELOAD="$2"; shift 2 ;;
     --cv-enable-lazy-loading=*) CV_ENABLE_LAZY_LOADING="${1#*=}"; shift ;;
     --cv-enable-lazy-loading) CV_ENABLE_LAZY_LOADING="$2"; shift 2 ;;
-    --suffix-enable-auto-multi-buffer=*) SUFFIX_ENABLE_AUTO_MULTI_BUFFER="${1#*=}"; shift ;;
-    --suffix-enable-auto-multi-buffer) SUFFIX_ENABLE_AUTO_MULTI_BUFFER="$2"; shift 2 ;;
+    --suffix-enable-auto-multi-buffer=*) MULTIBUFFER_ENABLE_AUTO="${1#*=}"; shift ;;
+    --suffix-enable-auto-multi-buffer) MULTIBUFFER_ENABLE_AUTO="$2"; shift 2 ;;
     --suffix-enable-triton-kernel-compile=*) SUFFIX_ENABLE_TRITON_KERNEL_COMPILE="${1#*=}"; shift ;;
     --suffix-enable-triton-kernel-compile) SUFFIX_ENABLE_TRITON_KERNEL_COMPILE="$2"; shift 2 ;;
-    --suffix-local-multi-buffer-strategy=*) SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY="${1#*=}"; shift ;;
-    --suffix-local-multi-buffer-strategy) SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY="$2"; shift 2 ;;
-    --suffix-mix-multi-buffer-strategy=*) SUFFIX_MIX_MULTI_BUFFER_STRATEGY="${1#*=}"; shift ;;
-    --suffix-mix-multi-buffer-strategy) SUFFIX_MIX_MULTI_BUFFER_STRATEGY="$2"; shift 2 ;;
+    --suffix-local-multi-buffer-strategy=*) MULTIBUFFER_LOCAL_STRATEGY="${1#*=}"; shift ;;
+    --suffix-local-multi-buffer-strategy) MULTIBUFFER_LOCAL_STRATEGY="$2"; shift 2 ;;
+    --suffix-mix-multi-buffer-strategy=*) MULTIBUFFER_MIX_STRATEGY="${1#*=}"; shift ;;
+    --suffix-mix-multi-buffer-strategy) MULTIBUFFER_MIX_STRATEGY="$2"; shift 2 ;;
     --restrict-inplace-as-isa=*) RESTRICT_INPLACE_AS_ISA="${1#*=}"; shift ;;
     --restrict-inplace-as-isa) RESTRICT_INPLACE_AS_ISA="$2"; shift 2 ;;
     --random-seed=*) RANDOM_SEED="${1#*=}"; shift ;;
@@ -147,10 +161,10 @@ model_args=(
   --cv-pipeline-depth="${CV_PIPELINE_DEPTH}"
   --cv-enable-preload="${CV_ENABLE_PRELOAD}"
   --cv-enable-lazy-loading="${CV_ENABLE_LAZY_LOADING}"
-  --suffix-enable-auto-multi-buffer="${SUFFIX_ENABLE_AUTO_MULTI_BUFFER}"
+  --suffix-enable-auto-multi-buffer="${MULTIBUFFER_ENABLE_AUTO}"
   --suffix-enable-triton-kernel-compile="${SUFFIX_ENABLE_TRITON_KERNEL_COMPILE}"
-  --suffix-local-multi-buffer-strategy="${SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY}"
-  --suffix-mix-multi-buffer-strategy="${SUFFIX_MIX_MULTI_BUFFER_STRATEGY}"
+  --suffix-local-multi-buffer-strategy="${MULTIBUFFER_LOCAL_STRATEGY}"
+  --suffix-mix-multi-buffer-strategy="${MULTIBUFFER_MIX_STRATEGY}"
   --format=json
   --output="${DEMO_JSON}"
 )
@@ -198,10 +212,10 @@ if [[ "${RUN_ORACLE}" == "true" ]]; then
     --disable-cv-pipelining="${CV_DISABLE_PIPELINING}"
     --enable-preload="${CV_ENABLE_PRELOAD}"
     --enable-cv-lazy-loading="${CV_ENABLE_LAZY_LOADING}"
-    --enable-auto-multi-buffer="${SUFFIX_ENABLE_AUTO_MULTI_BUFFER}"
+    --enable-auto-multi-buffer="${MULTIBUFFER_ENABLE_AUTO}"
     --enable-triton-kernel-compile="${SUFFIX_ENABLE_TRITON_KERNEL_COMPILE}"
-    --limit-auto-multi-buffer-of-local-buffer "${SUFFIX_LOCAL_MULTI_BUFFER_STRATEGY}"
-    --limit-auto-multi-buffer-buffer "${SUFFIX_MIX_MULTI_BUFFER_STRATEGY}"
+    --limit-auto-multi-buffer-of-local-buffer "${MULTIBUFFER_LOCAL_STRATEGY}"
+    --limit-auto-multi-buffer-buffer "${MULTIBUFFER_MIX_STRATEGY}"
     -o "${oracle_ir}"
   )
   if [[ "${RESTRICT_INPLACE_AS_ISA}" == "true" || "${RESTRICT_INPLACE_AS_ISA}" == "1" ]]; then

@@ -56,8 +56,8 @@ assert sum(model_inplace.values()) == 1
 
 oracle = """\
 PLANMEM_LIVENESS_ATTEMPT\tkernel\t0\t0
-PLANMEM_EXACT_BUFFER\t0\t0\t32768\t6\t0\t10\t20
-PLANMEM_EXACT_BUFFER\t0\t1\t32768\t6\t0\t20\t30
+PLANMEM_EXACT_BUFFER\t0\t0\t32768\t6\t0\t100\t200
+PLANMEM_EXACT_BUFFER\t0\t1\t32768\t6\t0\t200\t300
 PLANMEM_PLAN_ATTEMPT\tkernel\t0\tsuccess
 PLANMEM_APPLIED_INPLACE_COUNT\t0\t1
 PLANMEM_EXACT_APPLIED_INPLACE\t0\t1\t0
@@ -76,5 +76,25 @@ assert status == "success"
 assert required == 65536
 assert oracle_multi == model_multi
 assert oracle_inplace == model_inplace
+
+# Split MIX functions reuse local semantic buffer IDs.  An AIC/L1 multi mark
+# must not be joined to an AIV/UB buffer with the same ID.
+split_oracle = """\
+PLANMEM_LIVENESS_ATTEMPT\tkernel_mix_aic\t0\t0
+PLANMEM_EXACT_BUFFER\t0\t0\t32768\t2\t0\t1\t2
+PLANMEM_EXACT_MULTI\t0\t0\t2
+PLANMEM_PLAN_ATTEMPT\tkernel_mix_aic\t0\tsuccess
+PLANMEM_LIVENESS_ATTEMPT\tkernel_mix_aiv\t0\t0
+PLANMEM_EXACT_BUFFER\t0\t0\t32768\t6\t0\t10\t20
+PLANMEM_PLAN_ATTEMPT\tkernel_mix_aiv\t0\tsuccess
+PLANMEM_EXACT_PLANNED_BUFFER\t0\t6\t0\t32768\t0
+PLANMEM_PEAK\t0\t6\t32768
+"""
+with tempfile.TemporaryDirectory(prefix="cvub-split-oracle-test-") as directory:
+    path = Path(directory) / "oracle.tsv"
+    path.write_text(split_oracle, encoding="utf-8")
+    _, _, split_multi, _ = parse_oracle_contract(path, 0, "6")
+
+assert split_multi == collections.Counter({1: 1})
 
 print("[PASS] wrapped reports and applied inplace oracle remain comparable")

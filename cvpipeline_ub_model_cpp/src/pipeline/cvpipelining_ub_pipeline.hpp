@@ -35,9 +35,9 @@ struct UBAffectingPassOptions {
   bool enableTritonKernelCompile = false;
   bool enableAutoMultiBuffer = false;
   MultiBufferStrategy limitAutoMultiBufferOfLocalBuffer =
-      MultiBufferStrategy::NoLimit;
+      MultiBufferStrategy::CubeNoL0C;
   MultiBufferStrategy limitMixAutoMultiBufferBuffer =
-      MultiBufferStrategy::NoLimit;
+      MultiBufferStrategy::OnlyCube;
 };
 
 inline GenericModule RequireExactStage(StageResult stage) {
@@ -200,13 +200,10 @@ inline GenericModule RunPassesBeforeOneShotBufferize(
   return module;
 }
 
-inline PlanMemoryInput BuildPlanMemoryInputFromAfterCVPipelining(
-    GenericModule module,
+inline PlanMemoryInput BuildPlanMemoryInputFromBeforeOneShotBufferize(
+    const GenericModule &module,
     const UBAffectingPassOptions &options = {}, DebugTrace *trace = nullptr,
     const std::string &targetFunction = {}) {
-  module =
-      RunPassesBeforeOneShotBufferize(std::move(module), options, trace);
-
   const OneShotBufferizationResult bufferization = RunOneShotBufferize(module);
   const BufferizedSemanticIR oneShotBufferizeOutput =
       BuildBufferizedSemanticIR(module, bufferization);
@@ -338,6 +335,16 @@ inline PlanMemoryInput BuildPlanMemoryInputFromAfterCVPipelining(
 }
 
 inline PlanMemoryInput BuildPlanMemoryInputFromAfterCVPipelining(
+    GenericModule module,
+    const UBAffectingPassOptions &options = {}, DebugTrace *trace = nullptr,
+    const std::string &targetFunction = {}) {
+  module =
+      RunPassesBeforeOneShotBufferize(std::move(module), options, trace);
+  return BuildPlanMemoryInputFromBeforeOneShotBufferize(
+      module, options, trace, targetFunction);
+}
+
+inline PlanMemoryInput BuildPlanMemoryInputFromAfterCVPipelining(
     const fs::path &afterCVPipeliningGenericIR,
     const UBAffectingPassOptions &options = {}, DebugTrace *trace = nullptr,
     const std::string &targetFunction = {}) {
@@ -388,13 +395,14 @@ inline ModulePlanResult RunUBModuleFromAfterCVPipelining(
   const std::vector<std::string> functions = AIVFunctionNames(projected);
   ModulePlanResult result;
   for (const std::string &function : functions) {
-    const PlanMemoryInput input = BuildPlanMemoryInputFromAfterCVPipelining(
-        module, options, nullptr, function);
+    const PlanMemoryInput input = BuildPlanMemoryInputFromBeforeOneShotBufferize(
+        projected, options, trace, function);
     PlanMemoryModelResult plan =
         planMemorySeed
             ? PlanLocalMemoryForSeed(input, *planMemorySeed,
                                      restrictInplaceAsISA)
             : PlanLocalMemory(input, restrictInplaceAsISA);
+    TracePlanMemoryResult(trace, plan);
     result.success = result.success && plan.success;
     result.overflow = result.overflow || plan.overflow;
     result.peakBits = std::max(result.peakBits, plan.peakBits);

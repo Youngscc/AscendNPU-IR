@@ -316,7 +316,7 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
     rewrites[rewrite.sourceOperation] = &rewrite;
   std::map<int, const InlineLoadCopyRewrite *> inlineLoads;
   for (const InlineLoadCopyRewrite &rewrite : afterMarkMultiBuffer.afterInlineLoadCopy.inlineLoadCopy.rewrites)
-    inlineLoads[rewrite.loadOperation] = &rewrite;
+    inlineLoads[rewrite.copyOperation] = &rewrite;
   std::map<std::pair<int, std::string>, std::vector<std::string>> extraBuffers;
   for (const LocalBufferRecord &buffer : afterMarkMultiBuffer.afterInlineLoadCopy.buffers) {
     if (!buffer.extraBuffer)
@@ -450,13 +450,9 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
       continue;
     }
     auto inlineLoad = inlineLoads.find(operation.id);
-    if (inlineLoad != inlineLoads.end()) {
-      append(operation, "hivm.hir.load",
-             {inlineLoad->second->loadSource,
-              inlineLoad->second->copyDestination});
-      continue;
-    }
-    if (afterMarkMultiBuffer.afterInlineLoadCopy.inlineLoadCopy.erasedOperations.count(operation.id) != 0)
+    if (inlineLoad == inlineLoads.end() &&
+        afterMarkMultiBuffer.afterInlineLoadCopy.inlineLoadCopy
+                .erasedOperations.count(operation.id) != 0)
       continue;
     auto rewritten = rewrites.find(operation.id);
     if (rewritten != rewrites.end()) {
@@ -539,6 +535,12 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
         append(operation, "hivm.hir.copy", {source, buffers[operand]},
                "", false, 0, true, false, false,
                static_cast<int>(operand));
+    }
+    if (inlineLoad != inlineLoads.end()) {
+      append(operation, "hivm.hir.load",
+             {inlineLoad->second->loadSource,
+              inlineLoad->second->copyDestination});
+      continue;
     }
     if (tensorSinglePointBufferization) {
       const size_t bufferOperand = operation.name == "tensor.insert" ? 1 : 0;

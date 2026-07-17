@@ -3,7 +3,9 @@
 
 #include "../analysis/hivm_dimension_analyzer.hpp"
 #include "../ir/operation_folder.hpp"
+#include "canonicalization_hivm_pipeline.hpp"
 #include "split_mix_kernel.hpp"
+
 
 namespace cvub {
 
@@ -432,58 +434,6 @@ inline std::optional<int> FindTileAndBindIndexConstant(
   return FindArithConstantValue(module, block, "index", std::to_string(value));
 }
 
-inline bool HasDynamicTileAndBindInsertSliceSource(
-    const GenericModule &module, const GenericOperation &function,
-    const DimensionAnalyzer &analyzer) {
-  const std::map<int, const GenericOperation *> definitions =
-      DefiningOperations(module);
-  for (int operationId : GetTileAndBindDescendants(module, function)) {
-    const GenericOperation &operation =
-        module.operations.at(static_cast<size_t>(operationId));
-    if ((operation.name != "hivm.hir.store" &&
-         operation.name != "hivm.hir.copy" &&
-         operation.name != "hivm.hir.indirect_store") ||
-        operation.operands.empty() ||
-        analyzer.getTilingDim(operation.operands.front()) < 0)
-      continue;
-    auto source = definitions.find(operation.operands.front());
-    if (source == definitions.end() ||
-        source->second->name != "tensor.insert_slice" ||
-        source->second->operandTypes.empty())
-      continue;
-    const std::optional<ShapedTypeModel> inserted =
-        ParseShapedTypeForDimensionAnalysis(
-            source->second->operandTypes.front());
-    if (inserted && std::any_of(
-                        inserted->shape.begin(), inserted->shape.end(),
-                        [](const std::optional<int64_t> &extent) {
-                          return !extent;
-                        }))
-      return true;
-  }
-  return false;
-}
-
-inline std::set<size_t>
-GetExtractOrInsertDim(const GenericOperation &slice,
-                      const ShapedTypeModel &source,
-                      const ShapedTypeModel &result) {
-  std::set<size_t> dimensions;
-  const std::vector<int64_t> staticSizes =
-      ParseDimensionI64Array(slice.properties, "static_sizes");
-  if (source.shape.size() != result.shape.size())
-    return dimensions;
-  for (size_t axis = 0; axis < source.shape.size(); ++axis) {
-    const bool dynamicSize =
-        axis >= staticSizes.size() ||
-        staticSizes[axis] == std::numeric_limits<int64_t>::min();
-    if (dynamicSize || !source.shape[axis] || !result.shape[axis] ||
-        *source.shape[axis] != *result.shape[axis])
-      dimensions.insert(axis);
-  }
-  return dimensions;
-}
-
 inline bool IsTileAndBindStoreCopyStartPoint(
     const GenericModule &module, const GenericOperation &operation,
     const DimensionAnalyzer &analyzer,
@@ -529,135 +479,6 @@ inline bool IsTileAndBindStoreCopyStartPoint(
          (!source->shape[axis] || *source->shape[axis] >= 2);
 }
 
-inline bool CanBubbleUpTileAndBindValue(
-    const GenericModule &module, int value, size_t tilingDim,
-    const DimensionAnalyzer &analyzer,
-    const std::map<int, const GenericOperation *> &definitions,
-    const std::map<int, std::string> &valueTypes, int consumingOperation,
-    const std::set<int> &tiledStartPoints, bool checkCurrentUsers,
-    std::set<int> &visited) {
-  if (!visited.insert(value).second)
-    return true;
-
-  // BubbleUpPattern inserts one marked extract_slice between this value and
-  // its current consumer. Before that insertion, every other use must be an
-  // annotation.mark; otherwise the source would have a non-slice user (or
-  // more than one slice user) and the pattern must fail.
-  if (checkCurrentUsers)
-    for (const GenericOperation &user : module.operations) {
-      if (std::find(user.operands.begin(), user.operands.end(), value) ==
-          user.operands.end())
-        continue;
-      if (user.id != consumingOperation &&
-          tiledStartPoints.count(user.id) == 0 &&
-          user.name != "annotation.mark")
-        return false;
-    }
-
-  auto definition = definitions.find(value);
-  if (definition == definitions.end())
-    return true;
-  const GenericOperation &operation = *definition->second;
-  if (operation.name == "tensor.empty" ||
-      operation.name == "bufferization.to_tensor")
-    return true;
-
-  if (operation.name == "tensor.extract_slice" &&
-      !operation.operands.empty() && !operation.resultTypes.empty()) {
-    auto sourceType = valueTypes.find(operation.operands.front());
-    const std::optional<ShapedTypeModel> source =
-        sourceType == valueTypes.end()
-            ? std::nullopt
-            : ParseShapedTypeForDimensionAnalysis(sourceType->second);
-    const std::optional<ShapedTypeModel> result =
-        ParseShapedTypeForDimensionAnalysis(operation.resultTypes.front());
-    if (!source || !result)
-      return false;
-
-    // ExtractSliceBubbleUpStrategy::handleExtractOfExtractSameDimCase only
-    // accepts a parent slice that was itself created by the active tiling
-    // loop. Every slice visible before attemptBindSubBlock is pre-existing.
-    const std::set<size_t> extracted =
-        GetExtractOrInsertDim(operation, *source, *result);
-    if (extracted.count(tilingDim) != 0)
-      return false;
-  }
-
-  for (size_t index = 0; index < operation.operands.size(); ++index) {
-    const int operand = operation.operands[index];
-    auto type = valueTypes.find(operand);
-    if (type == valueTypes.end())
-      continue;
-    const std::optional<ShapedTypeModel> shaped =
-        ParseShapedTypeForDimensionAnalysis(type->second);
-    if (!shaped || !shaped->tensor || analyzer.getTilingDim(operand) < 0)
-      continue;
-    if (!CanBubbleUpTileAndBindValue(module, operand, tilingDim, analyzer,
-                                     definitions, valueTypes, operation.id,
-                                     tiledStartPoints, false, visited))
-      return false;
-  }
-  return true;
-}
-
-inline bool VerifyMarkedExtractSlicesCanBubbleUp(
-    const GenericModule &module, const GenericOperation &function,
-    const DimensionAnalyzer &analyzer) {
-  const std::map<int, const GenericOperation *> definitions =
-      DefiningOperations(module);
-  const std::map<int, std::string> valueTypes = ValueTypes(module);
-  std::set<int> tiledStartPoints;
-  for (int operationId : GetTileAndBindDescendants(module, function)) {
-    const GenericOperation &operation =
-        module.operations.at(static_cast<size_t>(operationId));
-    if (IsTileAndBindStoreCopyStartPoint(module, operation, analyzer,
-                                         valueTypes))
-      tiledStartPoints.insert(operationId);
-  }
-  for (int operationId : GetTileAndBindDescendants(module, function)) {
-    const GenericOperation &store =
-        module.operations.at(static_cast<size_t>(operationId));
-    if (tiledStartPoints.count(operationId) == 0)
-      continue;
-    const int64_t selected = analyzer.getTilingDim(store.operands.front());
-    if (selected < 0)
-      continue;
-
-    int valueToSlice = store.operands.front();
-    int consumingOperation = store.id;
-    bool checkCurrentUsers = true;
-    auto sourceDefinition = definitions.find(valueToSlice);
-    auto sourceType = valueTypes.find(valueToSlice);
-    const std::optional<ShapedTypeModel> source =
-        sourceType == valueTypes.end()
-            ? std::nullopt
-            : ParseShapedTypeForDimensionAnalysis(sourceType->second);
-    if (source &&
-        std::any_of(source->shape.begin(), source->shape.end(),
-                    [](const std::optional<int64_t> &extent) {
-                      return !extent;
-                    }) &&
-        sourceDefinition != definitions.end() &&
-        (sourceDefinition->second->name == "tensor.extract_slice" ||
-         sourceDefinition->second->name == "memref.subview") &&
-        !sourceDefinition->second->operands.empty()) {
-      // handleMaskedStore tiles the parent view operands, then rebuilds the
-      // dynamic source/destination slices around those tiled parents.
-      valueToSlice = sourceDefinition->second->operands.front();
-      consumingOperation = sourceDefinition->second->id;
-      checkCurrentUsers = false;
-    }
-
-    std::set<int> visited;
-    if (!CanBubbleUpTileAndBindValue(
-            module, valueToSlice, static_cast<size_t>(selected), analyzer,
-            definitions, valueTypes, consumingOperation, tiledStartPoints,
-            checkCurrentUsers, visited))
-      return false;
-  }
-  return true;
-}
-
 // tileAndSliceOp creates marked slices at selected store/copy sources and at
 // unused results of supported control-flow leaf operations. BubbleUpPattern
 // can then reach tensor operands of those sources transitively.
@@ -683,6 +504,12 @@ inline std::map<int, size_t> CollectTileAndBindBubbleDims(
     // result-index correspondence here; walking every tensor init would tile
     // unrelated loop-carried values.
     if (operation.name == "scf.for") {
+      // LoopBubbleUpStrategy rejects loops produced by ExtractLoadStore.
+      // The marked slice remains immediately after that loop instead of
+      // changing its result, init, iter_arg, or yielded value types.
+      if (HasSplitMixDictionaryEntry(operation.attributes,
+                                     "ExtractedLoadOrStore"))
+        return;
       auto result =
           std::find(operation.results.begin(), operation.results.end(), value);
       if (result == operation.results.end() || operation.regions.empty())
@@ -957,6 +784,63 @@ ParseTileAndBindMixedSlice(const GenericOperation &operation) {
   return slice;
 }
 
+inline bool IsRankReducedTileAndBindSliceType(
+    const std::vector<TileAndBindFoldResult> &sizes,
+    const std::vector<std::optional<int64_t>> &shape) {
+  std::vector<std::vector<int8_t>> memo(
+      sizes.size() + 1, std::vector<int8_t>(shape.size() + 1, -1));
+  std::function<bool(size_t, size_t)> matches =
+      [&](size_t sizeIndex, size_t shapeIndex) {
+        int8_t &cached = memo[sizeIndex][shapeIndex];
+        if (cached >= 0)
+          return cached != 0;
+        if (sizeIndex == sizes.size())
+          return (cached = shapeIndex == shape.size()) != 0;
+
+        bool result = false;
+        if (shapeIndex < shape.size() &&
+            (!sizes[sizeIndex].constant || !shape[shapeIndex] ||
+             *sizes[sizeIndex].constant == *shape[shapeIndex]))
+          result = matches(sizeIndex + 1, shapeIndex + 1);
+        if (!result && sizes[sizeIndex].constant &&
+            *sizes[sizeIndex].constant == 1)
+          result = matches(sizeIndex + 1, shapeIndex);
+        cached = result ? 1 : 0;
+        return result;
+      };
+  return matches(0, 0);
+}
+
+// Projection of the OffsetSizeAndStrideOpInterface verifiers reached by
+// newFunc.verify() in TileAndBindSubBlockPass::attemptBindSubBlock.
+inline bool VerifyTileAndBindSliceTypes(const GenericModule &module) {
+  const std::map<int, std::string> valueTypes = ValueTypes(module);
+  for (const GenericOperation &operation : module.operations) {
+    const bool isInsert = operation.name == "tensor.insert_slice";
+    const bool isExtract = operation.name == "tensor.extract_slice" ||
+                           operation.name == "memref.subview";
+    if (!isInsert && !isExtract)
+      continue;
+    const std::optional<TileAndBindMixedSlice> slice =
+        ParseTileAndBindMixedSlice(operation);
+    if (!slice || slice->prefixOperands.empty() ||
+        (isExtract && operation.results.empty()))
+      return false;
+
+    const int shapedValue = isInsert ? slice->prefixOperands.front()
+                                     : operation.results.front();
+    auto type = valueTypes.find(shapedValue);
+    if (type == valueTypes.end())
+      return false;
+    const std::optional<ShapedTypeModel> shaped =
+        ParseShapedTypeForDimensionAnalysis(type->second);
+    if (!shaped || !IsRankReducedTileAndBindSliceType(slice->sizes,
+                                                       shaped->shape))
+      return false;
+  }
+  return true;
+}
+
 inline std::string TileAndBindFoldResultArray(
     const std::vector<TileAndBindFoldResult> &values) {
   std::vector<std::optional<int64_t>> staticValues;
@@ -999,6 +883,152 @@ inline void SetTileAndBindMixedSlice(GenericOperation &operation,
                          TileAndBindFoldResultArray(slice.sizes));
   SetTileAndBindProperty(operation, "static_strides",
                          TileAndBindFoldResultArray(slice.strides));
+}
+
+inline std::set<size_t> GetTileAndBindExtractOrInsertDims(
+    const GenericModule &module, const GenericOperation &operation) {
+  const std::optional<TileAndBindMixedSlice> slice =
+      ParseTileAndBindMixedSlice(operation);
+  if (!slice || slice->prefixOperands.empty())
+    return {};
+  const std::map<int, std::string> valueTypes = ValueTypes(module);
+  auto sourceType = valueTypes.find(slice->prefixOperands.front());
+  const std::optional<ShapedTypeModel> source =
+      sourceType == valueTypes.end()
+          ? std::nullopt
+          : ParseShapedTypeForDimensionAnalysis(sourceType->second);
+  if (!source || source->shape.size() != slice->sizes.size())
+    return {};
+  std::set<size_t> dimensions;
+  for (size_t dimension = 0; dimension < slice->sizes.size(); ++dimension) {
+    const TileAndBindFoldResult &size = slice->sizes[dimension];
+    if (!size.constant || !source->shape[dimension] ||
+        *size.constant != *source->shape[dimension])
+      dimensions.insert(dimension);
+  }
+  return dimensions;
+}
+
+// Projection of TileAndBindSubBlock/Helper.cpp::createdByTiling for the
+// normalized 1:2 loop used by TileAndBindSubBlock.
+inline bool CreatedByTileAndBindTiling(const GenericModule &module,
+                                       const GenericOperation &sliceOperation) {
+  const std::optional<TileAndBindMixedSlice> slice =
+      ParseTileAndBindMixedSlice(sliceOperation);
+  const std::set<size_t> dimensions =
+      GetTileAndBindExtractOrInsertDims(module, sliceOperation);
+  if (!slice || slice->prefixOperands.empty() || dimensions.size() != 1)
+    return false;
+  const size_t tilingDimension = *dimensions.begin();
+  if (tilingDimension >= slice->offsets.size() ||
+      tilingDimension >= slice->sizes.size() ||
+      std::any_of(slice->strides.begin(), slice->strides.end(),
+                  [](const TileAndBindFoldResult &stride) {
+                    return !stride.constant || *stride.constant != 1;
+                  }))
+    return false;
+
+  const std::map<int, std::string> valueTypes = ValueTypes(module);
+  auto sourceType = valueTypes.find(slice->prefixOperands.front());
+  const std::optional<ShapedTypeModel> source =
+      sourceType == valueTypes.end()
+          ? std::nullopt
+          : ParseShapedTypeForDimensionAnalysis(sourceType->second);
+  if (!source || tilingDimension >= source->shape.size() ||
+      !source->shape[tilingDimension])
+    return false;
+  for (size_t dimension = 0; dimension < source->shape.size(); ++dimension) {
+    if (!source->shape[dimension] || dimension >= slice->sizes.size() ||
+        (dimension != tilingDimension &&
+         (!slice->sizes[dimension].constant ||
+          *slice->sizes[dimension].constant != *source->shape[dimension])))
+      return false;
+  }
+
+  const GenericOperation *tilingLoop = nullptr;
+  int parent = sliceOperation.parentId;
+  while (parent >= 0) {
+    const GenericOperation &ancestor =
+        module.operations.at(static_cast<size_t>(parent));
+    if (ancestor.name == "scf.for") {
+      tilingLoop = &ancestor;
+      break;
+    }
+    parent = ancestor.parentId;
+  }
+  if (!tilingLoop || tilingLoop->operands.size() < 3 ||
+      tilingLoop->regions.empty())
+    return false;
+
+  const std::map<int, const GenericOperation *> definitions =
+      DefiningOperations(module);
+  const auto constant = [&](int value) -> std::optional<int64_t> {
+    auto definition = definitions.find(value);
+    if (definition == definitions.end() ||
+        definition->second->name != "arith.constant")
+      return std::nullopt;
+    std::string text =
+        FindDictionaryValue(definition->second->properties, "value");
+    if (text.empty())
+      text = FindDictionaryValue(definition->second->attributes, "value");
+    const size_t suffix = text.find(" : ");
+    if (suffix != std::string::npos)
+      text = trim(text.substr(0, suffix));
+    try {
+      size_t consumed = 0;
+      const int64_t result = std::stoll(text, &consumed, 0);
+      return consumed == text.size() ? std::optional<int64_t>(result)
+                                     : std::nullopt;
+    } catch (const std::exception &) {
+      return std::nullopt;
+    }
+  };
+  const std::optional<int64_t> lowerBound = constant(tilingLoop->operands[0]);
+  const std::optional<int64_t> upperBound = constant(tilingLoop->operands[1]);
+  const std::optional<int64_t> step = constant(tilingLoop->operands[2]);
+  if (!lowerBound || !upperBound || !step || *lowerBound != 0 || *step != 1 ||
+      *upperBound <= 0 ||
+      *source->shape[tilingDimension] % *upperBound != 0)
+    return false;
+  const int64_t tileSize =
+      *source->shape[tilingDimension] / *upperBound;
+  if (!slice->sizes[tilingDimension].constant ||
+      *slice->sizes[tilingDimension].constant != tileSize)
+    return false;
+  for (size_t dimension = 0; dimension < slice->offsets.size(); ++dimension) {
+    if (dimension == tilingDimension)
+      continue;
+    if (!slice->offsets[dimension].constant ||
+        *slice->offsets[dimension].constant != 0)
+      return false;
+  }
+  if (slice->offsets[tilingDimension].constant)
+    return false;
+  auto offsetDefinition =
+      definitions.find(slice->offsets[tilingDimension].value);
+  if (offsetDefinition == definitions.end() ||
+      offsetDefinition->second->name != "affine.apply" ||
+      offsetDefinition->second->operands.size() != 1)
+    return false;
+
+  const GenericRegion &loopRegion = module.regions.at(
+      static_cast<size_t>(tilingLoop->regions.front()));
+  if (loopRegion.blocks.empty())
+    return false;
+  const GenericBlock &loopBlock =
+      module.blocks.at(static_cast<size_t>(loopRegion.blocks.front()));
+  if (loopBlock.arguments.empty() ||
+      offsetDefinition->second->operands.front() != loopBlock.arguments.front())
+    return false;
+  const std::optional<std::string> expression =
+      ExistingAffineApplyExpression(*offsetDefinition->second);
+  if (!expression)
+    return false;
+  const std::string induction =
+      AffineValueExpression(loopBlock.arguments.front());
+  const std::string size = "c(" + std::to_string(tileSize) + ")";
+  return *expression == MakeAffineBinaryExpression("mul", induction, size) ||
+         *expression == MakeAffineBinaryExpression("mul", size, induction);
 }
 
 // Projection of TileAndBindSubBlock/Helper.cpp::handleExtractOfExtract.
@@ -1439,6 +1469,80 @@ inline bool ApplyHoistAffinePattern(GenericModule &module, int operationId) {
 inline bool ApplyCSEAffineApplyPattern(GenericModule &module,
                                        int operationId);
 
+// Mirrors TileAndBindSubBlock.cpp::tileAndSliceOp's dynamic-shape store
+// precondition. The real pass rejects the cloned 1:2 candidate before adding
+// any temporary slices when a store cannot be traced back to equal, static
+// parent shapes.
+inline bool TileAndSliceOpHasUnsupportedStore(
+    const GenericModule &module, const GenericOperation &function) {
+  const std::map<int, const GenericOperation *> definitions =
+      DefiningOperations(module);
+  const std::map<int, std::string> valueTypes = ValueTypes(module);
+  const auto shapedType = [&](int value) {
+    auto type = valueTypes.find(value);
+    return type == valueTypes.end()
+               ? std::optional<ShapedTypeModel>{}
+               : ParseShapedTypeForDimensionAnalysis(type->second);
+  };
+  const auto hasDynamicShape = [](const ShapedTypeModel &type) {
+    return std::any_of(type.shape.begin(), type.shape.end(),
+                       [](const std::optional<int64_t> &extent) {
+                         return !extent.has_value();
+                       });
+  };
+  const auto sourceOfView = [&](int value) {
+    auto definition = definitions.find(value);
+    if (definition == definitions.end() ||
+        (definition->second->name != "tensor.extract_slice" &&
+         definition->second->name != "memref.subview") ||
+        definition->second->operands.empty())
+      return value;
+    return definition->second->operands.front();
+  };
+  const auto isInsideExtractedLoadOrStoreLoop =
+      [&](const GenericOperation &operation) {
+        int parent = operation.parentId;
+        while (parent >= 0) {
+          const GenericOperation &ancestor =
+              module.operations.at(static_cast<size_t>(parent));
+          if (ancestor.name == "scf.for")
+            return HasSplitMixDictionaryEntry(ancestor.attributes,
+                                               "ExtractedLoadOrStore");
+          parent = ancestor.parentId;
+        }
+        return false;
+      };
+
+  for (int operationId : GetTileAndBindDescendants(module, function)) {
+    const GenericOperation &store =
+        module.operations.at(static_cast<size_t>(operationId));
+    if (store.name != "hivm.hir.store" || store.operands.size() < 2)
+      continue;
+    const std::optional<ShapedTypeModel> source =
+        shapedType(store.operands[0]);
+    const std::optional<ShapedTypeModel> destination =
+        shapedType(store.operands[1]);
+    if (!source || !destination ||
+        isInsideExtractedLoadOrStoreLoop(store)) {
+      return true;
+    }
+    if (!hasDynamicShape(*source) && !hasDynamicShape(*destination))
+      continue;
+
+    const std::optional<ShapedTypeModel> sourceParent =
+        shapedType(sourceOfView(store.operands[0]));
+    const std::optional<ShapedTypeModel> destinationParent =
+        shapedType(sourceOfView(store.operands[1]));
+    if (!sourceParent || !destinationParent ||
+        hasDynamicShape(*sourceParent) ||
+        hasDynamicShape(*destinationParent) ||
+        sourceParent->shape != destinationParent->shape) {
+      return true;
+    }
+  }
+  return false;
+}
+
 inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
   RunReplicateOutEmptyTensor(module, functionId);
   DimensionAnalyzer tiledAnalyzer(module);
@@ -1448,6 +1552,8 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
       module.operations.at(static_cast<size_t>(functionId)));
   const GenericOperation function =
       module.operations.at(static_cast<size_t>(functionId));
+  if (TileAndSliceOpHasUnsupportedStore(module, function))
+    return false;
   if (function.regions.size() != 1)
     return false;
   const GenericRegion &functionRegion =
@@ -1729,6 +1835,13 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
   };
   std::map<int, TiledValue> tiledValues;
   for (GenericBlock &block : module.blocks) {
+    const GenericOperation &blockParent = module.operations.at(
+        static_cast<size_t>(module.regions.at(
+            static_cast<size_t>(block.regionId)).parentOperation));
+    if (blockParent.name == "scf.for" &&
+        HasSplitMixDictionaryEntry(blockParent.attributes,
+                                   "ExtractedLoadOrStore"))
+      continue;
     for (size_t index = 0; index < block.arguments.size(); ++index) {
       const int value = block.arguments[index];
       auto bubbleDim = bubbleDims.find(value);
@@ -1794,8 +1907,11 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
                      return lhs.initialOrder < rhs.initialOrder;
                    });
 
+  bool bubbleUpFailed = false;
   std::function<void(int, int, std::set<int>)> runBubbleUpRequest =
       [&](int value, int offset, std::set<int> path) {
+        if (bubbleUpFailed)
+          return;
         if (!path.insert(value).second || bubbleDims.count(value) == 0)
           return;
         const auto definitions = DefiningOperations(module);
@@ -1807,7 +1923,31 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
             operationSnapshot.name == "bufferization.to_tensor")
           return;
 
+        if (operationSnapshot.name == "tensor.extract_slice") {
+          const std::optional<TileAndBindMixedSlice> parentSlice =
+              ParseTileAndBindMixedSlice(operationSnapshot);
+          const bool parentIsStatic =
+              parentSlice &&
+              std::all_of(parentSlice->sizes.begin(),
+                          parentSlice->sizes.end(),
+                          [](const TileAndBindFoldResult &size) {
+                            return size.constant.has_value();
+                          });
+          const std::set<size_t> parentDimensions =
+              GetTileAndBindExtractOrInsertDims(module, operationSnapshot);
+          const size_t childDimension = bubbleDims.at(value);
+          if (parentIsStatic &&
+              parentDimensions.count(childDimension) != 0 &&
+              !CreatedByTileAndBindTiling(module, operationSnapshot)) {
+            bubbleUpFailed = true;
+            return;
+          }
+        }
+
         if (operationSnapshot.name == "scf.for") {
+          if (HasSplitMixDictionaryEntry(operationSnapshot.attributes,
+                                         "ExtractedLoadOrStore"))
+            return;
           auto result = std::find(operationSnapshot.results.begin(),
                                   operationSnapshot.results.end(), value);
           if (result == operationSnapshot.results.end() ||
@@ -1913,6 +2053,8 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
       };
   for (const BubbleUpRequest &request : initialRequests)
     runBubbleUpRequest(request.value, request.offset, {});
+  if (bubbleUpFailed)
+    return false;
 
   struct ExtractInsertExtractRewrite {
     int sourceExtract = -1;
@@ -1994,6 +2136,77 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
     extractInsertExtractSources.insert(sourceExtract.id);
   }
 
+  auto isBubbleTerminal = [&](int value) {
+    const auto definitions = DefiningOperations(module);
+    auto definition = definitions.find(value);
+    if (definition == definitions.end())
+      return false;
+    const GenericOperation &operation = *definition->second;
+    return operation.name == "tensor.empty" ||
+           (operation.name == "scf.for" &&
+            HasSplitMixDictionaryEntry(operation.attributes,
+                                       "ExtractedLoadOrStore"));
+  };
+  auto materializeTerminalSlice = [&](int consumerId, size_t operandIndex) {
+    const GenericOperation consumerSnapshot =
+        module.operations.at(static_cast<size_t>(consumerId));
+    if (consumerSnapshot.blockId < 0 ||
+        operandIndex >= consumerSnapshot.operands.size())
+      return false;
+    const int source = consumerSnapshot.operands[operandIndex];
+    auto dimension = bubbleDims.find(source);
+    auto offset = bubbleOffsets.find(source);
+    auto sourceType = valueTypes.find(source);
+    if (dimension == bubbleDims.end() || offset == bubbleOffsets.end() ||
+        sourceType == valueTypes.end() || !isBubbleTerminal(source))
+      return false;
+    const std::optional<ShapedTypeModel> shaped =
+        ParseShapedTypeForDimensionAnalysis(sourceType->second);
+    const size_t axis = dimension->second;
+    if (!shaped || !shaped->tensor || axis >= shaped->shape.size() ||
+        !shaped->shape[axis] || *shaped->shape[axis] < 2)
+      return false;
+    const int64_t tileSize = (*shaped->shape[axis] + 1) / 2;
+    std::vector<std::optional<int64_t>> tileShape = shaped->shape;
+    tileShape[axis] = tileSize;
+    const std::string tileType = ReplaceTileAndBindShapeDimension(
+        sourceType->second, axis, tileSize);
+    int insertionParent = consumerSnapshot.parentId;
+    int insertionRegion = consumerSnapshot.regionId;
+    int insertionBlock = consumerSnapshot.blockId;
+    size_t insertionPosition =
+        static_cast<size_t>(consumerSnapshot.ordinal);
+    const auto definitions = DefiningOperations(module);
+    auto sourceDefinition = definitions.find(source);
+    if (sourceDefinition != definitions.end() &&
+        sourceDefinition->second->name == "scf.for" &&
+        HasSplitMixDictionaryEntry(sourceDefinition->second->attributes,
+                                   "ExtractedLoadOrStore")) {
+      insertionParent = sourceDefinition->second->parentId;
+      insertionRegion = sourceDefinition->second->regionId;
+      insertionBlock = sourceDefinition->second->blockId;
+      insertionPosition =
+          static_cast<size_t>(sourceDefinition->second->ordinal + 1);
+    }
+    const int slice = rewriter.createOperation(
+        insertionParent, insertionRegion, insertionBlock,
+        "tensor.extract_slice", {tileType},
+        {source, offset->second}, {sourceType->second, "index"},
+        TileAndBindSliceProperties(tileShape, axis),
+        "{to_be_bubbled_slice}");
+    rewriter.insertToBlock(insertionBlock, insertionPosition, slice);
+    const int slicedValue =
+        module.operations.at(static_cast<size_t>(slice)).results.front();
+    GenericOperation &consumer =
+        module.operations.at(static_cast<size_t>(consumerId));
+    consumer.operands[operandIndex] = slicedValue;
+    if (operandIndex < consumer.operandTypes.size())
+      consumer.operandTypes[operandIndex] = tileType;
+    valueTypes[slicedValue] = tileType;
+    tiledValues[slicedValue] = {axis, tileSize, offset->second};
+    return true;
+  };
+
   for (int operationId : bubbleRewriteOrder) {
     auto extractInsertExtractRewrite =
         extractInsertExtractRewrites.find(operationId);
@@ -2005,6 +2218,28 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
             extractInsertExtractRewrite->second.tileOffset,
             extractInsertExtractRewrite->second.tileSize, valueTypes))
       return false;
+    const GenericOperation operationBeforeSlices =
+        module.operations.at(static_cast<size_t>(operationId));
+    const bool resultIsBubbled = std::any_of(
+        operationBeforeSlices.results.begin(),
+        operationBeforeSlices.results.end(),
+        [&](int result) { return bubbleDims.count(result) != 0; });
+    if (resultIsBubbled &&
+        (IsElementwiseNaryOp(operationBeforeSlices.name) ||
+         operationBeforeSlices.name == "hivm.hir.vbrc" ||
+         operationBeforeSlices.name == "hivm.hir.vreduce" ||
+         operationBeforeSlices.name == "hivm.hir.varange" ||
+         operationBeforeSlices.name == "hivm.hir.load" ||
+         operationBeforeSlices.name == "hivm.hir.store" ||
+         operationBeforeSlices.name == "hivm.hir.copy"))
+      for (size_t operandIndex = 0;
+           operandIndex < operationBeforeSlices.operands.size();
+           ++operandIndex)
+        materializeTerminalSlice(operationId, operandIndex);
+    if (operationBeforeSlices.name == "tensor.extract_slice" &&
+        !operationBeforeSlices.operands.empty())
+      materializeTerminalSlice(operationId, 0);
+
     GenericOperation &operation =
         module.operations.at(static_cast<size_t>(operationId));
     for (size_t index = 0;
@@ -2027,6 +2262,11 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
         boundaryToTensor.push_back(operation.id);
         continue;
       }
+      if (operation.name == "tensor.empty" ||
+          (operation.name == "scf.for" &&
+           HasSplitMixDictionaryEntry(operation.attributes,
+                                      "ExtractedLoadOrStore")))
+        continue;
       if (extractInsertExtractSources.count(operation.id) != 0)
         continue;
 
@@ -2108,6 +2348,7 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
     size_t insertionPosition = static_cast<size_t>(toTensor.ordinal + 1);
     int insertionParent = toTensor.parentId;
     int insertionRegion = toTensor.regionId;
+    const auto definitions = DefiningOperations(module);
     for (const GenericOperation &user : module.operations) {
       if (user.operands.empty() || user.operands.front() != sourceValue ||
           user.name != "hivm.hir.load")
@@ -2116,6 +2357,15 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
       insertionPosition = static_cast<size_t>(user.ordinal);
       insertionParent = user.parentId;
       insertionRegion = user.regionId;
+      if (user.operands.size() > 1) {
+        const auto destination = definitions.find(user.operands[1]);
+        if (destination != definitions.end() &&
+            (destination->second->name == "tensor.empty" ||
+             destination->second->name == "tensor.extract_slice") &&
+            destination->second->blockId == user.blockId)
+          insertionPosition =
+              static_cast<size_t>(destination->second->ordinal);
+      }
       break;
     }
     const int slice = rewriter.createOperation(
@@ -2215,15 +2465,6 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
       const int sourceSliceId = sourceSliceDefinition->second->id;
       const int destinationSubviewId =
           destinationSubviewDefinition->second->id;
-      if (!HandleTileAndBindExtractOfExtract(
-              module, rewriter, sourceSliceId, axis, tileOffset, tileSize) ||
-          !HandleTileAndBindExtractOfExtract(
-              module, rewriter, destinationSubviewId, axis, tileOffset,
-              tileSize))
-        continue;
-      std::vector<std::optional<int64_t>> tileShape =
-          destinationParent->shape;
-      tileShape[axis] = tileSize;
       const GenericOperation destinationSubview =
           *destinationSubviewDefinition->second;
       auto destinationParentDefinition = definitions.find(
@@ -2233,6 +2474,15 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
         continue;
       const GenericOperation destinationParentOperation =
           *destinationParentDefinition->second;
+      if (!HandleTileAndBindExtractOfExtract(
+              module, rewriter, sourceSliceId, axis, tileOffset, tileSize) ||
+          !HandleTileAndBindExtractOfExtract(
+              module, rewriter, destinationSubviewId, axis, tileOffset,
+              tileSize))
+        continue;
+      std::vector<std::optional<int64_t>> tileShape =
+          destinationParent->shape;
+      tileShape[axis] = tileSize;
       const std::string tiledParentType = ReplaceTileAndBindShapeDimension(
           destinationParentType->second, axis, tileSize);
       const int parentSubview = rewriter.createOperation(
@@ -2763,16 +3013,9 @@ inline GenericModule RunTileAndBindSubBlock(GenericModule module) {
     analyzer.computeTilingDim(
         candidate.operations.at(static_cast<size_t>(functionId)));
     if (!analyzer.hasSelectedTilingDim() ||
-        HasDynamicTileAndBindInsertSliceSource(
-            candidate,
-            candidate.operations.at(static_cast<size_t>(functionId)),
-            analyzer) ||
-        !VerifyMarkedExtractSlicesCanBubbleUp(
-            candidate,
-            candidate.operations.at(static_cast<size_t>(functionId)),
-            analyzer) ||
         !AttemptBindSubBlock(candidate, functionId) ||
-        !VerifyTileAndBindReshapeTypes(candidate))
+        !VerifyTileAndBindReshapeTypes(candidate) ||
+        !VerifyTileAndBindSliceTypes(candidate))
       return LimitUniqueSubBlockToStore(std::move(module));
     RunTileAndBindHoistAffine(candidate, functionId);
     RunCSEAffineApplyPattern(candidate, functionId);

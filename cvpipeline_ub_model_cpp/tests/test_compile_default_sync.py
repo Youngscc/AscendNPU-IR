@@ -39,6 +39,14 @@ def assert_compile_default(option: str, expected: str) -> None:
 assert_compile_default("TileMixVectorLoop", "2")
 assert_compile_default("TileMixCubeLoop", "2")
 assert_compile_default("EnableTritonKernelCompile", "false")
+assert_compile_default(
+    "LimitAutoMultiBufferOfLocalBuffer",
+    "MultiBufferStrategy::CUBE_NO_L0C",
+)
+assert_compile_default(
+    "LimitAutoMultiBufferBuffer",
+    "MultiBufferStrategy::ONLY_CUBE",
+)
 
 for variable in ("tileMixVectorLoop", "tileMixCubeLoop"):
     assert re.search(
@@ -57,6 +65,27 @@ assert re.search(
 assert re.search(
     r"bool enableTritonKernelCompile = false;", model_main
 ), "model Triton default differs from bishengir-compile"
+
+assert re.search(
+    r"localMultiBufferStrategy\s*=\s*\n\s*"
+    r"cvub::MultiBufferStrategy::CubeNoL0C;",
+    model_main,
+), "model local multi-buffer default differs from suffix"
+assert re.search(
+    r"mixMultiBufferStrategy\s*=\s*\n\s*"
+    r"cvub::MultiBufferStrategy::OnlyCube;",
+    model_main,
+), "model MIX multi-buffer default differs from suffix"
+assert re.search(
+    r'--suffix-local-multi-buffer-strategy", default="no-l0c"',
+    model_wrapper,
+), "model wrapper local multi-buffer default differs from suffix"
+assert re.search(
+    r'--suffix-mix-multi-buffer-strategy", default="only-cube"',
+    model_wrapper,
+), "model wrapper MIX multi-buffer default differs from suffix"
+assert "MULTIBUFFER_LOCAL_STRATEGY=no-l0c" in demo_script
+assert "MULTIBUFFER_MIX_STRATEGY=only-cube" in demo_script
 
 assert re.search(
     r'planMemorySeed\(.*?"plan-memory-seed".*?llvm::cl::init\(-1\)',
@@ -80,12 +109,21 @@ demo_forward = (
 for argument in demo_forward:
     assert argument in demo_script, f"demo does not forward {argument}"
 
-explicit_corpus_option = (
-    'f"--enable-triton-kernel-compile={'
-    "'true' if args.enable_triton_kernel_compile else 'false'}\""
-)
-assert corpus_script.count(explicit_corpus_option) == 5, (
-    "corpus model/oracle/retry commands do not share one Triton option"
+for option in (
+    "--disable-cv-pipelining",
+    "--cv-pipeline-depth",
+    "--enable-preload",
+    "--enable-cv-lazy-loading",
+    "--enable-code-motion",
+    "--enable-auto-multi-buffer",
+    "--enable-triton-kernel-compile",
+    "--limit-auto-multi-buffer-of-local-buffer",
+    "--limit-auto-multi-buffer-buffer",
+):
+    assert option in corpus_script, f"corpus does not expose/forward {option}"
+
+assert corpus_script.count("*shared_pipeline_options(args)") == 5, (
+    "fixed-seed, blocker and retry model/oracle commands must share options"
 )
 
 print("[PASS] bishengir-compile defaults and forwarding stay synchronized")

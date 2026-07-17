@@ -107,6 +107,10 @@ public:
             .preBufferizationCSE;
     erasedOperations.insert(preBufferizationCSE.erasedOperations.begin(),
                             preBufferizationCSE.erasedOperations.end());
+    for (const InlineLoadCopyRewrite &rewrite :
+         inputModule.afterMarkMultiBuffer.afterInlineLoadCopy.inlineLoadCopy
+             .rewrites)
+      erasedOperations.insert(rewrite.loadOperation);
     indexBuffers();
     indexValues();
     arithToAffine = RunConvertArithToAffine(logical);

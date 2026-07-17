@@ -68,6 +68,49 @@ inline bool IsCopyOperation(const std::string &name) {
   return name == "hivm.hir.copy" || name == "tensor.insert_slice";
 }
 
+inline const GenericOperation *DefiningOperationForInlineLoadCopy(
+    const GenericModule &module, int value) {
+  for (const GenericOperation &operation : module.operations)
+    if (std::find(operation.results.begin(), operation.results.end(), value) !=
+        operation.results.end())
+      return &operation;
+  return nullptr;
+}
+
+inline std::string ProjectedBufferValue(
+    const GenericModule &module, int value, std::set<int> &visited) {
+  if (!visited.insert(value).second)
+    return "value:" + std::to_string(value);
+  const GenericOperation *definition =
+      DefiningOperationForInlineLoadCopy(module, value);
+  if (!definition)
+    return "value:" + std::to_string(value);
+
+  if (definition->name == "bufferization.to_tensor" &&
+      !definition->operands.empty())
+    return ProjectedBufferValue(module, definition->operands.front(), visited);
+
+  const auto result = std::find(definition->results.begin(),
+                                definition->results.end(), value);
+  if (result != definition->results.end()) {
+    const size_t resultNumber = static_cast<size_t>(
+        std::distance(definition->results.begin(), result));
+    const std::vector<size_t> initOperands = DpsInitOperandIndices(
+        definition->name, definition->operands.size(), definition->properties);
+    if (resultNumber < initOperands.size() &&
+        initOperands[resultNumber] < definition->operands.size())
+      return ProjectedBufferValue(
+          module, definition->operands[initOperands[resultNumber]], visited);
+  }
+  return "value:" + std::to_string(value);
+}
+
+inline std::string ProjectedBufferValue(const GenericModule &module,
+                                        int value) {
+  std::set<int> visited;
+  return ProjectedBufferValue(module, value, visited);
+}
+
 inline std::map<size_t, std::string> OperationBufferMap(
     const PostBufferizationRewriteState &postBufferization, int operationId) {
   std::map<size_t, std::string> result;
@@ -136,23 +179,6 @@ inline bool HappensAfterLoadBeforeCopy(const GenericOperation &candidate,
   return true;
 }
 
-inline int TraceTensorBufferValue(
-    int value, const std::map<int, const GenericOperation *> &definitions) {
-  std::set<int> visited;
-  while (visited.insert(value).second) {
-    auto found = definitions.find(value);
-    if (found == definitions.end() || found->second->operands.empty())
-      return value;
-    const std::string &name = found->second->name;
-    if (name != "bufferization.to_tensor" && name != "tensor.cast" &&
-        name != "tensor.collapse_shape" && name != "tensor.expand_shape" &&
-        name != "tensor.extract_slice")
-      return value;
-    value = found->second->operands.front();
-  }
-  return value;
-}
-
 inline bool HasInterveningMemoryEffect(
     const PostBufferizationRewriteState &postBufferization, const std::string &buffer,
     const GenericOperation &load, const GenericOperation &copy,
@@ -185,8 +211,6 @@ inline bool HasInterveningMemoryEffect(
 inline InlineLoadCopyResult ModelInlineLoadCopy(const AfterAllocExtraBufferState &afterAllocExtraBuffer) {
   const PostBufferizationRewriteState &postBufferization = afterAllocExtraBuffer.postBufferization;
   const GenericModule &module = postBufferization.bufferized.logicalModule;
-  const std::map<int, const GenericOperation *> definitions =
-      DefiningOperations(module);
   InlineLoadCopyResult result;
   std::set<int> erasedOperations;
   for (const GenericOperation &copy : module.operations) {
@@ -201,6 +225,10 @@ inline InlineLoadCopyResult ModelInlineLoadCopy(const AfterAllocExtraBufferState
     if (copySource == copyBuffers.end() ||
         copyDestination == copyBuffers.end())
       continue;
+    if (copy.operands.empty())
+      continue;
+    const std::string copySourceValue =
+        ProjectedBufferValue(module, copy.operands.front());
 
     const GenericOperation *matchedLoad = nullptr;
     for (const GenericOperation &load : module.operations) {
@@ -215,9 +243,8 @@ inline InlineLoadCopyResult ModelInlineLoadCopy(const AfterAllocExtraBufferState
       if (loadDestination == loadBuffers.end() ||
           loadDestination->second != copySource->second)
         continue;
-      if (!copy.operands.empty() && load.operands.size() > 1 &&
-          TraceTensorBufferValue(copy.operands[0], definitions) !=
-              TraceTensorBufferValue(load.operands[1], definitions))
+      if (load.operands.size() < 2 ||
+          ProjectedBufferValue(module, load.operands[1]) != copySourceValue)
         continue;
       matchedLoad = &load;
       break;
@@ -227,11 +254,13 @@ inline InlineLoadCopyResult ModelInlineLoadCopy(const AfterAllocExtraBufferState
     const std::map<size_t, std::string> loadBuffers =
         OperationBufferMap(postBufferization, matchedLoad->id);
     auto loadSource = loadBuffers.find(0);
-    if (loadSource == loadBuffers.end() ||
-        HasInterveningMemoryEffect(postBufferization, copySource->second, *matchedLoad,
-                                     copy, true) ||
-        HasInterveningMemoryEffect(postBufferization, loadSource->second, *matchedLoad,
-                                     copy, false))
+    if (loadSource == loadBuffers.end())
+      continue;
+    if (HasInterveningMemoryEffect(postBufferization, copySource->second,
+                                   *matchedLoad, copy, true))
+      continue;
+    if (HasInterveningMemoryEffect(postBufferization, loadSource->second,
+                                   *matchedLoad, copy, false))
       continue;
     const LocalBufferRecord *middle =
         FindSourceBuffer(afterAllocExtraBuffer.buffers, copySource->second);

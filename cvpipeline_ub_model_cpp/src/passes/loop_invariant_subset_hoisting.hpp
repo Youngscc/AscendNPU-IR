@@ -340,6 +340,89 @@ inline bool LoopCarriesSubsetPattern(const GenericModule &module, int loopId) {
   return false;
 }
 
+// Mirrors the early-return paths in MatchingSubsets::populateSubsetOpsAtIterArg
+// and hoistSubsetAtIterArg. This recognizes only cases where the upstream pass
+// is provably a no-op: a non-subset operation breaks the single use-def chain,
+// or the completed chain does not contain an extraction/insertion pair.
+inline bool ProvesSubsetHoistingNoOp(const GenericModule &module, int loopId) {
+  const GenericOperation &loop =
+      module.operations.at(static_cast<size_t>(loopId));
+  const int bodyBlock = LoopBodyBlock(module, loop);
+  if (loop.name != "scf.for" || bodyBlock < 0)
+    return false;
+  const GenericBlock &body =
+      module.blocks.at(static_cast<size_t>(bodyBlock));
+
+  struct Use {
+    const GenericOperation *operation;
+    size_t operand;
+  };
+  const auto uses = [&](int value) {
+    std::vector<Use> result;
+    for (const GenericOperation &operation : module.operations)
+      for (size_t operand = 0; operand < operation.operands.size(); ++operand)
+        if (operation.operands[operand] == value)
+          result.push_back({&operation, operand});
+    return result;
+  };
+
+  for (size_t iterArgIndex = 1; iterArgIndex < body.arguments.size();
+       ++iterArgIndex) {
+    int value = body.arguments[iterArgIndex];
+    bool sawExtraction = false;
+    bool sawInsertion = false;
+    std::set<int> visited;
+    while (visited.insert(value).second) {
+      const std::vector<Use> currentUses = uses(value);
+      if (currentUses.size() == 1 &&
+          IsTerminator(currentUses.front().operation->name)) {
+        // scf.for ties iter_arg N to scf.yield operand N. A mismatched yield is
+        // rejected by getTiedLoopYieldedValue in the upstream implementation.
+        if (currentUses.front().operation->name != "scf.yield" ||
+            currentUses.front().operand + 1 != iterArgIndex)
+          return true;
+        if (!sawExtraction || !sawInsertion)
+          return true; // Upstream hoists extraction/insertion pairs only.
+        break;
+      }
+
+      std::optional<int> nextValue;
+      for (const Use &use : currentUses) {
+        const GenericOperation &operation = *use.operation;
+        if (operation.name == "tensor.extract_slice") {
+          if (use.operand != 0)
+            return false;
+          sawExtraction = true;
+          continue;
+        }
+        if (operation.name == "tensor.insert_slice") {
+          // Subset insertion must use the current chain value as destination.
+          if (use.operand != 1)
+            return true;
+          if (nextValue || operation.results.size() != 1)
+            return true;
+          sawInsertion = true;
+          nextValue = operation.results.front();
+          continue;
+        }
+        if (IsSubsetSliceOp(operation.name))
+          return false; // Other SubsetOpInterface forms are not projected here.
+        if (IsTerminator(operation.name))
+          return true;
+        // Nested LoopLikeOpInterface handling is intentionally left unknown;
+        // all other operations make populateSubsetOpsAtIterArg return failure.
+        if (IsModeledLoop(operation.name) || IsUnmodeledLoop(operation.name))
+          return false;
+        return true;
+      }
+      if (!nextValue)
+        return true;
+      value = *nextValue;
+    }
+  }
+  return false;
+}
+
 struct SubsetHoistPlan {
   bool candidate = false;
   bool exact = false;
@@ -360,6 +443,8 @@ inline SubsetHoistPlan AnalyzeStaticSubsetHoist(const GenericModule &module,
   SubsetHoistPlan plan;
   plan.loopId = loopId;
   if (!LoopCarriesSubsetPattern(module, loopId))
+    return plan;
+  if (ProvesSubsetHoistingNoOp(module, loopId))
     return plan;
   plan.candidate = true;
 

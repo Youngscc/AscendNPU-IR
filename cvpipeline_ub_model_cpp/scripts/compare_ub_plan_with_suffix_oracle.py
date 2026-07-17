@@ -38,9 +38,16 @@ def model_multi_and_inplace(
         function_name = canonical_function_name(
             str(function.get("function", ""))
         )
+        buffers = function.get("buffers", [])
+        event_times = sorted({
+            int(buffer[key])
+            for buffer in buffers
+            for key in ("alloc_time", "free_time")
+        })
+        ranks = {time: rank for rank, time in enumerate(event_times)}
         by_name: dict[str, int] = {}
         identity_by_name: dict[str, BufferIdentity] = {}
-        for buffer in function.get("buffers", []):
+        for buffer in buffers:
             name = str(buffer.get("name", ""))
             by_name[name] = int(buffer.get("multi_buffer_num", 1))
             offsets = buffer.get("offsets_bytes")
@@ -50,8 +57,8 @@ def model_multi_and_inplace(
                 function_name,
                 int(buffer["extent_bits"]),
                 tuple(sorted(int(offset) for offset in offsets)),
-                int(buffer["alloc_time"]),
-                int(buffer["free_time"]),
+                ranks[int(buffer["alloc_time"])],
+                ranks[int(buffer["free_time"])],
             )
         multi.update(by_name.values())
         for pair in function.get("inplace_pairs", []):
@@ -69,6 +76,8 @@ def parse_oracle_contract(
     path: Path, attempt: int, scope: str,
 ) -> tuple[str, int, Counter[int], Counter[InplaceKey]]:
     """Parse status/required/multi/inplace facts omitted by the legacy tuple."""
+    # Keep split AIC/AIV names distinct while joining semantic buffer IDs.
+    # Their local SSA names can overlap even though only AIV scope 6 is UB.
     current_function = ""
     statuses: list[str] = []
     required = 0
@@ -88,9 +97,9 @@ def parse_oracle_contract(
         if not fields:
             continue
         if fields[0] == "PLANMEM_LIVENESS_ATTEMPT" and len(fields) >= 4:
-            current_function = canonical_function_name(fields[1])
+            current_function = fields[1]
         elif fields[0] == "PLANMEM_PLAN_ATTEMPT" and len(fields) >= 4:
-            current_function = canonical_function_name(fields[1])
+            current_function = fields[1]
             if int(fields[2]) == attempt:
                 statuses.append(fields[3])
         elif (fields[0] == "PLANMEM_REQUIRED" and len(fields) >= 4 and
@@ -143,6 +152,17 @@ def parse_oracle_contract(
     selected_inplace_ids = (
         applied_inplace_ids if applied_inplace_dumped else initial_inplace_ids
     )
+    event_ranks: dict[str, dict[int, int]] = {}
+    for function in {key[0] for key in ub_buffers}:
+        times = sorted({
+            time
+            for (life_function, _), (_, alloc, free) in buffer_lives.items()
+            if life_function == function
+            for time in (alloc, free)
+        })
+        event_ranks[function] = {
+            time: rank for rank, time in enumerate(times)
+        }
     inplace: Counter[InplaceKey] = collections.Counter()
     for function, first_id, second_id in selected_inplace_ids:
         first_key = (function, first_id)
@@ -151,13 +171,18 @@ def parse_oracle_contract(
             continue
         first_extent, first_alloc, first_free = buffer_lives[first_key]
         second_extent, second_alloc, second_free = buffer_lives[second_key]
+        canonical_function = canonical_function_name(function)
         first_identity: BufferIdentity = (
-            function, first_extent,
-            tuple(sorted(planned_offsets[first_key])), first_alloc, first_free,
+            canonical_function, first_extent,
+            tuple(sorted(planned_offsets[first_key])),
+            event_ranks[function][first_alloc],
+            event_ranks[function][first_free],
         )
         second_identity: BufferIdentity = (
-            function, second_extent,
-            tuple(sorted(planned_offsets[second_key])), second_alloc, second_free,
+            canonical_function, second_extent,
+            tuple(sorted(planned_offsets[second_key])),
+            event_ranks[function][second_alloc],
+            event_ranks[function][second_free],
         )
         inplace[(first_identity, second_identity)] += 1
     return status, required, multi, inplace

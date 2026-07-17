@@ -4,6 +4,7 @@
 #include "../src/passes/tile_cube_vector_loop.hpp"
 #include "../src/passes/tile_and_bind_sub_block.hpp"
 #include "../src/passes/tightly_coupled_buffer_guard.hpp"
+#include "../src/passes/mark_multi_buffer.hpp"
 
 #include <iostream>
 #include <stdexcept>
@@ -250,6 +251,61 @@ void TestGenericRewriterAssignsRegionOrdinals() {
         "GenericRewriter must preserve multi-region ownership ordinals");
 }
 
+void TestMarkMultiBufferExplicitMarksAndFailFast() {
+  cvub::GenericModule module = cvub::ParseGenericIR(
+      "cvpipeline_ub_model_cpp/tests/fixtures/two_aiv_functions.mlir", false);
+  const cvub::GenericOperation &function = FindOperation(module, "func.func");
+  const cvub::GenericOperation &allocation =
+      FindOperation(module, "memref.alloc");
+  const int functionId = function.id;
+  const int functionRegion = function.regions.front();
+  const int block = allocation.blockId;
+  const int allocationResult = allocation.results.front();
+  const std::string allocationType = allocation.resultTypes.front();
+  cvub::GenericRewriter rewriter(module);
+  const auto appendMark = [&](const std::string &attributes) {
+    const int mark = rewriter.createOperation(
+        functionId, functionRegion, block, "annotation.mark", {},
+        {allocationResult}, {allocationType}, "", attributes);
+    rewriter.appendToBlock(block, mark);
+    return mark;
+  };
+  const int firstMark =
+      appendMark("{hivm.multi_buffer = 2 : i32}");
+  const int secondMark = appendMark(
+      "{hivm.multi_buffer = 3 : i32, hivm.preload_local_buffer = 1 : i32}");
+  const int singleBufferMark =
+      appendMark("{hivm.multi_buffer = 1 : i32}");
+
+  cvub::AfterInlineLoadCopyState state;
+  state.afterAllocExtraBuffer.postBufferization.bufferized.logicalModule =
+      module;
+  state.afterAllocExtraBuffer.postBufferization.bufferized.accesses = {
+      {firstMark, 0, "local:0"}, {secondMark, 0, "local:0"},
+      {singleBufferMark, 0, "local:0"}};
+  state.buffers.push_back({"%base_0", "base:0", "memref.alloc",
+                           allocationType, cvub::AddressSpace::UB, 65536,
+                           false, {2048}});
+
+  const cvub::MarkMultiBufferResult result =
+      cvub::ModelMarkMultiBuffer(state, {});
+  Check(result.buffer2MultiNum.at("base:0") == 3,
+        "the last non-one explicit multi-buffer mark must win");
+  Check(result.preloadLocalBuffers.count("base:0") == 1,
+        "explicit preload marks must be preserved");
+
+  state.afterAllocExtraBuffer.postBufferization.bufferized.accesses.clear();
+  bool blocked = false;
+  try {
+    (void)cvub::ModelMarkMultiBuffer(state, {});
+  } catch (const std::runtime_error &error) {
+    blocked = std::string(error.what()).find(
+                  "explicit multi-buffer mark has no modeled buffer") !=
+              std::string::npos;
+  }
+  Check(blocked, "unresolved explicit multi-buffer marks must fail closed");
+}
+
 } // namespace
 
 int main() {
@@ -275,5 +331,7 @@ int main() {
   std::cout << "[PASS] Task7 early canonicalization is modeled\n";
   TestGenericRewriterAssignsRegionOrdinals();
   std::cout << "[PASS] GenericRewriter assigns region ordinals\n";
+  TestMarkMultiBufferExplicitMarksAndFailFast();
+  std::cout << "[PASS] MarkMultiBuffer preserves explicit order and fails closed\n";
   return 0;
 }

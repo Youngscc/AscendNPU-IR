@@ -3,6 +3,7 @@
 
 #include "../ir/post_pipeline_ir_utils.hpp"
 #include "../pipeline/modeling_result.hpp"
+#include "canonicalization_hivm_pipeline.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -235,6 +236,16 @@ inline void EraseDeadLocalFunctions(GenericModule &module,
   }
 }
 
+// InlineScopePass runs createInlinerPass after extracting scope bodies.  The
+// inliner's default callable optimization pipeline is createCanonicalizerPass.
+inline void RunInlinerCanonicalizer(GenericModule &module) {
+  while (FoldCanonicalizationBooleanOps(module)) {
+  }
+  while (EliminateCanonicalizationDeadCode(module)) {
+  }
+  module = CompactGenericModule(std::move(module));
+}
+
 } // namespace inline_scope_detail
 
 inline StageResult RunStrictInlineScope(GenericModule module) {
@@ -322,6 +333,7 @@ inline StageResult RunStrictInlineScope(GenericModule module) {
   }
   inline_scope_detail::EraseDeadLocalFunctions(result.module,
                                                 inlineCandidates);
+  inline_scope_detail::RunInlinerCanonicalizer(result.module);
   ValidateGenericModule(result.module);
   return result;
 }

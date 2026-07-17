@@ -89,10 +89,17 @@ python3 cvpipeline_ub_model_cpp/scripts/run_corpus_oracle.py \
 
 对修改涉及的配置继续运行以下矩阵：
 
+`run_corpus_oracle.py` 在交互终端默认显示按“输入 x seed（以及可选 retry）”计算的
+进度、当前输入、seed、耗时和 ETA；需要保存纯净日志时可传 `--no-progress`。进度写入
+stderr，最终 summary 保持在 stdout。
+
 | 维度 | 配置 |
 | --- | --- |
 | inplace | 默认、`--restrict-inplace-as-isa` |
 | PlanMemory | seed `0-19`、`--check-retry` |
+| CVPipelining | 默认、`--disable-cv-pipelining`、不同 `--cv-pipeline-depth` |
+| CV load scheduling | `--enable-preload`、`--enable-cv-lazy-loading` |
+| code motion | `--enable-code-motion true/false` |
 | auto multi-buffer | 关闭、`--enable-auto-multi-buffer` |
 | Triton | 默认关闭、`--enable-triton-kernel-compile` |
 | local strategy | `no-l0c`，必要时补 `no-limit/only-cube/only-vector` |

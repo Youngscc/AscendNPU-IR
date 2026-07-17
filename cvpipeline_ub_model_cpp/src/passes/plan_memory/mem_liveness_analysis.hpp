@@ -814,6 +814,16 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
         return candidate.blockArguments;
     return std::vector<std::string>{};
   };
+  auto GetRegionYieldedValues = [&](int region) {
+    for (const OperationRecord &candidate : operations) {
+      if (candidate.regionPath.empty() ||
+          candidate.regionPath.back() != region ||
+          candidate.opName != "scf.yield")
+        continue;
+      return operationOperandNames(candidate);
+    }
+    return std::vector<std::string>{};
+  };
   std::map<std::pair<std::vector<int>, std::string>,
            std::vector<std::string>>
       blockArguments;
@@ -895,9 +905,20 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
       context.iterArgs = extractIterArgPairs(line);
       context.results = resultNamesBeforeEqual(line);
       context.region = GetChildRegion(op);
+      context.yielded = GetRegionYieldedValues(context.region);
       for (const auto &pair : context.iterArgs) {
         traceback[pair.first] = pair.second;
         UpdateBufferAlias(pair.first, pair.second, false);
+      }
+      size_t count = std::min(context.yielded.size(),
+                              context.iterArgs.size());
+      for (size_t i = 0; i < count; ++i)
+        UpdateBufferAlias(context.yielded[i], context.iterArgs[i].first,
+                          false);
+      count = std::min(context.results.size(), context.yielded.size());
+      for (size_t i = 0; i < count; ++i) {
+        traceback[context.results[i]] = context.yielded[i];
+        UpdateBufferAlias(context.results[i], context.yielded[i], false);
       }
       loopStack.push_back(std::move(context));
       continue;
@@ -940,9 +961,6 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
     if ((op.opName == "scf.yield" ||
          op.opName == "scf.for.implicit_yield") &&
         !loopStack.empty() && IsInRegion(op, loopStack.back().region)) {
-      loopStack.back().yielded =
-          op.opName == "scf.yield" ? extractSSAs(line)
-                                   : std::vector<std::string>{};
       (void)UpdateLinearOperation(op);
       continue;
     }
@@ -984,15 +1002,6 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
         throw std::runtime_error("PlanMemory: unmatched scf.for.end");
       LoopContext context = loopStack.back();
       loopStack.pop_back();
-      size_t count = std::min(context.yielded.size(), context.iterArgs.size());
-      for (size_t i = 0; i < count; ++i) {
-        UpdateBufferAlias(context.yielded[i], context.iterArgs[i].first, false);
-      }
-      count = std::min(context.results.size(), context.yielded.size());
-      for (size_t i = 0; i < count; ++i) {
-        traceback[context.results[i]] = context.yielded[i];
-        UpdateBufferAlias(context.results[i], context.yielded[i], false);
-      }
       OpInfo &info = UpdateLinearOperation(op);
       OpKillHandle(info);
       continue;

@@ -28,8 +28,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--suffix-enable-auto-multi-buffer", action="store_true")
     parser.add_argument("--suffix-enable-triton-kernel-compile",
                         action="store_true")
-    parser.add_argument("--suffix-local-multi-buffer-strategy", default="no-limit")
-    parser.add_argument("--suffix-mix-multi-buffer-strategy", default="no-limit")
+    parser.add_argument("--suffix-local-multi-buffer-strategy", default="no-l0c")
+    parser.add_argument("--suffix-mix-multi-buffer-strategy", default="only-cube")
     parser.add_argument("--restrict-inplace-as-isa", action="store_true")
     parser.add_argument("--random-seed", default=None)
     return parser.parse_args()

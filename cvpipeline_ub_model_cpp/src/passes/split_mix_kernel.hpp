@@ -582,12 +582,16 @@ inline GenericModule RunSplitMixKernelProjection(
 
   bool changed = false;
   std::vector<int> vectorFunctions;
-  for (GenericOperation &function : module.operations) {
-    if (!IsSplitMixFunction(function))
-      continue;
+  std::vector<int> mixFunctions;
+  for (const GenericOperation &operation : module.operations)
+    if (IsSplitMixFunction(operation))
+      mixFunctions.push_back(operation.id);
+  for (int functionId : mixFunctions) {
+    GenericOperation &function =
+        module.operations.at(static_cast<size_t>(functionId));
     changed = true;
     MarkSplitMixProjectedFunction(function, retainedCore);
-    vectorFunctions.push_back(function.id);
+    vectorFunctions.push_back(functionId);
 
     std::vector<int> descendants;
     std::function<void(int)> collect = [&](int operationId) {
@@ -602,7 +606,7 @@ inline GenericModule RunSplitMixKernelProjection(
             descendants.push_back(child);
           }
     };
-    collect(function.id);
+    collect(functionId);
 
     GenericRewriter rewriter(module);
     for (int operationId : descendants) {

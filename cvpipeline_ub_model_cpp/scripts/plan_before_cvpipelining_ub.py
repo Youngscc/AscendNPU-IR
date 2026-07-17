@@ -97,11 +97,11 @@ def parse_args() -> argparse.Namespace:
         help_text=("Run Triton-only DPS insert-slice optimization before "
                    "OneShotBufferize."))
     suffix_group.add_argument(
-        "--suffix-local-multi-buffer-strategy", default="no-limit",
+        "--suffix-local-multi-buffer-strategy", default="no-l0c",
         choices=["no-limit", "only-cube", "only-vector", "no-l0c"],
         help="Strategy passed to --limit-auto-multi-buffer-of-local-buffer.")
     suffix_group.add_argument(
-        "--suffix-mix-multi-buffer-strategy", default="no-limit",
+        "--suffix-mix-multi-buffer-strategy", default="only-cube",
         choices=["no-limit", "only-cube", "only-vector", "no-l0c"],
         help="Strategy passed to --limit-auto-multi-buffer-buffer.")
     suffix_group.add_argument(

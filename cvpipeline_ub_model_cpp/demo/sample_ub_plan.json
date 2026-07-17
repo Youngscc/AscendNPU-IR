@@ -12,8 +12,8 @@
     },
     "suffix_plan_memory": {
       "enable_auto_multi_buffer": false,
-      "local_multi_buffer_strategy": "no-limit",
-      "mix_multi_buffer_strategy": "no-limit",
+      "local_multi_buffer_strategy": "no-l0c",
+      "mix_multi_buffer_strategy": "only-cube",
       "random_seed": null,
       "restrict_inplace_as_isa": false
     }

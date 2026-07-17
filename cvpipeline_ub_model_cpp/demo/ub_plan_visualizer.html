@@ -578,6 +578,7 @@
                   <th>Name</th>
                   <th>Extent</th>
                   <th>Offset</th>
+                  <th>Multi-buffer / Copies</th>
                   <th>Live Range</th>
                   <th>End Byte</th>
                   <th>Storage</th>
@@ -773,19 +774,40 @@
         throw new Error("Input does not contain result.plan.");
       }
       const plan = result.plan.map((buffer, index) => ({
+        functionName: String(buffer.function ?? ""),
         name: String(buffer.name ?? `buffer_${index}`),
         extentBits: Number(buffer.extent_bits ?? buffer.extentBits ?? 0),
         offsetBytes: Number(buffer.offset_bytes ?? buffer.offsetBytes ?? 0),
         allocTime: Number(buffer.alloc_time ?? buffer.allocTime ?? 0),
-        freeTime: Number(buffer.free_time ?? buffer.freeTime ?? 0)
+        freeTime: Number(buffer.free_time ?? buffer.freeTime ?? 0),
+        multiBufferNum: Math.max(1, Number(
+          buffer.multi_buffer_num ?? buffer.multiBufferNum ?? 1))
       })).filter(buffer => Number.isFinite(buffer.extentBits) &&
                            Number.isFinite(buffer.offsetBytes) &&
                            Number.isFinite(buffer.allocTime) &&
-                           Number.isFinite(buffer.freeTime));
+                           Number.isFinite(buffer.freeTime) &&
+                           Number.isFinite(buffer.multiBufferNum));
       if (plan.length === 0) throw new Error("The plan table is empty.");
+      const physicalCopyCounts = new Map();
+      for (const buffer of plan) {
+        const logicalKey = `${buffer.functionName}\u0000${buffer.name}`;
+        physicalCopyCounts.set(
+          logicalKey, (physicalCopyCounts.get(logicalKey) || 0) + 1);
+      }
+      const copyOrdinals = new Map();
+      for (const buffer of plan) {
+        const logicalKey = `${buffer.functionName}\u0000${buffer.name}`;
+        const copyIndex = (copyOrdinals.get(logicalKey) || 0) + 1;
+        copyOrdinals.set(logicalKey, copyIndex);
+        buffer.copyIndex = copyIndex;
+        buffer.physicalCopyCount = physicalCopyCounts.get(logicalKey);
+      }
       const placements = groupPlacements(plan);
       const addresses = analyzeAddresses(placements);
-      return { data, result, plan, placements, addresses };
+      return {
+        data, result, plan, placements, addresses,
+        logicalBufferCount: copyOrdinals.size
+      };
     }
 
     function groupPlacements(plan) {
@@ -805,7 +827,9 @@
           byGeometry.set(key, placement);
           placements.push(placement);
         }
-        placement.names.push(buffer.name);
+        placement.names.push(buffer.physicalCopyCount > 1
+          ? `${buffer.name} [${buffer.copyIndex}/${buffer.physicalCopyCount}]`
+          : buffer.name);
       }
       return placements;
     }
@@ -843,7 +867,9 @@
       renderUtilChart(model.result, model.plan);
       inputText.value = JSON.stringify(data, null, 2);
       status.textContent =
-        `Rendered ${model.plan.length} buffers in ${model.placements.length} visual placements.`;
+        `Rendered ${model.logicalBufferCount} logical buffers as ` +
+        `${model.plan.length} physical copies in ` +
+        `${model.placements.length} visual placements.`;
     }
 
     function updateZoomLabels() {
@@ -985,12 +1011,22 @@
       const usage = capacityBits > 0 ? displayBits / capacityBits : 0;
       const summary = document.getElementById("summary");
       summary.innerHTML = "";
+      const logicalBuffers = new Set(plan.map(buffer =>
+        `${buffer.functionName}\u0000${buffer.name}`)).size;
+      const multiBufferCopies = plan.filter(buffer =>
+        buffer.physicalCopyCount > 1).length;
+      const multiBufferOwners = new Set(plan.filter(buffer =>
+        buffer.physicalCopyCount > 1).map(buffer =>
+          `${buffer.functionName}\u0000${buffer.name}`)).size;
       summary.append(
         metric("Status", overflow ? "Overflow" : success ? "Success" : "Blocked", overflow ? "danger" : success ? "ok" : "warn"),
         metric(overflow ? "Required" : "Peak",
                formatBits(displayBits),
                overflow ? "danger" : success ? "ok" : "warn"),
-        metric("Buffers / Placements", `${plan.length} / ${placements.length}`, "")
+        metric("Buffers / Placements", `${logicalBuffers} / ${placements.length}`, ""),
+        metric("Multi-buffer", multiBufferOwners > 0
+          ? `${multiBufferOwners} buffers / ${multiBufferCopies} copies`
+          : "Disabled / none", "")
       );
       const fill = document.getElementById("capacityFill");
       fill.style.width = `${Math.min(100, Math.max(0, usage * 100))}%`;
@@ -1227,6 +1263,11 @@
           [buffer.name, "name"],
           [formatBits(buffer.extentBits), ""],
           [formatBytes(buffer.offsetBytes), ""],
+          [buffer.physicalCopyCount > 1
+            ? `x${buffer.physicalCopyCount} · copy ${buffer.copyIndex}/${buffer.physicalCopyCount}` +
+              (buffer.multiBufferNum !== buffer.physicalCopyCount
+                ? ` · mark x${buffer.multiBufferNum}` : "")
+            : "x1", ""],
           [`${buffer.allocTime} -> ${buffer.freeTime}`, ""],
           [formatBytes(endByte), ""],
           [storage, ""]
@@ -1263,7 +1304,8 @@
       const entries = [
         ["Unique placement", ""],
         ["Inplace / shared", "shared"],
-        ["Address reused over time", "reused"]
+        ["Address reused over time", "reused"],
+        ["Physical copies use [copy/total] labels", ""]
       ];
       for (const [label, tone] of entries) {
         const item = document.createElement("span");

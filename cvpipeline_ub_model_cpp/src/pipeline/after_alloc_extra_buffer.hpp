@@ -2,6 +2,7 @@
 #define CVPIPELINE_UB_MODEL_CPP_AFTER_ALLOC_EXTRA_BUFFER_HPP
 
 #include "../passes/alloc_extra_buffer.hpp"
+#include "../passes/affine_min_max_canonicalization.hpp"
 #include "../passes/align_storage.hpp"
 
 namespace cvub {
@@ -50,6 +51,70 @@ inline std::optional<uint64_t> TryStaticBufferBits(const std::string &type) {
                     "AllocExtraBuffer allocation bits");
 }
 
+// Projection of the ValueBoundsConstraintSet rule used by
+// ConstantizeBufferSizePass for the tiled extent form emitted by
+// TileAndBindSubBlock:
+//
+//   extent = min(base + tileSize, other) - base
+//
+// Since min(base + tileSize, other) <= base + tileSize, the closed upper
+// bound is tileSize. The generic IR stores affine expressions in the same
+// value-based form used by ConvertArithToAffine.
+inline std::optional<int64_t> ConstantizeBufferSizeUpperBound(
+    const GenericModule &module, int value) {
+  const std::map<int, const GenericOperation *> definitions =
+      DefiningOperations(module);
+  const auto definition = definitions.find(value);
+  if (definition == definitions.end() ||
+      definition->second->name != "affine.apply")
+    return std::nullopt;
+  const std::optional<std::string> expression =
+      ExistingAffineApplyExpression(*definition->second);
+  if (!expression)
+    return std::nullopt;
+  const std::optional<AffineLinearForm> extent =
+      FlattenAffineLinearExpression(*expression);
+  if (!extent || extent->coefficients.size() != 2)
+    return std::nullopt;
+
+  std::optional<int> minValue;
+  std::optional<int> baseValue;
+  for (const auto &[term, coefficient] : extent->coefficients) {
+    const std::optional<int> termValue = AffineValue(term);
+    if (!termValue)
+      return std::nullopt;
+    if (coefficient == 1)
+      minValue = *termValue;
+    else if (coefficient == -1)
+      baseValue = *termValue;
+    else
+      return std::nullopt;
+  }
+  if (!minValue || !baseValue)
+    return std::nullopt;
+  const auto minDefinition = definitions.find(*minValue);
+  if (minDefinition == definitions.end() ||
+      minDefinition->second->name != "affine.min")
+    return std::nullopt;
+  const std::optional<std::vector<std::string>> minExpressions =
+      ExistingAffineMinMaxExpressions(*minDefinition->second);
+  if (!minExpressions)
+    return std::nullopt;
+
+  for (const std::string &candidate : *minExpressions) {
+    const std::optional<AffineLinearForm> bound =
+        FlattenAffineLinearExpression(candidate);
+    if (!bound || bound->coefficients.size() != 1)
+      continue;
+    const auto &[term, coefficient] = *bound->coefficients.begin();
+    if (coefficient != 1 || AffineValue(term) != baseValue ||
+        bound->constant < 0)
+      continue;
+    return CheckedAddInt64(bound->constant, extent->constant);
+  }
+  return std::nullopt;
+}
+
 inline std::vector<std::optional<int64_t>> AllocationUpperBounds(
     const PostBufferizationRewriteState &postBufferization, const BufferAllocation &allocation) {
   const std::optional<MemRefTypeModel> allocationType =
@@ -65,6 +130,24 @@ inline std::vector<std::optional<int64_t>> AllocationUpperBounds(
 
   const size_t first = allocation.source.find(':');
   const size_t second = allocation.source.find(':', first + 1);
+  if (startsWith(allocation.source, "result:") &&
+      first != std::string::npos && second != std::string::npos) {
+    size_t dynamicIndex = 0;
+    for (std::optional<int64_t> &bound : bounds) {
+      if (bound)
+        continue;
+      if (dynamicIndex >= allocation.dynamicExtentValues.size())
+        throw std::runtime_error(
+            "AllocExtraBuffer: dynamic result allocation extent is missing");
+      bound = ConstantizeBufferSizeUpperBound(
+          postBufferization.bufferized.logicalModule,
+          allocation.dynamicExtentValues[dynamicIndex++]);
+      if (!bound)
+        throw std::runtime_error(
+            "AllocExtraBuffer: dynamic result allocation upper bound is unknown");
+    }
+    return bounds;
+  }
   if (!startsWith(allocation.source, "operand:") ||
       first == std::string::npos || second == std::string::npos)
     throw std::runtime_error("AllocExtraBuffer: dynamic allocation source is unsupported: " +
@@ -177,6 +260,10 @@ inline std::string GeneratedBufferType(
 inline std::optional<ExtraBufferAllocation> ModelExtraBufferForOperation(
     GenericOperation operation,
     std::vector<std::string> physicalTypes) {
+  // AllocExtraBufferPass walks only operations implementing
+  // ExtraBufferOpInterface. Operations such as hivm.hir.copy are not visited.
+  if (!HasAllocExtraBufferInterface(operation.name))
+    return std::nullopt;
   if (operation.name == "hivm.hir.vinterleave") {
     for (size_t index = 0; index < operation.operandTypes.size(); ++index) {
       const std::optional<MemRefTypeModel> type =
@@ -218,8 +305,11 @@ inline std::optional<ExtraBufferAllocation> ModelExtraBufferForOperation(
   operation.resultTypes.clear();
   operation.dpsInputs.clear();
   operation.dpsInits.clear();
-  if (HasModeledOperationSemantics(operation.name))
-    ApplyOperationSemantics(operation);
+  if (!HasModeledOperationSemantics(operation.name))
+    throw std::runtime_error(
+        "AllocExtraBuffer: unreviewed operation semantics: " +
+        operation.name);
+  ApplyOperationSemantics(operation);
   fake.operations.push_back(operation);
   const std::vector<ExtraBufferAllocation> extra =
       ModelAllocExtraBuffer(fake, "kernel");

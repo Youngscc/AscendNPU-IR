@@ -31,6 +31,7 @@ inline bool HasModeledOperationSemantics(const std::string &name) {
       "hivm.hir.vpow", "hivm.hir.vrec", "hivm.hir.vreduce",
       "hivm.hir.vsel", "hivm.hir.vshr", "hivm.hir.vsort",
       "hivm.hir.vsqrt", "hivm.hir.vsub", "hivm.hir.vtranspose",
+      "hivm.hir.vxor",
       "llvm.inline_asm", "llvm.intr.assume", "memref.alloc",
       "memref.collapse_shape", "memref.load", "memref.store",
       "memref.reinterpret_cast",

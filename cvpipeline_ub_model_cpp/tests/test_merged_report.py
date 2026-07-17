@@ -13,9 +13,15 @@ VECTOR_ADD = (
     ROOT
     / "cvpipeline_ub_model_cpp/examples/inputs/demo_vector_add_before_cvpipelining.mlir"
 )
-DYNAMIC_ALIGN = (
+ATTENTION_OVERFLOW = (
     ROOT
     / "cvpipeline_ub_model_cpp/data/before_cvpipelining/attn_fwd.ttadapter/before_cvpipelining_func_func_attn_fwd_32.mlir"
+)
+SUBSET_HOISTING = (
+    ROOT
+    / "cvpipeline_ub_model_cpp/data/before_cvpipelining/"
+      "triton.language.extra.cann.extension.get_element.ttadapter/"
+      "before_cvpipelining_func_func_get_element_test_kernel_32.mlir"
 )
 
 
@@ -75,10 +81,10 @@ assert [
 
 print("[PASS] default PlanMemory inplace pairs remain exact")
 
-exception_blocked = subprocess.run(
+attention_overflow = subprocess.run(
     [
         str(MODEL),
-        f"--before-cvpipelining-ir={DYNAMIC_ALIGN}",
+        f"--before-cvpipelining-ir={ATTENTION_OVERFLOW}",
         "--format=json",
         "--random-seed=0",
     ],
@@ -86,15 +92,36 @@ exception_blocked = subprocess.run(
     capture_output=True,
     check=False,
 )
-assert exception_blocked.returncode == 1, exception_blocked
-exception_report = json.loads(exception_blocked.stdout)
-assert exception_report["precision"] == "incomplete", exception_report
-assert exception_report["status"] == "blocker", exception_report
-assert exception_report["ub_peak_bits"] is None, exception_report
-assert exception_report["required_bits"] is None, exception_report
-assert exception_report["functions"] == [], exception_report
+assert attention_overflow.returncode == 2, attention_overflow
+attention_report = json.loads(attention_overflow.stdout)
+assert attention_report["precision"] == "exact", attention_report
+assert attention_report["status"] == "overflow", attention_report
+assert attention_report["ub_peak_bits"] == 1716224, attention_report
+assert attention_report["required_bits"] == 1716224, attention_report
+assert len(attention_report["functions"]) == 1, attention_report
 
-print("[PASS] pass exceptions obey the blocker contract")
+print("[PASS] dynamic alignment produces an exact overflow plan")
+
+subset_hoisting = subprocess.run(
+    [
+        str(MODEL),
+        f"--before-cvpipelining-ir={SUBSET_HOISTING}",
+        "--format=json",
+        "--random-seed=0",
+    ],
+    text=True,
+    capture_output=True,
+    check=False,
+)
+assert subset_hoisting.returncode == 0, subset_hoisting
+subset_report = json.loads(subset_hoisting.stdout)
+assert subset_report["precision"] == "exact", subset_report
+assert subset_report["status"] == "success", subset_report
+assert subset_report["ub_peak_bits"] == 177408, subset_report
+assert subset_report["required_bits"] == 177408, subset_report
+assert len(subset_report["functions"]) == 1, subset_report
+
+print("[PASS] subset-hoisting input produces an exact plan")
 
 wrapped = subprocess.run(
     [
