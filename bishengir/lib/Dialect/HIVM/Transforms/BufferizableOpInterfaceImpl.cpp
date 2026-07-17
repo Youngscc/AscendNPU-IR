@@ -577,6 +577,8 @@ void mlir::hivm::registerBufferizableOpInterfaceExternalModels(
     ND2NZOp::attachInterface<NDNZConversionOpInterface<ND2NZOp>>(*ctx);
     NZ2NDOp::attachInterface<NDNZConversionOpInterface<NZ2NDOp>>(*ctx);
     L12UBOp::attachInterface<HIVMCopyOrStoreOpInterface<L12UBOp>>(*ctx);
+    LoadMXScaleOp::attachInterface<HIVMCopyOrStoreOpInterface<LoadMXScaleOp>>(
+        *ctx);
     CopyOp::attachInterface<HIVMCopyOrStoreOpInterface<hivm::CopyOp>>(*ctx);
     CustomOp::attachInterface<HIVMCustomOpInterface<CustomOp>>(*ctx);
     CustomMacroOp::attachInterface<HIVMCustomOpInterface<CustomMacroOp>>(*ctx);

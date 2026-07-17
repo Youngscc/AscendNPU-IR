@@ -138,6 +138,12 @@ std::unique_ptr<Pass> createConstantizeBufferSizePass();
 /// Create a pass to allocate extra buffer
 std::unique_ptr<Pass> createAllocExtraBufferPass();
 
+/// Create a pass to outline memref.alloc with static shape in VF
+std::unique_ptr<Pass> createOutlineAllocInVFPass();
+
+/// Create a pass to outline hivm.load in VF by rewriting it to hivm.copy.
+std::unique_ptr<Pass> createOutlineCopyInVFPass();
+
 /// Create a pass to remove unnecessary buffer address return
 std::unique_ptr<Pass> createHIVMOptFuncOutputPass();
 
@@ -257,6 +263,9 @@ std::unique_ptr<Pass> createHIVMInlineOTFLoadStorePass();
 /// Create a pass to analyze arith/vector mask
 std::unique_ptr<Pass> createArithVectorMaskAnalysisPass();
 
+// Create a pass to annotate alias info within VF.
+std::unique_ptr<Pass> createAnnotateVFAliasPass();
+
 /// Create a pass to tile and bind sub block for mix cv function.
 std::unique_ptr<Pass>
 createTileAndBindSubBlockPass(const TileAndBindSubBlockOptions &options = {});
@@ -264,6 +273,9 @@ createTileAndBindSubBlockPass(const TileAndBindSubBlockOptions &options = {});
 /// Create a pass to bubble up extract slice for hivm ops.
 std::unique_ptr<Pass> createHIVMBubbleUpExtractSlicePass(
     const HIVMBubbleUpExtractSliceOptions &options = {});
+
+/// Create a pass to vectorize hivm ops.
+std::unique_ptr<Pass> createHIVMVectorizeOpsPass();
 
 // Create a pass to insert init and finish for debug.
 std::unique_ptr<Pass> createInsertInitAndFinishForDebugPass();
@@ -324,6 +336,10 @@ std::unique_ptr<Pass> createRemoveHIVMDataLayoutAnnotationPass();
 
 /// Create a pass to remove redundant copy ops in VF functions.
 std::unique_ptr<Pass> createRemoveCopyOpsPass();
+
+/// Create a pass to fuse linalg.transpose into hivm.hir.load via DMA
+/// on-the-fly transpose.
+std::unique_ptr<Pass> createFuseTransposeIntoLoadPass();
 
 //===----------------------------------------------------------------------===//
 // Registration

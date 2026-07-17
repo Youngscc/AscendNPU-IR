@@ -309,21 +309,24 @@ def FixpipeOp : HIVM_DmaOp<"fixpipe", [
                        }]>:$unit_flag_cond,
                        DefaultValuedAttr<HIVM_FixpipeDMAModeAttr,
                          "FixpipeDMAMode::NZ2NZ">:$dma_mode,
-                        DefaultValuedOptionalAttr<HIVM_FixpipeDualDstModeAttr,
+                       DefaultValuedOptionalAttr<HIVM_FixpipeDualDstModeAttr,
                          "FixpipeDualDstMode::NO_DUAL">:$dual_dst_mode,
-                        DefaultValuedOptionalAttr<HIVM_FixpipePreQuantModeAttr,
+                       DefaultValuedOptionalAttr<HIVM_FixpipeSubBlockAttr,
+                         "FixpipeSubBlock::SUB_BLOCK_0">:$sub_block_idx,
+                       DefaultValuedOptionalAttr<HIVM_FixpipePreQuantModeAttr,
                          "FixpipePreQuantMode::NO_QUANT">:$pre_quant,
-                        DefaultValuedOptionalAttr<HIVM_FixpipePreReluModeAttr,
+                       DefaultValuedOptionalAttr<HIVM_FixpipePreReluModeAttr,
                          "FixpipePreReluMode::NO_RELU">:$pre_relu,
-                        DefaultValuedOptionalAttr<BoolAttr, "false">:$channel_split,
-                        OptionalAttr<UnitFlagArrayAttr>:$unit_flag_mode,
-                        Optional<AnyFloat>:$quant_scale
+                       DefaultValuedOptionalAttr<BoolAttr, "false">:$channel_split,
+                       OptionalAttr<UnitFlagArrayAttr>:$unit_flag_mode,
+                       Optional<AnyFloat>:$quant_scale
   );
   let results = (outs Optional<AnyRankedTensor>:$result_tensor);
   let builders = [
     OpBuilder<(ins "TypeRange":$result, "Value":$src, "Value":$dst,
                     CArg<"FixpipeDMAModeAttr", "nullptr">:$dma_mode,
                     CArg<"FixpipeDualDstModeAttr", "nullptr">:$dual_dst_mode,
+                    CArg<"FixpipeSubBlockAttr", "nullptr">:$sub_block_idx,
                     CArg<"FixpipePreQuantModeAttr", "nullptr">:$pre_quant,
                     CArg<"FixpipePreReluModeAttr", "nullptr">:$pre_relu,
                     CArg<"BoolAttr", "nullptr">:$channel_split,
@@ -332,6 +335,7 @@ def FixpipeOp : HIVM_DmaOp<"fixpipe", [
     OpBuilder<(ins "Type":$result, "Value":$src, "Value":$dst,
                     CArg<"FixpipeDMAModeAttr", "nullptr">:$dma_mode,
                     CArg<"FixpipeDualDstModeAttr", "nullptr">:$dual_dst_mode,
+                    CArg<"FixpipeSubBlockAttr", "nullptr">:$sub_block_idx,
                     CArg<"FixpipePreQuantModeAttr", "nullptr">:$pre_quant,
                     CArg<"FixpipePreReluModeAttr", "nullptr">:$pre_relu,
                     CArg<"BoolAttr", "nullptr">:$channel_split,
@@ -426,25 +430,25 @@ def L12UBOp : HIVM_DmaOp<"l12ub",
   let extraClassDeclaration = DmaOpBaseDecl;
 }
 
-def LoadMXScaleOp
-    : HIVM_DmaOp<
-          "load_scale", [SinglePipeOpTrait, OpPipeTrait<"PIPE::PIPE_MTE2">,
-                         HIVMCoreTypeInterface, CubeCoreTypeTrait,
-                         NoMaxRankTrait,
-                         DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+def LoadMXScaleOp : HIVM_DmaOp<"load_scale", [
+  SinglePipeOpTrait, OpPipeTrait<"PIPE::PIPE_MTE2">,
+  HIVMCoreTypeInterface, CubeCoreTypeTrait,
+  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
 ]> {
-  let summary =
-      "HIVM data copy operation for loading scale tensor for mmad mx op";
-  let description =
-      [{ loading scale tensor from OUT to L1 using special version of dn2nz . }];
-  let arguments = (ins TensorOrMemref:$src, TensorOrMemref:$dst,
-      DefaultValuedOptionalAttr<BoolAttr, "false">:$is_transposed);
+  let summary = "HIVM data movement for loading an MX scale tensor";
+  let description = [{
+    Loads an MX scale tensor from global memory to L1 using the specialized
+    data layout required by MX matrix multiplication.
+  }];
+  let arguments = (ins TensorOrMemref:$src,
+                       TensorOrMemref:$dst,
+                       DefaultValuedOptionalAttr<BoolAttr, "false">:$is_transposed);
   let results = (outs Optional<AnyRankedTensor>:$result_tensor);
   let assemblyFormat = [{
     attr-dict
     `ins` `(` $src `:` type($src) `)`
     `outs` `(` $dst `:` type($dst) `)`
-    (`is_transposed` `=` $is_transposed^ )?
+    (`is_transposed` `=` $is_transposed^)?
     (`->` type($result_tensor)^)?
   }];
   let extraClassDeclaration = DmaOpBaseDecl;

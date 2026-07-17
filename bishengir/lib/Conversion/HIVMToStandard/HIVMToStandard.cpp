@@ -437,6 +437,21 @@ public:
   }
 };
 
+class LoadMXScaleOpToLibraryCallPattern
+    : public OpRewritePattern<hivm::LoadMXScaleOp> {
+public:
+  using OpRewritePattern<hivm::LoadMXScaleOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(LoadMXScaleOp op,
+                                PatternRewriter &rewriter) const final {
+    replaceWithLibCall(rewriter, op,
+                       cast<OpWithLibraryFunction>(op.getOperation())
+                           .getOpLibraryCallName(/*isOpsAligned=*/std::nullopt),
+                       op->getOperands(), {});
+    return success();
+  }
+};
+
 class NZ2NDOpToLibraryCallPattern : public OpRewritePattern<hivm::NZ2NDOp> {
   using OpRewritePattern<hivm::NZ2NDOp>::OpRewritePattern;
 
@@ -538,6 +553,29 @@ private:
     additionalArgs.push_back(preRelu);
     additionalArgs.push_back(channelSplit);
     additionalArgs.push_back(unitFlagMode);
+
+    if (auto dualDstAttr = op.getDualDstModeAttr()) {
+      const auto dualDstEnum = dualDstAttr.getDualDstMode();
+      int8_t dualDstVal = static_cast<int8_t>(dualDstEnum);
+      Value dualDstMode =
+          rewriter.create<arith::ConstantIntOp>(op->getLoc(), dualDstVal, 8);
+      additionalArgs.push_back(dualDstMode);
+    } else if (dstIsUB(op)) {
+      // Single-destination L0C->UB fixpipe: the target sub-block is a bool
+      // argument (0 -> sub-block 0's UB, 1 -> sub-block 1's).
+      bool subBlockId = op.getSubBlockIdx() != FixpipeSubBlock::SUB_BLOCK_0;
+      additionalArgs.push_back(rewriter.create<arith::ConstantOp>(
+          op->getLoc(), rewriter.getBoolAttr(subBlockId)));
+    }
+  }
+
+  /// True when the fixpipe destination is a UB memref
+  static bool dstIsUB(FixpipeOp op) {
+    auto memref = dyn_cast<BaseMemRefType>(op.getDst().getType());
+    if (!memref)
+      return false;
+    auto space = dyn_cast_if_present<AddressSpaceAttr>(memref.getMemorySpace());
+    return space && space.getAddressSpace() == hivm::AddressSpace::UB;
   }
 };
 
@@ -1824,6 +1862,7 @@ void mlir::hivm::populateHIVMToStandardConversionPatterns(
                Conv1DL1OpToLibraryCallPattern,
                Conv2DL1OpToLibraryCallPattern,
                ND2NZOpToLibraryCallPattern,
+               LoadMXScaleOpToLibraryCallPattern,
                NZ2NDOpToLibraryCallPattern,
                L12UBOpToLibraryCallPattern,
                FixpipeOpToLibraryCallPattern,
@@ -1907,6 +1946,7 @@ void ConvertHIVMToStandardPass::runOnOperation() {
                       hivm::Conv1DL1Op,
                       hivm::Conv2DL1Op,
                       hivm::ND2NZOp,
+                      hivm::LoadMXScaleOp,
                       hivm::NZ2NDOp,
                       hivm::FixpipeOp,
                       hivm::MatmulOp,

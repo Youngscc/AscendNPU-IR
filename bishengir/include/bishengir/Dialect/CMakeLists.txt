@@ -1,3 +1,4 @@
+add_subdirectory(Analysis)
 add_subdirectory(Annotation)
 add_subdirectory(Arith)
 add_subdirectory(HACC)

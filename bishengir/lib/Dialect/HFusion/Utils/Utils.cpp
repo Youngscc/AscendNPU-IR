@@ -376,6 +376,13 @@ bool hfusion::isMatmulOps(Operation *op) {
          isa<linalg::MatmulTransposeBOp>(op);
 }
 
+bool hfusion::isSimtOps(Operation *op) {
+  return isa<hfusion::IndirectLoadOp, hfusion::IndirectStoreOp,
+             hfusion::StrideLoadOp, hfusion::StrideStoreOp, hfusion::GatherTOp,
+             hfusion::EmbeddingGatherOp,
+             hfusion::IndexPutOp, hfusion::ScatterTOp>(op);
+}
+
 Value hfusion::getReshapeSource(Operation *op) {
   return TypeSwitch<Operation *, Value>(op)
       .Case([](tensor::ExpandShapeOp expand) { return expand.getSrc(); })
@@ -753,6 +760,11 @@ bool hasCustomOp(Operation *op) {
   });
 
   return found;
+}
+
+/// trace value and judge if it is function argument
+bool isFromFunctionArg(mlir::Value v) {
+  return utils::tracebackMemRef(v).getDefiningOp() == nullptr;
 }
 
 } // namespace util
@@ -1400,4 +1412,188 @@ Value hfusion::divWithRoundModeAndCastType(OpBuilder &builder, Location loc, Typ
   Value res =
       hfusion::castTo(builder, divF32->getResults()[0], resType, roundingMode);
   return res;
+}
+
+bool hfusion::isFillOp(Operation *op) {
+  if (auto lop = dyn_cast<linalg::LinalgOp>(op)) {
+    if (isa<linalg::FillOp>(lop))
+      return true;
+
+    if (isa<linalg::TransposeOp>(lop))
+      return false;
+
+    if (lop.getNumParallelLoops() != lop.getNumLoops())
+      return false;
+
+    if (lop.getNumDpsInits() != 1)
+      return false;
+
+    Block *body = &lop->getRegion(0).front();
+    if (body->getOperations().size() != 1)
+      return false;
+
+    auto yieldOp = dyn_cast<linalg::YieldOp>(body->back());
+    if (!yieldOp || yieldOp.getNumOperands() != 1)
+      return false;
+
+    auto value = yieldOp.getOperand(0);
+    return !isa<BaseMemRefType, TensorType>(value.getType());
+  }
+  return false;
+}
+
+// Check if a linalg op operates on a single element
+bool hfusion::isSingleElementLinalgOp(linalg::LinalgOp op) {
+  SmallVector<int64_t> shapes = op.getStaticShape();
+
+  return std::all_of(shapes.begin(), shapes.end(),
+                     [](int64_t dim) { return dim == 1; });
+}
+
+// Check if a linalg op operates on a zero element
+bool hfusion::isZeroElementLinalgOp(linalg::LinalgOp op) {
+  SmallVector<int64_t> shapes = op.getStaticShape();
+
+  return std::all_of(shapes.begin(), shapes.end(),
+                     [](int64_t dim) { return dim == 0; });
+}
+
+static bool canTraceBackToMatmul(Value operand) {
+  Operation *definingOp = operand.getDefiningOp();
+  if (definingOp)
+    return isa<linalg::MatmulOp, linalg::BatchMatmulOp>(definingOp);
+
+  // Operand is a BlockArgument
+  auto blockArg = dyn_cast<BlockArgument>(operand);
+  auto scfForOp =
+      dyn_cast_if_present<scf::ForOp>(blockArg.getOwner()->getParentOp());
+  if (!scfForOp)
+    return false;
+
+  // Recursively check in case of nested loops
+  if (OpOperand *iterArgOperand = scfForOp.getTiedLoopInit(blockArg))
+    return canTraceBackToMatmul(iterArgOperand->get());
+
+  return false;
+}
+
+static bool isValueReachingMatmul(Value val) {
+  if (val.use_empty()) {
+    // not used value cannot reach matmul
+    return false;
+  }
+
+  bool reachable = llvm::any_of(val.getUsers(), [&](Operation *user) {
+    return llvm::TypeSwitch<Operation *, bool>(user)
+        // directly reach matmul-like op
+        .Case<linalg::MatmulOp, linalg::BatchMatmulOp, hfusion::MatMulMxOp>(
+            [](auto) { return true; })
+        // generic op reaches matmul if first input can trace back to matmul.
+        .Case<linalg::GenericOp>([&](auto genericOp) {
+          if (genericOp.getNumDpsInputs() == 0) {
+            return false;
+          }
+          // TODO: Should we check all inputs/operands of generic op?
+          return canTraceBackToMatmul(genericOp.getInputs()[0]);
+        })
+        // trace through scf::ForOp arguments
+        .Case<scf::ForOp>([&](auto forOp) {
+          auto inits = forOp.getInitArgs();
+          auto it = llvm::find(inits, val);
+          if (it == inits.end()) {
+            return false;
+          }
+          unsigned idx = static_cast<unsigned>(std::distance(inits.begin(), it));
+          Value iterArg = forOp.getRegionIterArg(idx);
+          return isValueReachingMatmul(iterArg);
+        })
+        // treat unhandled cases as not reachable to matmul
+        // TODO: should we handle other cases?
+        .Default(false);
+  });
+
+  LDBG("[isValueReachingMatmul]: val: " << val);
+  LDBG("[isValueReachingMatmul]: reachable: " << reachable);
+  return reachable;
+}
+
+namespace {
+template <typename T> bool canFillLikeOpFuseIntoMatmul(Operation *op) {
+  // for linalg.fill and linalg.transpose
+  /* Check if the DestinationPassing input
+     becomes to_tensor and reaches a matmul */
+  auto candidateOp = cast<T>(op);
+  Value doutput = candidateOp.getDpsInitOperand(0)->get();
+  for (auto *user : doutput.getUsers()) {
+    if (auto totensor = dyn_cast<bufferization::ToTensorOp>(user)) {
+      if (isValueReachingMatmul(totensor.getResult()))
+        return true;
+    }
+  }
+  /* Check if its output directly reaches a matmul */
+  if (candidateOp.getNumResults() == 0)
+    return false;
+  Value output = candidateOp.getResults()[0];
+  return isValueReachingMatmul(output);
+}
+} // end anonymous namespace
+
+bool hfusion::opCanFuseIntoMatmul(Operation *op) {
+  return TypeSwitch<Operation *, bool>(op)
+      .Case([](linalg::FillOp op) {
+        return canFillLikeOpFuseIntoMatmul<linalg::FillOp>(op);
+      })
+      .Case([](linalg::TransposeOp op) {
+        return canFillLikeOpFuseIntoMatmul<linalg::TransposeOp>(op);
+      })
+      .Default([](Operation *op) { return false; });
+}
+
+bool hfusion::isZeroOrEmptyTensor(Value op) {
+  auto emptyOp = op.getDefiningOp<tensor::EmptyOp>();
+  if (emptyOp) {
+    return true;
+  }
+
+  auto linalgFill = op.getDefiningOp<linalg::FillOp>();
+  if (!linalgFill) {
+    return false;
+  }
+  auto cstValue = linalgFill.getDpsInputOperand(0)
+                      ->get()
+                      .getDefiningOp<arith::ConstantOp>();
+  if (!cstValue) {
+    return false;
+  }
+  // Check if value is constant int or float zero.
+  std::optional<int64_t> cstInt = getConstantIntValue(cstValue.getValue());
+  if (cstInt && (*cstInt) == 0) {
+    return true;
+  }
+  auto cstFloat = dyn_cast_if_present<FloatAttr>(cstValue.getValue());
+  return cstFloat && cstFloat.getValue().isZero();
+}
+
+bool hfusion::shouldUseTileReductionUsingForV2(Operation *op) {
+  if (!isa<linalg::LinalgOp>(op))
+    return false;
+
+  auto linalgOp = cast<linalg::LinalgOp>(op);
+  if (linalgOp.getNumParallelLoops() == 0)
+    return false;
+  if (linalgOp.getNumReductionLoops() != 1)
+    return false;
+
+  // Tile-reduction-using-for may fail when multiple outputs depend on each
+  // other; keep those cases on the older tiling path.
+  if (linalgOp.getRegionOutputArgs().size() > 1)
+    return false;
+
+  SmallVector<unsigned> reductionDims;
+  linalgOp.getReductionDims(reductionDims);
+  for (auto dim : reductionDims) {
+    if (dim < linalgOp.getNumLoops() - 1)
+      return false;
+  }
+  return true;
 }

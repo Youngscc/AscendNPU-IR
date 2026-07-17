@@ -27,6 +27,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Pass/Pass.h"
 
 namespace mlir {
@@ -102,10 +103,34 @@ createHFusionOpFusionPass(const HFusionOpFusionOptions &options = {});
 std::unique_ptr<Pass>
 createHFusionAutoSchedulePass(const AutoScheduleOptions &options = {});
 
+/// Create an auto vectorizer pass.
+std::unique_ptr<Pass>
+createHFusionAutoVectorizePass(const AutoVectorizeOptions &options = {});
+
+/// Create a pass to handle non-vectorizeable linalg.generic cases
+std::unique_ptr<Pass> createGenericUnrollerPass();
+
+/// Create an auto vectorize verifier pass.
+std::unique_ptr<Pass> createAutoVectorizeVerifierPass();
+
+/// Create an auto vectorizer v2 pass.
+std::unique_ptr<Pass>
+createHFusionAutoVectorizeV2Pass(const AutoVectorizeV2Options &options = {});
+
+/// Register Tree Reduce v2 pass
+std::unique_ptr<Pass> createTreeReduceV2Pass(const TreeReduceV2Options &options = {});
+
+// Create a pass to perform elemwise op fusion before vectorization
+std::unique_ptr<Pass> createPreVectorizationFusionPass(
+    const PreVectorizationFusionOptions &options = {});
+
 /// Create a pass to execute auto schedule sequence for the target kernel.
 std::unique_ptr<Pass>
 createAutoScheduleInterpreterPass(const std::string &kernelName,
                                   transform::TransformOptions options = {});
+
+/// Create a pass to execute emitted auto vectorize transform sequences.
+std::unique_ptr<Pass> createAutoVectorizeInterpreterPass();
 
 /// Create a pass to erase auto schedule sequence for the target kernel.
 std::unique_ptr<Pass>
@@ -114,6 +139,9 @@ createEraseAutoSchedulePass(const std::string &kernelName);
 /// Create a pass to add ffts base address to func param and annotation
 std::unique_ptr<Pass>
 createAddFFTSAddrPass(const AddFFTSAddrOptions &options = {});
+
+/// Create a pass to outline vector function.
+std::unique_ptr<Pass> createOutlineVectorFunctionPass();
 
 /// Create a pass to lianlg generic ops to named ops
 std::unique_ptr<Pass> createConvertGenericToNamedOpPass();
@@ -235,8 +263,27 @@ std::unique_ptr<Pass> createHFusionFoldUnitDimsPass();
 /// Create a pass to generalize named ops to generic ops.
 std::unique_ptr<Pass> createHFusionGeneralizePass();
 
-// Create a pass to prepare i1 Nx1 linalg.generic before vectorization.
+/// Create a pass to prepare i1 Nx1 linalg.generic before vectorization.
 std::unique_ptr<Pass> createPrepareI1Nx1ForVectorizationPass();
+
+/// Create a pass to simplify VF function arguments.
+std::unique_ptr<Pass> createSimplifyVFArgsPass();
+
+// Create a pass to Merge VF function
+std::unique_ptr<Pass> createMergeVecScopePass(const MergeVecScopeOptions &options = {});
+
+/// Create a pass to pull slice into vector function.
+std::unique_ptr<Pass> createPullSliceIntoVectorFunctionPass();
+
+// Create a pass to vectorize hfusion ops.
+std::unique_ptr<Pass>
+createHFusionVectorizeOpsPass(const VectorizeOpsOptions &options = {});
+
+/// Create a pass to remove mask from unaligned reduction loop.
+std::unique_ptr<Pass> createRemoveMaskFromUnalignedReductionLoopPass();
+
+// Create a pass to remove redundant transfer_write and transfer_read pair
+std::unique_ptr<Pass> createRemoveRedundantWriteAndReadPairPass();
 
 //===----------------------------------------------------------------------===//
 // Registration
@@ -248,6 +295,9 @@ std::unique_ptr<Pass> createPrepareI1Nx1ForVectorizationPass();
 
 /// Register a pass to execute auto schedule sequence for the target kernel.
 void registerAutoScheduleInterpreterPass();
+
+/// Register a pass to execute emitted auto vectorize transform sequences.
+void registerAutoVectorizeInterpreterPass();
 
 /// Register a pass to erase auto schedule sequence for the target kernel.
 void registerEraseAutoSchedulePass();

@@ -460,7 +460,8 @@ rewriteFixpipeThrowOutBatch(Value matrixToStore, SmallVector<Value> indexes,
     rewriter.create<hivm::FixpipeOp>(
         originFixpipe.getLoc(), Type{}, /*src=*/matrixToStore,
         /*dst=*/fixpipeDst, originFixpipe.getDmaModeAttr(),
-        originFixpipe.getDualDstModeAttr(), originFixpipe.getPreQuantAttr(),
+        originFixpipe.getDualDstModeAttr(), originFixpipe.getSubBlockIdxAttr(),
+        originFixpipe.getPreQuantAttr(),
         originFixpipe.getPreReluAttr(), originFixpipe.getChannelSplitAttr());
     return std::nullopt;
   }
@@ -479,7 +480,8 @@ rewriteFixpipeThrowOutBatch(Value matrixToStore, SmallVector<Value> indexes,
     auto newfixpipe = rewriter.create<hivm::FixpipeOp>(
         originFixpipe.getLoc(), resultType, /*src=*/matrixToStore,
         /*dst=*/fixpipeDst, originFixpipe.getDmaModeAttr(),
-        originFixpipe.getDualDstModeAttr(), originFixpipe.getPreQuantAttr(),
+        originFixpipe.getDualDstModeAttr(), originFixpipe.getSubBlockIdxAttr(),
+        originFixpipe.getPreQuantAttr(),
         originFixpipe.getPreReluAttr(), originFixpipe.getChannelSplitAttr());
 
     Value insert = insertTensorValueWithoutBatch(

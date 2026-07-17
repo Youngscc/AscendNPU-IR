@@ -3,6 +3,7 @@ file(GLOB BUBBLE_UP_EXTRACT_SLICE ${CMAKE_CURRENT_SOURCE_DIR}/BubbleUpExtractSli
 file(GLOB GRAPH_SYNC_CONFLICT_SOLVER ${CMAKE_CURRENT_SOURCE_DIR}/GraphSyncSolver/*.cpp)
 file(GLOB INJECT_SYNC ${CMAKE_CURRENT_SOURCE_DIR}/InjectSync/*.cpp)
 file(GLOB INSERT_LOAD_STORE_FOR_MIX_CV ${CMAKE_CURRENT_SOURCE_DIR}/InsertLoadStoreForMixCV/*.cpp)
+file(GLOB NDDMA CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/NDDMA/*.cpp)
 file(GLOB TILING ${CMAKE_CURRENT_SOURCE_DIR}/Tiling/*.cpp)
 set(TILE_AND_BIND_SUB_BLOCK
     ${CMAKE_CURRENT_SOURCE_DIR}/TileAndBindSubBlock/Helper.cpp
@@ -14,12 +15,14 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   ${GRAPH_SYNC_CONFLICT_SOLVER}
   ${INJECT_SYNC}
   ${INSERT_LOAD_STORE_FOR_MIX_CV}
+  ${NDDMA}
   ${TILING}
   ${TILE_AND_BIND_SUB_BLOCK}
   AddFFTSToSyncBlockSetOp.cpp
   AllocExtraBuffer.cpp
   AllocToAlloca.cpp
   AllocToPointerCast.cpp
+  AnnotateVFAlias.cpp
   AutoBlockifyParallelLoop.cpp
   AutoInferBufferSize.cpp
   BindSyncBlockLockArg.cpp
@@ -57,6 +60,7 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   HIVMMapForallToBlocks.cpp
   HIVMOptFuncOutput.cpp
   HIVMOptSinglePoint.cpp
+  HIVMVectorizeOps.cpp
   HoistTightlyCoupledAlloc.cpp
   InferFuncCoreType.cpp
   InferHIVMDataLayout.cpp
@@ -90,6 +94,8 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   NormalizeLoopIterator.cpp
   NormalizeMatmul.cpp
   OptMemPlanForPipeline.cpp
+  OutlineAllocInVF.cpp
+  OutlineCopyInVF.cpp
   PlanMemory.cpp
   RecognizeDeinterleaveOp.cpp
   ReduceRankSubview.cpp
@@ -138,6 +144,8 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   MLIRLLVMDialect
   MLIRMathDialect
   MLIRMemRefDialect
+  MLIRMemRefTransforms
+  MLIRVectorDialect
   BiShengIRMemRefExtDialect
   BiShengIRDialectUtils
   BiShengIRTransform

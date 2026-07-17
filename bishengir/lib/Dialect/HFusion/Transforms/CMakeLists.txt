@@ -12,6 +12,11 @@ add_bishengir_dialect_library(BiShengIRHFusionTransforms
   ${NORMALIZE_UTILS}
   AdaptTritonKernel.cpp
   AddFFTSAddr.cpp
+  AutoVectorize.cpp
+  AutoVectorize/AutoVectorizeInterpreter.cpp
+  AutoVectorize/Verify.cpp
+  AutoVectorizeV2.cpp
+  AutoVectorizeVerifier.cpp
   BufferizableOpInterfaceImpl.cpp
   CacheIO.cpp
   CacheIOForReturnArg.cpp
@@ -28,26 +33,37 @@ add_bishengir_dialect_library(BiShengIRHFusionTransforms
   FoldExtractInsertPair.cpp
   FoldUnitDims.cpp
   FoldSymbolicDim.cpp
+  GenericUnroller.cpp
   HFusionGeneralize.cpp
   HoistTensorEmpty.cpp
   InlineBrc.cpp
   InferFuncFusionKind.cpp
   InferOutShapes.cpp
+  MergeVecScope.cpp
   Normalize.cpp
   NormalizeSliceOps.cpp
   OpFusion.cpp
   OutlineSingleOp.cpp
+  OutlineVectorFunction.cpp
   PackTilingData.cpp
   PrepareI1Nx1ForVectorization.cpp
+  PreVectorizationFusion.cpp
+  PullSliceIntoVectorFunction.cpp
   ReCacheIO.cpp
   RemoveCacheIO.cpp
+  RemoveMaskFromUnalignedReductionLoop.cpp
+  RemoveRedundantWriteAndReadPair.cpp
   ReorderOpsByBFS.cpp
+  SimplifyVFArgs.cpp
   SimplifyOps.cpp
   TensorResToOutParams.cpp
   TilingInterfaceImpl.cpp
+  TreeReduce.cpp
+  TreeReduceV2.cpp
   UnfoldSymbolicDim.cpp
   UpliftWhileToFor.cpp
   LegalizeScalar.cpp
+  VectorizeOps.cpp
   LegalizeBF16.cpp
   LegalizeFP8.cpp
   LegalizeBool.cpp
@@ -67,9 +83,14 @@ add_bishengir_dialect_library(BiShengIRHFusionTransforms
   BiShengIRTransform
   BiShengIRHACCDialect
   BiShengIRHACCUtils
+  BiShengIRHIVMDialect
   BiShengIRHFusionAnalysis
   BiShengIRMathExtDialect
   BiShengIRAnnotationDialect
+  BiShengIRScopeDialect
+  BiShengIRScopeUtils
+  BiShengIRVFFusion
+  BiShengIRHFusionToHIVM
   MLIRAffineDialect
   MLIRArithDialect
   MLIRBufferizationDialect
@@ -84,6 +105,7 @@ add_bishengir_dialect_library(BiShengIRHFusionTransforms
   MLIRMemRefDialect
   MLIRMemRefTransformOps
   MLIRSCFTransformOps
+  MLIRVectorDialect
   MLIRShapeDialect
   MLIRTensorDialect
   MLIRTensorTransformOps

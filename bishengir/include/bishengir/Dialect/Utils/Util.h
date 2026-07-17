@@ -59,6 +59,7 @@ namespace utils {
 constexpr const uint8_t kBitsToByte = 8;
 constexpr static unsigned int INTR_BITS_PER_BYTE = 8;
 constexpr static unsigned int INTR_BYTES_PER_BLOCK = 32;
+constexpr static unsigned int INTR_BYTES_PER_REPEAT = 256;
 constexpr static unsigned int FRACTAL_BLOCK_NUM = 16;
 constexpr static int64_t kUBAlignSizeInBits = 32 * 8;
 static constexpr llvm::StringLiteral kEnableAutoMarkBufferSize =
@@ -68,6 +69,7 @@ static constexpr llvm::StringLiteral maskOpIdx = "mask_op_idx";
 static constexpr llvm::StringLiteral reachedMaskOpsIdx = "reached_mask_ops_idx";
 static constexpr llvm::StringLiteral maskBitWidth = "mask_bit_width";
 static const llvm::StringLiteral kMapForToForallAttrName = "map_for_to_forall";
+const llvm::StringLiteral padConst = "pad_const";
 
 namespace debugger {
 
@@ -154,6 +156,8 @@ std::string to_string(const T &container, int indent, bool useEndl) {
   oss << "]";
   return oss.str();
 }
+
+std::string getPrettyOpName(Operation *op);
 
 } // namespace debugger
 
@@ -435,6 +439,12 @@ Value tracebackMemRef(Value memrefVal);
 /// originate from a alloc op.
 std::optional<memref::AllocOp> tracebackMemRefToAlloc(Value memrefVal);
 
+/// Try to trace back the current mermef-typed value to the source
+/// `mermef.alloc` or `memref` block argument.
+/// Return `std::nullopt` if max-iteration is reached, or that the value doesn't
+/// originate from a alloc op or block argument.
+std::optional<Value> tracebackMemRefToAllocOrBlockArgument(Value memrefVal);
+
 /// Try to trace back the current mermef-typed value to the source values.
 SmallVector<Value> tracebackMemRefAllocAndAlias(Value memrefVal);
 
@@ -622,6 +632,17 @@ Value getSlice(OpBuilder &b, Location loc, Value source,
 bool isAlignedInUB(Type type);
 
 bool isUnstructuredMemAccLoop(Operation *op);
+
+int64_t getNumPerRepeat(Type t);
+
+/// Rewrite loop iter_arg to drop unit dims or to fixed hardware types
+template <bool DropUnitDimOnly>
+struct ForOpLegalization : public OpRewritePattern<scf::ForOp> {
+  using OpRewritePattern<scf::ForOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(scf::ForOp op,
+                                PatternRewriter &rewriter) const override;
+  virtual ~ForOpLegalization() = default;
+};
 
 ModuleOp getTopLevelModuleOp(Operation *op);
 

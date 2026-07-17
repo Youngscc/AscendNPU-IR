@@ -32,5 +32,4 @@ void bishengirRegisterAllDialects(MlirContext context) {
 
 void bishengirRegisterAllPasses() {
   bishengir::registerAllPasses();
-  bishengir::registerBiShengIRCompilePass();
 }

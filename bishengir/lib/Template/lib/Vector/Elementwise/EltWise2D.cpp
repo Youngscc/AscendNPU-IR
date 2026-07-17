@@ -622,10 +622,10 @@ __aiv__ __attribute__((always_inline)) void normalize_vector_last_axis_2d(
             {1}};
         vector_last_axis_brc_2d<SRC_T, DST_T>(src1, new_src1, &new_tmp_buf);
         tmp_buf_as_dst_t.offset =
-            tmp_buf_as_dst_t.offset + src1->sizes[0] == 1
+            tmp_buf_as_dst_t.offset + (src1->sizes[0] == 1
                 ? new_num_per_block
                 : new_num_per_block *
-                      CEIL_FACTOR(src1->sizes[0], kSrcNumPerRepeatOfVBRCB);
+                      CEIL_FACTOR(src1->sizes[0], kSrcNumPerRepeatOfVBRCB));
       }
     }
   }

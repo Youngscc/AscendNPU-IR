@@ -68,6 +68,7 @@ llvm_config.with_environment(
 tool_dirs = [config.mlir_tools_dir,
              config.llvm_tools_dir, config.bishengir_tools_dir]
 tools = [
+    'bishengir-compile',
     'bishengir-opt',
     "bishengir-options-tblgen",
     'bishengir-target-spec-tblgen',

@@ -699,11 +699,12 @@ void FixpipeOp::build(OpBuilder &odsBuilder, OperationState &odsState,
                       TypeRange result, Value src, Value dst,
                       FixpipeDMAModeAttr dma_mode,
                       FixpipeDualDstModeAttr dual_dst_mode,
+                      FixpipeSubBlockAttr sub_block_idx,
                       FixpipePreQuantModeAttr pre_quant,
                       FixpipePreReluModeAttr pre_relu, BoolAttr channel_split,
                       Value quant_scale) {
   build(odsBuilder, odsState, result, src, dst, /*unit_flag_cond=*/ValueRange{},
-        dma_mode, /*dual_dst_mode=*/dual_dst_mode, pre_quant, pre_relu,
+        dma_mode, /*dual_dst_mode=*/dual_dst_mode,  sub_block_idx, pre_quant, pre_relu,
         channel_split,
         /*unit_flag_mode=*/ArrayAttr{}, quant_scale);
 }
@@ -712,11 +713,12 @@ void FixpipeOp::build(OpBuilder &odsBuilder, OperationState &odsState,
                       Type result, Value src, Value dst,
                       FixpipeDMAModeAttr dma_mode,
                       FixpipeDualDstModeAttr dual_dst_mode,
+                      FixpipeSubBlockAttr sub_block_idx,
                       FixpipePreQuantModeAttr pre_quant,
                       FixpipePreReluModeAttr pre_relu, BoolAttr channel_split,
                       Value quant_scale) {
   build(odsBuilder, odsState, result, src, dst, /*unit_flag_cond=*/ValueRange{},
-        dma_mode, /*dual_dst_mode=*/dual_dst_mode, pre_quant, pre_relu,
+        dma_mode, /*dual_dst_mode=*/dual_dst_mode, sub_block_idx, pre_quant, pre_relu,
         channel_split,
         /*unit_flag_mode=*/ArrayAttr{}, quant_scale);
 }
@@ -1258,6 +1260,10 @@ LogicalResult FixpipeOp::verify() {
     return success();
   }
   auto dualDstMode = dualDstModeAttr.getDualDstMode();
+  if (dualDstMode != FixpipeDualDstMode::NO_DUAL && getSubBlockIdxAttr()) {
+    return emitOpError(
+        "sub_block_idx must not be set when dual_dst_mode is enabled!");
+  }
   if (!isDualDstEnabled(dualDstMode)) {
     return success();
   }

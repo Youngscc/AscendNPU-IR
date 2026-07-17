@@ -194,10 +194,10 @@ public:
     }
     if (tilingDim != rank - 2 && tilingDim != rank - 1) {
       op->emitWarning(
-          "The tilingDim in AIC does not match row_split or column split!");      
+          "The tilingDim in AIC does not match row_split or column split!");
           return failure();
     }
-      
+
     // compute the fixpipe split info
     FixpipeDualDstMode splitMode;
     SmallVector<int64_t> splitShape;
@@ -228,8 +228,10 @@ public:
       SmallVector<Value> oprs({op.getSrc(), newAlloc});
       if (auto quantScale = op.getQuantScale())
         oprs.push_back(quantScale);
-      auto newFixpipeOp = rewriter.create<FixpipeOp>(op.getLoc(), TypeRange{},
-                                                     oprs, op->getAttrs());
+      NamedAttrList attrs(op->getAttrs());
+      attrs.erase(op.getSubBlockIdxAttrName());
+      auto newFixpipeOp = rewriter.create<FixpipeOp>(
+          op.getLoc(), TypeRange{}, oprs, attrs.getAttrs());
       newFixpipeOp.setDualDstModeAttr(dualAttr);
 
       rewriter.replaceAllUsesWith(allocVal, newAlloc.getResult());
@@ -289,6 +291,7 @@ public:
     rewriter.setInsertionPoint(op);
     NamedAttrList attrs(op->getAttrs());
     attrs.set(op.getDualDstModeAttrName(), dualAttr);
+    attrs.erase(op.getSubBlockIdxAttrName());
 
     auto newFixpipeOp = rewriter.create<FixpipeOp>(
         op.getLoc(), TypeRange{}, ValueRange{op.getSrc(), newSubview},
@@ -522,7 +525,7 @@ LogicalResult tileAicFixpipeFuncsIfNeeded(
       }
     });
     if (failed(
-            tileAndSliceOpAIC(originalFunc, tightlyCoupledBufferToTilingDim))) {      
+            tileAndSliceOpAIC(originalFunc, tightlyCoupledBufferToTilingDim))) {
       return failure();
     }
   }

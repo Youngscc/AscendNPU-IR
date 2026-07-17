@@ -375,6 +375,20 @@ def AllocExtraBuffer : Pass<"hivm-alloc-extra-buffer", "func::FuncOp"> {
   let dependentDialects = ["hivm::HIVMDialect", ];
 }
 
+def OutlineAllocInVF : Pass<"hivm-outline-alloc-in-VF", "ModuleOp"> {
+  let summary = "outline memref.alloc with static shape in VF";
+  let constructor = "mlir::hivm::createOutlineAllocInVFPass()";
+  let dependentDialects = ["func::FuncDialect", "hivm::HIVMDialect",
+                           "memref::MemRefDialect"];
+}
+
+def OutlineCopyInVF : Pass<"hivm-outline-copy-in-VF", "ModuleOp"> {
+  let summary = "rewrite hivm.load to hivm.copy in VF when operands are VF args";
+  let constructor = "mlir::hivm::createOutlineCopyInVFPass()";
+  let dependentDialects = ["arith::ArithDialect", "hivm::HIVMDialect",
+                           "memref::MemRefDialect", "vector::VectorDialect"];
+}
+
 def ConstantizeBufferSize
     : Pass<"hivm-constantize-buffer-size", "func::FuncOp"> {
   let summary = "Try to constantize dynamic shape buffers.";
@@ -802,6 +816,13 @@ def AnalyzeArithVectorMask : Pass<"arith-vector-mask-analyze", "func::FuncOp"> {
                            "annotation::AnnotationDialect"];
 }
 
+def AnnotateVFAlias : Pass<"hivm-annotate-vf-alias", "func::FuncOp"> {
+  let summary = "Annotate alias info within VF";
+  let constructor = "mlir::hivm::createAnnotateVFAliasPass()";
+  let dependentDialects = ["func::FuncDialect", "LLVM::LLVMDialect",
+                           "memref::MemRefDialect", "vector::VectorDialect"];
+}
+
 def TileAndBindSubBlock : Pass<"hivm-bind-sub-block", "ModuleOp"> {
   let summary = "tile and bind sub block";
   let constructor = "mlir::hivm::createTileAndBindSubBlockPass()";
@@ -829,6 +850,14 @@ def HIVMBubbleUpExtractSlice : Pass<"hivm-bubble-up-extract-slice", "func::FuncO
     "strictMode", "strict-mode", "bool",
     /*default=*/"true",
     "Run on strict mode when bubble up extract slice">];
+}
+
+def HIVMVectorizeOps : Pass<"hivm-vectorize-ops", "func::FuncOp"> {
+  let summary = "vectorize hivm ops";
+  let constructor = "mlir::hivm::createHIVMVectorizeOpsPass()";
+  let dependentDialects = ["arith::ArithDialect", "func::FuncDialect",
+                           "hivm::HIVMDialect", "memref::MemRefDialect",
+                           "tensor::TensorDialect", "vector::VectorDialect"];
 }
 
 def InsertInitAndFinishForDebug : Pass<"hivm-insert-init-and-finish-for-debug"> {
@@ -994,6 +1023,19 @@ def RemoveCopyOps : Pass<"hivm-remove-copy-ops", "func::FuncOp"> {
   let summary = "Remove redundant copy operations in VF functions";
   let constructor = "mlir::hivm::createRemoveCopyOpsPass()";
   let dependentDialects = ["hivm::HIVMDialect", "memref::MemRefDialect"];
+}
+
+def FuseTransposeIntoLoad : Pass<"hivm-fuse-transpose-into-load", "func::FuncOp"> {
+  let summary = "Fuse linalg.transpose into hivm.hir.load by leveraging DMA on-the-fly transpose";
+  let constructor = "mlir::hivm::createFuseTransposeIntoLoadPass()";
+  let dependentDialects = [
+    "arith::ArithDialect",
+    "bufferization::BufferizationDialect",
+    "hivm::HIVMDialect",
+    "linalg::LinalgDialect",
+    "memref::MemRefDialect",
+    "scf::SCFDialect",
+  ];
 }
 
 #endif // BISHENGIR_DIALECT_HIVM_TRANSFORMS_PASSES_TD
