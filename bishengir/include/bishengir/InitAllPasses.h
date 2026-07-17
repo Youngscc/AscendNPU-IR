@@ -42,6 +42,7 @@
 #include "bishengir/Dialect/Tensor/Transforms/Passes.h"
 #include "bishengir/Dialect/Vector/Transforms/Passes.h"
 #include "bishengir/Tools/bishengir-compile/PassPipeline.h"
+#include "bishengir/Tools/bishengir-compile/regbase/PassPipeline.h"
 #include "bishengir/Transforms/Passes.h"
 
 #if MLIR_ENABLE_EXECUTION_ENGINE
@@ -101,6 +102,7 @@ inline void registerAllPasses() {
 
   // Dialect pipelines
   bishengir::registerBiShengIRCompilePass();
+  bishengir::regbase::registerBiShengIRCompilePass();
   mlir::hivm::registerLowerHIVMPipelines();
   mlir::hivm::registerConvertToHIVMPipelines();
   mlir::hfusion::registerLowerHFusionPipelines();

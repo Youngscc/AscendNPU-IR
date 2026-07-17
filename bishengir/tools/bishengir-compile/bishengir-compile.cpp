@@ -20,6 +20,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "bishengir/Config/bishengir-config.h"
+#include "bishengir/Dialect/HACC/Utils/Utils.h"
 #include "bishengir/InitAllDialects.h"
 #include "bishengir/InitAllExtensions.h"
 #include "bishengir/InitAllPasses.h"
@@ -45,9 +46,10 @@ namespace {
 static void bishengirCompileExecutableAnchor() {}
 } // namespace
 
-/// Check if any argv is --target=VALUE or -target=VALUE where VALUE matches
-/// Ascend910_95* (Ascend910_950z, Ascend910_9579, ...) or Ascend950*.
-static bool hasAscend910_95Target(int argc, char **argv) {
+/// Check if any argv is --target VALUE, --target=VALUE, -target VALUE, or
+/// -target=VALUE where VALUE matches Ascend910_95* (Ascend910_950z,
+/// Ascend910_9579, ...) or Ascend950*.
+static bool hasRegBaseTarget(int argc, char **argv) {
   for (int i = 1; i < argc; ++i) {
     llvm::StringRef arg(argv[i]);
     llvm::StringRef target;
@@ -55,9 +57,11 @@ static bool hasAscend910_95Target(int argc, char **argv) {
       target = arg.drop_front(9);
     else if (arg.starts_with("-target="))
       target = arg.drop_front(8);
+    else if ((arg == "--target" || arg == "-target") && i + 1 < argc)
+      target = argv[++i];
     else
       continue;
-    if (target.starts_with("Ascend910_95") || target.starts_with("Ascend950"))
+    if (mlir::hacc::utils::isAscend950(target))
       return true;
   }
   return false;
@@ -78,7 +82,7 @@ static void printVersion(llvm::raw_ostream &os) {
   os << bishengir::getBiShengIRToolFullVersion("bishengir-compile") << '\n';
 }
 
-void registerAndParseCLIOptions(int argc, char **argv) {
+static void registerAndParseCLIOptions(int argc, char **argv) {
   // Register any command line options.
   mlir::registerMLIRContextCLOptions();
   mlir::registerAsmPrinterCLOptions();
@@ -100,7 +104,7 @@ int main(int argc, char **argv) {
   // bishengir-compile-91095.
   // TODO: this will be removed after bihengir-compile and bishengir-compile-a5
   // are merged.
-  if (hasAscend910_95Target(argc, argv))
+  if (hasRegBaseTarget(argc, argv))
     return runBishengirCompile91095(argc, argv);
 
   // Register dialects.

@@ -1,4 +1,5 @@
 add_subdirectory(bishengir-compile)
+add_subdirectory(bishengir-compile/regbase)
 add_subdirectory(ConfigOptions)
 add_subdirectory(RetriablePassManager)
 add_subdirectory(Utils)
