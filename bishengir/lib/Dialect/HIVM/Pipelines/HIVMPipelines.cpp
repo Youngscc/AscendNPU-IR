@@ -284,7 +284,7 @@ static void hivmPreBufferizationOptimizationPipeline(
   if (hivmPipelineOptions.enableTritonKernelCompile &&
       !hivmPipelineOptions.disableAutoCVWorkSpaceManage) {
     // Must place after plan-workspace-memory
-    pm.nest<func::FuncOp>().addPass(createInsertInferWorkSpaceSizeFuncPass());
+    pm.addPass(createInsertInferWorkSpaceSizeFuncPass());
   }
 
   if (hivmPipelineOptions.enableTritonKernelCompile) {
