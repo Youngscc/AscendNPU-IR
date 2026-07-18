@@ -270,7 +270,11 @@ struct ElementwiseOpToHFusionCast : public OpRewritePattern<CastOp> {
       // So now we just need to know that source is signed/unsigned
       // In future, we need to support both cast_from_sign, cast_to_sign
       // parameters
-      if (isInTypeI1 || isInTypeI8 || isInTypeI16 || isInTypeI32) {
+      if (isI8ToI16 || isI8ToI32 || isI8ToI64) {
+        return hfusion::TypeFn::cast_unsigned;
+      }
+
+      if (isRegBasedArch && (isInTypeI1 || isInTypeI16 || isInTypeI32)) {
         return hfusion::TypeFn::cast_unsigned;
       }
       return hfusion::TypeFn::cast_signed;
