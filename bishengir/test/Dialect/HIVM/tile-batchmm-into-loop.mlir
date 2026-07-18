@@ -18,7 +18,7 @@ func.func @test_tile_batchMmadL1(%dst : memref<2x256x256xf16>) {
   // CHECK:   %[[MC:.*]] = tensor.empty() : tensor<256x256xf32>
 
 
-  // CHECK:   %[[RES:.*]] = hivm.hir.mmadL1 ins(%[[EXT_MA]], %[[EXT_MB]]
+  // CHECK:   %[[RES:.*]] = hivm.hir.mmadL1 {batch_matmul} ins(%[[EXT_MA]], %[[EXT_MB]]
   // CHECK-SAME:                            outs(%[[MC]]
   // CHECK:   %[[SUBVIEW_DST:.*]] = memref.subview %[[DST]][%[[ITERATOR]], 0, 0]
   // CHECK:   %[[COLLAPSE_DST:.*]] = memref.collapse_shape %[[SUBVIEW_DST]]
@@ -29,6 +29,58 @@ func.func @test_tile_batchMmadL1(%dst : memref<2x256x256xf16>) {
                               outs(%mc: tensor<2x256x256xf32>) -> tensor<2x256x256xf32>
   hivm.hir.fixpipe {enable_nz2nd} ins(%result : tensor<2x256x256xf32>) outs(%dst : memref<2x256x256xf16>)
   return
+}
+
+// -----
+module {
+  // CHECK-LABEL: func.func @test_move_nested_debug_through_memory_space_cast
+  // The tiled batch matmul loop must be placed before the nested debug loop.
+  // CHECK: scf.for
+  // CHECK:   hivm.hir.mmadL1 {batch_matmul}
+  // CHECK: }
+  // CHECK: scf.for
+  // CHECK:   hivm.hir.debug
+  // CHECK: }
+  func.func @test_move_nested_debug_through_memory_space_cast(
+      %dst: memref<2x1x1xf32>) {
+    %ma = tensor.empty() : tensor<2x1x1xf16>
+    %mb = tensor.empty() : tensor<2x1x1xf16>
+    %mc = tensor.empty() : tensor<2x1x1xf32>
+    %true = arith.constant true
+    %one = arith.constant 1 : index
+    %zero_i32 = arith.constant 0 : i32
+    %one_i32 = arith.constant 1 : i32
+
+    %result = hivm.hir.batchMmadL1
+        ins(%ma, %mb, %true, %one, %one, %one
+            : tensor<2x1x1xf16>, tensor<2x1x1xf16>, i1, index, index, index)
+        outs(%mc : tensor<2x1x1xf32>) -> tensor<2x1x1xf32>
+
+    %alloc = memref.alloc() : memref<2x1x1xf32, #hivm.address_space<ub>>
+    %cast = memref.memory_space_cast %alloc
+        : memref<2x1x1xf32, #hivm.address_space<ub>> to memref<2x1x1xf32>
+    %debug_tensor = bufferization.to_tensor %cast restrict writable
+        : memref<2x1x1xf32>
+
+    hivm.hir.fixpipe {dma_mode = #hivm.dma_mode<nz2nd>}
+        ins(%result : tensor<2x1x1xf32>)
+        outs(%alloc : memref<2x1x1xf32, #hivm.address_space<ub>>)
+
+    scf.for %i = %zero_i32 to %one_i32 step %one_i32 : i32 {
+      hivm.hir.debug {
+        debugtype = "print",
+        hex = false,
+        memscope = #hivm.address_space<ub>,
+        prefix = "result: ",
+        tcoretype = #hivm.tcore_type<VECTOR>
+      } %debug_tensor : tensor<2x1x1xf32>
+    }
+
+    hivm.hir.fixpipe {dma_mode = #hivm.dma_mode<nz2nd>}
+        ins(%result : tensor<2x1x1xf32>)
+        outs(%dst : memref<2x1x1xf32>)
+    return
+  }
 }
 
 // -----
@@ -56,7 +108,7 @@ module {
     // CHECK-SAME: iter_args(%[[ITERATION:.*]] = %[[WORKSPACE_TENSOR]])
     // CHECK: %[[EXT_MA:.*]] = tensor.extract_slice{{.*}}[%[[INDUCTION_VAR]], 0, 0]
     // CHECK: %[[EXT_MB:.*]] = tensor.extract_slice{{.*}}[%[[INDUCTION_VAR]], 0, 0]
-    // CHECK: %[[MATMUL_RES:.*]] = hivm.hir.mmadL1 ins(%[[EXT_MA]], %[[EXT_MB]]
+    // CHECK: %[[MATMUL_RES:.*]] = hivm.hir.mmadL1 {batch_matmul} ins(%[[EXT_MA]], %[[EXT_MB]]
     // CHECK: %[[EXT_WS:.*]] = tensor.extract_slice %[[ITERATION]][%[[INDUCTION_VAR]], 0, 0]
     // CHECK: %[[FIX_RES:.*]] = hivm.hir.fixpipe
     // CHECK-SAME: ins(%[[MATMUL_RES]]
@@ -93,7 +145,7 @@ func.func @test_tile_batchMmadL1(%dst : memref<2x256x256xf16>) {
   // CHECK:   %[[MC:.*]] = tensor.empty() : tensor<256x256xf32>
 
 
-  // CHECK:   %[[RES:.*]] = hivm.hir.mmadL1 {fixpipe_for_result_already_inserted = true} ins(%[[EXT_MA]], %[[EXT_MB]]
+  // CHECK:   %[[RES:.*]] = hivm.hir.mmadL1 {batch_matmul, fixpipe_for_result_already_inserted = true} ins(%[[EXT_MA]], %[[EXT_MB]]
   // CHECK-SAME:                            outs(%[[MC]]
   // CHECK:   %[[SUBVIEW_DST:.*]] = memref.subview %[[DST]][%[[ITERATOR]], 0, 0]
   // CHECK:   %[[COLLAPSE_DST:.*]] = memref.collapse_shape %[[SUBVIEW_DST]]
@@ -125,7 +177,7 @@ module {
 // CHECK:             %[[VAL_16:.*]] = tensor.extract_slice %[[VAL_7]]{{\[}}%[[VAL_13]], 0, 0] [1, 256, 128] [1, 1, 1] : tensor<2x256x128xf16> to tensor<256x128xf16>
 // CHECK:             %[[VAL_17:.*]] = tensor.extract_slice %[[VAL_8]]{{\[}}%[[VAL_13]], 0, 0] [1, 128, 256] [1, 1, 1] : tensor<2x128x256xf16> to tensor<128x256xf16>
 // CHECK:             %[[VAL_18:.*]] = tensor.empty() : tensor<256x256xf32>
-// CHECK:             %[[VAL_19:.*]] = hivm.hir.mmadL1 {fixpipe_for_result_already_inserted = true} ins(%[[VAL_16]], %[[VAL_17]], %[[VAL_6]], %[[VAL_5]], %[[VAL_4]], %[[VAL_5]] : tensor<256x128xf16>, tensor<128x256xf16>, i1, index, index, index) outs(%[[VAL_18]] : tensor<256x256xf32>) -> tensor<256x256xf32>
+// CHECK:             %[[VAL_19:.*]] = hivm.hir.mmadL1 {batch_matmul, fixpipe_for_result_already_inserted = true} ins(%[[VAL_16]], %[[VAL_17]], %[[VAL_6]], %[[VAL_5]], %[[VAL_4]], %[[VAL_5]] : tensor<256x128xf16>, tensor<128x256xf16>, i1, index, index, index) outs(%[[VAL_18]] : tensor<256x256xf32>) -> tensor<256x256xf32>
 // CHECK:             %[[VAL_20:.*]] = memref.subview %[[VAL_0]]{{\[}}%[[VAL_13]], 0, 0] [1, 256, 256] [1, 1, 1] : memref<2x256x256xf16> to memref<1x256x256xf16, strided<[65536, 256, 1], offset: ?>>
 // CHECK:             %[[VAL_21:.*]] = memref.collapse_shape %[[VAL_20]] {{\[\[}}0, 1], [2]] : memref<1x256x256xf16, strided<[65536, 256, 1], offset: ?>> into memref<256x256xf16, strided<[256, 1], offset: ?>>
 // CHECK:             hivm.hir.fixpipe {dma_mode = #hivm.dma_mode<nz2nd>} ins(%[[VAL_19]] : tensor<256x256xf32>) outs(%[[VAL_21]] : memref<256x256xf16, strided<[256, 1], offset: ?>>)
