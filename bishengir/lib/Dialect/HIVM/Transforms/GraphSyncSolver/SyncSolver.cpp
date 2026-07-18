@@ -421,8 +421,8 @@ Solver::getMultiBufferEventIdInfo(Occurrence *occ1, Occurrence *occ2,
       return {};
     }
     auto [setOcc, waitOcc] = getSetWaitOcc(occ1, occ2);
-    if (!parLoop1->isProperAncestor(setOcc) ||
-        !parLoop1->isProperAncestor(waitOcc)) {
+    if (setOcc->getParentOfType<Loop>() != parLoop1 ||
+        waitOcc->getParentOfType<Loop>() != parLoop1) {
       return {};
     }
   } else {
@@ -433,10 +433,15 @@ Solver::getMultiBufferEventIdInfo(Occurrence *occ1, Occurrence *occ2,
     multibufferLoop = multibufferLoopOpt.value();
     assert(multibufferLoop != nullptr);
     auto [setOcc, waitOcc] = getSetWaitOcc(occ1, occ2);
-    if (!setOcc->getParentWithOp(multibufferLoop,
-                                 /*assertExists=*/false) ||
-        !waitOcc->getParentWithOp(multibufferLoop,
-                                  /*assertExists=*/false)) {
+    // TODO: This still matches the multibuffer loop through the MLIR loop op
+    // (LoopLikeOpInterface) rather than the solver occurrence; unify it with the
+    // solver loop nest once the a5 PR is merged.
+    Operation *multibufferLoopOp = multibufferLoop.getOperation();
+    auto *setParentLoop = setOcc->getParentOfType<Loop>();
+    auto *waitParentLoop = waitOcc->getParentOfType<Loop>();
+    if (!setParentLoop || !setParentLoop->op ||
+        setParentLoop->op->op != multibufferLoopOp || !waitParentLoop ||
+        !waitParentLoop->op || waitParentLoop->op->op != multibufferLoopOp) {
       return {};
     }
   }
@@ -649,7 +654,7 @@ EventIdInfo Solver::getEventIdInfo(Occurrence *occ1, Occurrence *occ2,
 // index.
 bool Solver::checkGraphConflict(
     Occurrence *occ1, Occurrence *occ2, CorePipeInfo corePipeSrc,
-    CorePipeInfo corePipeDst, EventIdInfo eventIdInfo,
+    CorePipeInfo corePipeDst, std::optional<EventIdInfo> eventIdInfo,
     std::optional<int> startIndex, std::optional<int> endIndex,
     const llvm::SmallVector<ConflictPair *> &extraConflictPairs,
     const llvm::SmallVector<ConflictPair *> &ignoreConflictPairs) {
@@ -671,7 +676,11 @@ bool Solver::checkGraphConflict(
       return;
     }
     if (conflictPair->isInnerBackward) {
-      if ((eventIdInfo.eventIdNum * eventIdInfo.eventIdRepeatNum) <
+      int64_t candidateEventIdProduct =
+          eventIdInfo.has_value()
+              ? eventIdInfo->eventIdNum * eventIdInfo->eventIdRepeatNum
+              : 1;
+      if (candidateEventIdProduct <
           (conflictPair->eventIdInfo.eventIdNum *
            conflictPair->eventIdInfo.eventIdRepeatNum)) {
         return;
@@ -2020,7 +2029,15 @@ void Solver::handleConflict(Occurrence *occ1, Occurrence *occ2,
                             RWOperation *rwOp1, RWOperation *rwOp2,
                             CorePipeInfo corePipeSrc, CorePipeInfo corePipeDst,
                             EventIdInfo eventIdInfo, bool isUseless) {
-  if (!checkGraphConflict(occ1, occ2, corePipeSrc, corePipeDst, eventIdInfo)) {
+  bool isBarrier = corePipeSrc == corePipeDst;
+  auto unitFlagInfo =
+      isBarrier ? std::nullopt : checkUnitFlagPatterns(occ1, occ2);
+  std::optional<EventIdInfo> checkEventIdInfo;
+  if (!isBarrier && !unitFlagInfo) {
+    checkEventIdInfo = eventIdInfo;
+  }
+  if (!checkGraphConflict(occ1, occ2, corePipeSrc, corePipeDst,
+                          checkEventIdInfo)) {
     return;
   }
   LLVM_DEBUG({
@@ -2031,9 +2048,9 @@ void Solver::handleConflict(Occurrence *occ1, Occurrence *occ2,
     llvm::dbgs() << occ2->syncIrIndex << ' ' << occ2->startIndex << ' '
                  << occ2->endIndex << ' ' << rwOp2->str(0, false) << '\n';
   });
-  if (corePipeSrc == corePipeDst) {
+  if (isBarrier) {
     handleBarrierConflict(occ1, occ2, corePipeSrc, corePipeDst, isUseless);
-  } else if (auto unitFlagInfo = checkUnitFlagPatterns(occ1, occ2)) {
+  } else if (unitFlagInfo) {
     handleUnitFlagConflict(occ1, occ2, corePipeSrc, corePipeDst,
                            unitFlagInfo.value(), isUseless);
   } else {
