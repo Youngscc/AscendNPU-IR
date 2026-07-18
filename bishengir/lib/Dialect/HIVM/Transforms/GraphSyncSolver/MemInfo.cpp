@@ -58,7 +58,7 @@ PointerLikeInfo getPointerLikeInfo(hivm::PointerCastOp pointerCastOp) {
   if (auto spaceAttr = GetBufferSpaceAttr(pointerCastOp.getResult())) {
     pointerLikeInfo.addressSpace = spaceAttr->getAddressSpace();
   }
-  if (auto parentLoop = pointerCastOp->getParentOfType<LoopLikeOpInterface>()) {
+  if (auto parentLoop = mlir::hivm::getParentLoop(pointerCastOp.getResult())) {
     pointerLikeInfo.parentLoop = parentLoop;
   }
   return pointerLikeInfo;
@@ -75,7 +75,7 @@ getPointerLikeInfo(bishengir::memref_ext::AllocWorkspaceOp allocWorkspaceOp) {
   }
   pointerLikeInfo.addressSpace = hivm::AddressSpace::GM;
   if (auto parentLoop =
-          allocWorkspaceOp->getParentOfType<LoopLikeOpInterface>()) {
+          mlir::hivm::getParentLoop(allocWorkspaceOp.getResult())) {
     pointerLikeInfo.parentLoop = parentLoop;
   }
   return pointerLikeInfo;
