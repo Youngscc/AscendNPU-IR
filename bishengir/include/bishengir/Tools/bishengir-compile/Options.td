@@ -176,7 +176,6 @@ def EnsureNoImplicitBroadcast : FeatureControlOptions<
 }
 #endif
 
-#ifndef BISHENGIR_PUBLISH
 def EnableLIRCompile : FeatureControlOptions<
   "Enable BiShengLIR compilation.",
   "bool",
@@ -185,7 +184,6 @@ def EnableLIRCompile : FeatureControlOptions<
   let emitGetterSetter = 0;
   bit isSharedWithDownstreamToolchain = 1;
 }
-#endif
 
 def DisableAutoInjectBlockSync : FeatureControlOptions<
   "Disable generating blocksync wait/set by injectBlockSync pass.",
