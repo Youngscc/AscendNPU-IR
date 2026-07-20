@@ -564,7 +564,7 @@ static void hivmPostBufferizationOptimizationPipeline(
       hivmPipelineOptions.limitAutoMultiBufferOfLocalBuffer;
   multiBufferOptions.limitMixAutoMultiBufferBuffer =
       hivmPipelineOptions.limitAutoMultiBufferBuffer;
-  // TODO(regbase)
+  // TODO(regbase): maybe deprecated
   // multiBufferOptions.disableMultiBufferOnUB =
   //     hivmPipelineOptions.disableMultiBufferOnUB;
   // multiBufferOptions.disableMultiBufferOnL0C =
@@ -574,7 +574,7 @@ static void hivmPostBufferizationOptimizationPipeline(
   pm.nest<func::FuncOp>().addPass(
       createMarkMultiBufferPass(multiBufferOptions));
   PlanMemoryOptions planMemoryOption;
-  // TODO(regbase)
+  // TODO(regbase): maybe deprecated
   // planMemoryOption.enablePrintMemoryAllocatedSize =
   //     hivmPipelineOptions.enablePrintMemoryAllocatedSize;
   // planMemoryOption.simtVFDynamicSize = hivmPipelineOptions.simtVFDynamicSize;

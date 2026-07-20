@@ -204,24 +204,20 @@ static void preProcess(OpPassManager &pm,
   pm.nest<func::FuncOp>().addPass(createDecomposePass(decomposeOptions));
   pm.nest<func::FuncOp>().addPass(createHFusionNormalizeSliceOpsPass());
   pm.nest<func::FuncOp>().addPass(createGenericUnrollerPass());
-  
-  // TODO(regbase)
-  // NormalizeOptions normalizeOptions;
-  // normalizeOptions.enableHighPrecision = options.enableHighPrecision;
-  // pm.nest<func::FuncOp>().addPass(
-  //     createHFusionNormalizeOpsPass(normalizeOptions));
-  pm.nest<func::FuncOp>().addPass(createHFusionNormalizeOpsPass());
+
+  NormalizeRegBaseOptions normalizeOptions;
+  normalizeOptions.enableHighPrecision = options.enableHighPrecision;
+  pm.nest<func::FuncOp>().addPass(
+      createHFusionNormalizeOpsRegBasePass(normalizeOptions));
 
   pm.addPass(createLegalizeBoolPass());
   pm.nest<func::FuncOp>().addPass(createSimplifyOpsPass());
   pm.nest<func::FuncOp>().addPass(createHFusionInlineBrcPass());
 
-  // TODO(regbase)
-  // // normalize should be called after inline-brc pass:
-  // //  a) convert scalar-vector ops to vector-scalar ops
-  // pm.nest<func::FuncOp>().addPass(
-  //     createHFusionNormalizeOpsPass(normalizeOptions));
-  pm.nest<func::FuncOp>().addPass(createHFusionNormalizeOpsPass());
+  // normalize should be called after inline-brc pass:
+  //  a) convert scalar-vector ops to vector-scalar ops
+  pm.nest<func::FuncOp>().addPass(
+      createHFusionNormalizeOpsRegBasePass(normalizeOptions));
 }
 
 static void preFlattenPass(OpPassManager &pm,
@@ -367,14 +363,12 @@ static void postProcess(OpPassManager &pm,
                         const HFusionPipelineOptions &options) {
   pm.nest<func::FuncOp>().addPass(createHFusionInlineBrcPass());
   
-  // TODO(regbase)
-  // // normalize should be called after auto schedule:
-  // // - tile reduction may generate unsupported elemwise op requiring normalize
-  // NormalizeOptions normalizeOptions;
-  // normalizeOptions.enableHighPrecision = options.enableHighPrecision;
-  // pm.nest<func::FuncOp>().addPass(
-  //     createHFusionNormalizeOpsPass(normalizeOptions));
-  pm.nest<func::FuncOp>().addPass(createHFusionNormalizeOpsPass());
+  // normalize should be called after auto schedule:
+  // - tile reduction may generate unsupported elemwise op requiring normalize
+  NormalizeRegBaseOptions normalizeOptions;
+  normalizeOptions.enableHighPrecision = options.enableHighPrecision;
+  pm.nest<func::FuncOp>().addPass(
+      createHFusionNormalizeOpsRegBasePass(normalizeOptions));
 
   // will only operate on functions with ShallowCV fusion kind
   AddFFTSAddrOptions addFFTSAddrOpt;
@@ -412,12 +406,15 @@ hfusionAutoVectorizePipeline(OpPassManager &pm,
   canonicalizationPipeline(pm, hfusionOptions);
   pm.nest<func::FuncOp>().addPass(createFoldExtractInsertPairPass());
   pm.nest<func::FuncOp>().addPass(hivm::createSinkOpToConsumerInLoopPass());
-  // TODO(regbase)
+  // Deprecated: no longer needed
   // pm.nest<func::FuncOp>().addPass(hivm::createCloneSCFIfYieldOperandPass());
   hfusionVectorizeManualScopePipeline(pm, hfusionOptions);
-
+  // Prepare tree reduce options for RA / AR control.
   TreeReduceEnableFlags treeReduceFlags =
       getTreeReduceEnableFlags(hfusionOptions.enableTreeReduceMode);
+  TreeReduceV2Options treeReduceOptions;
+  treeReduceOptions.enableRA = treeReduceFlags.enableRA;
+  treeReduceOptions.enableAR = treeReduceFlags.enableAR;
   if (enableSIMDVFFusion(hfusionOptions)) {
     VFFusionOptions vfFusionOptions;
     vfFusionOptions.fusionMode = hfusionOptions.vfFusionMode;
@@ -457,8 +454,7 @@ hfusionAutoVectorizePipeline(OpPassManager &pm,
     pm.addPass(createHFusionAutoVectorizePass(vecOptions));
   }
   pm.addPass(createAutoVectorizeVerifierPass());
-  // TODO(regbase)
-  // pm.addPass(createTreeReduceV2Pass(treeReduceOptions));
+  pm.addPass(createTreeReduceV2Pass(treeReduceOptions));
   pm.addPass(mlir::createHFusionToVectorConversionPass());
   pm.nest<func::FuncOp>().addPass(
       createRemoveMaskFromUnalignedReductionLoopPass());
@@ -507,8 +503,7 @@ void buildHFusionPipelines(OpPassManager &pm,
       PropagateReshapeOptions opts;
       opts.forRegbased = true;
       opts.forHIVM = false;
-      // TODO(regbase)
-      // opts.skipScope = options.skipScope;
+      opts.skipScope = options.skipScope;
       pm.nest<func::FuncOp>().addPass(tensor::createPropagateReshapePass(opts));
       pm.nest<func::FuncOp>().addPass(tensor::createFoldTensorEmptyPass());
       pm.nest<func::FuncOp>().addPass(
@@ -520,8 +515,7 @@ void buildHFusionPipelines(OpPassManager &pm,
       flattenOpsOpt.skipHost = options.enableMultiKernel;
       flattenOpsOpt.multiDynamicShape = false;
       flattenOpsOpt.registerBased = true;
-      // TODO(regbase)
-      // flattenOpsOpt.skipScope = options.skipScope;
+      flattenOpsOpt.skipScope = options.skipScope;
       pm.nest<func::FuncOp>().addPass(createFlattenOpsPass(flattenOpsOpt));
     }
     pm.nest<func::FuncOp>().addPass(
@@ -574,12 +568,10 @@ void buildHFusionRegBasePipeline(OpPassManager &pm,
 
   pm.nest<func::FuncOp>().addPass(tensor::createFoldTensorEmptyPass());
 
-  // TODO(regbase)
-  // NormalizeOptions normalizeOptions;
-  // normalizeOptions.enableHighPrecision = options.enableHighPrecision;
-  // pm.nest<func::FuncOp>().addPass(
-  //     createHFusionNormalizeOpsPass(normalizeOptions));
-  pm.nest<func::FuncOp>().addPass(createHFusionNormalizeOpsPass());
+  NormalizeRegBaseOptions normalizeOptions;
+  normalizeOptions.enableHighPrecision = options.enableHighPrecision;
+  pm.nest<func::FuncOp>().addPass(
+      createHFusionNormalizeOpsRegBasePass(normalizeOptions));
 
   pm.nest<func::FuncOp>().addPass(createHFusionInlineBrcPass());
   hfusionAutoVectorizePipeline(pm, options);
