@@ -28,7 +28,13 @@ struct Options {
   bool enablePreload = false;
   bool enableCVLazyLoading = false;
   bool enableCodeMotion = true;
+  int tileMixCubeLoop = 2;
+  int tileMixVectorLoop = 2;
+  bool enableUbufSaving = false;
   bool enableTritonKernelCompile = false;
+  bool disableAlignAllocSize = false;
+  bool disableEnableStrideAlign = false;
+  bool disableInferHIVMDataLayout = false;
   bool enableAutoMultiBuffer = false;
   cvub::MultiBufferStrategy localMultiBufferStrategy =
       cvub::MultiBufferStrategy::CubeNoL0C;
@@ -78,7 +84,13 @@ void PrintHelp() {
       << "  --enable-cv-lazy-loading=<bool>\n"
       << "\nUB-affecting pass and PlanMemory options:\n"
       << "  --enable-code-motion=<bool>\n"
+      << "  --tile-mix-cube-loop=<positive integer>\n"
+      << "  --tile-mix-vector-loop=<positive integer>\n"
+      << "  --enable-ubuf-saving=<bool>\n"
       << "  --enable-triton-kernel-compile=<bool>\n"
+      << "  --disable-align-alloc-size=<bool>\n"
+      << "  --disable-enable-stride-align=<bool>\n"
+      << "  --disable-infer-hivm-data-layout=<bool>\n"
       << "  --enable-auto-multi-buffer=<bool>\n"
       << "  --limit-auto-multi-buffer-of-local-buffer=<strategy>\n"
       << "  --limit-auto-multi-buffer-buffer=<strategy>\n"
@@ -134,11 +146,33 @@ Options ParseOptions(int argc, char **argv) {
       options.enableCVLazyLoading = ParseBool(*lazyLoading);
     else if (auto codeMotion = readValue("--enable-code-motion"))
       options.enableCodeMotion = ParseBool(*codeMotion);
+    else if (auto cubeLoop = readValue("--tile-mix-cube-loop"))
+      options.tileMixCubeLoop = std::stoi(*cubeLoop);
+    else if (auto vectorLoop = readValue("--tile-mix-vector-loop"))
+      options.tileMixVectorLoop = std::stoi(*vectorLoop);
+    else if (argument == "--enable-ubuf-saving")
+      options.enableUbufSaving = true;
+    else if (auto ubufSaving = readValue("--enable-ubuf-saving"))
+      options.enableUbufSaving = ParseBool(*ubufSaving);
     else if (argument == "--enable-triton-kernel-compile")
       options.enableTritonKernelCompile = true;
     else if (auto enableTriton =
                  readValue("--enable-triton-kernel-compile"))
       options.enableTritonKernelCompile = ParseBool(*enableTriton);
+    else if (argument == "--disable-align-alloc-size")
+      options.disableAlignAllocSize = true;
+    else if (auto disableAlign = readValue("--disable-align-alloc-size"))
+      options.disableAlignAllocSize = ParseBool(*disableAlign);
+    else if (argument == "--disable-enable-stride-align")
+      options.disableEnableStrideAlign = true;
+    else if (auto disableStride =
+                 readValue("--disable-enable-stride-align"))
+      options.disableEnableStrideAlign = ParseBool(*disableStride);
+    else if (argument == "--disable-infer-hivm-data-layout")
+      options.disableInferHIVMDataLayout = true;
+    else if (auto disableLayout =
+                 readValue("--disable-infer-hivm-data-layout"))
+      options.disableInferHIVMDataLayout = ParseBool(*disableLayout);
     else if (argument == "--enable-auto-multi-buffer")
       options.enableAutoMultiBuffer = true;
     else if (auto autoMultiBuffer = readValue("--enable-auto-multi-buffer"))
@@ -170,6 +204,9 @@ Options ParseOptions(int argc, char **argv) {
 void ValidateOptions(const Options &options) {
   if (options.format != "text" && options.format != "json")
     throw std::runtime_error("--format must be text or json");
+  if (options.tileMixCubeLoop <= 0 || options.tileMixVectorLoop <= 0)
+    throw std::runtime_error(
+        "--tile-mix-cube-loop and --tile-mix-vector-loop must be positive");
   if ((!options.debugDirectory.empty() ||
        options.debugEntry != DebugEntry::BeforeCVPipelining) &&
       !options.debug)
@@ -210,8 +247,14 @@ cvub::CVPipeliningOptions CVPipeliningOptions(const Options &options) {
 
 cvub::UBAffectingPassOptions UBAffectingPassOptions(const Options &options) {
   cvub::UBAffectingPassOptions result;
+  result.tileMixCubeLoop = static_cast<unsigned>(options.tileMixCubeLoop);
+  result.tileMixVectorLoop = static_cast<unsigned>(options.tileMixVectorLoop);
   result.enableCodeMotion = options.enableCodeMotion;
+  result.enableUbufSaving = options.enableUbufSaving;
   result.enableTritonKernelCompile = options.enableTritonKernelCompile;
+  result.disableAlignAllocSize = options.disableAlignAllocSize;
+  result.disableEnableStrideAlign = options.disableEnableStrideAlign;
+  result.disableInferHIVMDataLayout = options.disableInferHIVMDataLayout;
   result.enableAutoMultiBuffer = options.enableAutoMultiBuffer;
   result.limitAutoMultiBufferOfLocalBuffer =
       options.localMultiBufferStrategy;

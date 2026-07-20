@@ -123,6 +123,36 @@ static std::unique_ptr<Pass> createDumpIRBeforeLocalPlanMemoryPass() {
   return std::make_unique<DumpIRBeforeLocalPlanMemoryPass>();
 }
 
+static std::unique_ptr<llvm::MemoryBuffer> upgradeLegacyOracleInput(
+    std::unique_ptr<llvm::MemoryBuffer> input) {
+  // The checked-in before-CVPipelining corpus predates VCmpOp's optional
+  // temp_buffer operand group.  Fresh TableGen output therefore expects three
+  // segment sizes while those generic-form records contain two.  Upgrade only
+  // that exact legacy spelling in-memory; never rewrite the corpus itself.
+  constexpr StringLiteral legacy =
+      "operandSegmentSizes = array<i32: 2, 1>";
+  constexpr StringLiteral current =
+      "operandSegmentSizes = array<i32: 2, 1, 0>";
+  std::string text = input->getBuffer().str();
+  size_t lineBegin = 0;
+  while (lineBegin < text.size()) {
+    size_t lineEnd = text.find('\n', lineBegin);
+    if (lineEnd == std::string::npos)
+      lineEnd = text.size();
+    StringRef line(text.data() + lineBegin, lineEnd - lineBegin);
+    if (line.contains("\"hivm.hir.vcmp\"") && line.contains(legacy)) {
+      size_t attribute = text.find(legacy.str(), lineBegin);
+      if (attribute < lineEnd) {
+        text.replace(attribute, legacy.size(), current.str());
+        lineEnd += current.size() - legacy.size();
+      }
+    }
+    lineBegin = lineEnd + (lineEnd < text.size());
+  }
+  return llvm::MemoryBuffer::getMemBufferCopy(
+      text, input->getBufferIdentifier());
+}
+
 struct DumpIRAfterCVPipeliningPass
     : public PassWrapper<DumpIRAfterCVPipeliningPass,
                          OperationPass<ModuleOp>> {
@@ -420,6 +450,12 @@ static llvm::cl::opt<int> planMemorySeed(
 static llvm::cl::opt<bool> restrictInplaceAsISA(
     "restrict-inplace-as-isa",
     llvm::cl::desc("Restrict local PlanMemory inplace reuse to ISA rules"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> ubOracleOnly(
+    "ub-oracle-only",
+    llvm::cl::desc(
+        "Skip AIC local PlanMemory so CBUF overflow cannot suppress UB oracle output"),
     llvm::cl::init(false));
 
 static llvm::cl::opt<bool> enableTritonKernelCompile(
@@ -795,6 +831,7 @@ static void addPostBufferizationToLocalPlanMemoryPipeline(OpPassManager &pm) {
   PlanMemoryOptions planMemoryOption;
   planMemoryOption.enableMemoryDisplay = enableMemoryDisplay;
   planMemoryOption.restrictInplaceAsISA = restrictInplaceAsISA;
+  planMemoryOption.ubOracleOnly = ubOracleOnly;
   pm.nest<func::FuncOp>().addPass(createPlanMemoryPass(planMemoryOption));
 }
 
@@ -804,6 +841,7 @@ static void buildSuffixPipeline(OpPassManager &pm) {
     PlanMemoryOptions planMemoryOption;
     planMemoryOption.enableMemoryDisplay = enableMemoryDisplay;
     planMemoryOption.restrictInplaceAsISA = restrictInplaceAsISA;
+    planMemoryOption.ubOracleOnly = ubOracleOnly;
     pm.nest<func::FuncOp>().addPass(createPlanMemoryPass(planMemoryOption));
     return;
   }
@@ -951,6 +989,8 @@ int main(int argc, char **argv) {
                  << planMemorySeed.getValue()
                  << "\trestrict_inplace_as_isa\t"
                  << static_cast<int>(restrictInplaceAsISA.getValue())
+                 << "\tub_oracle_only\t"
+                 << static_cast<int>(ubOracleOnly.getValue())
                  << "\tlocal_plan_memory_only\t"
                  << static_cast<int>(localPlanMemoryOnly.getValue())
                  << "\tdisable_cv_pipelining\t"
@@ -992,6 +1032,7 @@ int main(int argc, char **argv) {
                  << " error message: " << errorMessage << "\n";
     return EXIT_FAILURE;
   }
+  file = upgradeLegacyOracleInput(std::move(file));
 
   MLIRContext context(registry);
   context.allowUnregisteredDialects(allowUnregisteredDialects);
@@ -1042,6 +1083,9 @@ int main(int argc, char **argv) {
   }
   module.print(output->os());
   output->keep();
+  if (dumpPlanMemoryOracle && ubOracleOnly)
+    llvm::errs() << "PLANMEM_UB_ORACLE_COMPLETE\t"
+                 << planMemorySeed.getValue() << '\n';
   if (dumpPlanMemoryOracle)
     llvm::errs() << "PLANMEM_RUN_RESULT\tsuccess\n";
   return EXIT_SUCCESS;

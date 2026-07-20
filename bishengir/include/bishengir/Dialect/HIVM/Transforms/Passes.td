@@ -235,6 +235,9 @@ def PlanMemory : Pass<"hivm-plan-memory", "func::FuncOp"> {
     Option<"restrictInplaceAsISA", "restrict-inplace-as-isa", "bool",
            /*default=*/"false",
            "restrict memory inplace as isa, default : false">,
+    Option<"ubOracleOnly", "ub-oracle-only", "bool",
+           /*default=*/"false",
+           "Skip explicit AIC functions when collecting a local UB oracle">,
   ];
 }
 

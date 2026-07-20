@@ -177,6 +177,65 @@ inline std::vector<std::vector<size_t>> ReassociationWithBarriers(
 }
 
 inline std::vector<std::vector<size_t>>
+AllocExtraBufferReassociationWithBarriers(
+    const std::vector<MemRefTypeModel> &types,
+    const std::vector<int64_t> &barrierDims) {
+  if (types.empty())
+    return {};
+  const size_t rank = types.front().shape.size();
+  const std::vector<bool> contiguous = GetContiguousAxes(types);
+  std::set<size_t> barriers;
+  for (int64_t dimension : barrierDims)
+    if (dimension >= 0 && static_cast<size_t>(dimension) < rank)
+      barriers.insert(static_cast<size_t>(dimension));
+  if (barriers.empty())
+    return ContinuousReassociation(types);
+
+  std::vector<bool> uniformUnit(rank, true);
+  for (const MemRefTypeModel &type : types) {
+    if (type.shape.size() != rank)
+      throw std::runtime_error("flatten operand rank mismatch");
+    for (size_t axis = 0; axis < rank; ++axis)
+      uniformUnit[axis] = uniformUnit[axis] && type.shape[axis] &&
+                          *type.shape[axis] == 1;
+  }
+
+  std::vector<std::vector<size_t>> reassociation;
+  for (size_t axis = 0; axis < rank; ++axis) {
+    bool barrierBoundary = false;
+    if (axis > 0 &&
+        (barriers.count(axis - 1) != barriers.count(axis))) {
+      const bool nonBarrierIsRight = barriers.count(axis - 1) != 0;
+      const size_t nonBarrierAxis = nonBarrierIsRight ? axis : axis - 1;
+      bool adjacentComponentIsUnit = uniformUnit[nonBarrierAxis];
+      if (nonBarrierIsRight) {
+        for (size_t next = nonBarrierAxis + 1;
+             adjacentComponentIsUnit && next < rank && contiguous[next] &&
+             barriers.count(next) == 0;
+             ++next)
+          adjacentComponentIsUnit = uniformUnit[next];
+      } else {
+        size_t current = nonBarrierAxis;
+        while (adjacentComponentIsUnit && current > 0 &&
+               contiguous[current] && barriers.count(current - 1) == 0) {
+          --current;
+          adjacentComponentIsUnit = uniformUnit[current];
+        }
+      }
+      // FlattenInterface may absorb an adjacent dimension that is one for
+      // every operand into the limited axis. The entire contiguous component
+      // on that side must be unit; otherwise removing this boundary would
+      // transitively merge a non-unit dimension across the limited axis.
+      barrierBoundary = !adjacentComponentIsUnit;
+    }
+    if (axis == 0 || !contiguous[axis] || barrierBoundary)
+      reassociation.push_back({});
+    reassociation.back().push_back(axis);
+  }
+  return reassociation;
+}
+
+inline std::vector<std::vector<size_t>>
 UniformReassociationPipelineWithBarriers(
     const std::vector<MemRefTypeModel> &types,
     const std::vector<int64_t> &barrierDims) {
@@ -760,32 +819,39 @@ inline std::vector<AlignedOperand> OperationOperandTypes(
 
 inline AlignStorageResult
 ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
-                  std::vector<LocalBufferRecord> &buffers) {
+                  std::vector<LocalBufferRecord> &buffers,
+                  bool alignAllocSize = true,
+                  bool enableStrideAlign = true) {
   std::map<std::string, std::map<size_t, uint64_t>> sizeMarks;
-  for (const GenericOperation &operation :
-       postBufferization.bufferized.logicalModule.operations) {
-    if (!IsHIVMStructuredOp(operation.name))
-      continue;
-    const std::vector<AlignedOperand> operands =
-        OperationOperandTypes(postBufferization, operation, buffers);
-    if (operation.name == "hivm.hir.vcast") {
-      const GenericOperation *function = EnclosingFunction(
-          postBufferization.bufferized.logicalModule, operation);
-      if (function && !HasDictionaryEntry(
-                          function->attributes,
-                          "hivm.disable_size_align_for_cast"))
-        MarkVCastAllocSize(operation, operands, buffers, sizeMarks);
-    } else if (operation.name == "hivm.hir.vtranspose") {
-      MarkVTransposeAllocSize(operation, operands, buffers, sizeMarks);
-    } else if (operation.name == "hivm.hir.vsort") {
-      MarkVSortAllocSize(operands, buffers, sizeMarks);
+  if (alignAllocSize) {
+    for (const GenericOperation &operation :
+         postBufferization.bufferized.logicalModule.operations) {
+      if (!IsHIVMStructuredOp(operation.name))
+        continue;
+      const std::vector<AlignedOperand> operands =
+          OperationOperandTypes(postBufferization, operation, buffers);
+      if (operation.name == "hivm.hir.vcast") {
+        const GenericOperation *function = EnclosingFunction(
+            postBufferization.bufferized.logicalModule, operation);
+        if (function && !HasDictionaryEntry(
+                            function->attributes,
+                            "hivm.disable_size_align_for_cast"))
+          MarkVCastAllocSize(operation, operands, buffers, sizeMarks);
+      } else if (operation.name == "hivm.hir.vtranspose") {
+        MarkVTransposeAllocSize(operation, operands, buffers, sizeMarks);
+      } else if (operation.name == "hivm.hir.vsort") {
+        MarkVSortAllocSize(operands, buffers, sizeMarks);
+      }
     }
   }
 
   std::map<std::string, std::set<size_t>> marks;
-  MarkBufferizationConflictCopies(postBufferization, buffers, marks);
+  if (enableStrideAlign)
+    MarkBufferizationConflictCopies(postBufferization, buffers, marks);
   for (const GenericOperation &operation :
        postBufferization.bufferized.logicalModule.operations) {
+      if (!enableStrideAlign)
+        break;
       if (!IsHIVMStructuredOp(operation.name))
         continue;
       const std::vector<AlignedOperand> operands =
@@ -837,10 +903,18 @@ ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
       std::vector<MemRefTypeModel> types;
       for (const AlignedOperand &operand : operands)
         types.push_back(operand.type);
+      const auto alignmentLimitedAxes = [&]() {
+        // Without AlignAllocSize, the real alignment pipeline does not carry
+        // VConcat's concatenation dimension into the stride-mark barrier
+        // analysis. Other limited operations keep their normal barriers.
+        if (!alignAllocSize && operation.name == "hivm.hir.vconcat")
+          return std::vector<int64_t>{};
+        return GetLimitedAxes(operation);
+      };
       std::optional<size_t> alignDim;
       if (operation.name == "hivm.hir.vcumsum") {
         const std::vector<int64_t> dimensions =
-            GetLimitedAxes(operation);
+            alignmentLimitedAxes();
         const size_t next = dimensions.empty()
                                 ? rank
                                 : static_cast<size_t>(dimensions.back() + 1);
@@ -854,7 +928,7 @@ ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
                        : GetLastUnContinuousDimWithBarriers(types,
                                                               dimensions);
       } else if (const std::vector<int64_t> dimensions =
-                     GetLimitedAxes(operation);
+                     alignmentLimitedAxes();
                  !dimensions.empty()) {
         alignDim = GetLastUnContinuousDimWithBarriers(types, dimensions);
       } else {
@@ -903,15 +977,14 @@ ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
       }
   }
 
-  bool propagated = true;
+  bool propagated = enableStrideAlign;
   for (size_t iteration = 0; propagated && iteration < 10; ++iteration) {
     propagated = false;
     for (const GenericOperation &operation :
          postBufferization.bufferized.logicalModule.operations) {
       if (!IsHIVMStructuredOp(operation.name) ||
           operation.name == "hivm.hir.load" ||
-          operation.name == "hivm.hir.store" ||
-          operation.name == "hivm.hir.vtranspose")
+          operation.name == "hivm.hir.store")
         continue;
       const std::vector<AlignedOperand> operands =
           OperationOperandTypes(postBufferization, operation, buffers);

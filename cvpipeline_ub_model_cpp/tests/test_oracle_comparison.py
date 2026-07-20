@@ -15,6 +15,30 @@ from compare_ub_plan_with_suffix_oracle import (  # noqa: E402
     parse_oracle_contract,
     plan_multiset_from_model,
 )
+from run_corpus_oracle import is_ub_overflow, overflow_address_space  # noqa: E402
+
+
+assert overflow_address_space(
+    'loc("input.mlir":2:3): error: cbuf overflow, requires 4456448 bits') == "cbuf"
+assert overflow_address_space(
+    'input.mlir:2:3: error: ubuf overflow, requires 1710080 bits') == "ubuf"
+assert overflow_address_space("[ERROR] unrelated compiler failure") is None
+assert is_ub_overflow("ub")
+assert is_ub_overflow("ubuf")
+assert not is_ub_overflow("cbuf")
+
+with tempfile.TemporaryDirectory() as directory:
+    empty_ub_oracle = Path(directory) / "empty-ub.tsv"
+    empty_ub_oracle.write_text(
+        "PLANMEM_UB_ORACLE_COMPLETE\t0\nPLANMEM_RUN_RESULT\tsuccess\n",
+        encoding="utf-8",
+    )
+    status, required, multi, inplace = parse_oracle_contract(
+        empty_ub_oracle, 0, "6")
+    assert status == "success"
+    assert required == 0
+    assert not multi
+    assert not inplace
 
 
 wrapped_report = {

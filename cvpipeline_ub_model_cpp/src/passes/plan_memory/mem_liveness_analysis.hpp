@@ -1241,36 +1241,52 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
     return false;
   };
 
-  auto VisitDstOpTypeReachable = [&](
+  auto VisitDstOpTypeReachable = [&resolveAlloc, &operations](
                                      const std::string &src,
                                      const std::string &dstOpName,
                                      const std::vector<std::pair<std::string,
                                                                  std::string>>
                                          &inplaceList) {
     std::set<std::string> visited;
-    std::vector<std::string> worklist = {src};
-    while (!worklist.empty()) {
-      std::string current = worklist.back();
-      worklist.pop_back();
-      if (!visited.insert(current).second)
-        continue;
-      for (const OperationRecord &operation : operations) {
-        if (operation.opName != dstOpName)
-          continue;
-        for (const std::string &operand : operationOperandNames(operation)) {
-          auto alloc = resolveAlloc(operand);
-          if (alloc && *alloc == current)
-            return true;
-        }
-      }
-      for (const auto &pair : inplaceList) {
-        if (pair.first == current)
-          worklist.push_back(pair.second);
-        else if (pair.second == current)
-          worklist.push_back(pair.first);
-      }
-    }
-    return false;
+    std::function<bool(const std::string &)> visit =
+        [&](const std::string &current) {
+          if (!visited.insert(current).second)
+            return false;
+
+          // MLIR prepends operand uses to the value use-list. Reproduce
+          // Value::getUsers() by visiting the reconstructed operations in
+          // reverse creation order. PlanMemory deliberately returns after the
+          // first view-like user, even when that branch does not reach dst.
+          for (auto operation = operations.rbegin();
+               operation != operations.rend(); ++operation) {
+            const std::vector<std::string> operands =
+                operationOperandNames(*operation);
+            if (std::find(operands.begin(), operands.end(), current) ==
+                operands.end())
+              continue;
+            if (operation->opName == dstOpName)
+              return true;
+            if (isViewLikeMemrefOp(operation->opName)) {
+              const std::vector<std::string> results =
+                  operationResultNames(*operation);
+              return !results.empty() && visit(results.front());
+            }
+          }
+
+          const std::optional<std::string> root = resolveAlloc(current);
+          if (!root)
+            return false;
+          for (const auto &pair : inplaceList) {
+            if (pair.first == pair.second)
+              continue;
+            if (pair.first == *root && visit(pair.second))
+              return true;
+            if (pair.second == *root && visit(pair.first))
+              return true;
+          }
+          return false;
+        };
+    return visit(src);
   };
 
   auto HasUser = [&](const std::string &src, const std::string &dstOpName,

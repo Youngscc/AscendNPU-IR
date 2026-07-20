@@ -208,7 +208,9 @@ inline bool HasInterveningMemoryEffect(
   return false;
 }
 
-inline InlineLoadCopyResult ModelInlineLoadCopy(const AfterAllocExtraBufferState &afterAllocExtraBuffer) {
+inline InlineLoadCopyResult ModelInlineLoadCopy(
+    const AfterAllocExtraBufferState &afterAllocExtraBuffer,
+    bool requireExactDynamicMiddleValue = false) {
   const PostBufferizationRewriteState &postBufferization = afterAllocExtraBuffer.postBufferization;
   const GenericModule &module = postBufferization.bufferized.logicalModule;
   InlineLoadCopyResult result;
@@ -265,6 +267,27 @@ inline InlineLoadCopyResult ModelInlineLoadCopy(const AfterAllocExtraBufferState
     const LocalBufferRecord *middle =
         FindSourceBuffer(afterAllocExtraBuffer.buffers, copySource->second);
     if (!middle || middle->extraBuffer)
+      continue;
+    const bool sameProjectedValue =
+        matchedLoad->operands.size() >= 2 &&
+        matchedLoad->operands[1] == copy.operands.front();
+    const std::optional<MemRefTypeModel> middleType =
+        ParseMemRefType(middle->type);
+    const bool dynamicMiddle =
+        middleType && std::any_of(
+                          middleType->shape.begin(), middleType->shape.end(),
+                          [](const std::optional<int64_t> &extent) {
+                            return !extent;
+                          });
+    // In the Triton and stride-alignment-disabled paths the real pattern
+    // requires load.getDst() == copy.getSrc() as the exact SSA value. A
+    // dynamic allocation is represented through view/subview values; sharing
+    // its projected buffer identity does not make those SSA values
+    // interchangeable there.
+    const bool exactDynamicMiddleValue =
+        requireExactDynamicMiddleValue ||
+        !afterAllocExtraBuffer.enableStrideAlign;
+    if (exactDynamicMiddleValue && !sameProjectedValue && dynamicMiddle)
       continue;
     const GenericOperation *function = EnclosingFunction(module, copy);
     if (!function)

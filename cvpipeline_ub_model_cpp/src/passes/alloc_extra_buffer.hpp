@@ -333,7 +333,13 @@ private:
     if (rank <= 1)
       return std::nullopt;
     int64_t dimension = dimensions.front();
-    const bool first = dimension + 3 - rank <= 0;
+    // VBrc's first-axis path applies to the leading dimension of the
+    // flattened operand regardless of whether FlattenInterface reduced the
+    // operation to rank two or kept it at rank three.  The previous
+    // three-dimensional normalization missed rank-two broadcast_dims = [0],
+    // while the real ExtraBufferOpInterface allocates its 16-element scratch
+    // buffer for that form.
+    const bool first = dimension == 0;
     const bool last = dimension + 3 - rank == 2;
     if (!first && !last)
       return std::nullopt;

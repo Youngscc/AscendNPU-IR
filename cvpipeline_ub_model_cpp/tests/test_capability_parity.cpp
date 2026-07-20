@@ -5,6 +5,7 @@
 #include "../src/passes/tile_and_bind_sub_block.hpp"
 #include "../src/passes/tightly_coupled_buffer_guard.hpp"
 #include "../src/passes/mark_multi_buffer.hpp"
+#include "../src/passes/sink_op_to_consumer_in_loop.hpp"
 
 #include <iostream>
 #include <stdexcept>
@@ -306,6 +307,36 @@ void TestMarkMultiBufferExplicitMarksAndFailFast() {
   Check(blocked, "unresolved explicit multi-buffer marks must fail closed");
 }
 
+void TestSinkOpUseMultiplicityAndGreedyOrder() {
+  cvub::GenericModule module = cvub::ParseGenericIR(
+      "cvpipeline_ub_model_cpp/tests/fixtures/sink_op_use_order.mlir", false);
+  module = cvub::RunSinkOpToConsumerInLoop(std::move(module));
+
+  const cvub::GenericOperation &consumer = FindOperation(module, "hivm.hir.vadd");
+  Check(consumer.operands[0] != consumer.operands[1],
+        "two operands on one user must receive distinct sunk clones");
+
+  const cvub::GenericOperation &loop = FindOperation(module, "scf.for");
+  const int loopBlock =
+      module.regions.at(static_cast<size_t>(loop.regions.front())).blocks.front();
+  std::vector<std::string> fillOrder;
+  for (int operationId :
+       module.blocks.at(static_cast<size_t>(loopBlock)).operations) {
+    const cvub::GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(operationId));
+    if (operation.name != "hivm.hir.vbrc")
+      continue;
+    fillOrder.push_back(operation.attributes.find("second_fill") !=
+                                std::string::npos
+                            ? "second"
+                            : "first");
+  }
+  Check(fillOrder == std::vector<std::string>({"second", "first", "first"}),
+        "sink pass must reproduce MLIR use-list and greedy worklist order");
+  Check(CountOperation(module, "hivm.hir.vbrc") == 3,
+        "two uses on one consumer must create one clone per OpOperand");
+}
+
 } // namespace
 
 int main() {
@@ -333,5 +364,7 @@ int main() {
   std::cout << "[PASS] GenericRewriter assigns region ordinals\n";
   TestMarkMultiBufferExplicitMarksAndFailFast();
   std::cout << "[PASS] MarkMultiBuffer preserves explicit order and fails closed\n";
+  TestSinkOpUseMultiplicityAndGreedyOrder();
+  std::cout << "[PASS] SinkOpToConsumer preserves MLIR use and worklist order\n";
   return 0;
 }

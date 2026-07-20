@@ -10,6 +10,7 @@ namespace cvub {
 struct AfterAllocExtraBufferState {
   PostBufferizationRewriteState postBufferization;
   AlignStorageResult alignStorage;
+  bool enableStrideAlign = true;
   std::vector<LocalBufferRecord> buffers;
   std::map<std::string, int> bufferOwnerOperations;
 };
@@ -443,9 +444,9 @@ inline MemRefTypeModel AlignedOperandType(
   return type;
 }
 
-inline void FlattenLimitedOperationForAllocExtraBuffer(GenericOperation &operation,
-                                      const std::string &dimensionName,
-                                      const std::vector<int64_t> &dimensions) {
+inline void FlattenLimitedOperationForAllocExtraBuffer(
+    GenericOperation &operation, const std::string &dimensionName,
+    const std::vector<int64_t> &dimensions) {
   std::vector<MemRefTypeModel> types;
   std::vector<size_t> indices;
   for (size_t index = 0; index < operation.operandTypes.size(); ++index) {
@@ -467,7 +468,7 @@ inline void FlattenLimitedOperationForAllocExtraBuffer(GenericOperation &operati
       type.hasStridedLayout = true;
     }
   const std::vector<std::vector<size_t>> reassociation =
-      ReassociationWithBarriers(types, dimensions);
+      AllocExtraBufferReassociationWithBarriers(types, dimensions);
   for (size_t index = 0; index < types.size(); ++index)
     operation.operandTypes[indices[index]] =
         FormatMemRefType(CollapseMemRefType(types[index], reassociation));
@@ -559,11 +560,22 @@ ModelConnectedAllocExtraBuffer(const PostBufferizationRewriteState &postBufferiz
         if (const LocalBufferRecord *record =
                 FindSourceBuffer(buffers, identity)) {
           if (operation.name == "hivm.hir.vreduce" ||
-              operation.name == "hivm.hir.vbrc")
+              operation.name == "hivm.hir.vbrc") {
+            // FlattenInterface operates on the operand view type, not on the
+            // shape of the backing allocation.  Preserve expanded/collapsed
+            // view shapes here, then project any root stride alignment onto
+            // that view.  Using the allocation type loses singleton-axis
+            // placement (for example 1x1x2 versus 2x1x1) and can suppress a
+            // required VBrc scratch buffer.
+            operation.operandTypes[index] =
+                IsTensorType(source.operandTypes[index])
+                    ? ConvertTensorToMemRefType(source.operandTypes[index])
+                    : source.operandTypes[index];
             if (std::optional<MemRefTypeModel> type =
                     ParseMemRefType(operation.operandTypes[index]))
               operation.operandTypes[index] = FormatMemRefType(
                   AlignedOperandType(*record, *type, alignStorage));
+          }
           physical[index] = record->type;
           if (operation.name == "hivm.hir.vreduce" ||
               operation.name == "hivm.hir.vbrc") {
@@ -622,7 +634,9 @@ ModelConnectedAllocExtraBuffer(const PostBufferizationRewriteState &postBufferiz
   return result;
 }
 
-inline AfterAllocExtraBufferState BuildAfterAllocExtraBufferState(PostBufferizationRewriteState postBufferization) {
+inline AfterAllocExtraBufferState BuildAfterAllocExtraBufferState(
+    PostBufferizationRewriteState postBufferization,
+    bool alignAllocSize = true, bool enableStrideAlign = true) {
   AfterAllocExtraBufferState result;
   const std::map<std::string, AddressSpace> scopes = InferHIVMMemScope(postBufferization);
   const bool preserveCompactedBaseOrder =
@@ -667,7 +681,9 @@ inline AfterAllocExtraBufferState BuildAfterAllocExtraBufferState(PostBufferizat
     sourceBuffers.push_back(item.buffer);
   for (const Pending &item : pending)
     sourceBuffers.push_back(item.buffer);
-  result.alignStorage = ModelAlignStorage(postBufferization, sourceBuffers);
+  result.alignStorage = ModelAlignStorage(
+      postBufferization, sourceBuffers, alignAllocSize, enableStrideAlign);
+  result.enableStrideAlign = enableStrideAlign;
   for (size_t index = 0; index < basePending.size(); ++index)
     basePending[index].buffer = sourceBuffers[index];
   for (size_t index = 0; index < pending.size(); ++index)

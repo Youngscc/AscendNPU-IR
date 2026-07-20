@@ -19,6 +19,7 @@
 #include "../passes/tile_and_bind_sub_block.hpp"
 #include "../passes/tile_cube_vector_loop.hpp"
 #include "../passes/tightly_coupled_buffer_guard.hpp"
+#include "../passes/sink_op_to_consumer_in_loop.hpp"
 #include "../support/debug_trace.hpp"
 #include "plan_memory_input_builder.hpp"
 
@@ -32,7 +33,11 @@ struct UBAffectingPassOptions {
   unsigned tileMixVectorLoop = 2;
   unsigned tileMixCubeLoop = 2;
   bool enableCodeMotion = true;
+  bool enableUbufSaving = false;
   bool enableTritonKernelCompile = false;
+  bool disableAlignAllocSize = false;
+  bool disableEnableStrideAlign = false;
+  bool disableInferHIVMDataLayout = false;
   bool enableAutoMultiBuffer = false;
   MultiBufferStrategy limitAutoMultiBufferOfLocalBuffer =
       MultiBufferStrategy::CubeNoL0C;
@@ -196,6 +201,12 @@ inline GenericModule RunPassesBeforeOneShotBufferize(
     trace->Pass("OptimizeDpsOpWithYieldedInsertSlice", {{"executed", 0}});
     trace->Pass("CloneTensorEmptyBeforeBufferize", {{"executed", 0}});
   }
+  if (options.enableUbufSaving) {
+    module = RunSinkOpToConsumerInLoop(std::move(module));
+    TraceGenericPass(trace, "SinkOpToConsumerInLoop", module);
+  } else if (trace) {
+    trace->Pass("SinkOpToConsumerInLoop", {{"executed", 0}});
+  }
   ValidateGenericModule(module);
   return module;
 }
@@ -237,7 +248,9 @@ inline PlanMemoryInput BuildPlanMemoryInputFromBeforeOneShotBufferize(
     });
   }
   const AfterAllocExtraBufferState allocExtraBufferOutput =
-      BuildAfterAllocExtraBufferState(hivmDecomposeOpOutput);
+      BuildAfterAllocExtraBufferState(
+          hivmDecomposeOpOutput, !options.disableAlignAllocSize,
+          !options.disableEnableStrideAlign);
   if (trace) {
     const uint64_t extraBuffers = static_cast<uint64_t>(std::count_if(
         allocExtraBufferOutput.buffers.begin(),
@@ -259,7 +272,8 @@ inline PlanMemoryInput BuildPlanMemoryInputFromBeforeOneShotBufferize(
     });
   }
   const AfterInlineLoadCopyState inlineLoadCopyOutput =
-      BuildAfterInlineLoadCopyState(allocExtraBufferOutput);
+      BuildAfterInlineLoadCopyState(allocExtraBufferOutput,
+                                    options.enableTritonKernelCompile);
   if (trace) {
     trace->Pass(
         "InlineLoadCopy",
@@ -278,6 +292,8 @@ inline PlanMemoryInput BuildPlanMemoryInputFromBeforeOneShotBufferize(
       options.limitAutoMultiBufferOfLocalBuffer;
   multiBufferOptions.limitMixAutoMultiBufferBuffer =
       options.limitMixAutoMultiBufferBuffer;
+  multiBufferOptions.inferHIVMDataLayout =
+      !options.disableInferHIVMDataLayout;
   const AfterMarkMultiBufferState markMultiBufferOutput =
       BuildAfterMarkMultiBufferState(inlineLoadCopyOutput, multiBufferOptions);
   if (trace) {
@@ -304,22 +320,6 @@ inline PlanMemoryInput BuildPlanMemoryInputFromBeforeOneShotBufferize(
     });
   }
 
-  const AfterAllocExtraBufferState &afterAllocExtraBuffer =
-      semantic.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer;
-  for (const LocalBufferRecord &buffer : afterAllocExtraBuffer.buffers) {
-    const std::optional<MemRefTypeModel> type = ParseMemRefType(buffer.type);
-    const bool dynamic = type && std::any_of(
-        type->shape.begin(), type->shape.end(),
-        [](const std::optional<int64_t> &extent) { return !extent; });
-    const auto alignment =
-        afterAllocExtraBuffer.alignStorage.strideAlignments.find(
-            buffer.sourceIdentity);
-    if (dynamic &&
-        alignment != afterAllocExtraBuffer.alignStorage.strideAlignments.end() &&
-        !alignment->second.empty())
-      throw std::runtime_error(
-          "AlignStorage: dynamic stride-aligned allocation is unsupported");
-  }
   PlanMemoryInput input = targetFunction.empty()
                               ? BuildPlanMemoryInput(semantic)
                               : BuildPlanMemoryInput(semantic, targetFunction);

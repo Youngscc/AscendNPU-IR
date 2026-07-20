@@ -36,6 +36,13 @@ def parse_bool(text: str) -> bool:
         "expected one of: 0, 1, true, false, yes, no, on, off")
 
 
+def positive_int(text: str) -> int:
+    value = int(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("expected a positive integer")
+    return value
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--corpus-root", required=True, type=Path)
@@ -49,8 +56,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable-cv-lazy-loading", action="store_true")
     parser.add_argument("--enable-code-motion", type=parse_bool, default=True,
                         metavar="BOOL")
+    parser.add_argument("--tile-mix-cube-loop", type=positive_int, default=2)
+    parser.add_argument("--tile-mix-vector-loop", type=positive_int, default=2)
+    parser.add_argument("--enable-ubuf-saving", action="store_true")
     parser.add_argument("--enable-auto-multi-buffer", action="store_true")
     parser.add_argument("--enable-triton-kernel-compile", action="store_true")
+    parser.add_argument("--disable-align-alloc-size", action="store_true")
+    parser.add_argument("--disable-enable-stride-align", action="store_true")
+    parser.add_argument("--disable-infer-hivm-data-layout", action="store_true")
     parser.add_argument("--local-multi-buffer-strategy", default="no-l0c",
                         choices=("no-limit", "only-cube", "only-vector", "no-l0c"))
     parser.add_argument("--mix-multi-buffer-strategy", default="only-cube",
@@ -90,6 +103,21 @@ def bool_text(value: bool) -> str:
     return "true" if value else "false"
 
 
+def overflow_address_space(stderr: str) -> str | None:
+    """Return the compiler address space named by an overflow diagnostic."""
+    match = re.search(
+        r"\berror:\s+([A-Za-z][A-Za-z0-9_-]*) overflow, requires\s+",
+        stderr,
+        re.IGNORECASE,
+    )
+    return match.group(1).lower() if match else None
+
+
+def is_ub_overflow(address_space: str | None) -> bool:
+    """Accept both spellings emitted by supported compiler revisions."""
+    return address_space in {"ub", "ubuf"}
+
+
 def shared_pipeline_options(args: argparse.Namespace) -> list[str]:
     return [
         f"--disable-cv-pipelining={bool_text(args.disable_cv_pipelining)}",
@@ -97,8 +125,14 @@ def shared_pipeline_options(args: argparse.Namespace) -> list[str]:
         f"--enable-preload={bool_text(args.enable_preload)}",
         f"--enable-cv-lazy-loading={bool_text(args.enable_cv_lazy_loading)}",
         f"--enable-code-motion={bool_text(args.enable_code_motion)}",
+        f"--tile-mix-cube-loop={args.tile_mix_cube_loop}",
+        f"--tile-mix-vector-loop={args.tile_mix_vector_loop}",
+        f"--enable-ubuf-saving={bool_text(args.enable_ubuf_saving)}",
         f"--enable-auto-multi-buffer={bool_text(args.enable_auto_multi_buffer)}",
         f"--enable-triton-kernel-compile={bool_text(args.enable_triton_kernel_compile)}",
+        f"--disable-align-alloc-size={bool_text(args.disable_align_alloc_size)}",
+        f"--disable-enable-stride-align={bool_text(args.disable_enable_stride_align)}",
+        f"--disable-infer-hivm-data-layout={bool_text(args.disable_infer_hivm_data_layout)}",
         f"--limit-auto-multi-buffer-of-local-buffer={args.local_multi_buffer_strategy}",
         f"--limit-auto-multi-buffer-buffer={args.mix_multi_buffer_strategy}",
     ]
@@ -176,6 +210,8 @@ def main() -> int:
     reported_exact = 0
     matched = 0
     invalid = 0
+    oracle_unavailable = 0
+    unavailable_reasons: list[str] = []
     manifest_written = False
     tasks_per_case = len(selected_seeds) + int(args.check_retry)
     progress = ProgressBar(
@@ -190,6 +226,7 @@ def main() -> int:
             case_name = safe_name(str(relative))
             case_was_blocker = False
             case_reported_exact = True
+            case_oracle_unavailable = False
             case_task_base = case_index * tasks_per_case
             for seed_index, seed in enumerate(selected_seeds):
                 progress.update(
@@ -277,6 +314,7 @@ def main() -> int:
                 compiler_command = [
                     str(args.compiler), str(input_path), "-o", str(oracle_output),
                     f"--plan-memory-seed={seed}", "--mlir-disable-threading",
+                    "--ub-oracle-only",
                     *shared_pipeline_options(args),
                 ]
                 if args.restrict_inplace_as_isa:
@@ -291,12 +329,17 @@ def main() -> int:
                 oracle_env = dict(os.environ)
                 oracle_env["BISHENGIR_DUMP_PLAN_MEMORY_ATTEMPTS"] = "1"
                 compiled = run(compiler_command, env=oracle_env)
-                expected_capacity_failure = re.search(
-                    r"error: [^\n]* overflow, requires ",
-                    compiled.stderr) is not None
+                overflow_space = overflow_address_space(compiled.stderr)
+                if (compiled.returncode != 0 and overflow_space is not None and
+                        not is_ub_overflow(overflow_space)):
+                    case_oracle_unavailable = True
+                    unavailable_reasons.append(
+                        f"{relative} seed {seed}: real compiler stopped on "
+                        f"{overflow_space} overflow before a UB oracle was available")
+                    break
                 if (compiled.returncode != 0 and
                         not (payload.get("status") == "overflow" and
-                             expected_capacity_failure)):
+                             is_ub_overflow(overflow_space))):
                     failures.append(
                         f"{relative} seed {seed}: real compiler failed: {compiled.stderr[-2000:]}")
                     break
@@ -393,7 +436,9 @@ def main() -> int:
                                 failures.append(
                                     f"{relative} retry: selected-seed/peak/plan/"
                                     "lifetime differ")
-            if case_was_blocker:
+            if case_oracle_unavailable:
+                oracle_unavailable += 1
+            elif case_was_blocker:
                 blockers += 1
             elif case_reported_exact:
                 reported_exact += 1
@@ -401,7 +446,8 @@ def main() -> int:
                     matched += 1
             else:
                 invalid += 1
-            status = ("BLOCKER" if case_was_blocker else
+            status = ("ORACLE_UNAVAILABLE" if case_oracle_unavailable else
+                      "BLOCKER" if case_was_blocker else
                       "INVALID" if not case_reported_exact else
                       "MATCHED" if len(failures) == failure_count_before_case else
                       "MISMATCH")
@@ -417,7 +463,9 @@ def main() -> int:
     print(
         f"summary: inputs={len(inputs)} reported_exact={reported_exact} "
         f"matched={matched} blockers={blockers} invalid={invalid} "
-        f"failures={len(failures)}")
+        f"oracle_unavailable={oracle_unavailable} failures={len(failures)}")
+    for reason in unavailable_reasons:
+        print(f"[UNAVAILABLE] {reason}", file=sys.stderr)
     for failure in failures:
         print(f"[FAIL] {failure}", file=sys.stderr)
     return 1 if failures else 0

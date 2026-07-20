@@ -19,6 +19,7 @@ struct MarkMultiBufferOptions {
       MultiBufferStrategy::CubeNoL0C;
   MultiBufferStrategy limitMixAutoMultiBufferBuffer =
       MultiBufferStrategy::OnlyCube;
+  bool inferHIVMDataLayout = true;
 };
 
 struct MultiBufferMark {
@@ -464,7 +465,7 @@ inline MarkMultiBufferResult ModelMarkMultiBuffer(
       continue;
     // InferHIVMDataLayout folds an ND-to-NZ load into ND2NZ when the target
     // buffer has been inferred as L1. MarkMultiBuffer observes that folded op.
-    if (finalName == "hivm.hir.load" &&
+    if (options.inferHIVMDataLayout && finalName == "hivm.hir.load" &&
         destinationAddressSpace == AddressSpace::L1)
       finalName = "hivm.hir.nd2nz";
 

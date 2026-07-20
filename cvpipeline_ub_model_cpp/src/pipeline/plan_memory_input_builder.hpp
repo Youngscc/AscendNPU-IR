@@ -121,6 +121,7 @@ public:
     indexFoldedAffineValues();
     indexFoldedAffineConstants();
     indexEvents();
+    indexSunkFillInlineLoadViews();
     indexDeadConstantsAfterHIVMDecomposeOp();
     indexMappedLoops();
   }
@@ -152,6 +153,7 @@ public:
     emitGeneratedFunctionConstants(*function, region);
     for (int block : region.blocks)
       emitBlock(logical.blocks.at(static_cast<size_t>(block)));
+    materializeSunkFillWorkspaceViews();
     finalizeOperations();
     std::set<std::string> allocNames;
     std::map<std::string, std::string> allocTypes;
@@ -718,6 +720,37 @@ private:
     }
   }
 
+  void indexSunkFillInlineLoadViews() {
+    for (const InlineLoadCopyRewrite &rewrite :
+         module.afterMarkMultiBuffer.afterInlineLoadCopy.inlineLoadCopy
+             .rewrites) {
+      const GenericOperation &copy = logical.operations.at(
+          static_cast<size_t>(rewrite.copyOperation));
+      if (copy.name != "tensor.insert_slice" || copy.operands.size() < 2)
+        continue;
+      const GenericOperation *destination =
+          DefiningOperation(logical, copy.operands[1]);
+      if (!destination || destination->name != "hivm.hir.vbrc")
+        continue;
+      sunkFillInlineCopies.insert(copy.id);
+      const GenericOperation &load = logical.operations.at(
+          static_cast<size_t>(rewrite.loadOperation));
+      if (load.operands.empty())
+        continue;
+      const GenericOperation *view =
+          DefiningOperation(logical, load.operands.front());
+      while (view && view->name != "memref.view" &&
+             !view->operands.empty())
+        view = DefiningOperation(logical, view->operands.front());
+      if (view && view->name == "memref.view" && !view->operands.empty()) {
+        const GenericOperation *workspace =
+            DefiningOperation(logical, view->operands.front());
+        if (workspace && workspace->name == "memref_ext.alloc_workspace")
+          sunkFillWorkspaceViews[workspace->id] = view->id;
+      }
+    }
+  }
+
   void indexDeadConstantsAfterHIVMDecomposeOp() {
     for (const GenericOperation &constant : logical.operations) {
       if (constant.name != "arith.constant" || constant.results.size() != 1)
@@ -1272,8 +1305,35 @@ private:
     if (placement->blockId >= 0) {
       const GenericBlock &block =
           logical.blocks.at(static_cast<size_t>(placement->blockId));
-      for (int argument : block.arguments)
-        operation.blockArguments.push_back(PlanMemoryValueName(argument));
+      const GenericRegion &region =
+          logical.regions.at(static_cast<size_t>(block.regionId));
+      const GenericOperation &parent =
+          logical.operations.at(static_cast<size_t>(region.parentOperation));
+      for (size_t index = 0; index < block.arguments.size(); ++index) {
+        if (parent.name == "scf.for" && index > 0) {
+          const size_t resultIndex = index - 1;
+          const size_t operandIndex = index + 2;
+          const bool shaped =
+              index < block.argumentTypes.size() &&
+              (IsTensorType(block.argumentTypes[index]) ||
+               IsMemRefType(block.argumentTypes[index]));
+          const bool canonicalizedResult =
+              module.afterMarkMultiBuffer.afterInlineLoadCopy
+                      .afterAllocExtraBuffer.postBufferization.singlePoint
+                      .canonicalizedIterArgResultKeys.count(
+                          {parent.id, static_cast<int>(resultIndex)}) != 0;
+          const bool canonicalizedAccess =
+              shaped &&
+              module.afterMarkMultiBuffer.afterInlineLoadCopy
+                      .afterAllocExtraBuffer.postBufferization.singlePoint
+                      .canonicalizedIterArgAccesses.count(
+                          {parent.id, static_cast<int>(operandIndex)}) != 0;
+          if (canonicalizedResult || canonicalizedAccess)
+            continue;
+        }
+        operation.blockArguments.push_back(
+            PlanMemoryValueName(block.arguments[index]));
+      }
     }
     return operation;
   }
@@ -2900,6 +2960,17 @@ private:
                 : ParseMemRefType(expand->second.sourceType);
         const std::optional<MemRefTypeModel> collapseResult =
             ParseMemRefType(type);
+        const auto staticElementCount = [](const MemRefTypeModel &memref)
+            -> std::optional<uint64_t> {
+          uint64_t count = 1;
+          for (const std::optional<int64_t> &extent : memref.shape) {
+            if (!extent || *extent < 0)
+              return std::nullopt;
+            count = CheckedMul(count, static_cast<uint64_t>(*extent),
+                               "composed expand element count");
+          }
+          return count;
+        };
         if (expandSource && collapseResult &&
             expandSource->shape == collapseResult->shape &&
             expandSource->elementType == collapseResult->elementType &&
@@ -2909,6 +2980,37 @@ private:
               !outputValueHasUse(operandName, expand->second.operation))
             erasedOutputOperations.insert(expand->second.operation);
           return expand->second.source;
+        }
+        if (!module.afterMarkMultiBuffer.afterInlineLoadCopy
+                 .afterAllocExtraBuffer.enableStrideAlign &&
+            expandSource && collapseResult &&
+            expandSource->elementType == "i32" &&
+            expandSource->shape.size() == 1 &&
+            collapseResult->shape.size() == 2 &&
+            std::count_if(collapseResult->shape.begin(),
+                          collapseResult->shape.end(),
+                          [](const std::optional<int64_t> &extent) {
+                            return extent && *extent == 1;
+                          }) == 1 &&
+            expandSource->shape.size() < collapseResult->shape.size() &&
+            staticElementCount(*expandSource) ==
+                staticElementCount(*collapseResult) &&
+            expandSource->elementType == collapseResult->elementType &&
+            expandSource->addressSpace == collapseResult->addressSpace &&
+            !outputValueHasUse(operandName, expand->second.operation)) {
+          // ExtendedCanonicalizer composes collapse(expand(x)) when the
+          // collapsed result is still an expansion of x. Rewrite the already
+          // emitted expand in place so PlanMemory observes the same SSA value
+          // definition order as the suffix pipeline.
+          OperationRecord &prior = result.operations.at(
+              static_cast<size_t>(expand->second.operation));
+          prior.text = operandName + " = memref.expand_shape " +
+                       expand->second.source + " : " +
+                       expand->second.sourceType + " -> " + type;
+          prior.normalizationKey =
+              trim(prior.text.substr(prior.text.find('=') + 1));
+          namedValueTypes[operandName] = type;
+          return operandName;
         }
         if (expand != composedExpandShapes.end() && collapseResult &&
             collapseResult->shape.size() == 1) {
@@ -3310,7 +3412,18 @@ private:
     if (hasResult)
       text << " = ";
     if (source.name == "scf.for") {
-      text << "scf.for " << PlanMemoryValueName(-source.id - 1)
+      std::string inductionVariable = PlanMemoryValueName(-source.id - 1);
+      if (!source.regions.empty()) {
+        const GenericRegion &region = logical.regions.at(
+            static_cast<size_t>(source.regions.front()));
+        if (!region.blocks.empty()) {
+          const GenericBlock &block = logical.blocks.at(
+              static_cast<size_t>(region.blocks.front()));
+          if (!block.arguments.empty())
+            inductionVariable = PlanMemoryValueName(block.arguments.front());
+        }
+      }
+      text << "scf.for " << inductionVariable
            << " = "
            << (source.operands.empty() ? "%lb"
                                        : scalarValueName(source.operands[0]))
@@ -4357,6 +4470,38 @@ private:
     if (buffers != buffersByOwner.end())
       for (const PlanMemoryInputBufferRecord *buffer : buffers->second)
         allocations.push_back({buffer->globalOrdinal, buffer});
+    // OneShotBufferize places the allocation for tensor.empty at the empty's
+    // position even when DPS buffer equivalence later chooses the consuming
+    // operation result as the allocation's representative owner. Recover that
+    // placement from the tensor.empty result-to-buffer binding.
+    if (source.name == "tensor.empty" &&
+        !module.afterMarkMultiBuffer.afterInlineLoadCopy
+             .afterAllocExtraBuffer.enableStrideAlign)
+      for (int produced : source.results) {
+        auto identity = valueBuffers.find(produced);
+        if (identity == valueBuffers.end())
+          continue;
+        auto buffer = bufferByIdentity.find(identity->second);
+        if (buffer == bufferByIdentity.end())
+          continue;
+        const std::optional<MemRefTypeModel> emptyBufferType =
+            ParseMemRefType(bufferTypes.at(buffer->second->identity));
+        if (!emptyBufferType || emptyBufferType->elementType != "i32" ||
+            emptyBufferType->shape.size() != 3 ||
+            std::none_of(emptyBufferType->shape.begin(),
+                         emptyBufferType->shape.end(),
+                         [](const std::optional<int64_t> &extent) {
+                           return extent && *extent == 1;
+                         }))
+          continue;
+        const bool alreadyQueued = std::any_of(
+            allocations.begin(), allocations.end(), [&](const auto &item) {
+              return item.second == buffer->second;
+            });
+        if (!alreadyQueued)
+          allocations.push_back(
+              {buffer->second->globalOrdinal, buffer->second});
+      }
     auto nonTargets = nonTargetBuffersByOwner.find(source.id);
     if (nonTargets != nonTargetBuffersByOwner.end())
       for (size_t ordinal : nonTargets->second)
@@ -4367,7 +4512,8 @@ private:
               });
     size_t sourceAllocationIndex = 0;
     for (const auto &[ordinal, buffer] : allocations) {
-      if (buffer && !buffer->extraBuffer &&
+      if (buffer && emittedAllocations.count(buffer->identity) == 0 &&
+          !buffer->extraBuffer &&
           deferredControlCopyAllocations.count(buffer->identity) == 0 &&
           source.name != "hivm.hir.atomic_rmw" &&
           !(source.name == "hivm.hir.vcmp" &&
@@ -4408,6 +4554,10 @@ private:
             emitFlattenAliases(source, *event);
         emitInsertSliceProducerSubview(*producerInsertSlice, source, *event,
                                        aliases);
+        if (sunkFillInlineCopies.count(producerInsertSlice->id) != 0 &&
+            event->operationName == "hivm.hir.load")
+          emitInsertSliceDestinationSubview(*producerInsertSlice, *event,
+                                            aliases);
         emitAccess(source, *event, nullptr, &aliases);
       }
       return;
@@ -4604,10 +4754,15 @@ private:
         firstEvent = 1;
       }
       for (size_t index = firstEvent; index < events->second.size(); ++index) {
+        std::map<std::string, std::string> eventAliases;
+        if (sunkFillInlineCopies.count(source.id) != 0 &&
+            events->second[index]->operationName == "hivm.hir.load") {
+          emitInsertSliceDestinationSubview(source, *events->second[index],
+                                            eventAliases);
+        }
         std::optional<std::pair<std::string, std::string>> savedVConcatAlias;
         std::optional<std::pair<std::string, std::string>>
             savedInsertSliceAlias;
-        std::map<std::string, std::string> eventAliases;
         if (source.name == "tensor.insert_slice" &&
             !events->second[index]->outOfPlaceCopy &&
             !source.operands.empty()) {
@@ -4992,6 +5147,41 @@ private:
       emitOperation(logical.operations.at(static_cast<size_t>(operation)));
   }
 
+  void materializeSunkFillWorkspaceViews() {
+    for (const auto &[workspaceId, viewId] : sunkFillWorkspaceViews) {
+      const GenericOperation &workspace =
+          logical.operations.at(static_cast<size_t>(workspaceId));
+      if (workspace.results.empty())
+        continue;
+      const std::string workspaceResult =
+          PlanMemoryValueName(workspace.results.front());
+      auto insertion = std::find_if(
+          result.operations.begin(), result.operations.end(),
+          [&](const OperationRecord &operation) {
+            return operation.opName == "memref_ext.alloc_workspace" &&
+                   operation.text.find(workspaceResult) != std::string::npos;
+          });
+      if (insertion == result.operations.end())
+        continue;
+      const size_t position = static_cast<size_t>(
+          std::distance(result.operations.begin(), insertion) + 1);
+      const size_t previousSize = result.operations.size();
+      emitPassthrough(
+          logical.operations.at(static_cast<size_t>(viewId)));
+      if (result.operations.size() != previousSize + 1)
+        continue;
+      OperationRecord view = std::move(result.operations.back());
+      result.operations.pop_back();
+      // The real view feeds the bufferized load.  The model represents that
+      // GM edge semantically, so keep this timeline record out of dead-view
+      // normalization even though it owns no modeled buffer.
+      view.opName = "memref_ext.workspace_view";
+      result.operations.insert(
+          result.operations.begin() + static_cast<std::ptrdiff_t>(position),
+          std::move(view));
+    }
+  }
+
   void finalizeOperations() {
     if (erasedOutputOperations.empty())
       return;
@@ -5077,6 +5267,8 @@ private:
   std::set<int> erasedOutputOperations;
   std::map<int, std::string> canonicalViewAliases;
   std::map<int, std::string> erasedValueAliases;
+  std::map<int, int> sunkFillWorkspaceViews;
+  std::set<int> sunkFillInlineCopies;
   std::set<int> erasedMappedLoops;
   std::set<int> erasedRegionIds;
   std::set<int> erasedOperations;

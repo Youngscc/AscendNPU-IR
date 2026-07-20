@@ -11,9 +11,12 @@ struct AfterInlineLoadCopyState {
   std::vector<LocalBufferRecord> buffers;
 };
 
-inline AfterInlineLoadCopyState BuildAfterInlineLoadCopyState(AfterAllocExtraBufferState afterAllocExtraBuffer) {
+inline AfterInlineLoadCopyState BuildAfterInlineLoadCopyState(
+    AfterAllocExtraBufferState afterAllocExtraBuffer,
+    bool requireExactDynamicMiddleValue = false) {
   AfterInlineLoadCopyState result;
-  result.inlineLoadCopy = ModelInlineLoadCopy(afterAllocExtraBuffer);
+  result.inlineLoadCopy = ModelInlineLoadCopy(
+      afterAllocExtraBuffer, requireExactDynamicMiddleValue);
   for (const LocalBufferRecord &buffer : afterAllocExtraBuffer.buffers)
     if (result.inlineLoadCopy.erasedBuffers.count(buffer.sourceIdentity) == 0)
       result.buffers.push_back(buffer);

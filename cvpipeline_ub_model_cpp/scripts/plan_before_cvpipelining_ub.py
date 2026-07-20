@@ -92,10 +92,28 @@ def parse_args() -> argparse.Namespace:
     add_optional_bool(
         suffix_group, "--suffix-enable-code-motion", default=True,
         help_text="Match the real LICM and subset-hoisting pipeline option.")
+    suffix_group.add_argument(
+        "--suffix-tile-mix-cube-loop", type=int, default=2,
+        help="Cube loop tiling factor passed to TileCubeVectorLoop.")
+    suffix_group.add_argument(
+        "--suffix-tile-mix-vector-loop", type=int, default=2,
+        help="Vector loop tiling factor passed to TileCubeVectorLoop.")
+    add_optional_bool(
+        suffix_group, "--suffix-enable-ubuf-saving", default=False,
+        help_text="Enable SinkOpToConsumerInLoop before OneShotBufferize.")
     add_optional_bool(
         suffix_group, "--suffix-enable-triton-kernel-compile", default=False,
         help_text=("Run Triton-only DPS insert-slice optimization before "
                    "OneShotBufferize."))
+    add_optional_bool(
+        suffix_group, "--suffix-disable-align-alloc-size", default=False,
+        help_text="Disable AlignAllocSize in the suffix model.")
+    add_optional_bool(
+        suffix_group, "--suffix-disable-enable-stride-align", default=False,
+        help_text="Disable EnableStrideAlign in the suffix model.")
+    add_optional_bool(
+        suffix_group, "--suffix-disable-infer-hivm-data-layout", default=False,
+        help_text="Disable InferHIVMDataLayout in the suffix model.")
     suffix_group.add_argument(
         "--suffix-local-multi-buffer-strategy", default="no-l0c",
         choices=["no-limit", "only-cube", "only-vector", "no-l0c"],
@@ -108,7 +126,11 @@ def parse_args() -> argparse.Namespace:
         "--random-seed", type=int, default=None,
         help="Fixed PlanMemory seed. Omit to use PlanMemory retry mode.")
     suffix_group.add_argument("--restrict-inplace-as-isa", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if (args.suffix_tile_mix_cube_loop <= 0 or
+            args.suffix_tile_mix_vector_loop <= 0):
+        parser.error("tile-mix loop factors must be positive")
+    return args
 
 
 def require_file(path: Path, description: str, executable: bool = False) -> Path:
@@ -130,7 +152,13 @@ def model_command(args: argparse.Namespace) -> list[str]:
         f"--enable-cv-lazy-loading={str(args.cv_enable_lazy_loading).lower()}",
         f"--enable-auto-multi-buffer={str(args.suffix_enable_auto_multi_buffer).lower()}",
         f"--enable-code-motion={str(args.suffix_enable_code_motion).lower()}",
+        f"--tile-mix-cube-loop={args.suffix_tile_mix_cube_loop}",
+        f"--tile-mix-vector-loop={args.suffix_tile_mix_vector_loop}",
+        f"--enable-ubuf-saving={str(args.suffix_enable_ubuf_saving).lower()}",
         f"--enable-triton-kernel-compile={str(args.suffix_enable_triton_kernel_compile).lower()}",
+        f"--disable-align-alloc-size={str(args.suffix_disable_align_alloc_size).lower()}",
+        f"--disable-enable-stride-align={str(args.suffix_disable_enable_stride_align).lower()}",
+        f"--disable-infer-hivm-data-layout={str(args.suffix_disable_infer_hivm_data_layout).lower()}",
         "--limit-auto-multi-buffer-of-local-buffer",
         args.suffix_local_multi_buffer_strategy,
         "--limit-auto-multi-buffer-buffer",
@@ -196,8 +224,17 @@ def options_payload(args: argparse.Namespace) -> dict[str, Any]:
         "suffix_plan_memory": {
             "enable_auto_multi_buffer": args.suffix_enable_auto_multi_buffer,
             "enable_code_motion": args.suffix_enable_code_motion,
+            "tile_mix_cube_loop": args.suffix_tile_mix_cube_loop,
+            "tile_mix_vector_loop": args.suffix_tile_mix_vector_loop,
+            "enable_ubuf_saving": args.suffix_enable_ubuf_saving,
             "enable_triton_kernel_compile":
                 args.suffix_enable_triton_kernel_compile,
+            "disable_align_alloc_size":
+                args.suffix_disable_align_alloc_size,
+            "disable_enable_stride_align":
+                args.suffix_disable_enable_stride_align,
+            "disable_infer_hivm_data_layout":
+                args.suffix_disable_infer_hivm_data_layout,
             "local_multi_buffer_strategy": args.suffix_local_multi_buffer_strategy,
             "mix_multi_buffer_strategy": args.suffix_mix_multi_buffer_strategy,
             "random_seed": args.random_seed,
@@ -243,7 +280,13 @@ def text_report(args: argparse.Namespace,
         f"cvpipelining.enable_lazy_loading\t{str(args.cv_enable_lazy_loading).lower()}",
         f"suffix.enable_auto_multi_buffer\t{str(args.suffix_enable_auto_multi_buffer).lower()}",
         f"suffix.enable_code_motion\t{str(args.suffix_enable_code_motion).lower()}",
+        f"suffix.tile_mix_cube_loop\t{args.suffix_tile_mix_cube_loop}",
+        f"suffix.tile_mix_vector_loop\t{args.suffix_tile_mix_vector_loop}",
+        f"suffix.enable_ubuf_saving\t{str(args.suffix_enable_ubuf_saving).lower()}",
         f"suffix.enable_triton_kernel_compile\t{str(args.suffix_enable_triton_kernel_compile).lower()}",
+        f"suffix.disable_align_alloc_size\t{str(args.suffix_disable_align_alloc_size).lower()}",
+        f"suffix.disable_enable_stride_align\t{str(args.suffix_disable_enable_stride_align).lower()}",
+        f"suffix.disable_infer_hivm_data_layout\t{str(args.suffix_disable_infer_hivm_data_layout).lower()}",
         f"suffix.local_multi_buffer_strategy\t{args.suffix_local_multi_buffer_strategy}",
         f"suffix.mix_multi_buffer_strategy\t{args.suffix_mix_multi_buffer_strategy}",
         f"plan.random_seed\t{'' if args.random_seed is None else args.random_seed}",

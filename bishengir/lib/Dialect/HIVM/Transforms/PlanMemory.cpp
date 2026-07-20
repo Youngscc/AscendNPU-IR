@@ -3043,6 +3043,18 @@ void PlanMemoryPass::runOnOperation() {
   if (hacc::utils::isHost(funcOp))
     return;
 
+  // The suffix oracle can request an AIV-only local-memory result.  MIX
+  // kernels have already been split by this boundary; skipping their AIC
+  // half prevents a CBUF capacity failure from suppressing the independent
+  // UB plan.  This option is deliberately ignored for workspace planning and
+  // defaults to false for every production pipeline.
+  if (this->ubOracleOnly &&
+      this->memMode == MemPlanMode::LOCAL_MEM_PLAN) {
+    std::optional<TFuncCoreType> coreType = queryFuncCoreType(funcOp);
+    if (coreType && *coreType == TFuncCoreType::AIC)
+      return;
+  }
+
   if (this->memMode == MemPlanMode::LOCAL_MEM_PLAN) {
     RewritePatternSet normalizeLoopIterPatterns(&getContext());
     populateNormalizeLoopIneratorPattern(normalizeLoopIterPatterns);

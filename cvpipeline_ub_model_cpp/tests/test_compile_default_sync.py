@@ -38,6 +38,7 @@ def assert_compile_default(option: str, expected: str) -> None:
 
 assert_compile_default("TileMixVectorLoop", "2")
 assert_compile_default("TileMixCubeLoop", "2")
+assert_compile_default("EnableUbufSaving", "false")
 assert_compile_default("EnableTritonKernelCompile", "false")
 assert_compile_default(
     "LimitAutoMultiBufferOfLocalBuffer",
@@ -55,6 +56,19 @@ for variable in ("tileMixVectorLoop", "tileMixCubeLoop"):
     assert re.search(
         rf"unsigned {variable} = 2;", model_pipeline
     ), f"model {variable} default differs from bishengir-compile"
+
+for variable in (
+    "enableUbufSaving",
+    "disableAlignAllocSize",
+    "disableEnableStrideAlign",
+    "disableInferHIVMDataLayout",
+):
+    assert re.search(
+        rf'{variable}\(.*?llvm::cl::init\(false\)', suffix_source, re.DOTALL
+    ), f"suffix compiler {variable} default is not false"
+    assert re.search(
+        rf"bool {variable} = false;", model_main
+    ), f"model {variable} default differs from suffix"
 
 assert re.search(
     r'enableTritonKernelCompile\(.*?"enable-triton-kernel-compile".*?'
@@ -93,6 +107,14 @@ assert re.search(
     re.DOTALL,
 ), "suffix compiler must keep PlanMemory retry mode by default"
 assert re.search(
+    r'ubOracleOnly\(.*?"ub-oracle-only".*?llvm::cl::init\(false\)',
+    suffix_source,
+    re.DOTALL,
+), "suffix compiler must keep UB-only oracle mode disabled by default"
+assert '"--ub-oracle-only"' in corpus_script, (
+    "corpus oracle must isolate UB planning from AIC CBUF failures"
+)
+assert re.search(
     r"std::optional<uint32_t> randomSeed;", model_main
 ), "model must leave the PlanMemory seed unspecified by default"
 assert re.search(
@@ -115,12 +137,30 @@ for option in (
     "--enable-preload",
     "--enable-cv-lazy-loading",
     "--enable-code-motion",
+    "--tile-mix-cube-loop",
+    "--tile-mix-vector-loop",
+    "--enable-ubuf-saving",
     "--enable-auto-multi-buffer",
     "--enable-triton-kernel-compile",
+    "--disable-align-alloc-size",
+    "--disable-enable-stride-align",
+    "--disable-infer-hivm-data-layout",
     "--limit-auto-multi-buffer-of-local-buffer",
     "--limit-auto-multi-buffer-buffer",
 ):
     assert option in corpus_script, f"corpus does not expose/forward {option}"
+
+for variable, value in (
+    ("SUFFIX_TILE_MIX_CUBE_LOOP", "2"),
+    ("SUFFIX_TILE_MIX_VECTOR_LOOP", "2"),
+    ("SUFFIX_ENABLE_UBUF_SAVING", "false"),
+    ("SUFFIX_DISABLE_ALIGN_ALLOC_SIZE", "false"),
+    ("SUFFIX_DISABLE_ENABLE_STRIDE_ALIGN", "false"),
+    ("SUFFIX_DISABLE_INFER_HIVM_DATA_LAYOUT", "false"),
+):
+    assert f"{variable}={value}" in demo_script, (
+        f"demo default for {variable} differs from suffix"
+    )
 
 assert corpus_script.count("*shared_pipeline_options(args)") == 5, (
     "fixed-seed, blocker and retry model/oracle commands must share options"

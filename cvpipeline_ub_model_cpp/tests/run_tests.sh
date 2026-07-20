@@ -26,3 +26,4 @@ python3 cvpipeline_ub_model_cpp/tests/test_capability_manifest.py
 python3 cvpipeline_ub_model_cpp/tests/test_merged_report.py
 python3 cvpipeline_ub_model_cpp/tests/test_oracle_comparison.py
 python3 cvpipeline_ub_model_cpp/tests/test_compile_default_sync.py
+python3 cvpipeline_ub_model_cpp/tests/test_corpus_matrix.py

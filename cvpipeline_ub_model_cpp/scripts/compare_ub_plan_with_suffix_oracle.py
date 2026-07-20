@@ -92,6 +92,7 @@ def parse_oracle_contract(
     applied_inplace_ids: list[tuple[str, str, str]] = []
     applied_inplace_expected = 0
     applied_inplace_dumped = False
+    ub_oracle_complete = False
     for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         fields = raw_line.split("\t")
         if not fields:
@@ -140,8 +141,13 @@ def parse_oracle_contract(
         elif (fields[0] == "PLANMEM_EXACT_APPLIED_INPLACE" and
               len(fields) >= 4 and int(fields[1]) == attempt):
             applied_inplace_ids.append((current_function, fields[2], fields[3]))
-    status = "success" if statuses and all(value == "success" for value in statuses) \
-        else "overflow"
+        elif (fields[0] == "PLANMEM_UB_ORACLE_COMPLETE" and len(fields) >= 2 and
+              int(fields[1]) == attempt):
+            ub_oracle_complete = True
+    status = "success" if (
+        (statuses and all(value == "success" for value in statuses)) or
+        (not statuses and ub_oracle_complete)
+    ) else "overflow"
     if status == "success" and required == 0:
         required = planned_required or storage_required or peak
     multi: Counter[int] = collections.Counter(

@@ -102,6 +102,30 @@ assert len(attention_report["functions"]) == 1, attention_report
 
 print("[PASS] dynamic alignment produces an exact overflow plan")
 
+triton_attention_overflow = subprocess.run(
+    [
+        str(MODEL),
+        f"--before-cvpipelining-ir={ATTENTION_OVERFLOW}",
+        "--format=json",
+        "--random-seed=0",
+        "--enable-triton-kernel-compile",
+    ],
+    text=True,
+    capture_output=True,
+    check=False,
+)
+assert triton_attention_overflow.returncode == 2, triton_attention_overflow
+triton_attention_report = json.loads(triton_attention_overflow.stdout)
+assert triton_attention_report["precision"] == "exact", triton_attention_report
+assert triton_attention_report["status"] == "overflow", triton_attention_report
+assert triton_attention_report["ub_peak_bits"] == 1716224, triton_attention_report
+assert triton_attention_report["required_bits"] == 1716224, triton_attention_report
+assert len(triton_attention_report["functions"]) == 1, triton_attention_report
+assert len(triton_attention_report["functions"][0]["buffers"]) == 45, \
+    triton_attention_report
+
+print("[PASS] Triton dynamic stride alignment produces an exact overflow plan")
+
 subset_hoisting = subprocess.run(
     [
         str(MODEL),

@@ -567,7 +567,8 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
           buffers[1], afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.bufferMapping);
       const LocalBufferRecord *record =
           FindSourceBuffer(afterMarkMultiBuffer.afterInlineLoadCopy.buffers, destination);
-      if (record && record->addressSpace == AddressSpace::L1)
+      if (afterMarkMultiBuffer.options.inferHIVMDataLayout && record &&
+          record->addressSpace == AddressSpace::L1)
         name = "hivm.hir.nd2nz";
     }
     append(operation, name, buffers, operation.properties);

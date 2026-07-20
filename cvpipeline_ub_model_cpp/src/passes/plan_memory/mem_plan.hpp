@@ -71,6 +71,18 @@ inline const StorageEntryModel *FindStorageEntry(
   return nullptr;
 }
 
+inline void ClearSyntheticRelationEntries(MemPlanStateModel &state,
+                                          int firstBufferEntryId) {
+  auto relation = state.firstBufferEntry2RelationOtherBufferEntry.find(
+      firstBufferEntryId);
+  if (relation == state.firstBufferEntry2RelationOtherBufferEntry.end())
+    return;
+  const std::set<int> ids(relation->second.begin(), relation->second.end());
+  state.relationStorageEntries.remove_if(
+      [&](const StorageEntryModel &entry) { return ids.count(entry.id) != 0; });
+  state.firstBufferEntry2RelationOtherBufferEntry.erase(relation);
+}
+
 inline void MergeBufferLife(MemBoundListModelIter start,
                             MemBoundListModelIter end,
                             std::vector<BufferLifeModel> &newLife) {
@@ -385,9 +397,12 @@ inline void PlanRelationOtherBufferEntryAddress(
       relation->bitsOffset = offsets[i - 1];
   }
 
+  // The compiler owns these entries through unique_ptrs in the map. Its
+  // vec.clear() destroys an earlier speculative set before replacement; do
+  // the equivalent for the model's stable list storage.
+  ClearSyntheticRelationEntries(state, entry.id);
   std::vector<int> &relations =
       state.firstBufferEntry2RelationOtherBufferEntry[entry.id];
-  relations.clear();
   for (size_t i = entry.multiBufferNum - 1; i < offsets.size(); ++i) {
     StorageEntryModel relation = entry;
     relation.id = state.nextStorageEntryId++;
@@ -553,7 +568,7 @@ inline bool RollBackForAllocFail(
     specInfo.specStartIdx = specInfo.childIdx;
   while (!hasEnoughRollBackSize && !history.empty() && !outline.empty()) {
     PlanRecordModel record = RollbackOutline(history, outline);
-    state.firstBufferEntry2RelationOtherBufferEntry.erase(record.entry);
+    ClearSyntheticRelationEntries(state, record.entry);
     const StorageEntryModel *entry =
         FindStorageEntry(entries, state, record.entry);
     if (record.isDirectlyRollback ||

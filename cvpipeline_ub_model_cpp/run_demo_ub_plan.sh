@@ -39,6 +39,13 @@ MULTIBUFFER_MIX_STRATEGY=only-cube
 # Remaining suffix / PlanMemory parameters
 # ---------------------------------------------------------------------------
 SUFFIX_ENABLE_TRITON_KERNEL_COMPILE=false
+SUFFIX_ENABLE_CODE_MOTION=true
+SUFFIX_TILE_MIX_CUBE_LOOP=2
+SUFFIX_TILE_MIX_VECTOR_LOOP=2
+SUFFIX_ENABLE_UBUF_SAVING=false
+SUFFIX_DISABLE_ALIGN_ALLOC_SIZE=false
+SUFFIX_DISABLE_ENABLE_STRIDE_ALIGN=false
+SUFFIX_DISABLE_INFER_HIVM_DATA_LAYOUT=false
 RESTRICT_INPLACE_AS_ISA=false
 # Keep empty for PlanMemory retry mode; set only to reproduce one attempt.
 RANDOM_SEED=""
@@ -70,7 +77,14 @@ MarkMultiBuffer options (affect UB buffer count and peak):
   --suffix-mix-multi-buffer-strategy no-limit|only-cube|only-vector|no-l0c
 
 Remaining suffix / PlanMemory options:
+  --suffix-enable-code-motion true|false
+  --suffix-tile-mix-cube-loop N
+  --suffix-tile-mix-vector-loop N
+  --suffix-enable-ubuf-saving true|false
   --suffix-enable-triton-kernel-compile true|false
+  --suffix-disable-align-alloc-size true|false
+  --suffix-disable-enable-stride-align true|false
+  --suffix-disable-infer-hivm-data-layout true|false
   --restrict-inplace-as-isa true|false
   --random-seed N        # omit for PlanMemory retry mode
 EOF
@@ -104,6 +118,20 @@ while [[ $# -gt 0 ]]; do
     --suffix-enable-auto-multi-buffer) MULTIBUFFER_ENABLE_AUTO="$2"; shift 2 ;;
     --suffix-enable-triton-kernel-compile=*) SUFFIX_ENABLE_TRITON_KERNEL_COMPILE="${1#*=}"; shift ;;
     --suffix-enable-triton-kernel-compile) SUFFIX_ENABLE_TRITON_KERNEL_COMPILE="$2"; shift 2 ;;
+    --suffix-enable-code-motion=*) SUFFIX_ENABLE_CODE_MOTION="${1#*=}"; shift ;;
+    --suffix-enable-code-motion) SUFFIX_ENABLE_CODE_MOTION="$2"; shift 2 ;;
+    --suffix-tile-mix-cube-loop=*) SUFFIX_TILE_MIX_CUBE_LOOP="${1#*=}"; shift ;;
+    --suffix-tile-mix-cube-loop) SUFFIX_TILE_MIX_CUBE_LOOP="$2"; shift 2 ;;
+    --suffix-tile-mix-vector-loop=*) SUFFIX_TILE_MIX_VECTOR_LOOP="${1#*=}"; shift ;;
+    --suffix-tile-mix-vector-loop) SUFFIX_TILE_MIX_VECTOR_LOOP="$2"; shift 2 ;;
+    --suffix-enable-ubuf-saving=*) SUFFIX_ENABLE_UBUF_SAVING="${1#*=}"; shift ;;
+    --suffix-enable-ubuf-saving) SUFFIX_ENABLE_UBUF_SAVING="$2"; shift 2 ;;
+    --suffix-disable-align-alloc-size=*) SUFFIX_DISABLE_ALIGN_ALLOC_SIZE="${1#*=}"; shift ;;
+    --suffix-disable-align-alloc-size) SUFFIX_DISABLE_ALIGN_ALLOC_SIZE="$2"; shift 2 ;;
+    --suffix-disable-enable-stride-align=*) SUFFIX_DISABLE_ENABLE_STRIDE_ALIGN="${1#*=}"; shift ;;
+    --suffix-disable-enable-stride-align) SUFFIX_DISABLE_ENABLE_STRIDE_ALIGN="$2"; shift 2 ;;
+    --suffix-disable-infer-hivm-data-layout=*) SUFFIX_DISABLE_INFER_HIVM_DATA_LAYOUT="${1#*=}"; shift ;;
+    --suffix-disable-infer-hivm-data-layout) SUFFIX_DISABLE_INFER_HIVM_DATA_LAYOUT="$2"; shift 2 ;;
     --suffix-local-multi-buffer-strategy=*) MULTIBUFFER_LOCAL_STRATEGY="${1#*=}"; shift ;;
     --suffix-local-multi-buffer-strategy) MULTIBUFFER_LOCAL_STRATEGY="$2"; shift 2 ;;
     --suffix-mix-multi-buffer-strategy=*) MULTIBUFFER_MIX_STRATEGY="${1#*=}"; shift ;;
@@ -162,7 +190,14 @@ model_args=(
   --cv-enable-preload="${CV_ENABLE_PRELOAD}"
   --cv-enable-lazy-loading="${CV_ENABLE_LAZY_LOADING}"
   --suffix-enable-auto-multi-buffer="${MULTIBUFFER_ENABLE_AUTO}"
+  --suffix-enable-code-motion="${SUFFIX_ENABLE_CODE_MOTION}"
+  --suffix-tile-mix-cube-loop="${SUFFIX_TILE_MIX_CUBE_LOOP}"
+  --suffix-tile-mix-vector-loop="${SUFFIX_TILE_MIX_VECTOR_LOOP}"
+  --suffix-enable-ubuf-saving="${SUFFIX_ENABLE_UBUF_SAVING}"
   --suffix-enable-triton-kernel-compile="${SUFFIX_ENABLE_TRITON_KERNEL_COMPILE}"
+  --suffix-disable-align-alloc-size="${SUFFIX_DISABLE_ALIGN_ALLOC_SIZE}"
+  --suffix-disable-enable-stride-align="${SUFFIX_DISABLE_ENABLE_STRIDE_ALIGN}"
+  --suffix-disable-infer-hivm-data-layout="${SUFFIX_DISABLE_INFER_HIVM_DATA_LAYOUT}"
   --suffix-local-multi-buffer-strategy="${MULTIBUFFER_LOCAL_STRATEGY}"
   --suffix-mix-multi-buffer-strategy="${MULTIBUFFER_MIX_STRATEGY}"
   --format=json
@@ -213,7 +248,14 @@ if [[ "${RUN_ORACLE}" == "true" ]]; then
     --enable-preload="${CV_ENABLE_PRELOAD}"
     --enable-cv-lazy-loading="${CV_ENABLE_LAZY_LOADING}"
     --enable-auto-multi-buffer="${MULTIBUFFER_ENABLE_AUTO}"
+    --enable-code-motion="${SUFFIX_ENABLE_CODE_MOTION}"
+    --tile-mix-cube-loop="${SUFFIX_TILE_MIX_CUBE_LOOP}"
+    --tile-mix-vector-loop="${SUFFIX_TILE_MIX_VECTOR_LOOP}"
+    --enable-ubuf-saving="${SUFFIX_ENABLE_UBUF_SAVING}"
     --enable-triton-kernel-compile="${SUFFIX_ENABLE_TRITON_KERNEL_COMPILE}"
+    --disable-align-alloc-size="${SUFFIX_DISABLE_ALIGN_ALLOC_SIZE}"
+    --disable-enable-stride-align="${SUFFIX_DISABLE_ENABLE_STRIDE_ALIGN}"
+    --disable-infer-hivm-data-layout="${SUFFIX_DISABLE_INFER_HIVM_DATA_LAYOUT}"
     --limit-auto-multi-buffer-of-local-buffer "${MULTIBUFFER_LOCAL_STRATEGY}"
     --limit-auto-multi-buffer-buffer "${MULTIBUFFER_MIX_STRATEGY}"
     -o "${oracle_ir}"

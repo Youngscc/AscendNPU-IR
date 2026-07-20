@@ -867,7 +867,6 @@ ModelOneShotBufferizeAllocationsExact(const GenericModule &module) {
 inline OneShotBufferizationResult
 RunOneShotBufferize(const GenericModule &module) {
   OneShotBufferizationResult result;
-  result.preBufferizationCSE = ModelPreBufferizationCSE(module);
   result.decisions = ModelOneShotAnalysis(module);
   result.allocations = ModelOneShotBufferizeAllocationsExact(
       module, result.decisions, result.preBufferizationCSE);

@@ -227,6 +227,27 @@ cvpipeline_ub_model_cpp/data/before_cvpipelining/
 
 `data/before_cvpipelining/manifest.tsv` 记录每个 adapter 的生成状态、哈希和输出路径。
 
+### Corpus 配置矩阵
+
+常用差分配置保存在 `config/corpus_test_matrix.tsv`，由矩阵 runner 逐行读取。每组
+配置固定使用一个 PlanMemory seed（默认 0），不会运行 retry：
+
+```bash
+python3 cvpipeline_ub_model_cpp/scripts/run_corpus_matrix.py \
+  --corpus-root cvpipeline_ub_model_cpp/data/before_cvpipelining \
+  --model cvpipeline_ub_model_cpp/output/bin/cvpipeline_ub_model \
+  --compiler build/bin/bishengir-cvpipeline-suffix-compile \
+  --seed 0 \
+  --quiet
+```
+
+使用 `--list` 查看矩阵中的配置；使用一个或多个 `--config NAME` 选择配置；使用
+`--dry-run` 检查展开后的命令。当前 25 组配置乘以 171 个输入，共 4275 个差分用例。
+矩阵文件的 `required=0` 表示实验性配置：差分仍完整报告，但不阻塞必选矩阵退出码。
+corpus runner 会为 suffix compiler 启用 `--ub-oracle-only`：前置流水线保持完整，最终
+本地 PlanMemory 跳过 AIC，只收集 AIV/UB 结果。因此 AIC 的 CBUF overflow 不再阻止
+UB 差分；若其他非 UB 失败仍使 oracle 不完整，结果才记为 `oracle_unavailable`。
+
 ## 目录说明
 
 ```text
