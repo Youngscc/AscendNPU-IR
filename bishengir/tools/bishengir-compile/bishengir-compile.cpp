@@ -67,6 +67,17 @@ static bool hasRegBaseTarget(int argc, char **argv) {
   return false;
 }
 
+static int runBishengirCompile91095(int argc, char **argv) { 
+  llvm::SmallVector<llvm::StringRef> arguments; 
+  arguments.push_back(""); // placeholder, replaced by execute with full path 
+  for (int i = 1; i < argc; ++i) 
+    arguments.push_back(argv[i]); 
+  if (failed(bishengir::execute("bishengir-compile-a5", 
+                                bishengir::getBiShengInstallPath(), arguments))) 
+    return EXIT_FAILURE; 
+  return EXIT_SUCCESS; 
+}
+
 static void printVersion(llvm::raw_ostream &os) {
   os << bishengir::getBiShengIRToolFullVersion("bishengir-compile") << '\n';
 }
@@ -88,6 +99,13 @@ static void registerAndParseCLIOptions(int argc, char **argv) {
 
 int main(int argc, char **argv) {
   llvm::InitLLVM y(argc, argv);
+
+  // If --target=Ascend910_95* or --target=Ascend950* is specified, delegate to	 
+  // bishengir-compile-91095.	 
+  // TODO: this will be removed after bihengir-compile and bishengir-compile-a5	 
+  // are merged. 
+  if (hasRegBaseTarget(argc, argv)) 
+    return runBishengirCompile91095(argc, argv);
 
   std::vector<std::string> originalCLArgs;
   for (int i = 1; i < argc; ++i)
