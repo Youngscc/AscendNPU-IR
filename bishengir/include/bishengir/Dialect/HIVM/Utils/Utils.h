@@ -64,6 +64,12 @@ static constexpr llvm::StringLiteral kMappingAttrName = "mapping";
 static constexpr llvm::StringLiteral kMapForToForallAttrName =
     "map_for_to_forall";
 
+// Attribute names used by the hivm-mark-disable-load pass and consumed by the
+// MemRef-to-LLVM lowering to emit non-cached (ld_dev) load instructions.
+static constexpr llvm::StringLiteral kDisableDCacheAttr = "disableDCache";
+static constexpr llvm::StringLiteral kMarkDCacheVisitedAttr =
+    "markDCacheInvalidatePatternVisited";
+
 static constexpr llvm::StringLiteral kHIVMDataLayoutAttrName =
     "hivm_data_layout";
 
@@ -184,6 +190,10 @@ void removeMarkOpAttr(annotation::MarkOp markOp, ::llvm::StringLiteral attrName,
 // Remove attr from markOp, but use rewriter
 void removeMarkOpAttr(annotation::MarkOp markOp, StringRef attrName,
                       RewriterBase &rewriter, bool removeOp = true);
+
+/// Remove a dynamic key/value annotation from markOp (and erase mark if empty).
+void removeMarkOpDynamicAttr(annotation::MarkOp markOp, StringRef attrName,
+                             PatternRewriter &rewriter);
 
 // Check whether current for loop is subblock binded.
 bool isSubBlockBindedFor(scf::ForOp op);
@@ -307,9 +317,15 @@ SmallVector<Value> getTensorDynamicValues(OpBuilder &builder, Location loc,
 
 // Create local workspace of current block
 Value createAllocLocalWorkSpace(OpBuilder &builder, Location loc,
+                                ArrayRef<int64_t> shape, Type elementType);
+
+Value createAllocLocalWorkSpace(OpBuilder &builder, Location loc,
                                 SmallVector<int64_t> targetShape,
                                 SmallVector<Value> dynamicSizes,
                                 Type elementType);
+
+Value getLocalWorkSpaceTensor(PatternRewriter &rewriter, Location loc,
+                              ArrayRef<int64_t> targetShapes, Type elementType);
 
 // Create local workspace and to_tensor ops. When staticAllocShape is provided,
 // add annotation::MarkOp to mark the static buffer size in byte (for dynamic
@@ -443,6 +459,19 @@ SmallVector<MemRefType> getMemRefTypes(TypeRange types);
 
 /// Judge if all MemRefTypes has same rank value
 bool isAllSameRank(const SmallVectorImpl<MemRefType> &memrefTypes);
+
+/// Refine the reassociations into largest possible continuous parts, ensuring
+/// that all memrefTypes can be collapsed together.
+SmallVector<ReassociationIndices> getContinuousReassociation(
+    const SmallVectorImpl<MemRefType> &memrefTypes,
+    const SmallVectorImpl<ReassociationIndices> &reassociations);
+
+/// Refine the reassociations into continuous parts. Reshape dims (reduce /
+/// broadcast) cannot be collapsed with non-reshape dims.
+SmallVector<ReassociationIndices>
+getContinuousReassociation(const SmallVectorImpl<MemRefType> &memrefTypes,
+                           ArrayRef<int64_t> reshapeDims = {},
+                           ArrayRef<int64_t> permutations = {});
 
 inline int64_t ceilFactor(int64_t x, int64_t y) { return (x + y - 1) / y * y; }
 inline int64_t ceilDiv(int64_t x, int64_t y) { return (x + y - 1) / y; }

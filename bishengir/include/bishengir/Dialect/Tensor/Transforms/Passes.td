@@ -1,6 +1,6 @@
 //===- Passes.td - Pass pass definition file ---------------*- tablegen -*-===//
 //
-// Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+// Copyright (c) Huawei Technologies Co., Ltd. 2025~2026. All rights reserved.
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -39,6 +39,10 @@ let summary = "Fold tensor empty";
 
 def NormalizeTensorOps : Pass<"normalize-tensor-ops", "func::FuncOp"> {
   let summary = "Optimization patterns for tensor ops";
+  let options = [
+    Option<"skipAlignedSlice", "skip-aligned-slice", "bool", "false",
+           "Skip FoldInsertSliceToConcat pattern for aligned slice.">,
+  ];
   let constructor = "mlir::tensor::createNormalizeTensorOpsPass()";
   let dependentDialects = [
     "tensor::TensorDialect",
@@ -73,7 +77,13 @@ def PropagateReshape : Pass<"propagate-reshape", "func::FuncOp"> {
   let options = [
       Option<"forHIVM", "for-hivm", "bool",
              /*default=*/"false",
-             "Do propagate reshape for HIVM, which has special behavior">
+             "Do propagate reshape for HIVM, which has special behavior">,
+      Option<"forRegbased", "for-regbased", "bool",
+             /*default=*/"false",
+             "Do propagate reshape for register based, which has special behavior">,
+      Option<"skipScope", "skip-scope", "bool",
+             /*default=*/"true",
+             "Skip this pass when the function contains scope operations">
   ];
   let constructor = "mlir::tensor::createPropagateReshapePass()";
   let dependentDialects = [
@@ -162,7 +172,7 @@ def BubbleUpExtractSlice : Pass<"bubble-up-extract-slice", "func::FuncOp"> {
   ];
 }
 
-def MergeConsecutiveInsertExtractSlice 
+def MergeConsecutiveInsertExtractSlice
     : Pass<"merge-consecutive-insert-extract-slice", "func::FuncOp"> {
   let summary = "Merge consecutive insert extract slice";
   let description = [{Merge consecutive insert extract slice}];
@@ -184,6 +194,7 @@ def OptimizeDpsOpWithYieldedInsertSlice :
   }];
   let dependentDialects = [
     "tensor::TensorDialect",
+    "annotation::AnnotationDialect",
   ];
 }
 

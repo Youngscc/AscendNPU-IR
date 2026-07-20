@@ -33,6 +33,7 @@ namespace hivm {
 static constexpr llvm::StringLiteral usedForDebugOp = "used_for_debug_op";
 
 static constexpr llvm::StringLiteral ExtractLoadStoreAttr = "ExtractedLoadOrStore";
+static constexpr llvm::StringLiteral VgatherDecomposeAttr = "VgatherDecompose";
 
 /// find v in vector valueVec
 std::optional<int> findIdx(SmallVector<Value> valueVec, Value v);
@@ -110,6 +111,10 @@ std::optional<Operation *> traceDefOp(Value v, bool isSingleChain = false,
   } else if (auto reinterpretCastOp =
                  v.getDefiningOp<memref::ReinterpretCastOp>()) {
     return traceDefOp<OpType>(reinterpretCastOp.getViewSource(), isSingleChain,
+                              shouldFilterInsertSlice);
+  } else if (auto memorySpaceCastOp =
+                 v.getDefiningOp<memref::MemorySpaceCastOp>()) {
+    return traceDefOp<OpType>(memorySpaceCastOp.getSource(), isSingleChain,
                               shouldFilterInsertSlice);
   } else if (auto blockArg = dyn_cast_if_present<BlockArgument>(v)) {
     if (auto loop = dyn_cast_if_present<LoopLikeOpInterface>(

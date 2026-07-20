@@ -40,12 +40,30 @@
 #define DEBUG_LINE_BEG(m) "===[" #m "]===[BEG]>>>\n"
 #define DEBUG_LINE_END(m) "<<<[" #m "]===[END]===\n"
 
+namespace llvm {
+template <typename T>
+inline raw_ostream &operator<<(raw_ostream &os, const SmallVectorImpl<T> &vec) {
+  if (vec.empty())
+    return os << "is empty";
+  os << "(" << vec.size() << " entries) = [";
+  for (size_t i = 0; i < vec.size(); ++i) {
+    os << vec[i];
+    if (i < vec.size() - 1)
+      os << ", ";
+  }
+  return os << "]";
+}
+} // namespace llvm
 namespace mlir {
 namespace utils {
 constexpr const uint8_t kBitsToByte = 8;
 constexpr static unsigned int INTR_BITS_PER_BYTE = 8;
 constexpr static unsigned int INTR_BYTES_PER_BLOCK = 32;
+constexpr static unsigned int INTR_BYTES_PER_REPEAT = 256;
 constexpr static unsigned int FRACTAL_BLOCK_NUM = 16;
+
+/// Number of elements that fit in one DMA/UB align block for type `t`.
+int64_t getNumPerBlock(Type t);
 constexpr static int64_t kUBAlignSizeInBits = 32 * 8;
 static constexpr llvm::StringLiteral kEnableAutoMarkBufferSize =
     "enable_auto_mark_buffer_size";
@@ -54,6 +72,7 @@ static constexpr llvm::StringLiteral maskOpIdx = "mask_op_idx";
 static constexpr llvm::StringLiteral reachedMaskOpsIdx = "reached_mask_ops_idx";
 static constexpr llvm::StringLiteral maskBitWidth = "mask_bit_width";
 static const llvm::StringLiteral kMapForToForallAttrName = "map_for_to_forall";
+const llvm::StringLiteral padConst = "pad_const";
 
 namespace debugger {
 
@@ -140,6 +159,8 @@ std::string to_string(const T &container, int indent, bool useEndl) {
   oss << "]";
   return oss.str();
 }
+
+std::string getPrettyOpName(Operation *op);
 
 } // namespace debugger
 
@@ -421,6 +442,12 @@ Value tracebackMemRef(Value memrefVal);
 /// originate from a alloc op.
 std::optional<memref::AllocOp> tracebackMemRefToAlloc(Value memrefVal);
 
+/// Try to trace back the current mermef-typed value to the source
+/// `mermef.alloc` or `memref` block argument.
+/// Return `std::nullopt` if max-iteration is reached, or that the value doesn't
+/// originate from a alloc op or block argument.
+std::optional<Value> tracebackMemRefToAllocOrBlockArgument(Value memrefVal);
+
 /// Try to trace back the current mermef-typed value to the source values.
 SmallVector<Value> tracebackMemRefAllocAndAlias(Value memrefVal);
 
@@ -519,13 +546,18 @@ template <typename T> FailureOr<T> getArithConstantOpValue(Value value) {
   return v;
 }
 
+void setAlignUnits(const SmallVectorImpl<int> &alignTargets,
+                   SmallVector<int> &alignUnits, ArrayRef<int64_t> shapes,
+                   int &innerAlignedUnits, int &shapeAccumulation,
+                   int alignTargetDim, int alignUnitsDim);
+
 template <typename TensorOrMemRefType,
           typename = typename std::enable_if_t<
               std::is_same_v<TensorOrMemRefType, TensorType> ||
               std::is_same_v<TensorOrMemRefType, MemRefType>>>
-SmallVector<int> collectAlignUnits(ArrayRef<int32_t> alignDims,
-                                   ArrayRef<int32_t> alignBytes,
-                                   TensorOrMemRefType unalignedTy) {
+SmallVector<int>
+collectAlignUnits(ArrayRef<int32_t> alignDims, ArrayRef<int32_t> alignBytes,
+                  TensorOrMemRefType unalignedTy, bool isRegBasedArch = false) {
   int rank = unalignedTy.getRank();
   const unsigned bitWidth = unalignedTy.getElementTypeBitWidth();
   SmallVector<int> alignTargets(rank, 1);
@@ -548,25 +580,28 @@ SmallVector<int> collectAlignUnits(ArrayRef<int32_t> alignDims,
   int shapeAccumulation = 1;
   auto shapes = unalignedTy.getShape();
   SmallVector<int> alignUnits(rank + 1, 1);
-  for (int dim = rank - 1; dim >= 0; --dim) {
-    // The alignment target forces the INNER dimension to get aligned
-    int newAlignedUnits = std::lcm(innerAlignedUnits, alignTargets[dim]);
-    if (newAlignedUnits == 0)
-      return {};
-    if (shapeAccumulation % newAlignedUnits == 0) {
-      // already aligned
-      alignUnits[dim + 1] = 1;
-    } else {
-      if (innerAlignedUnits == 0)
-        return {}; // should be impossible case (SecA_DivideByZero)
-      alignUnits[dim + 1] = newAlignedUnits / innerAlignedUnits;
-    }
-    innerAlignedUnits = newAlignedUnits;
-    if (!ShapedType::isDynamic(shapes[dim])) {
-      shapeAccumulation =
-          shapeAccumulation * std::lcm(shapes[dim], alignUnits[dim + 1]);
+  if constexpr (std::is_same_v<TensorOrMemRefType, MemRefType>) {
+    if (isRegBasedArch && isLastMemrefDimUnitStride(unalignedTy)) {
+      for (int dim = rank - 1; dim >= 0; --dim) {
+        setAlignUnits(alignTargets, alignUnits, shapes, innerAlignedUnits,
+                      shapeAccumulation, dim, dim);
+        if (alignUnits.empty()) {
+          return alignUnits;
+        }
+      }
+      alignUnits[0] = 1;
+      return alignUnits;
     }
   }
+
+  for (int dim = rank - 1; dim >= 0; --dim) {
+    setAlignUnits(alignTargets, alignUnits, shapes, innerAlignedUnits,
+                  shapeAccumulation, dim, dim + 1);
+    if (alignUnits.empty()) {
+      return alignUnits;
+    }
+  }
+
   // The outermost dimension needs no extra alignments
   alignUnits[0] = 1;
   return alignUnits;
@@ -591,6 +626,8 @@ hivm::AxisKind getAxisKind(int dim, int rank);
 // get axis kind after outlining
 hivm::AxisKind getOutlinedAxisKind(int dim, int rank);
 
+bool isReduceWithIndex(hivm::ReduceOperation op);
+
 BitVector arrayToMask(ArrayRef<int64_t> elements, int maskSize);
 
 std::optional<int64_t> traceToAllocMaxSize(mlir::Value memrefVal);
@@ -607,7 +644,21 @@ Value getSlice(OpBuilder &b, Location loc, Value source,
 
 bool isAlignedInUB(Type type);
 
+void dumpReassociationIndicesVector(
+    const SmallVector<ReassociationIndices> &reassocVec);
+
 bool isUnstructuredMemAccLoop(Operation *op);
+
+int64_t getNumPerRepeat(Type t);
+
+/// Rewrite loop iter_arg to drop unit dims or to fixed hardware types
+template <bool DropUnitDimOnly>
+struct ForOpLegalization : public OpRewritePattern<scf::ForOp> {
+  using OpRewritePattern<scf::ForOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(scf::ForOp op,
+                                PatternRewriter &rewriter) const override;
+  virtual ~ForOpLegalization() = default;
+};
 
 ModuleOp getTopLevelModuleOp(Operation *op);
 
@@ -677,6 +728,157 @@ bool areReassociationsCompatible(
 SmallVector<SmallVector<int64_t, 2>>
 getReAssociation(ArrayRef<int64_t> expandDims, int64_t outRank);
 
+bool isConstIntOne(Value v);
+
+/**
+ * @brief Remove unit dimensions (size=1) from a shape vector
+ * @details Filters out all elements with value 1 from the input shape,
+ *          returning a new shape vector with only non-unit dimensions
+ *
+ * Shape Transformation Example:
+ * - Input:  [2, 1, 3, 1, 5] (shape with unit dims at index 1, 3)
+ * - Output: [2, 3, 5] (unit dims removed)
+ *
+ * Edge Cases:
+ * - Input:  [1, 1, 1] → Output: [] (all unit dims)
+ * - Input:  [4, 5, 6] → Output: [4, 5, 6] (no unit dims)
+ * - Input:  [] → Output: [] (empty shape)
+ *
+ * @param[in] shape Input shape vector (int64_t dim sizes)
+ * @return SmallVector<int64_t> New shape vector with unit dims (size=1) removed
+ * @note Does not modify the original input shape vector
+ */
+SmallVector<int64_t> getSqueezedShape(SmallVectorImpl<int64_t> &type);
+
+/**
+ * @brief Multiply two OpFoldResult (OFR) values (constants/Values)
+ * @details Optimize multiplication for constant OFRs; create arith::MulIOp for
+ * dynamic Value-backed OFRs
+ *
+ * Multiplication Logic Flow:
+ * 1. Constant-Constant (OFR → IntegerAttr):
+ *    Input: lhs=IntegerAttr(5), rhs=IntegerAttr(3) → Output: IntegerAttr(15)
+ *
+ * 2. Constant-Special Case (0/1):
+ *    Input: lhs=IntegerAttr(0), rhs=Value(%0) → Output: lhs (IntegerAttr(0))
+ *    Input: lhs=IntegerAttr(1), rhs=Value(%0) → Output: rhs (Value(%0))
+ *
+ * 3. Dynamic-Dynamic (Value-backed OFR):
+ *    Input: lhs=Value(%a), rhs=Value(%b) → Output: Value(arith.muli %a, %b :
+ * index)
+ *
+ * 4. Constant-Dynamic Mixed:
+ *    Input: lhs=IntegerAttr(2), rhs=Value(%a) → Output: Value(arith.muli
+ * (arith.constant 2), %a : index)
+ *
+ * @param[in] lhs Left-hand side OFR (constant/Value)
+ * @param[in] rhs Right-hand side OFR (constant/Value)
+ * @param[in,out] b OpBuilder for creating constant/mul ops
+ * @param[in] loc Location for new operations (arith::ConstantOp/arith::MulIOp)
+ * @return OpFoldResult Result of multiplication (IntegerAttr or Value of
+ * arith::MulIOp)
+ * @note 1. Prioritizes constant folding (avoids op creation for constant
+ * inputs)
+ *       2. Handles 0/1 shortcuts to avoid unnecessary ops
+ *       3. Converts constant OFRs to arith::ConstantOp for mixed
+ * dynamic/constant cases
+ *       4. Returns Value-backed OFR for non-constant multiplication
+ */
+OpFoldResult mulOFRs(const OpFoldResult lhs, const OpFoldResult rhs,
+                     OpBuilder &b, const Location loc);
+
+/**
+ * @brief Extract integer value from OpFoldResult (OFR) if it's IntegerAttr
+ * @details Check if OFR holds an IntegerAttr and return its int64_t value;
+ * return nullopt otherwise
+ *
+ * Value Extraction Example:
+ * - Case 1 (Match):
+ *   OFR = IntegerAttr(42) → returns std::optional<int64_t> = 42
+ * - Case 2 (No Match):
+ *   OFR = Value(%0 : index) → returns std::nullopt
+ * - Case 3 (No Match):
+ *   OFR = FloatAttr(3.14) → returns std::nullopt
+ *
+ * @param[in] ofr OpFoldResult to extract integer value from
+ * @return std::optional<int64_t> Integer value if OFR is IntegerAttr; nullopt
+ * otherwise
+ * @note Only handles IntegerAttr (ignores other Attribute types or Value-backed
+ * OFR)
+ */
+std::optional<int64_t> getIntAttr(const OpFoldResult ofr);
+
+/**
+ * @brief Multiply two OpFoldResult (OFR) values (constants/Values)
+ * @details Optimize multiplication for constant OFRs; create arith::MulIOp for
+ * dynamic Value-backed OFRs
+ *
+ * Multiplication Logic Flow:
+ * 1. Constant-Constant (OFR → IntegerAttr):
+ *    Input: lhs=IntegerAttr(5), rhs=IntegerAttr(3) → Output: IntegerAttr(15)
+ *
+ * 2. Constant-Special Case (0/1):
+ *    Input: lhs=IntegerAttr(0), rhs=Value(%0) → Output: lhs (IntegerAttr(0))
+ *    Input: lhs=IntegerAttr(1), rhs=Value(%0) → Output: rhs (Value(%0))
+ *
+ * 3. Dynamic-Dynamic (Value-backed OFR):
+ *    Input: lhs=Value(%a), rhs=Value(%b) → Output: Value(arith.muli %a, %b :
+ * index)
+ *
+ * 4. Constant-Dynamic Mixed:
+ *    Input: lhs=IntegerAttr(2), rhs=Value(%a) → Output: Value(arith.muli
+ * (arith.constant 2), %a : index)
+ *
+ * @param[in] lhs Left-hand side OFR (constant/Value)
+ * @param[in] rhs Right-hand side OFR (constant/Value)
+ * @param[in,out] b OpBuilder for creating constant/mul ops
+ * @param[in] loc Location for new operations (arith::ConstantOp/arith::MulIOp)
+ * @return OpFoldResult Result of multiplication (IntegerAttr or Value of
+ * arith::MulIOp)
+ * @note 1. Prioritizes constant folding (avoids op creation for constant
+ * inputs)
+ *       2. Handles 0/1 shortcuts to avoid unnecessary ops
+ *       3. Converts constant OFRs to arith::ConstantOp for mixed
+ * dynamic/constant cases
+ *       4. Returns Value-backed OFR for non-constant multiplication
+ */
+OpFoldResult mulOFRs(const OpFoldResult lhs, const OpFoldResult rhs,
+                     OpBuilder &b, const Location loc);
+
+/**
+ * @brief Shrink reassociation indices by removing dropped dimensions
+ * @details Adjust reassociation indices to exclude dropped dims and shift
+ * remaining indices (compensate for dropped dims)
+ *
+ * Reassociation Transformation Example:
+ * - Input:
+ *   reassocIdxVec = [[0,1,2], [3,4]] (original indices for rank=5)
+ *   droppedDims = [0, 0, 1, 0, 0] (bit 2 marked as dropped)
+ *   shiftTable = [0,0,1,1,1] (precomputed shift for each index)
+ *
+ * - Step 1 (Filter dropped dim 2):
+ *   [[0,1], [3,4]] (remove index 2 from first group)
+ *
+ * - Step 2 (Shift indices by shiftTable):
+ *   [[0,1], [2,3]] (3→2, 4→3; shiftTable[3]=1, shiftTable[4]=1)
+ *
+ * - Output:
+ *   reassocIdxVec = [[0,1], [2,3]] (empty groups are erased)
+ *
+ * @param[in,out] reassocIdxVec Nested reassociation indices (modified in-place)
+ * @param[in] droppedDims BitVector marking dropped dimensions (bit set = dim is
+ * dropped)
+ *
+ * @note 1. shiftTable precomputes cumulative count of dropped dims up to each
+ * index
+ *       2. Remaining indices are shifted left by number of dropped dims before
+ * them
+ *       3. Empty reassociation groups are erased from the vector
+ *       4. Operation is in-place (modifies input reassocIdxVec directly)
+ */
+void shrinkReassocIdxByDroppedDims(
+    SmallVector<ReassociationIndices> &reassocIdxVec,
+    llvm::SmallBitVector &droppedDims);
 } // namespace reshape_utils
 
 } // namespace mlir

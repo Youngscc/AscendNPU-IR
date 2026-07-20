@@ -18,6 +18,7 @@ set(LIBS
   ${PRIVATE_BISHENGIR_CONVERSION_LIBS}
   ${PRIVATE_BISHENGIR_TRANSLATION_LIBS}
   ${PUBLIC_BISHENGIR_CONVERSION_LIBS}
+  BiShengIRRegBaseCompileLib
 )
 
 add_bishengir_publish_tool(bishengir-compile

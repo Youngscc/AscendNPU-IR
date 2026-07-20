@@ -21,6 +21,9 @@
 #include "bishengir/Dialect/HIVM/Utils/Utils.h"
 #include "bishengir/Dialect/Utils/Util.h"
 
+#include <type_traits>
+#include <utility>
+
 #define DEBUG_TYPE "hivm-impl"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define DBGSNL() (llvm::dbgs() << "\n")
@@ -31,6 +34,47 @@
 using namespace mlir::utils::debugger;
 
 namespace mlir::hivm {
+namespace {
+
+template <typename OpT, typename = void>
+struct HasArrayRefMultiDimReductionBuild : std::false_type {};
+
+template <typename OpT>
+struct HasArrayRefMultiDimReductionBuild<OpT, std::void_t<decltype(
+    OpT::build(
+        std::declval<OpBuilder &>(), std::declval<OperationState &>(),
+        std::declval<vector::CombiningKind>(), std::declval<Value>(),
+        std::declval<Value>(), std::declval<ArrayRef<int64_t>>()))>>
+    : std::true_type {};
+
+template <typename RewriterT,
+          bool SupportsArrayRef =
+              HasArrayRefMultiDimReductionBuild<
+                  vector::MultiDimReductionOp>::value,
+          std::enable_if_t<SupportsArrayRef, int> = 0>
+static Value createMultiDimReductionOp(RewriterT &rewriter, Location loc,
+                                       vector::CombiningKind combiningKind,
+                                       Value source, Value acc,
+                                       ArrayRef<int64_t> reduceDims) {
+  return rewriter.template create<vector::MultiDimReductionOp>(
+      loc, combiningKind, source, acc, reduceDims);
+}
+
+template <typename RewriterT,
+          bool SupportsArrayRef =
+              HasArrayRefMultiDimReductionBuild<
+                  vector::MultiDimReductionOp>::value,
+          std::enable_if_t<!SupportsArrayRef, int> = 0>
+static Value createMultiDimReductionOp(RewriterT &rewriter, Location loc,
+                                       vector::CombiningKind combiningKind,
+                                       Value source, Value acc,
+                                       ArrayRef<int64_t> reduceDims) {
+  return rewriter.template create<vector::MultiDimReductionOp>(
+      loc, combiningKind, source, acc, rewriter.getI64ArrayAttr(reduceDims));
+}
+
+} // namespace
+
 LogicalResult VReduceOp::vectorize(RewriterBase &rewriter,
                                    ArrayRef<int64_t> vectorSizes) {
   Location loc = getLoc();
@@ -137,18 +181,9 @@ LogicalResult VReduceOp::vectorize(RewriterBase &rewriter,
   Value vectorOut =
       rewriter.create<vector::ShapeCastOp>(loc, reducedVectorType, initAccum);
 
-#if defined(__LLVM_MAJOR_VERSION_20_COMPATIBLE__) ||                           \
-    defined(__LLVM_MAJOR_VERSION_21_COMPATIBLE__) ||                           \
-    defined(__LLVM_MAJOR_VERSION_22_COMPATIBLE__)
   // Perform multi-dimensional reduction with accumulator
-  Value reduced = rewriter.create<vector::MultiDimReductionOp>(
-      loc, combiningKind, vectorData, vectorOut, reduceDims);
-#else
-  // Perform multi-dimensional reduction with accumulator
-  Value reduced = rewriter.create<vector::MultiDimReductionOp>(
-      loc, combiningKind, vectorData, vectorOut,
-      rewriter.getI64ArrayAttr(reduceDims));
-#endif
+  Value reduced = createMultiDimReductionOp(rewriter, loc, combiningKind,
+                                            vectorData, vectorOut, reduceDims);
 
   // Reshape result back to have size-1 dimensions
   Value finalResult =

@@ -139,3 +139,51 @@ func.func @legalize_tensor_chain(%arg0: tensor<24x9xi1>) -> tensor<3x2x1x12x3xi1
   %collapsed_2 = tensor.collapse_shape %expanded [[0], [1], [2], [3, 4], [5]] : tensor<3x2x1x4x3x3xi1> into tensor<3x2x1x12x3xi1>
   return %collapsed_2 : tensor<3x2x1x12x3xi1>
 }
+
+// -----
+
+// CHECK-LABEL: func.func @bool_mul
+module attributes {hacc.target = #hacc.target<"Ascend950PR_957b">} {
+  func.func @bool_mul(%arg0 : tensor<64xi32>, %arg1 : tensor<16xi32>, %arg2: i32) -> tensor<16x64xi1> attributes {SyncBlockLockArgIdx = 0 : i64, WorkspaceArgIdx = 1 : i64, global_kernel = "local", mix_mode = "mix", parallel_mode = "simd"} {
+
+    %c64_i32 = arith.constant 64 : i32
+    %0 = tensor.empty() : tensor<64xi32>
+    %1 = linalg.fill ins(%c64_i32 : i32) outs(%0 : tensor<64xi32>) -> tensor<64xi32>
+    %32 = tensor.empty() : tensor<16xi32>
+    %33 = tensor.empty() : tensor<64xi1>
+    %34 = tensor.empty() : tensor<16xi1>
+    %38 = hfusion.compare {compare_fn = #hfusion.compare_fn<vlt>} ins(%arg0, %1 : tensor<64xi32>, tensor<64xi32>) outs(%33 : tensor<64xi1>) -> tensor<64xi1>
+    %49 = tensor.empty() : tensor<16x64xi1>
+    %broadcasted_19 = linalg.broadcast ins(%38 : tensor<64xi1>) outs(%49 : tensor<16x64xi1>) dimensions = [0]
+    %185 = linalg.fill ins(%arg2 : i32) outs(%32 : tensor<16xi32>) -> tensor<16xi32>
+    %186 = hfusion.compare {compare_fn = #hfusion.compare_fn<vlt>} ins(%arg1, %185 : tensor<16xi32>, tensor<16xi32>) outs(%34 : tensor<16xi1>) -> tensor<16xi1>
+    %broadcasted_93 = linalg.broadcast ins(%186 : tensor<16xi1>) outs(%49 : tensor<16x64xi1>) dimensions = [1]
+    %187 = linalg.elemwise_binary {fun = #linalg.binary_fn<mul>} ins(%broadcasted_19, %broadcasted_93 : tensor<16x64xi1>, tensor<16x64xi1>) outs(%49 : tensor<16x64xi1>) -> tensor<16x64xi1>
+    // CHECK: %[[MULI:.*]] = hfusion.elemwise_binary {fun = #hfusion.binary_fn<vand>} ins(%[[BOOL_0:.*]], %[[BOOL_1:.*]] : tensor<16x64xi1>, tensor<16x64xi1>) outs(%[[OUT:.*]] : tensor<16x64xi1>) -> tensor<16x64xi1>
+    return %187 : tensor<16x64xi1>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @bool_add
+module attributes {hacc.target = #hacc.target<"Ascend950PR_957b">} {
+  func.func @bool_add(%arg0 : tensor<64xi32>, %arg1 : tensor<16xi32>, %arg2: i32) -> tensor<16x64xi1> attributes {SyncBlockLockArgIdx = 0 : i64, WorkspaceArgIdx = 1 : i64, global_kernel = "local", mix_mode = "mix", parallel_mode = "simd"} {
+
+    %c64_i32 = arith.constant 64 : i32
+    %0 = tensor.empty() : tensor<64xi32>
+    %1 = linalg.fill ins(%c64_i32 : i32) outs(%0 : tensor<64xi32>) -> tensor<64xi32>
+    %32 = tensor.empty() : tensor<16xi32>
+    %33 = tensor.empty() : tensor<64xi1>
+    %34 = tensor.empty() : tensor<16xi1>
+    %38 = hfusion.compare {compare_fn = #hfusion.compare_fn<vlt>} ins(%arg0, %1 : tensor<64xi32>, tensor<64xi32>) outs(%33 : tensor<64xi1>) -> tensor<64xi1>
+    %49 = tensor.empty() : tensor<16x64xi1>
+    %broadcasted_19 = linalg.broadcast ins(%38 : tensor<64xi1>) outs(%49 : tensor<16x64xi1>) dimensions = [0]
+    %185 = linalg.fill ins(%arg2 : i32) outs(%32 : tensor<16xi32>) -> tensor<16xi32>
+    %186 = hfusion.compare {compare_fn = #hfusion.compare_fn<vlt>} ins(%arg1, %185 : tensor<16xi32>, tensor<16xi32>) outs(%34 : tensor<16xi1>) -> tensor<16xi1>
+    %broadcasted_93 = linalg.broadcast ins(%186 : tensor<16xi1>) outs(%49 : tensor<16x64xi1>) dimensions = [1]
+    %187 = linalg.elemwise_binary {fun = #linalg.binary_fn<add>} ins(%broadcasted_19, %broadcasted_93 : tensor<16x64xi1>, tensor<16x64xi1>) outs(%49 : tensor<16x64xi1>) -> tensor<16x64xi1>
+    // CHECK: %[[MULI:.*]] = hfusion.elemwise_binary {fun = #hfusion.binary_fn<vor>} ins(%[[BOOL_0:.*]], %[[BOOL_1:.*]] : tensor<16x64xi1>, tensor<16x64xi1>) outs(%[[OUT:.*]] : tensor<16x64xi1>) -> tensor<16x64xi1>
+    return %187 : tensor<16x64xi1>
+  }
+}

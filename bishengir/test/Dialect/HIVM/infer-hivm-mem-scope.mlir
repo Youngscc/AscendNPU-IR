@@ -115,6 +115,33 @@ func.func private @extern_host_func(memref<?xf32>, memref<?xf32>, memref<?xf32>)
 
 // -----
 
+module {
+  // CHECK-LABEL: func.func @simt_vf_caller(
+  // CHECK-SAME: %[[GM:.*]]: memref<16xf32, #hivm.address_space<gm>>
+  func.func @simt_vf_caller(%gm: memref<16xf32>) attributes {
+      hacc.function_kind = #hacc.function_kind<DEVICE>} {
+    // CHECK: %[[LOCAL:.*]] = memref.alloc() : memref<16xf32, #hivm.address_space<ub>>
+    %local = memref.alloc() : memref<16xf32>
+    // CHECK: call @simt_vf(%[[GM]], %[[LOCAL]])
+    // CHECK-SAME: (memref<16xf32, #hivm.address_space<gm>>,
+    // CHECK-SAME: memref<16xf32, #hivm.address_space<ub>>) -> ()
+    call @simt_vf(%gm, %local) {hivm.vector_function} :
+        (memref<16xf32>, memref<16xf32>) -> ()
+    return
+  }
+
+  // CHECK-LABEL: func.func @simt_vf(
+  // CHECK-SAME: %{{.*}}: memref<16xf32, #hivm.address_space<gm>>,
+  // CHECK-SAME: %{{.*}}: memref<16xf32, #hivm.address_space<ub>>)
+  func.func @simt_vf(%gm: memref<16xf32>, %local: memref<16xf32>)
+      attributes {hivm.vector_function,
+                  hivm.vf_mode = #hivm.vf_mode<SIMT>} {
+    return
+  }
+}
+
+// -----
+
 // CHECK: func.func @test_scf_if_0
 // CHECK: scf.if
 func.func @test_scf_if_0(%arg0: memref<19xf32>, %arg1: memref<17xf32>, %arg2: index, %arg3: index) {
@@ -319,6 +346,37 @@ func.func @test_mmadL1_tightly_coupled() {
   hivm.hir.mmadL1 ins(%cast, %rhs, %transpose, %c16, %c16, %c128 :
       memref<16x16xf16>, memref<16x128xf16>, i1, index, index, index)
       outs(%output : memref<16x128xf32>)
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_mmadL1_multi_root(
+func.func @test_mmadL1_multi_root(%condition: i1) attributes {
+    hacc.function_kind = #hacc.function_kind<DEVICE>} {
+  %transpose = arith.constant true
+  %c16 = arith.constant 16 : index
+  // CHECK: %[[LHS0:.*]] = memref.alloc() : memref<16x16xf16, #hivm.address_space<cbuf>>
+  %lhs0 = memref.alloc() : memref<16x16xf16>
+  // CHECK: %[[LHS1:.*]] = memref.alloc() : memref<16x16xf16, #hivm.address_space<cbuf>>
+  %lhs1 = memref.alloc() : memref<16x16xf16>
+  // CHECK: %[[LHS:.*]] = scf.if %{{.*}} -> (memref<16x16xf16, #hivm.address_space<cbuf>>) {
+  %lhs = scf.if %condition -> (memref<16x16xf16>) {
+    scf.yield %lhs0 : memref<16x16xf16>
+  } else {
+    scf.yield %lhs1 : memref<16x16xf16>
+  }
+  // CHECK: %[[RHS:.*]] = memref.alloc() : memref<16x16xf16, #hivm.address_space<cbuf>>
+  %rhs = memref.alloc() : memref<16x16xf16>
+  // CHECK: %[[OUTPUT:.*]] = memref.alloc() : memref<16x16xf32, #hivm.address_space<cc>>
+  %output = memref.alloc() : memref<16x16xf32>
+  // CHECK: hivm.hir.mmadL1 ins(%[[LHS]], %[[RHS]],
+  // CHECK-SAME: memref<16x16xf16, #hivm.address_space<cbuf>>,
+  // CHECK-SAME: memref<16x16xf16, #hivm.address_space<cbuf>>,
+  // CHECK-SAME: outs(%[[OUTPUT]] : memref<16x16xf32, #hivm.address_space<cc>>)
+  hivm.hir.mmadL1 ins(%lhs, %rhs, %transpose, %c16, %c16, %c16 :
+      memref<16x16xf16>, memref<16x16xf16>, i1, index, index, index)
+      outs(%output : memref<16x16xf32>)
   return
 }
 

@@ -15,4 +15,5 @@ add_bishengir_conversion_library(BiShengIRArithToAffine
   MLIRAffineDialect
   MLIRRewrite
   MLIRPass
+  BiShengIRHACCUtils
 )

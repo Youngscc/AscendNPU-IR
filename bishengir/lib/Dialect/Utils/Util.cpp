@@ -29,6 +29,8 @@
 #include "mlir/Dialect/Linalg/IR/LinalgExtensions.h"
 #endif // BISHENGIR_BUILD_STANDALONE_IR_ONLY
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 #include <algorithm>
@@ -135,6 +137,62 @@ SmallVector<Value> tracebackImpl(Value memrefVal) {
 } // namespace
 
 namespace utils {
+
+namespace debugger {
+std::string getPrettyOpName(Operation *op) {
+  std::string str;
+  llvm::raw_string_ostream os(str);
+
+  if (auto callOp = llvm::dyn_cast<mlir::func::CallOp>(op)) {
+    os << "func.call @" << callOp.getCallee();
+  } else {
+    os << op->getName();
+  }
+
+  if (op->getNumResults() > 0) {
+    os << " (res0: " << op->getResult(0) << ")";
+  } else {
+    os << " (ptr: " << op << ")";
+  }
+
+  return os.str();
+}
+} // namespace debugger
+
+void setAlignUnits(const SmallVectorImpl<int> &alignTargets,
+                   SmallVector<int> &alignUnits, ArrayRef<int64_t> shapes,
+                   int &innerAlignedUnits, int &shapeAccumulation,
+                   int alignTargetDim, int alignUnitsDim) {
+  // The alignment target forces the INNER dimension to get aligned
+  int newAlignedUnits =
+      std::lcm(innerAlignedUnits, alignTargets[alignTargetDim]);
+  if (newAlignedUnits == 0) {
+    alignUnits.clear();
+    return;
+  }
+  if (shapeAccumulation % newAlignedUnits == 0) {
+    // already aligned
+    alignUnits[alignUnitsDim] = 1;
+  } else {
+    if (innerAlignedUnits == 0) {
+      alignUnits.clear();
+      return; // should be impossible case (SecA_DivideByZero)
+    }
+    alignUnits[alignUnitsDim] = newAlignedUnits / innerAlignedUnits;
+  }
+  innerAlignedUnits = newAlignedUnits;
+  if (!ShapedType::isDynamic(shapes[alignTargetDim])) {
+    shapeAccumulation = shapeAccumulation * std::lcm(shapes[alignTargetDim],
+                                                     alignUnits[alignUnitsDim]);
+  }
+}
+
+bool isReduceWithIndex(hivm::ReduceOperation op) {
+  return op == hivm::ReduceOperation::min_with_index_left ||
+         op == hivm::ReduceOperation::min_with_index_right ||
+         op == hivm::ReduceOperation::max_with_index_left ||
+         op == hivm::ReduceOperation::max_with_index_right;
+}
 
 ModuleOp getTopLevelModuleOp(Operation *op) {
   ModuleOp moduleOp = op->getParentOfType<ModuleOp>();
@@ -663,6 +721,90 @@ bool isUnstructuredMemAccLoop(Operation *op) {
   return forOp->hasAttr("ExtractedLoadOrStore");
 }
 
+int64_t getNumPerRepeat(Type t) {
+  unsigned tBits = getElementTypeOrSelf(t).getIntOrFloatBitWidth();
+  unsigned tBytes = llvm::divideCeil(tBits, INTR_BITS_PER_BYTE);
+  return INTR_BYTES_PER_REPEAT / tBytes;
+}
+
+template <bool DropUnitDimOnly>
+static VectorType getLegalizedVectorType(VectorType source) {
+  Type elemTy = source.getElementType();
+  if constexpr (DropUnitDimOnly)
+    return hivm::util::trimNonScalableUnitDims(source);
+  return VectorType::get(
+      SmallVector<int64_t>{utils::getVectorSizeByElementType(elemTy)}, elemTy);
+}
+
+template <bool DropUnitDimOnly>
+static Value adjustVectorType(PatternRewriter &rewriter, VectorType resultTy,
+                              Value src) {
+  if constexpr (DropUnitDimOnly)
+    return rewriter.create<vector::ShapeCastOp>(src.getLoc(), resultTy, src);
+  return rewriter
+      .create<UnrealizedConversionCastOp>(src.getLoc(), resultTy, src)
+      .getResult(0);
+}
+
+template <bool DropUnitDimOnly>
+LogicalResult ForOpLegalization<DropUnitDimOnly>::matchAndRewrite(
+    scf::ForOp op, PatternRewriter &rewriter) const {
+  OperandRange iterArgs = op.getInitArgs();
+  SmallVector<Value> newIterArgs, newYields;
+  SmallVector<unsigned> modified;
+  for (unsigned i = 0; i < iterArgs.size(); i++) {
+    if (op.getRegionIterArg(i).use_empty())
+      continue;
+    if (auto vecTy = dyn_cast<VectorType>(iterArgs[i].getType())) {
+      VectorType adjustedType = getLegalizedVectorType<DropUnitDimOnly>(vecTy);
+      if (vecTy.getShape().size() > 1 ||
+          adjustedType.getNumElements() != vecTy.getNumElements()) {
+        modified.push_back(i);
+        rewriter.setInsertionPoint(op);
+        newIterArgs.push_back(adjustVectorType<DropUnitDimOnly>(
+            rewriter, adjustedType, iterArgs[i]));
+        rewriter.setInsertionPoint(op.getBody()->getTerminator());
+        newYields.push_back(adjustVectorType<DropUnitDimOnly>(
+            rewriter, adjustedType, op.getYieldedValues()[i]));
+      }
+    }
+  }
+
+  if (newIterArgs.empty())
+    return failure();
+
+  rewriter.setInsertionPointAfter(op);
+  NewYieldValuesFn fn =
+      [&](OpBuilder &innerBuilder, Location loc,
+          ArrayRef<BlockArgument> innerNewBBArgs) -> SmallVector<Value> {
+    return newYields;
+  };
+  scf::ForOp newForOp = cast<scf::ForOp>(
+      *op.replaceWithAdditionalYields(rewriter, newIterArgs, false, fn));
+
+  int idx = 0;
+  for (unsigned i = 0; i < iterArgs.size(); i++) {
+    if (std::find(modified.begin(), modified.end(), i) != modified.end()) {
+      rewriter.setInsertionPointAfter(newForOp);
+      Value adjustedResult = adjustVectorType<DropUnitDimOnly>(
+          rewriter, cast<VectorType>(newForOp.getResult(i).getType()),
+          newForOp.getResult(iterArgs.size() + idx));
+      rewriter.replaceAllUsesWith(newForOp.getResult(i), adjustedResult);
+      rewriter.setInsertionPointToStart(newForOp.getBody());
+      Value adjustedArg = adjustVectorType<DropUnitDimOnly>(
+          rewriter, cast<VectorType>(newForOp.getRegionIterArg(i).getType()),
+          newForOp.getRegionIterArg(iterArgs.size() + idx));
+      rewriter.replaceAllUsesWith(newForOp.getRegionIterArg(i), adjustedArg);
+      idx++;
+    }
+  }
+
+  return success();
+}
+
+template struct utils::ForOpLegalization<true>;
+template struct utils::ForOpLegalization<false>;
+
 hivm::AxisKind getAxisKind(int dim, int rank) {
   if (dim == rank - 1)
     return hivm::AxisKind::LAST;
@@ -678,6 +820,13 @@ hivm::AxisKind getOutlinedAxisKind(int dim, int rank) {
 }
 
 } // namespace utils
+
+int64_t utils::getNumPerBlock(Type t) {
+  // Multiply first so i1 (bitWidth=1) does not truncate 1/8 to 0 and divide by
+  // zero. Equivalent to 32 / (bitWidth/8) when bitWidth is a multiple of 8.
+  return (utils::INTR_BYTES_PER_BLOCK * utils::INTR_BITS_PER_BYTE) /
+         getElementTypeOrSelf(t).getIntOrFloatBitWidth();
+}
 
 bool utils::isAllocLikeOp(Value val) {
   return isAllocLikeOp(val.getDefiningOp());
@@ -1109,6 +1258,14 @@ std::optional<memref::AllocOp> utils::tracebackMemRefToAlloc(Value memrefVal) {
   return std::nullopt;
 }
 
+std::optional<Value>
+utils::tracebackMemRefToAllocOrBlockArgument(Value memrefVal) {
+  auto tracedValue = utils::tracebackMemRef(memrefVal);
+  return utils::isAllocLikeOp(tracedValue) || isa<BlockArgument>(tracedValue)
+             ? tracedValue
+             : std::optional<Value>();
+}
+
 SmallVector<Value> utils::tracebackMemRefAllocAndAlias(Value memrefVal) {
   return utils::tracebackMemRefVecByTargetFn(memrefVal, [](Value val) {
     return utils::isAllocLikeOp(val) || utils::isCollapseShapeOp(val) ||
@@ -1310,6 +1467,106 @@ getReAssociation(ArrayRef<int64_t> expandDims, int64_t outRank) {
   return retVecVec;
 }
 
+bool isConstIntOne(Value v) {
+  auto type = getElementTypeOrSelf(v);
+  if (type.isIntOrIndex()) {
+    if (matchPattern(v, m_One())) {
+      return true;
+    }
+  }
+  return false;
+}
+
+SmallVector<int64_t> getSqueezedShape(SmallVectorImpl<int64_t> &shape) {
+  SmallVector<int64_t> newShape;
+  for (int64_t dimSize : shape) {
+    if (dimSize != 1) {
+      newShape.push_back(dimSize);
+    }
+  }
+  // We do not allow empty shape which means rank 0 shaped value
+  if (newShape.empty()) {
+    newShape.push_back(1);
+  }
+  return newShape;
+}
+
+std::optional<int64_t> getIntAttr(const OpFoldResult ofr) {
+  if (ofr.is<Attribute>() && isa<IntegerAttr>(ofr.get<Attribute>()))
+    return dyn_cast<IntegerAttr>(ofr.get<Attribute>()).getInt();
+  return std::nullopt;
+}
+
+OpFoldResult mulOFRs(const OpFoldResult lhs, const OpFoldResult rhs,
+                     OpBuilder &b, const Location loc) {
+  auto lhsIntAttr = getIntAttr(lhs);
+  auto rhsIntAttr = getIntAttr(rhs);
+
+  // both lhs and rhs are constants, return result directly
+  if (lhsIntAttr && rhsIntAttr)
+    return b.getIndexAttr(lhsIntAttr.value() * rhsIntAttr.value());
+
+  // shortcuts for special cases
+  if (lhsIntAttr) {
+    if (lhsIntAttr.value() == 0)
+      return lhs;
+    if (lhsIntAttr.value() == 1)
+      return rhs;
+  }
+  if (rhsIntAttr) {
+    if (rhsIntAttr.value() == 0)
+      return rhs;
+    if (rhsIntAttr.value() == 1)
+      return lhs;
+  }
+
+  // otherwise, need to create instructions to calculate new attribute value
+  auto lhsValue = dyn_cast<Value>(lhs);
+  if (lhsIntAttr) {
+    auto lhsOp =
+        b.create<arith::ConstantOp>(loc, b.getIndexAttr(lhsIntAttr.value()));
+    lhsValue = lhsOp.getResult();
+  }
+
+  auto rhsValue = dyn_cast<Value>(rhs);
+  if (rhsIntAttr) {
+    auto rhsOp =
+        b.create<arith::ConstantOp>(loc, b.getIndexAttr(rhsIntAttr.value()));
+    rhsValue = rhsOp.getResult();
+  }
+
+  auto mulOp = b.create<arith::MulIOp>(loc, lhsValue, rhsValue);
+  return mulOp.getResult();
+}
+
+void shrinkReassocIdxByDroppedDims(
+    SmallVector<ReassociationIndices> &reassocIdxVec,
+    llvm::SmallBitVector &droppedDims) {
+  size_t rank = droppedDims.size();
+  SmallVector<int64_t> shiftTable(rank, 0);
+  shiftTable[0] = (droppedDims.test(0) ? 1 : 0);
+  for (size_t i = 1; i < rank; ++i) {
+    shiftTable[i] = shiftTable[i - 1] + (droppedDims.test(i) ? 1 : 0);
+  }
+  for (auto it = reassocIdxVec.begin(); it != reassocIdxVec.end();) {
+    auto &reassoc = *it;
+    size_t writePos = 0;
+    for (size_t readPos = 0; readPos < reassoc.size(); ++readPos) {
+      int64_t originalIdx = reassoc[readPos];
+      if (!droppedDims.test(originalIdx)) {
+        reassoc[writePos] = originalIdx - shiftTable[originalIdx];
+        ++writePos;
+      }
+    }
+    reassoc.resize(writePos);
+    if (reassoc.empty()) {
+      it = reassocIdxVec.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 } // namespace reshape_utils
 
 BitVector utils::arrayToMask(ArrayRef<int64_t> elements, int maskSize) {
@@ -1484,4 +1741,13 @@ bool utils::isTransferWriteSuitForStoreWithStride(Operation *op) {
   return true;
 }
 
+
+void utils::dumpReassociationIndicesVector(
+    const SmallVector<ReassociationIndices> &reassocVec) {
+  for (size_t i = 0; i < reassocVec.size(); ++i) {
+    std::string name = "reassocVec";
+    name += "[" + std::to_string(i) + "]";
+    llvm::dbgs() << name << reassocVec[i] << "\n";
+  }
+}
 } // namespace mlir

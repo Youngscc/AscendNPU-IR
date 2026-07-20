@@ -326,7 +326,8 @@ alignStoragePipeline(OpPassManager &pm,
     pm.nest<func::FuncOp>().addPass(createMarkStrideAlignPass());
   }
   pm.nest<func::FuncOp>().addPass(memref::createFoldAllocReshapePass());
-  pm.nest<func::FuncOp>().addPass(createEnableStrideAlignPass());
+  // ModuleOp: Enable may rewrite VF callee signatures via func.call.
+  pm.addPass(createEnableStrideAlignPass());
 }
 
 static void syncBlockLockPipeline(OpPassManager &pm,
@@ -440,6 +441,7 @@ static void hivmPostBufferizationOptimizationPipeline(
   pm.addPass(mlir::createMemrefExtLoweringPass());
   pm.nest<func::FuncOp>().addPass(createAddFFTSToSyncBlockSetOpPass());
   pm.nest<func::FuncOp>().addPass(createEnableMultiBufferPass());
+  pm.nest<func::FuncOp>().addPass(createLowerMultiBufferCounterPass());
   pm.nest<func::FuncOp>().addPass(createLiftLowestStridePass());
   pm.nest<func::FuncOp>().addPass(arith::createNormalizeArithPass());
   pm.nest<func::FuncOp>().addPass(arith::createLiftArithIndexCastPass());
@@ -459,8 +461,10 @@ void buildOptimizeHIVMPipeline(OpPassManager &pm,
       scope::createInlineScopePass(InlineScopeOptions{/*forceInline=*/true}));
   pm.addPass(createEnableHIVMCCompatiblePrintPass());
   pm.addPass(annotation::createAnnotationLoweringPass());
+  // Convert non-GM memref.alloc to alloca after annotations are lowered.
+  pm.addPass(createAllocToAllocaPass());
   pm.nest<func::FuncOp>().addPass(createInsertInitAndFinishForDebugPass());
-  pm.nest<func::FuncOp>().addPass(createMarkDisableLoadPass());
+  pm.addPass(createMarkDisableLoadPass());
   syncBlockLockPipeline(pm, SyncBlockLockPipelinePhase::Finalize);
   pm.addPass(createConvertHIVMToStandardPass());
 }

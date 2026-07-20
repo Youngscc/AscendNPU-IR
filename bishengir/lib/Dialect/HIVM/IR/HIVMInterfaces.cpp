@@ -38,6 +38,7 @@
 #include "bishengir/Dialect/HIVM/Interfaces/ImplByScalarOpInterface.cpp.inc"
 #include "bishengir/Dialect/HIVM/Interfaces/OpLayoutInterface.cpp.inc"
 #include "bishengir/Dialect/HIVM/Interfaces/OpPipeInterface.cpp.inc"
+#include "bishengir/Dialect/HIVM/Interfaces/VectorizableOpInterface.cpp.inc"
 #include "bishengir/Interfaces/AggregatedOpInterface.cpp.inc"
 #ifdef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
 // Only compile the vendored CopyOpInterface trait when MLIR doesn't provide it.

@@ -16,6 +16,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "bishengir/Conversion/ArithToHFusion/ArithToHFusion.h"
+#include "bishengir/Dialect/HACC/Utils/Utils.h"
 #include "bishengir/Dialect/HFusion/IR/HFusion.h"
 #include "bishengir/Dialect/Tensor/IR/TensorImpl.h"
 
@@ -27,6 +28,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/Support/Debug.h"
 
 namespace mlir {
 #define GEN_PASS_DEF_CONVERTARITHTOHFUSION
@@ -35,6 +37,10 @@ namespace mlir {
 
 using namespace mlir;
 using namespace mlir::hfusion;
+
+#define DEBUG_TYPE "arith-to-hfusion"
+
+static thread_local bool isRegBasedArch{false};
 
 static bool operateOnTensors(Operation *op) {
   return llvm::all_of(op->getOperandTypes(),
@@ -150,8 +156,8 @@ struct MulExtendedOpLowering : public OpRewritePattern<BinaryOp> {
     auto resultType = op.getLow().getType();
     constexpr bool isUnsigned =
         std::is_same_v<BinaryOp, arith::MulUIExtendedOp>;
-    auto mulExtOp = createMulExtOp(rewriter, op->getLoc(), resultType, lhs, rhs,
-                                   isUnsigned);
+    auto mulExtOp = createMulExtOp(rewriter, op->getLoc(), resultType,
+      lhs, rhs, isUnsigned);
     rewriter.replaceOp(op, mulExtOp);
     return success();
   }
@@ -209,15 +215,19 @@ struct ElementwiseOpToHFusionCast : public OpRewritePattern<CastOp> {
         return hfusion::RoundMode::RINT;
       if (inType.isF32() && outType.isF32())
         return hfusion::RoundMode::RINT;
-      llvm::report_fatal_error(
-          "unsupported datatype for arith::TruncFOp to hfusion");
+      if (isRegBasedArch && (inType.isF32() || inType.isF16() || inType.isBF16())
+          && (outType.isFloat8E4M3FN() || outType.isFloat8E5M2()))
+        return hfusion::RoundMode::RINT;
+      llvm_unreachable("unsupported datatype for arith::TruncFOp to hfusion");
     } else if (isa<arith::ExtFOp>(op)) {
       if (inType.isF16() && outType.isF32())
         return hfusion::RoundMode::RINT;
       if (inType.isBF16() && outType.isF32())
         return hfusion::RoundMode::RINT;
-      llvm::report_fatal_error(
-          "unsupported datatype for arith::ExtFOp to hfusion");
+      if (isRegBasedArch && (inType.isFloat8E4M3FN() || inType.isFloat8E5M2())
+          && (outType.isF32() || outType.isF16() || outType.isBF16()))
+        return hfusion::RoundMode::RINT;
+      llvm_unreachable("unsupported datatype for arith::ExtFOp to hfusion");
     } else if (isa<arith::TruncIOp>(op)) {
       if (isOverFlowMode(inType, outType)) {
         return hfusion::RoundMode::TRUNCWITHOVERFLOW;
@@ -232,7 +242,7 @@ struct ElementwiseOpToHFusionCast : public OpRewritePattern<CastOp> {
       }
       return hfusion::RoundMode::TRUNC;
     }
-    llvm::report_fatal_error("unsupported arith op to hfusion");
+    llvm_unreachable("unsupported arith op to hfusion");
   }
 
   static hfusion::TypeFn selectCast(CastOp op) {
@@ -241,16 +251,30 @@ struct ElementwiseOpToHFusionCast : public OpRewritePattern<CastOp> {
       auto inType = getElementTypeOrSelf(concreteOp.getIn().getType());
       auto outType = getElementTypeOrSelf(concreteOp.getOut().getType());
 
-      const bool isI8ToI64 = inType.isInteger(8) && outType.isInteger(64);
+      const bool isI1ToI16 = inType.isInteger(1) && outType.isInteger(16);
+      const bool isI1ToI32 = inType.isInteger(1) && outType.isInteger(32);
+      const bool isI1ToI64 = inType.isInteger(1) && outType.isInteger(64);
+      const bool isI1ToFloat = inType.isInteger(1) && isa<FloatType>(outType);
       const bool isI8ToI32 = inType.isInteger(8) && outType.isInteger(32);
       const bool isI8ToI16 = inType.isInteger(8) && outType.isInteger(16);
-
+      const bool isI8ToI64 = inType.isInteger(8) && outType.isInteger(64);
+      const bool isI16ToI32 = inType.isInteger(16) && outType.isInteger(32);
+      const bool isI16ToI64 = inType.isInteger(16) && outType.isInteger(64);
+      const bool isI32ToI64 = inType.isInteger(32) && outType.isInteger(64);
+      const bool isInTypeI1 = isI1ToI16 || isI1ToI32 || isI1ToI64 || isI1ToFloat;
+      const bool isInTypeI8  = isI8ToI16 || isI8ToI32 || isI8ToI64;
+      const bool isInTypeI16 = isI16ToI32 || isI16ToI64;
+      const bool isInTypeI32 = inType.isInteger(32) && outType.isInteger(64);
       // Now we support unsigned casts only from uint8
       // All casts from uint8 are performed using intermediate float cast
       // So now we just need to know that source is signed/unsigned
       // In future, we need to support both cast_from_sign, cast_to_sign
       // parameters
       if (isI8ToI16 || isI8ToI32 || isI8ToI64) {
+        return hfusion::TypeFn::cast_unsigned;
+      }
+
+      if (isRegBasedArch && (isInTypeI1 || isInTypeI16 || isInTypeI32)) {
         return hfusion::TypeFn::cast_unsigned;
       }
       return hfusion::TypeFn::cast_signed;
@@ -312,7 +336,7 @@ struct ElementwiseOpToHFusionCompare : public OpRewritePattern<CompareOp> {
     case arith::CmpFPredicate::UGT:
       return CompareFn::vgt;
     default:
-      llvm::report_fatal_error("unsupported arith cmp predicate to hfusion");
+      llvm_unreachable("unsupported arith cmp predicate to hfusion");
     }
   }
 
@@ -324,20 +348,36 @@ struct ElementwiseOpToHFusionCompare : public OpRewritePattern<CompareOp> {
       return CompareFn::vne;
     case arith::CmpIPredicate::slt:
       return CompareFn::vlt;
-    case arith::CmpIPredicate::ult:
-      return CompareFn::vult;
     case arith::CmpIPredicate::sgt:
       return CompareFn::vgt;
-    case arith::CmpIPredicate::ugt:
-      return CompareFn::vugt;
     case arith::CmpIPredicate::sle:
       return CompareFn::vle;
-    case arith::CmpIPredicate::ule:
-      return CompareFn::vule;
     case arith::CmpIPredicate::sge:
       return CompareFn::vge;
+    case arith::CmpIPredicate::ule:
+      return CompareFn::vule;
     case arith::CmpIPredicate::uge:
       return CompareFn::vuge;
+    case arith::CmpIPredicate::ugt:
+      return CompareFn::vugt;
+    case arith::CmpIPredicate::ult:
+      return CompareFn::vult;
+    }
+    llvm_unreachable("unsupported arith cmp predicate to hfusion");
+  }
+
+  static hfusion::CompareFn selectI1Predicate(arith::CmpIOp op) {
+    switch (op.getPredicate()) {
+    case arith::CmpIPredicate::ult:
+      return CompareFn::vlt;
+    case arith::CmpIPredicate::ugt:
+      return CompareFn::vgt;
+    case arith::CmpIPredicate::ule:
+      return CompareFn::vle;
+    case arith::CmpIPredicate::uge:
+      return CompareFn::vge;
+    default:
+      llvm_unreachable("i1 type cannot have signness information");
     }
   }
 
@@ -351,6 +391,28 @@ struct ElementwiseOpToHFusionCompare : public OpRewritePattern<CompareOp> {
       return failure();
     Value lhs = op.getLhs();
     Value rhs = op.getRhs();
+    if (isRegBasedArch) {
+      if constexpr (std::is_same_v<CompareOp, arith::CmpIOp>) {
+        auto tensorType = cast<RankedTensorType>(lhs.getType());
+        auto elemType = tensorType.getElementType();
+        auto width = elemType.getIntOrFloatBitWidth();
+        if (width == 1 && op.getPredicate() != arith::CmpIPredicate::eq &&
+            op.getPredicate() != arith::CmpIPredicate::ne) {
+          auto targetType =
+              RankedTensorType::get(tensorType.getShape(), rewriter.getI8Type());
+          lhs = rewriter.create<arith::ExtUIOp>(lhs.getLoc(), targetType, lhs);
+          rhs = rewriter.create<arith::ExtUIOp>(rhs.getLoc(), targetType, rhs);
+          hfusion::CompareFn predicate = selectI1Predicate(op);
+          auto predicateAttr =
+              rewriter.getAttr<hfusion::CompareFnAttr>(predicate);
+          auto modeAttr = rewriter.getNamedAttr(
+              hfusion::CompareFnAttr::getMnemonic(), predicateAttr);
+          rewriter.replaceOpWithNewOp<hfusion::CompareOp>(
+              op, ValueRange{lhs, rhs}, ValueRange{dsts}, ArrayRef{modeAttr});
+          return success();
+            }
+      }
+    }
     hfusion::CompareFn predicate = selectPredicate(op);
     auto predicateAttr = rewriter.getAttr<hfusion::CompareFnAttr>(predicate);
     auto modeAttr = rewriter.getNamedAttr(hfusion::CompareFnAttr::getMnemonic(),
@@ -495,6 +557,9 @@ struct ArithToHFusionConversionPass
 
 void ArithToHFusionConversionPass::runOnOperation() {
   auto module = getOperation();
+  auto mod = dyn_cast<ModuleOp>(module);
+  isRegBasedArch = mod && hacc::utils::isRegBasedArch(mod);
+
   ConversionTarget target(getContext());
   target.addLegalDialect<linalg::LinalgDialect, tensor::TensorDialect,
                          hfusion::HFusionDialect>();

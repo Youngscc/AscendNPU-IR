@@ -19,6 +19,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "bishengir/Dialect/HACC/Utils/Utils.h"
+#include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Dialect/MemRef/Transforms/Passes.h"
 
 #include "bishengir/Dialect/Utils/Util.h"
@@ -153,6 +155,35 @@ private:
     loadOp.erase();
   }
 
+  // erase load if the users of the result and outs are not used
+  // no read uses of the alloc should be after the load
+  void eraseUnusedLoad() {
+    for (auto [allocIdx, users] : llvm::enumerate(analyzer.OpsOfAlloc)) {
+      if (users.empty())
+        continue;
+
+      // only removes write from local allocation
+      if (!isa<memref::AllocOp>(users.front()))
+        continue;
+
+      while (!users.empty()) {
+        auto loadOp = dyn_cast<hivm::LoadOp>(users.back());
+        if (!loadOp || !loadOp->use_empty())
+          break;
+
+        // remove LoadOp if stored value is unused
+        if (static_cast<const int>(allocIdx) !=
+            analyzer.valueToIndexMap.at(
+                analyzer.getAllocOf(loadOp.getTarget())))
+          break;
+
+        LDBG("erasing unusedOp " << *loadOp);
+        users.pop_back();
+        loadOp->erase();
+      }
+    }
+  }
+
   DenseMap<memref::LoadOp, memref::StoreOp> loadedOp;
   utils::ValueDependencyAnalyzer analyzer;
 };
@@ -169,6 +200,11 @@ void MemrefDeadStoreElimination::runOnOperation() {
   funcOp->walk(
       [this](memref::LoadOp loadOp) { storeToLoadForwarding(loadOp); });
   LDBG("Finish forwarding");
+
+  // regbase-only
+  if (hacc::utils::isRegBasedArch(funcOp->getParentOfType<ModuleOp>())) {
+    eraseUnusedLoad();
+  }
 
   IRRewriter rewriter(&getContext());
   LDBG("func propagated\n" << *funcOp << "\n");

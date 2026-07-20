@@ -335,3 +335,28 @@ module {
     return
   }
 }
+
+// -----
+// CHECK-LABEL: test_load_mx_scale
+// CHECK: hivm.hir.load_scale
+func.func @test_load_mx_scale(
+    %src : memref<16x4xi8, #hivm.address_space<gm>>,
+    %dst : memref<1x1x16x16xi8, #hivm.address_space<cbuf>>) {
+  hivm.hir.load_scale {is_transposed = true}
+      ins(%src : memref<16x4xi8, #hivm.address_space<gm>>)
+      outs(%dst : memref<1x1x16x16xi8, #hivm.address_space<cbuf>>)
+  return
+}
+
+// -----
+// CHECK-LABEL: func.func @test_multi_buffer_counter
+func.func @test_multi_buffer_counter() {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c4 = arith.constant 4 : index
+  scf.for %iv = %c0 to %c4 step %c1 {
+    // CHECK: hivm.hir.multi_buffer_counter -> i64
+    %counter = hivm.hir.multi_buffer_counter -> i64
+  }
+  return
+}

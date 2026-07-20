@@ -35,10 +35,10 @@ namespace tensor {
 // Pattern to propagate expand shape operations upward through the IR
 class PropagateExpandUp : public mlir::OpRewritePattern<tensor::ExpandShapeOp> {
 public:
-  explicit PropagateExpandUp(MLIRContext *context, bool forHIVM)
-      : OpRewritePattern<tensor::ExpandShapeOp>(context, /*benefit=*/1) {
-    options.forHIVM = forHIVM;
-  }
+  explicit PropagateExpandUp(MLIRContext *context,
+                             PropagateReshapeOptions options)
+      : OpRewritePattern<tensor::ExpandShapeOp>(context, /*benefit=*/1),
+        options(options) {}
   LogicalResult matchAndRewrite(tensor::ExpandShapeOp expandOp,
                                 PatternRewriter &rewriter) const override;
 

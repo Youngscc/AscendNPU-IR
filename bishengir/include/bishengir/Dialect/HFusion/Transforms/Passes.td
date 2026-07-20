@@ -89,6 +89,98 @@ def AutoSchedule : Pass<"hfusion-auto-schedule", "ModuleOp"> {
   ];
 }
 
+def AutoVectorize : Pass<"hfusion-auto-vectorize", "ModuleOp"> {
+  let summary = "Auto vectorizer for all linalg named ops.";
+  let constructor = "mlir::hfusion::createHFusionAutoVectorizePass()";
+  let dependentDialects = ["linalg::LinalgDialect",
+                           "transform::TransformDialect",
+                           "arith::ArithDialect",
+                           "vector::VectorDialect"];
+  let options = [
+    Option<"vectorLength", "vector-length", "unsigned", "256", "Length of the vector in bytes">,
+    Option<"peelLoops", "peel-loops", "bool", "false", "Try to peel the tile loops.">,
+    Option<"maxVectorizeAxes", "max-vectorize-axes", "int64_t", "-1",
+           "Max number of inner-most axes to vectorize."
+           "Default value -1 means no limit on the max vectorize axes">,
+    Option<"treeReduce", "tree-reduce", "bool", "false", "use tree reduce">,
+  ];
+}
+
+def GenericUnroller : Pass<"hfusion-generic-unroller", "func::FuncOp"> {
+  let summary = "Provides lowering of non-vectorizeable linalg ops (currently only linalg.reduce)";
+  let constructor = "mlir::hfusion::createGenericUnrollerPass()";
+  let dependentDialects = ["linalg::LinalgDialect",
+                         "transform::TransformDialect",
+                         "arith::ArithDialect",
+                         "vector::VectorDialect"];
+}
+
+def AutoVectorizeVerifier
+    : Pass<"hfusion-auto-vectorize-verifier", "ModuleOp"> {
+  let summary = "Verify vector operations after auto vectorization";
+  let constructor = "mlir::hfusion::createAutoVectorizeVerifierPass()";
+  let dependentDialects = ["func::FuncDialect", "vector::VectorDialect",
+                           "hivm::HIVMDialect"];
+  let options = [
+    Option<"verifyFreeVectorRegion", "verify-free-vector-region", "bool",
+           "false",
+           "Verify vector operations are nested in outlined vector regions.">,
+    Option<"verifyFreeVectorFunc", "verify-free-vector-func", "bool", "true",
+           "Verify vector operations are not left outside vector functions.">,
+  ];
+}
+
+def PreVectorizationFusion : Pass<"hfusion-pre-vectorization-fusion", "func::FuncOp"> {
+  let summary = "Perform elemwise op fusion and generalization before vectorization";
+  let constructor = "::mlir::hfusion::createPreVectorizationFusionPass()";
+  let dependentDialects = ["linalg::LinalgDialect", "annotation::AnnotationDialect",
+                           "hfusion::HFusionDialect"];
+  let options = [
+    Option<"enableTritonCompile", "enable-triton-compile",
+           "bool", "false", "Enable Triton compile.">,
+    Option<"maxFusedElementwiseOps", "max-fused-elementwise-ops", "int", "-1",
+           "Maximum number of elementwise ops to combine into one fused "
+           "linalg.generic (-1 means unlimited).">,
+    Option<"enableVFStackLimit", "enable-vf-stack-limit", "bool", "false",
+           "Enable conservative vector function stack slot limit.">
+  ];
+}
+
+def AutoVectorizeV2 : Pass<"hfusion-auto-vectorize-v2", "ModuleOp"> {
+  let summary = "Tile, fuse and vectorize all linalg named ops";
+  let constructor = "mlir::hfusion::createHFusionAutoVectorizeV2Pass()";
+  let dependentDialects = ["linalg::LinalgDialect",
+                           "transform::TransformDialect",
+                           "arith::ArithDialect",
+                           "vector::VectorDialect"];
+  let options = [
+    Option<"vectorLength", "vector-length", "unsigned", "256", "Length of the vector in bytes">,
+    Option<"maxFusedOps", "max-fused-ops", "unsigned", "15",
+           "Maximum number of ops allowed in one fused node.">,
+    Option<"enableVFStackLimit", "enable-vf-stack-limit", "bool", "false",
+           "Enable conservative vector function stack slot limit.">,
+    Option<"enableMultipleConsumerFusion", "enable-multiple-consumer-fusion", "bool", "false",
+           "Enable multiple consumer fusion in AutoVectorizeV2.">,
+    Option<"emitTransformSequence", "emit-transform-sequence", "bool", "false",
+           "Emit AutoVectorizeV2 payload tags and transform sequence without applying it.">,
+    Option<"treeReduce", "tree-reduce", "bool", "false", "use tree reduce">,
+  ];
+}
+
+def TreeReduceV2 : Pass<"tree-reduce-v2", "ModuleOp"> {
+ 	   let summary = "tree-reduce-v2";
+ 	   let constructor = "mlir::hfusion::createTreeReduceV2Pass()";
+ 	   let dependentDialects = ["linalg::LinalgDialect",
+ 	   "arith::ArithDialect",
+ 	   "vector::VectorDialect"];
+ 	   let options = [
+ 	     Option<"enableRA", "enable-ra", "bool", "true",
+ 	            "Enable RA (reduction along dim 0) in TreeReduceV2.">,
+ 	     Option<"enableAR", "enable-ar", "bool", "false",
+ 	            "Enable AR (reduction along dim 1) in TreeReduceV2.">,
+ 	   ];
+ 	 }
+
 def AddFFTSAddr : Pass<"hfusion-add-ffts-addr", "ModuleOp"> {
   let summary = "Add ffts base address to func param and annotation";
   let constructor = "mlir::hfusion::createAddFFTSAddrPass()";
@@ -99,6 +191,13 @@ def AddFFTSAddr : Pass<"hfusion-add-ffts-addr", "ModuleOp"> {
       "Force adding FFTS base addr to the user specified param "
       "location. Default value -1 means no insertion. 0 means"
       "insert to the first param location.">];
+}
+
+def OutlineVectorFunction : Pass<"outline-vector-function", "ModuleOp"> {
+  let summary = "Outline vector function.";
+  let constructor = "mlir::hfusion::createOutlineVectorFunctionPass()";
+  let dependentDialects = ["scf::SCFDialect", "mlir::func::FuncDialect",
+                           "transform::TransformDialect"];
 }
 
 def ConvertGenericToNamedOp
@@ -176,10 +275,22 @@ def Normalize : Pass<"hfusion-normalize-ops", "func::FuncOp"> {
   let dependentDialects = ["hfusion::HFusionDialect"];
 }
 
+def NormalizeRegBase : Pass<"hfusion-normalize-ops-regbase", "func::FuncOp"> {
+  let summary = "Normalize Hfusion for RegBased architecture";
+  let constructor = "mlir::hfusion::createHFusionNormalizeOpsRegBasePass()";
+  let dependentDialects = ["hfusion::HFusionDialect", "hivm::HIVMDialect",
+                           "bufferization::BufferizationDialect"];
+  let options = [
+    Option<"enableHighPrecision", "enable-high-precision", "bool",
+           /*default=*/"true",
+           "Enable high precision calculation for sin/cos in HFusion.">
+  ];
+}
+
 def NormalizeSliceOps : Pass<"hfusion-normalize-slice-ops", "func::FuncOp"> {
   let summary = "Normalize Slice Ops.";
   let options = [
-    Option<"skipAlignedSlice", "skip-aligned-slice", "bool", "false", 
+    Option<"skipAlignedSlice", "skip-aligned-slice", "bool", "false",
            "Skip FoldInsertSliceToConcat pattern for aligned slice.">,
   ];
   let constructor = "mlir::hfusion::createHFusionNormalizeSliceOpsPass()";
@@ -380,6 +491,11 @@ def LegalizeBoolPass : Pass<"hfusion-legalize-bool", "ModuleOp"> {
   let summary = "cast int8 to int1 for input and int1 to int8 for output.";
   let constructor = "mlir::hfusion::createLegalizeBoolPass()";
   let dependentDialects = ["arith::ArithDialect", "hfusion::HFusionDialect", "annotation::AnnotationDialect"];
+
+  let options = [
+    Option<"enableClamp", "enable-clamp", "bool", /*default=*/"false",
+           "Enable clamp pseudo boolean arithmetic pattern">
+  ];
 }
 
 def ReorderOpsByBFS : Pass<"hfusion-reorder-ops", "func::FuncOp"> {
@@ -519,6 +635,17 @@ def Decompose : Pass<"hfusion-decompose", "func::FuncOp">{
   ];
 }
 
+def HFusionFoldUnitDims : Pass<"hfusion-fold-unit-dims", "func::FuncOp"> {
+  let summary = "Extended version of removing unit-extent dimension in Linalg ops on tensors";
+  let constructor = "hfusion::createHFusionFoldUnitDimsPass()";
+  let dependentDialects = [
+    "bufferization::BufferizationDialect",
+    "linalg::LinalgDialect",
+    "memref::MemRefDialect",
+    "hfusion::HFusionDialect"
+  ];
+}
+
 def UpliftWhileToFor : Pass<"hfusion-uplift-while-to-for", "func::FuncOp"> {
   let summary = "Uplift scf.while loops to scf.for when possible";
   let constructor = "mlir::hfusion::createUpliftWhileToForPass()";
@@ -541,6 +668,61 @@ def PrepareI1Nx1ForVectorization
   let summary = "Collapse Nx1 linalg.generic with expanded i1 input before vectorization";
   let constructor = "mlir::hfusion::createPrepareI1Nx1ForVectorizationPass()";
   let dependentDialects = ["linalg::LinalgDialect", "tensor::TensorDialect"];
+}
+
+def SimplifyVFArgs : Pass<"hfusion-simplify-vf-arg", "ModuleOp"> {
+  let summary = "simplify vf function arguments";
+  let constructor = "mlir::hfusion::createSimplifyVFArgsPass()";
+  let dependentDialects = ["func::FuncDialect"];
+}
+
+def MergeVecScope : Pass<"hfusion-merge-vf", "ModuleOp"> {
+    let summary = "Merge vf function";
+    let constructor = "mlir::hfusion::createMergeVecScopePass()";
+    let dependentDialects = ["func::FuncDialect"];
+    let options=[
+      Option<"mergeLevel", "merge-level",
+                        "int", /*default=*/"1",
+                        "Merging level. 0: no merge; 1: merge VFs only without dependency;"
+                        "2: merge all VFs.">,
+      Option<"mergeVFNumLimit", "merge-vf-num-limit", "int", "4",
+              "allowed maximum number of merged VFs">,
+  ];
+}
+
+def PullSliceIntoVectorFunction
+    : Pass<"hfusion-pull-slice-into-vector-function", "ModuleOp"> {
+  let summary = "Pull tensor slice ops into VF callees to reduce buffer copies";
+  let constructor = "mlir::hfusion::createPullSliceIntoVectorFunctionPass()";
+  let dependentDialects = ["tensor::TensorDialect", "func::FuncDialect",
+                           "hivm::HIVMDialect", "scf::SCFDialect"];
+}
+
+def VectorizeOps : Pass<"hfusion-vectorize-ops", "ModuleOp"> {
+  let summary = "vectorize hfusion ops";
+  let constructor = "mlir::hfusion::createHFusionVectorizeOpsPass()";
+  let dependentDialects = [
+    "bufferization::BufferizationDialect", "func::FuncDialect",
+    "hfusion::HFusionDialect", "linalg::LinalgDialect",
+    "memref::MemRefDialect", "tensor::TensorDialect", "vector::VectorDialect"
+  ];
+  let options =
+      [Option<"forManualScope", "for-manual-scope", "bool", "false",
+              "Enable hfusion vectorize only for manual scope function">];
+}
+
+def RemoveMaskFromUnalignedReductionLoop
+    : Pass<"hfusion-remove-mask-from-unaligned-reduction-loop", "func::FuncOp"> {
+  let summary = "Remove mask from unaligned reduction loops";
+  let constructor = "mlir::hfusion::createRemoveMaskFromUnalignedReductionLoopPass()";
+  let dependentDialects = ["linalg::LinalgDialect", "hfusion::HFusionDialect"];
+}
+
+def RemoveRedundantWriteAndReadPair
+    : Pass<"remove-redundant-write-and-read-pair", "func::FuncOp"> {
+  let summary = "Remove remove redundant write and read pair";
+  let constructor = "::mlir::hfusion::createRemoveRedundantWriteAndReadPairPass()";
+  let dependentDialects = ["vector::VectorDialect"];
 }
 
 #endif // BISHENGIR_DIALECT_HFUSION_TRANSFORMS_PASSES

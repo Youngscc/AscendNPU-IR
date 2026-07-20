@@ -94,6 +94,34 @@ func.func @test_elemwise_broadcast_ops(%src : tensor<6x4xbf16>, %dst : tensor<6x
 
 // -----
 
+// CHECK-LABEL: func.func @test_elemwise_broadcast_ops_regbase
+module attributes {hacc.target = #hacc.target<"Ascend950PR_957b">} {
+  func.func @test_elemwise_broadcast_ops_regbase(%src : tensor<6x4xbf16>, %dst : tensor<6x4x3xbf16>) -> tensor<6x4x3xbf16> {
+    // CHECK: %[[VAL_0:.*]] = tensor.empty() : tensor<6x4xbf16>
+    // CHECK: %[[VAL_1:.*]] = tensor.empty() : tensor<6x4xf32>
+    // CHECK: %[[VAL_2:.*]] =  hfusion.cast {{.*}} ins(%arg0 : tensor<6x4xbf16>) outs(%[[VAL_1]] : tensor<6x4xf32>) -> tensor<6x4xf32>
+    // CHECK: %[[VAL_3:.*]] = tensor.empty() : tensor<6x4xf32>
+    // CHECK: %[[VAL_4:.*]] =  hfusion.cast {{.*}} ins(%[[VAL_0]] : tensor<6x4xbf16>) outs(%[[VAL_3]] : tensor<6x4xf32>) -> tensor<6x4xf32>
+    // CHECK: %[[VAL_5:.*]] = hfusion.elemwise_unary {fun = #hfusion.unary_fn<sqrt>} ins(%[[VAL_2]] : tensor<6x4xf32>) outs(%[[VAL_4]] : tensor<6x4xf32>) -> tensor<6x4xf32>
+    // CHECK: %[[VAL_6:.*]] = tensor.empty() : tensor<6x4xbf16>
+    // CHECK: %[[VAL_7:.*]] =  hfusion.cast {{.*}} ins(%[[VAL_5]] : tensor<6x4xf32>) outs(%[[VAL_6]] : tensor<6x4xbf16>) -> tensor<6x4xbf16>
+    // CHECK: %[[VAL_8:.*]] = tensor.empty() : tensor<6x4xf32>
+    // CHECK: %[[VAL_9:.*]] =  hfusion.cast {{.*}} ins(%[[VAL_7]] : tensor<6x4xbf16>) outs(%[[VAL_8]] : tensor<6x4xf32>) -> tensor<6x4xf32>
+    // CHECK: %[[VAL_10:.*]] = tensor.empty() : tensor<6x4x3xf32>
+    // CHECK: %[[VAL_11:.*]] =  hfusion.cast {{.*}} ins(%arg1 : tensor<6x4x3xbf16>) outs(%[[VAL_10]] : tensor<6x4x3xf32>) -> tensor<6x4x3xf32>
+    // CHECK: %[[VAL_BRC:.*]] = linalg.broadcast ins(%[[VAL_9]] : tensor<6x4xf32>) outs(%[[VAL_11]] : tensor<6x4x3xf32>) dimensions = [2]
+    // CHECK: %[[VAL_12:.*]] = tensor.empty() : tensor<6x4x3xbf16>
+    // CHECK: %[[VAL_13:.*]] =  hfusion.cast {{.*}} ins(%[[VAL_BRC]] : tensor<6x4x3xf32>) outs(%[[VAL_12]] : tensor<6x4x3xbf16>) -> tensor<6x4x3xbf16>
+    // CHECK: return %[[VAL_13]] : tensor<6x4x3xbf16>
+	%0 = tensor.empty() : tensor<6x4xbf16>
+    %1 = hfusion.elemwise_unary {fun = #hfusion.unary_fn<sqrt>} ins(%src : tensor<6x4xbf16>) outs(%0 : tensor<6x4xbf16>) -> tensor<6x4xbf16>
+	%res = linalg.broadcast ins(%1 : tensor<6x4xbf16>) outs(%dst : tensor<6x4x3xbf16>) dimensions = [2]
+    return %res : tensor<6x4x3xbf16>
+  }
+}
+
+// -----
+
 // CHECK-LABEL: func.func @test_elemwise_reduce_ops
 func.func @test_elemwise_reduce_ops(%arg0 : tensor<6x4xbf16>, %arg1 : tensor<6x4xbf16>, %dst : tensor<6xbf16>) -> tensor<6xbf16> {
   // CHECK:  %[[VAL_0:.*]] = tensor.empty() : tensor<6x4xbf16>
@@ -387,4 +415,89 @@ func.func @test_select_bf16(%arg0 : tensor<16x32x4xbf16>, %arg1 : tensor<16x32x4
   %0 = tensor.empty() : tensor<16x32x4xbf16>
   %selected = hfusion.select ins(%arg2, %arg0, %arg1 : tensor<16x32x4xi1>, tensor<16x32x4xbf16>, tensor<16x32x4xbf16>) outs(%0 : tensor<16x32x4xbf16>) -> tensor<16x32x4xbf16>
   return %selected : tensor<16x32x4xbf16>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @triton_max_dim1
+module attributes {hacc.target = #hacc.target<"Ascend950PR_957b">} {
+  func.func @triton_max_dim1(%arg0: memref<?xi8> {hacc.arg_type = #hacc.arg_type<sync_block_lock>}, %arg1: memref<?xi8> {hacc.arg_type = #hacc.arg_type<workspace>}, %arg2: memref<?xbf16> {tt.divisibility = 16 : i32, tt.tensor_kind = 0 : i32}, %arg3: memref<?xi32> {tt.divisibility = 16 : i32, tt.tensor_kind = 0 : i32}, %arg4: memref<?xbf16> {tt.divisibility = 16 : i32, tt.tensor_kind = 1 : i32}, %arg5: memref<?xi32> {tt.divisibility = 16 : i32, tt.tensor_kind = 1 : i32}, %arg6: i32, %arg7: i32, %arg8: i32, %arg9: i32, %arg10: i32, %arg11: i32) attributes {SyncBlockLockArgIdx = 0 : i64, WorkspaceArgIdx = 1 : i64, hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, mix_mode = "aiv"} {
+    %reinterpret_cast = memref.reinterpret_cast %arg2 to offset: [0], sizes: [1, 22, 39], strides: [858, 39, 1] : memref<?xbf16> to memref<1x22x39xbf16, strided<[858, 39, 1]>>
+    %alloc = memref.alloc() : memref<1x22x39xbf16>
+    memref.copy %reinterpret_cast, %alloc : memref<1x22x39xbf16, strided<[858, 39, 1]>> to memref<1x22x39xbf16>
+    %0 = bufferization.to_tensor %alloc restrict writable : memref<1x22x39xbf16>
+    %reinterpret_cast_0 = memref.reinterpret_cast %arg3 to offset: [0], sizes: [1, 22, 39], strides: [858, 39, 1] : memref<?xi32> to memref<1x22x39xi32, strided<[858, 39, 1]>>
+    %alloc_1 = memref.alloc() : memref<1x22x39xi32>
+    memref.copy %reinterpret_cast_0, %alloc_1 : memref<1x22x39xi32, strided<[858, 39, 1]>> to memref<1x22x39xi32>
+    %1 = bufferization.to_tensor %alloc_1 restrict writable : memref<1x22x39xi32>
+    %2 = tensor.empty() : tensor<1x39xbf16>
+    %3 = tensor.empty() : tensor<1x39xi32>
+    // CHECK: hfusion.reduce_with_index {tie_break_left = true, unsigned_src = false} <max> ins{{.*}}
+    %4:2 = hfusion.reduce_with_index {tie_break_left = true, unsigned_src = false} <max> ins(%0, %1 : tensor<1x22x39xbf16>, tensor<1x22x39xi32>) outs(%2, %3 : tensor<1x39xbf16>, tensor<1x39xi32>) dimensions = [1]  -> tensor<1x39xbf16>, tensor<1x39xi32>
+    %reinterpret_cast_2 = memref.reinterpret_cast %arg4 to offset: [0], sizes: [1, 39], strides: [39, 1] : memref<?xbf16> to memref<1x39xbf16, strided<[39, 1]>>
+    bufferization.materialize_in_destination %4#0 in writable %reinterpret_cast_2 : (tensor<1x39xbf16>, memref<1x39xbf16, strided<[39, 1]>>) -> ()
+    %reinterpret_cast_3 = memref.reinterpret_cast %arg5 to offset: [0], sizes: [1, 39], strides: [39, 1] : memref<?xi32> to memref<1x39xi32, strided<[39, 1]>>
+    bufferization.materialize_in_destination %4#1 in writable %reinterpret_cast_3 : (tensor<1x39xi32>, memref<1x39xi32, strided<[39, 1]>>) -> ()
+    return
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_bitcast_i16_to_bf16
+module attributes {hacc.target = #hacc.target<"Ascend950PR_957b">} {
+  func.func @test_bitcast_i16_to_bf16(%arg0: tensor<16xi16>, %dst: tensor<16xbf16>) -> tensor<16xbf16> {
+    // CHECK: %[[VAL_0:.*]] = hfusion.bitcast ins(%arg0 : tensor<16xi16>) outs(%arg1 : tensor<16xbf16>) -> tensor<16xbf16>
+    // CHECK: return %[[VAL_0]] : tensor<16xbf16>
+    %res = hfusion.bitcast
+      ins(%arg0 : tensor<16xi16>)
+      outs(%dst : tensor<16xbf16>)
+      -> tensor<16xbf16>
+    return %res : tensor<16xbf16>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_bitcast_bf16_to_i16
+module attributes {hacc.target = #hacc.target<"Ascend950PR_957b">} {
+  func.func @test_bitcast_bf16_to_i16(%arg0: tensor<16xbf16>, %dst: tensor<16xi16>) -> tensor<16xi16> {
+    // CHECK: %[[VAL_0:.*]] = hfusion.bitcast ins(%arg0 : tensor<16xbf16>) outs(%arg1 : tensor<16xi16>) -> tensor<16xi16>
+    // CHECK: return %[[VAL_0]] : tensor<16xi16>
+    %res = hfusion.bitcast
+      ins(%arg0 : tensor<16xbf16>)
+      outs(%dst : tensor<16xi16>)
+      -> tensor<16xi16>
+    return %res : tensor<16xi16>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_bitcast_f16_to_bf16
+module attributes {hacc.target = #hacc.target<"Ascend950PR_957b">} {
+  func.func @test_bitcast_f16_to_bf16(%arg0: tensor<16xf16>, %dst: tensor<16xbf16>) -> tensor<16xbf16> {
+    // CHECK: %[[VAL_0:.*]] = hfusion.bitcast ins(%arg0 : tensor<16xf16>) outs(%arg1 : tensor<16xbf16>) -> tensor<16xbf16>
+    // CHECK: return %[[VAL_0]] : tensor<16xbf16>
+    %res = hfusion.bitcast
+      ins(%arg0 : tensor<16xf16>)
+      outs(%dst : tensor<16xbf16>)
+      -> tensor<16xbf16>
+    return %res : tensor<16xbf16>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_bitcast_bf16_to_f16
+module attributes {hacc.target = #hacc.target<"Ascend950PR_957b">} {
+  func.func @test_bitcast_bf16_to_f16(%arg0: tensor<16xbf16>, %dst: tensor<16xf16>) -> tensor<16xf16> {
+    // CHECK: %[[VAL_0:.*]] = hfusion.bitcast ins(%arg0 : tensor<16xbf16>) outs(%arg1 : tensor<16xf16>) -> tensor<16xf16>
+    // CHECK: return %[[VAL_0]] : tensor<16xf16>
+    %res = hfusion.bitcast
+      ins(%arg0 : tensor<16xbf16>)
+      outs(%dst : tensor<16xf16>)
+      -> tensor<16xf16>
+    return %res : tensor<16xf16>
+  }
 }

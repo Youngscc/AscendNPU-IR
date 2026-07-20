@@ -73,7 +73,8 @@ canonicalizationPipeline(OpPassManager &pm,
   CanonicalizerOptions options;
   options.disabledPatterns = phaseToDisabledMap[phase];
   pm.addPass(bishengir::createExtendedCanonicalizerPass(options));
-  pm.nest<func::FuncOp>().addPass(tensor::createNormalizeTensorOpsPass());
+  pm.nest<func::FuncOp>().addPass(tensor::createNormalizeTensorOpsPass(
+      /*skipAlignedSlice=*/hfusionOptions.enableTritonKernelCompile));
 }
 
 static void preProcess(OpPassManager &pm,

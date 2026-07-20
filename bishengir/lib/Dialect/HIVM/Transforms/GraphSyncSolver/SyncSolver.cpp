@@ -421,8 +421,8 @@ Solver::getMultiBufferEventIdInfo(Occurrence *occ1, Occurrence *occ2,
       return {};
     }
     auto [setOcc, waitOcc] = getSetWaitOcc(occ1, occ2);
-    if (!parLoop1->isProperAncestor(setOcc) ||
-        !parLoop1->isProperAncestor(waitOcc)) {
+    if (setOcc->getParentOfType<Loop>() != parLoop1 ||
+        waitOcc->getParentOfType<Loop>() != parLoop1) {
       return {};
     }
   } else {
@@ -433,10 +433,15 @@ Solver::getMultiBufferEventIdInfo(Occurrence *occ1, Occurrence *occ2,
     multibufferLoop = multibufferLoopOpt.value();
     assert(multibufferLoop != nullptr);
     auto [setOcc, waitOcc] = getSetWaitOcc(occ1, occ2);
-    if (!setOcc->getParentWithOp(multibufferLoop,
-                                 /*assertExists=*/false) ||
-        !waitOcc->getParentWithOp(multibufferLoop,
-                                  /*assertExists=*/false)) {
+    // TODO: This still matches the multibuffer loop through the MLIR loop op
+    // (LoopLikeOpInterface) rather than the solver occurrence; unify it with the
+    // solver loop nest once the a5 PR is merged.
+    Operation *multibufferLoopOp = multibufferLoop.getOperation();
+    auto *setParentLoop = setOcc->getParentOfType<Loop>();
+    auto *waitParentLoop = waitOcc->getParentOfType<Loop>();
+    if (!setParentLoop || !setParentLoop->op ||
+        setParentLoop->op->op != multibufferLoopOp || !waitParentLoop ||
+        !waitParentLoop->op || waitParentLoop->op->op != multibufferLoopOp) {
       return {};
     }
   }
@@ -649,7 +654,7 @@ EventIdInfo Solver::getEventIdInfo(Occurrence *occ1, Occurrence *occ2,
 // index.
 bool Solver::checkGraphConflict(
     Occurrence *occ1, Occurrence *occ2, CorePipeInfo corePipeSrc,
-    CorePipeInfo corePipeDst, EventIdInfo eventIdInfo,
+    CorePipeInfo corePipeDst, std::optional<EventIdInfo> eventIdInfo,
     std::optional<int> startIndex, std::optional<int> endIndex,
     const llvm::SmallVector<ConflictPair *> &extraConflictPairs,
     const llvm::SmallVector<ConflictPair *> &ignoreConflictPairs) {
@@ -671,7 +676,11 @@ bool Solver::checkGraphConflict(
       return;
     }
     if (conflictPair->isInnerBackward) {
-      if ((eventIdInfo.eventIdNum * eventIdInfo.eventIdRepeatNum) <
+      int64_t candidateEventIdProduct =
+          eventIdInfo.has_value()
+              ? eventIdInfo->eventIdNum * eventIdInfo->eventIdRepeatNum
+              : 1;
+      if (candidateEventIdProduct <
           (conflictPair->eventIdInfo.eventIdNum *
            conflictPair->eventIdInfo.eventIdRepeatNum)) {
         return;
@@ -755,8 +764,47 @@ bool Solver::checkSyncOpsConflicts(ConflictPair *conflictPair1,
       conflictPair1->endIndex >= conflictPair2->endIndex) {
     return true;
   }
+
+  auto setOcc1 = conflictPair1->setOcc;
+  auto waitOcc1 = conflictPair1->waitOcc;
+  auto setOcc2 = conflictPair2->setOcc;
+  auto waitOcc2 = conflictPair2->waitOcc;
+
+  bool checkSamePipeSetSet = false;
+  if (conflictPair1->setCorePipeInfo == conflictPair2->setCorePipeInfo) {
+    auto parentLoopOp1 = setOcc1->op->getParentOfType<Loop>();
+    auto parentLoopOp2 = setOcc2->op->getParentOfType<Loop>();
+    if (parentLoopOp1 && !parentLoopOp1->isProperAncestor(waitOcc1->op)) {
+      if (parentLoopOp1->isProperAncestor(setOcc2->op)) {
+        checkSamePipeSetSet = true;
+      }
+    }
+    if (parentLoopOp2 && !parentLoopOp2->isProperAncestor(waitOcc2->op)) {
+      if (parentLoopOp2->isProperAncestor(setOcc1->op)) {
+        checkSamePipeSetSet = true;
+      }
+    }
+  }
+
+  bool checkSamePipeWaitWait = false;
+  if (conflictPair1->waitCorePipeInfo == conflictPair2->waitCorePipeInfo) {
+    auto parentLoopOp1 = waitOcc1->op->getParentOfType<Loop>();
+    auto parentLoopOp2 = waitOcc2->op->getParentOfType<Loop>();
+    if (parentLoopOp1 && !parentLoopOp1->isProperAncestor(setOcc1->op)) {
+      if (parentLoopOp1->isProperAncestor(waitOcc2->op)) {
+        checkSamePipeWaitWait = true;
+      }
+    }
+    if (parentLoopOp2 && !parentLoopOp2->isProperAncestor(setOcc2->op)) {
+      if (parentLoopOp2->isProperAncestor(waitOcc1->op)) {
+        checkSamePipeWaitWait = true;
+      }
+    }
+  }
+
   bool result = false;
-  if (conflictPair1->setCorePipeInfo != conflictPair2->setCorePipeInfo) {
+  if (checkSamePipeSetSet ||
+      conflictPair1->setCorePipeInfo != conflictPair2->setCorePipeInfo) {
     auto corePipeSrc = conflictPair1->setCorePipeInfo;
     auto corePipeDst = conflictPair2->setCorePipeInfo;
     Occurrence *occ1 = conflictPair1->setOcc;
@@ -771,7 +819,8 @@ bool Solver::checkSyncOpsConflicts(ConflictPair *conflictPair1,
                                 endIndex, {conflictPair1}, {conflictPair2});
     conflictPair1->startIndex -= 1;
   }
-  if (conflictPair1->waitCorePipeInfo != conflictPair2->waitCorePipeInfo) {
+  if (checkSamePipeWaitWait ||
+      conflictPair1->waitCorePipeInfo != conflictPair2->waitCorePipeInfo) {
     auto corePipeSrc = conflictPair1->waitCorePipeInfo;
     auto corePipeDst = conflictPair2->waitCorePipeInfo;
     Occurrence *occ1 = conflictPair1->waitOcc;
@@ -1209,7 +1258,7 @@ Solver::getFixedSetWaitOcc(Occurrence *occ1, Occurrence *occ2,
     }
   }
 
-  // - for the case of cv-preload:
+  // - for the case of cv-preloading:
   // scope(){
   //   op1
   // } {preload=x}
@@ -1571,6 +1620,9 @@ bool Solver::reuseConflictPair(ConflictPair *conflictPair,
   reusableConflictPair->setOp = conflictPair->setOp;
   reusableConflictPair->setOcc = conflictPair->setOcc;
   reusableConflictPair->startIndex = conflictPair->startIndex;
+  // The reused pair takes over this conflict pair's set op, which is no longer
+  // the foldable MmadL1 L0 load the last-iteration optimization assumes.
+  reusableConflictPair->setOnLastIterOnly = false;
 
   if (!conflictPair->isUseless) {
     memorizeReusedSyncedPair(conflictPair, reusableConflictPair);
@@ -1977,7 +2029,15 @@ void Solver::handleConflict(Occurrence *occ1, Occurrence *occ2,
                             RWOperation *rwOp1, RWOperation *rwOp2,
                             CorePipeInfo corePipeSrc, CorePipeInfo corePipeDst,
                             EventIdInfo eventIdInfo, bool isUseless) {
-  if (!checkGraphConflict(occ1, occ2, corePipeSrc, corePipeDst, eventIdInfo)) {
+  bool isBarrier = corePipeSrc == corePipeDst;
+  auto unitFlagInfo =
+      isBarrier ? std::nullopt : checkUnitFlagPatterns(occ1, occ2);
+  std::optional<EventIdInfo> checkEventIdInfo;
+  if (!isBarrier && !unitFlagInfo) {
+    checkEventIdInfo = eventIdInfo;
+  }
+  if (!checkGraphConflict(occ1, occ2, corePipeSrc, corePipeDst,
+                          checkEventIdInfo)) {
     return;
   }
   LLVM_DEBUG({
@@ -1988,9 +2048,9 @@ void Solver::handleConflict(Occurrence *occ1, Occurrence *occ2,
     llvm::dbgs() << occ2->syncIrIndex << ' ' << occ2->startIndex << ' '
                  << occ2->endIndex << ' ' << rwOp2->str(0, false) << '\n';
   });
-  if (corePipeSrc == corePipeDst) {
+  if (isBarrier) {
     handleBarrierConflict(occ1, occ2, corePipeSrc, corePipeDst, isUseless);
-  } else if (auto unitFlagInfo = checkUnitFlagPatterns(occ1, occ2)) {
+  } else if (unitFlagInfo) {
     handleUnitFlagConflict(occ1, occ2, corePipeSrc, corePipeDst,
                            unitFlagInfo.value(), isUseless);
   } else {

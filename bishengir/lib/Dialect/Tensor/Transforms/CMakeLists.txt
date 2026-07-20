@@ -13,6 +13,8 @@ add_bishengir_library(BiShengIRTensorTransforms
   PropagateReshape/PropagateCollapseDown.cpp
   PropagateReshape/PropagateExpandUp.cpp
   PropagateReshape/PropagateNearEndExpandDown.cpp
+  PropagateReshape/PropagateOp/AnnotationMark.cpp
+  PropagateReshape/PropagateOp/MulExt.cpp
   PropagateReshape/PropagateOp/PropagatableOp.cpp
   PropagateReshape/PropagateOp/ScfForOp.cpp
   PropagateReshape/SwapCollapseExpand.cpp
@@ -39,6 +41,7 @@ add_bishengir_library(BiShengIRTensorTransforms
   MLIRDialect
   MLIRPass
   BiShengIRAnnotationDialect
+  BiShengIRHACCUtils
   BiShengIRHFusionDialect
   BiShengIRHFusionUtils
   BiShengIRHIVMDialect

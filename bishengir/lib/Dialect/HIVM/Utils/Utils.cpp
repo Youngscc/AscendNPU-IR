@@ -20,8 +20,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "bishengir/Dialect/HIVM/Utils/Utils.h"
+#include "bishengir/Dialect/Annotation/IR/Annotation.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Dialect/HIVM/IR/HIVMImpl.h"
+#include "bishengir/Dialect/HIVM/Utils/MultiBufferLoopAdapter.h"
 #include "bishengir/Dialect/MemRefExt/IR/MemRefExt.h"
 #include "bishengir/Dialect/Scope/IR/Scope.h"
 #include "bishengir/Dialect/Utils/Util.h"
@@ -29,6 +31,7 @@
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -121,37 +124,6 @@ FailureOr<memref::AllocOp> getMemRefForOpResult(OpResult result) {
       });
 }
 
-struct LoopInfo {
-  Value inductionVar;
-  OpFoldResult lowerBound;
-  OpFoldResult upperBound;
-  OpFoldResult singleStep;
-};
-
-/// Get info of parent and ancestor loop of ptrCastOp.
-/// The info is stored from inner to outer parent loop.
-std::vector<LoopInfo> getLoopsInfo(LoopLikeOpInterface ptrParentLoop) {
-  std::vector<LoopInfo> loopInfoVec;
-  LoopLikeOpInterface curOp = ptrParentLoop;
-  while (curOp) {
-    std::optional<Value> inductionVar = curOp.getSingleInductionVar();
-    std::optional<OpFoldResult> lowerBound = curOp.getSingleLowerBound();
-    std::optional<OpFoldResult> upperBound = curOp.getSingleUpperBound();
-    std::optional<OpFoldResult> singleStep = curOp.getSingleStep();
-
-    assert((inductionVar.has_value() && lowerBound.has_value() &&
-            upperBound.has_value() && singleStep.has_value()) &&
-           "iv, lb, ub and step shouldn't be null.");
-
-    loopInfoVec.push_back(
-        {*inductionVar, *lowerBound, *upperBound, *singleStep});
-
-    curOp = curOp->getParentOfType<LoopLikeOpInterface>();
-  }
-
-  return loopInfoVec;
-}
-
 /// Index of yielded value where is alias of targetVal.
 std::optional<int> getYieldValueIdx(Value targetVal, ValueRange yieldedValues) {
   auto it = std::find(yieldedValues.begin(), yieldedValues.end(), targetVal);
@@ -162,77 +134,66 @@ std::optional<int> getYieldValueIdx(Value targetVal, ValueRange yieldedValues) {
   return std::nullopt;
 }
 
-/// Flatten loops into one dimension and then modulo modular.
-/// for example modular is 2, use all induction var of loops to generate
-/// sequence data 0,1,2,3,... then mod 2 to get 0,1,0,1,...
-///
-/// IR:
-/// for i, 0, upperI, step=1:
-///   for j, 0, upperJ, step=1:
-///     affine.apply #map()[j, i]
-///
-/// the sequence is: 0,1,2,..., i*upperJ + j, ...
-///
-/// \return Index value of affineApply
-Value createNestedIndexModularUsingLoopInfo(
-    OpBuilder &builder, Location loc, const std::vector<LoopInfo> &loopInfoVec,
-    int modular) {
-  auto ctx = builder.getContext();
-  AffineExpr nElems = builder.getAffineConstantExpr(1);
-  AffineExpr targetExpr = builder.getAffineConstantExpr(0);
-  std::vector<OpFoldResult> symbolValueVec;
+bool isConsumedInLoop(Value val, LoopLikeOpInterface loop) {
+  Operation *loopOp = loop.getOperation();
+  for (Operation *user : val.getUsers()) {
+    if (user->hasTrait<OpTrait::IsTerminator>() ||
+        isa<annotation::MarkOp>(user))
+      continue;
 
-  // In order to create affineMap, bind symbols, affineExpr and values are
-  // needed. loopInfoVec would be used, loop from inner to outer.
-  for (size_t i = 0; i < loopInfoVec.size(); ++i) {
-    AffineExpr iv;
-    AffineExpr lb;
-    AffineExpr ub;
-    AffineExpr step;
-
-    // bind symbols
-    iv = getAffineSymbolExpr(i * 4, ctx);
-    lb = getAffineSymbolExpr(i * 4 + 1, ctx);
-    ub = getAffineSymbolExpr(i * 4 + 2, ctx);
-    step = getAffineSymbolExpr(i * 4 + 3, ctx);
-
-    // create affineExpr
-    targetExpr = targetExpr + (iv - lb).floorDiv(step) * nElems;
-    nElems = nElems * ((ub - lb + step - 1).floorDiv(step));
-
-    // values
-    auto info = loopInfoVec[i];
-    Value ivVal = getValueOrCreateCastToIndexLike(
-        builder, loc, builder.getIndexType(), info.inductionVar);
-    Value lbVal = getValueOrCreateCastToIndexLike(
-        builder, loc, builder.getIndexType(),
-        getValueOrCreateConstantIndexOp(builder, loc, info.lowerBound));
-    Value ubVal = getValueOrCreateCastToIndexLike(
-        builder, loc, builder.getIndexType(),
-        getValueOrCreateConstantIndexOp(builder, loc, info.upperBound));
-    Value stepVal = getValueOrCreateCastToIndexLike(
-        builder, loc, builder.getIndexType(),
-        getValueOrCreateConstantIndexOp(builder, loc, info.singleStep));
-
-    symbolValueVec.emplace_back(ivVal);
-    symbolValueVec.emplace_back(lbVal);
-    symbolValueVec.emplace_back(ubVal);
-    symbolValueVec.emplace_back(stepVal);
+    for (Operation *ancestor = user; ancestor;
+         ancestor = ancestor->getParentOp()) {
+      if (ancestor == loopOp)
+        return true;
+      if (isa<scf::ForOp, scf::WhileOp>(ancestor))
+        break;
+    }
   }
-
-  if (modular == -1) {
-    Value affineApply = mlir::affine::makeComposedAffineApply(
-        builder, loc, targetExpr, ArrayRef(symbolValueVec));
-    return affineApply;
-  }
-
-  targetExpr = targetExpr % modular;
-
-  Value affineApply = mlir::affine::makeComposedAffineApply(
-      builder, loc, targetExpr, ArrayRef(symbolValueVec));
-  return affineApply;
+  return false;
 }
 
+LoopLikeOpInterface getParentLoopImpl(Value val,
+                                      LoopLikeOpInterface consumerLoop) {
+  auto *valDefOp = val.getDefiningOp();
+  if (!valDefOp)
+    llvm::report_fatal_error("val should have defining op.");
+
+  LoopLikeOpInterface parentLoop =
+      valDefOp->getParentOfType<LoopLikeOpInterface>();
+  if (!parentLoop)
+    return consumerLoop;
+
+  if (isConsumedInLoop(val, parentLoop))
+    consumerLoop = parentLoop;
+
+  auto yieldedValues = parentLoop.getYieldedValues();
+  if (yieldedValues.empty())
+    return consumerLoop ? consumerLoop : parentLoop;
+
+  if (auto idx = getYieldValueIdx(val, yieldedValues)) {
+    // scf.while does not always expose results through LoopLikeOpInterface.
+    // Stop at the current anchor when the yielded value cannot be mapped to a
+    // loop result instead of dereferencing std::nullopt.
+    auto loopResults = parentLoop.getLoopResults();
+    if (!loopResults ||
+        static_cast<size_t>(*idx) >= loopResults->size())
+      return consumerLoop ? consumerLoop : parentLoop;
+    auto result = (*loopResults)[*idx];
+    return getParentLoopImpl(result, consumerLoop);
+  }
+
+  auto parentIf = valDefOp->getParentOfType<scf::IfOp>();
+  if (!parentIf || parentIf.getResults().empty())
+    return consumerLoop ? consumerLoop : parentLoop;
+
+  if (auto idx = getYieldValueIdx(val, parentIf.thenYield().getOperands()))
+    return getParentLoopImpl(parentIf.getResults()[*idx], consumerLoop);
+
+  if (auto idx = getYieldValueIdx(val, parentIf.elseYield().getOperands()))
+    return getParentLoopImpl(parentIf.getResults()[*idx], consumerLoop);
+
+  return consumerLoop ? consumerLoop : parentLoop;
+}
 } // namespace
 
 FailureOr<memref::AllocOp> getMemRefAlloc(Value operand) {
@@ -724,6 +685,39 @@ void removeMarkOpAttr(annotation::MarkOp markOp, StringRef attrName,
   }
 }
 
+void removeMarkOpDynamicAttr(annotation::MarkOp markOp, StringRef attrName,
+                             PatternRewriter &rewriter) {
+  assert(markOp && "markOp shouldn't be null.");
+  auto keys = markOp.getKeys();
+  auto values = markOp.getValues();
+  if (!keys.has_value())
+    return;
+
+  SmallVector<Attribute> newKeys;
+  SmallVector<Value> newValues;
+
+  auto keysArray = keys.value();
+
+  for (auto [key, value] : llvm::zip_equal(keysArray, values)) {
+    StringRef currentKey = mlir::cast<StringAttr>(key).getValue();
+    if (currentKey == attrName) {
+      LDBG("Removing dynamic annotation: " << attrName);
+    } else {
+      newKeys.push_back(key);
+      newValues.push_back(value);
+      LDBG("Keeping dynamic annotation: " << currentKey);
+    }
+  }
+
+  rewriter.modifyOpInPlace(markOp, [&]() {
+    markOp.setKeysAttr(rewriter.getArrayAttr(newKeys));
+    markOp.getValuesMutable().assign(newValues);
+  });
+  if (newKeys.empty()) {
+    removeMarkOpAttr(markOp, "keys", rewriter);
+  }
+}
+
 Value createTmpBufferOrTensorWithShape(PatternRewriter &rewriter, Location loc,
                                        Value source,
                                        SmallVector<int64_t> targetShape) {
@@ -879,6 +873,40 @@ SmallVector<Value> getTensorDynamicValues(OpBuilder &builder, Location loc,
     dynamicSizes = tensor::createDynamicDimValues(builder, loc, src);
   }
   return dynamicSizes;
+}
+
+Value createAllocLocalWorkSpace(OpBuilder &builder, Location loc,
+                                ArrayRef<int64_t> shape, Type elementType) {
+  assert(!ShapedType::isDynamicShape(shape) &&
+         "AllocWorkspaceOp only supports static shape");
+  Type allocWorkspaceType = MemRefType::get(shape, elementType);
+
+  auto allocWorkspaceOp =
+      builder.create<bishengir::memref_ext::AllocWorkspaceOp>(
+          loc, allocWorkspaceType,
+          /*workspaceArg*/ Value(), ValueRange{},
+          /*offset*/ ValueRange{});
+  return allocWorkspaceOp.getMemref();
+}
+
+Value getLocalWorkSpaceTensor(PatternRewriter &rewriter, Location loc,
+                              ArrayRef<int64_t> targetShapes,
+                              Type elementType) {
+#ifndef NDEBUG
+  std::optional<int64_t> totalStaticSize =
+      utils::getStaticTotalSize(targetShapes);
+  // TODO：support dynamic shape.
+  assert(totalStaticSize.has_value() && "Can only handle static shape");
+#endif
+
+  // 1. Get AllocWorkspaceOp of current block
+  Value localWorkSpace = createAllocLocalWorkSpace(
+      rewriter, loc, targetShapes, elementType);
+
+  // 2. Use bufferization::ToTensorOp to convert current workspace to tensor
+  auto toTensor = rewriter.create<bufferization::ToTensorOp>(
+      loc, localWorkSpace, true, true);
+  return toTensor;
 }
 
 Value createAllocLocalWorkSpace(OpBuilder &builder, Location loc,
@@ -1095,80 +1123,22 @@ void setSubBlockMapping(RewriterBase &rewriter, Operation *loop) {
 }
 
 LoopLikeOpInterface getParentLoop(Value val) {
-  auto *valDefOp = val.getDefiningOp();
-  if (!valDefOp)
-    llvm::report_fatal_error("val should have defining op.");
-
-  // Firstly, get parent loop
-  LoopLikeOpInterface parentLoop =
-      valDefOp->getParentOfType<LoopLikeOpInterface>();
-  if (!parentLoop) {
-    return nullptr;
-  }
-
-  // Need to determine whether val is yielded by the loop.
-  auto yieldedValues = parentLoop.getYieldedValues();
-  if (yieldedValues.empty())
-    return parentLoop;
-
-  auto idxLoopRes = getYieldValueIdx(val, yieldedValues);
-  if (idxLoopRes.has_value()) {
-    // The val is yielded by loop, so need to find parent of parent loop.
-    auto res = parentLoop.getLoopResults().value()[*idxLoopRes];
-    return getParentLoop(res);
-  }
-
-  // Need to determine whether val is yielded by if/else.
-  auto parentIf = valDefOp->getParentOfType<scf::IfOp>();
-  if (!parentIf || parentIf.getResults().empty())
-    return parentLoop;
-
-  auto thenYieldOp = parentIf.thenYield();
-  auto thenYieldOpers = thenYieldOp.getOperands();
-
-  auto idxThenYielded = getYieldValueIdx(val, thenYieldOpers);
-  if (idxThenYielded.has_value()) {
-    // The val is yielded by ifOp, need to find parent loop of ifOp's result
-    auto res = parentIf.getResults()[*idxThenYielded];
-    return getParentLoop(res);
-  }
-
-  if (!parentIf.getElseRegion().empty()) {
-    auto elseYieldOp = parentIf.elseYield();
-    auto elseYieldOpers = elseYieldOp.getOperands();
-    auto idxElseYielded = getYieldValueIdx(val, elseYieldOpers);
-    if (idxElseYielded.has_value()) {
-      auto res = parentIf.getResults()[*idxElseYielded];
-      return getParentLoop(res);
-    }
-  }
-
-  return parentLoop;
+  return getParentLoopImpl(val, nullptr);
 }
 
 Value createNestedIndexModular(OpBuilder &builder, Operation *op, int modular) {
   LoopLikeOpInterface parentLoop = getParentLoop(op->getResult(0));
-  assert(parentLoop &&
-         " ptrCastOp has no proper parent loop to do multi buffer");
-
-  auto loopInfoVec = getLoopsInfo(parentLoop);
-
-  // Insert at the beginning of the For loop.
-  auto forOp = cast<scf::ForOp>(parentLoop.getOperation());
-  builder.setInsertionPointToStart(forOp.getBody());
-  return createNestedIndexModularUsingLoopInfo(builder, forOp->getLoc(),
-                                               loopInfoVec, modular);
+  assert(parentLoop && " op has no proper parent loop to do multi buffer");
+  return createNestedIndexModular(builder, parentLoop, modular);
 }
 
 Value createNestedIndexModular(OpBuilder &builder, LoopLikeOpInterface loopOp,
                                int modular) {
-  auto loopInfoVec = getLoopsInfo(loopOp);
-  // Insert at the beginning of the For loop.
-  auto forOp = dyn_cast<scf::ForOp>(loopOp.getOperation());
-  assert(forOp != nullptr);
-  builder.setInsertionPointToStart(forOp.getBody());
-  return createNestedIndexModularUsingLoopInfo(builder, forOp->getLoc(),
-                                               loopInfoVec, modular);
+  auto adapter = MultiBufferLoopAdapter::create(loopOp);
+  assert(succeeded(adapter) &&
+         "createNestedIndexModular: loop is neither scf.for nor scf.while");
+  return modular == -1 ? adapter->getIterationCounter(builder)
+                       : adapter->getModuloIndex(builder, modular);
 }
 
 Value createNestedIndexForOp(OpBuilder &builder, Operation *operation) {
@@ -1177,16 +1147,10 @@ Value createNestedIndexForOp(OpBuilder &builder, Operation *operation) {
   if (!parentLoop) {
     return nullptr;
   }
-  assert(parentLoop &&
-         " ptrCastOp has no proper parent loop to do multi buffer");
-
-  auto loopInfoVec = getLoopsInfo(parentLoop);
-
-  // Insert at the beginning of the For loop.
-  auto forOp = cast<scf::ForOp>(parentLoop.getOperation());
-  builder.setInsertionPointToStart(forOp.getBody());
-  return createNestedIndexModularUsingLoopInfo(builder, forOp->getLoc(),
-                                               loopInfoVec, -1);
+  auto adapter = MultiBufferLoopAdapter::create(parentLoop);
+  if (failed(adapter))
+    return nullptr;
+  return adapter->getIterationCounter(builder);
 }
 
 static std::optional<BlockArgument> traceBlockArgument(BlockArgument ba) {
@@ -1491,6 +1455,166 @@ bool isOneDimLikeVecType(VectorType vecType) {
       return false;
   }
   return true;
+}
+
+static bool canCombineOneSide(const SmallVectorImpl<MemRefType> &memrefTypes,
+                              const ReassociationIndices &curIndexGroup,
+                              int indexStartPosition) {
+  return llvm::all_of(memrefTypes, [&](const MemRefType &curMemRef) {
+    ArrayRef<int64_t> curShapes = curMemRef.getShape();
+    int curIndexPosition = indexStartPosition;
+    for (int index : curIndexGroup) {
+      if (index != curIndexPosition) {
+        // do not combine transposed dims
+        return false;
+      }
+      curIndexPosition++;
+      if (curShapes[index] != 1) {
+        // do not combine dim with shape more than 1
+        return false;
+      }
+    }
+    return true;
+  });
+}
+
+/// if the given index group is not transpose reassociations, and the shape of
+/// each memref type corresponding to each index in the reassociation indices
+/// group is 1, the given index group can be combined.
+static bool canCombine(const SmallVectorImpl<MemRefType> &memrefTypes,
+                       const ReassociationIndices &lhs,
+                       const ReassociationIndices &rhs, int64_t lhsStartIndex,
+                       int64_t rhsStartIndex) {
+  // check whether one reassociation index group can be combined to another
+  bool anySideCombinable = canCombineOneSide(memrefTypes, rhs, rhsStartIndex) ||
+                           canCombineOneSide(memrefTypes, lhs, lhsStartIndex);
+  if (!anySideCombinable) {
+    return false;
+  }
+  // check continuous between index groups
+  ReassociationIndices combinedIndexGroup = lhs;
+  combinedIndexGroup.append(rhs);
+  return llvm::all_of(memrefTypes, [&](const MemRefType &curMemRef) {
+    return util::isGuaranteedCollapsibleStrictly(curMemRef,
+                                                 {combinedIndexGroup});
+  });
+}
+
+SmallVector<ReassociationIndices> combineReassociationGroups(
+    const SmallVectorImpl<MemRefType> &memrefTypes,
+    const SmallVectorImpl<ReassociationIndices> &oldReassociations) {
+  SmallVector<ReassociationIndices> reassociations(oldReassociations.begin(),
+                                                   oldReassociations.end());
+  SmallVector<ReassociationIndices> combinedReassociations;
+  auto *prevIt = reassociations.begin();
+  // used for checking whether contains transposed dim
+  int64_t size = static_cast<int64_t>(reassociations.front().size());
+
+  // combine continuous reassociation index groups
+  for (auto *curIt = reassociations.begin() + 1; curIt < reassociations.end();
+       ++curIt) {
+    if (canCombine(memrefTypes, *prevIt, *curIt, size - prevIt->size(), size)) {
+      // combine current reassociations into current combined group if
+      // possible
+      prevIt->append(*curIt);
+    } else {
+      // otherwise, save current combined group and create a new group
+      combinedReassociations.push_back(*prevIt);
+      prevIt = curIt;
+    }
+    size += static_cast<int64_t>(curIt->size());
+  }
+  // save remained reassociations
+  if (!prevIt->empty()) {
+    combinedReassociations.push_back(*prevIt);
+  }
+  return combinedReassociations;
+}
+
+SmallVector<ReassociationIndices> getContinuousReassociation(
+    const SmallVectorImpl<MemRefType> &memrefTypes,
+    const SmallVectorImpl<ReassociationIndices> &reassociations) {
+  // no more refine if all dims collapsible within origin reassociation groups
+  bool isCollapsedIntraGroup = llvm::all_of(memrefTypes, [&](MemRefType t) {
+    return util::isGuaranteedCollapsibleStrictly(t, reassociations);
+  });
+  if (isCollapsedIntraGroup) {
+    auto combinedReassociations =
+        combineReassociationGroups(memrefTypes, reassociations);
+    return combinedReassociations;
+  }
+
+  // refine reassociations into smaller parts for best effort collapse
+  SmallVector<ReassociationIndices> refinedReassociations;
+  for (const ReassociationIndices &group : reassociations) {
+    if (group.empty()) {
+      continue;
+    }
+    ReassociationIndices refinedGroup{group.front()};
+    const auto *prevIt = group.begin();
+    for (const auto *curIt = prevIt + 1; curIt < group.end();
+         ++curIt, ++prevIt) {
+      assert(*curIt > *prevIt &&
+             "reassociation indices must be ascending order");
+      // pairwise check for collapsible
+      SmallVector<ReassociationIndices> maybeCollapse{{*prevIt, *curIt}};
+      bool pairwiseCollapsed = llvm::all_of(memrefTypes, [&](MemRefType t) {
+        return util::isGuaranteedCollapsibleStrictly(t, maybeCollapse);
+      });
+      if (pairwiseCollapsed) {
+        // if prev and cur reasso indices can be collapsed, add to new group
+        refinedGroup.push_back(*curIt);
+      } else {
+        // if cannot collapse, split cur indice to another new group
+        refinedReassociations.push_back(refinedGroup);
+        refinedGroup.clear();
+        refinedGroup.push_back(*curIt);
+      }
+    }
+    if (!refinedGroup.empty()) {
+      refinedReassociations.push_back(refinedGroup);
+    }
+  }
+
+  // further combine inter-group reassociations
+  return combineReassociationGroups(memrefTypes, refinedReassociations);
+}
+
+SmallVector<ReassociationIndices>
+getContinuousReassociation(const SmallVectorImpl<MemRefType> &memrefTypes,
+                           ArrayRef<int64_t> reshapeDims,
+                           ArrayRef<int64_t> permutations) {
+  if (!isAllSameRank(memrefTypes)) {
+    LDBG("MemrefTypes of operands have different rank");
+    return {};
+  }
+
+  // get reassociations by dividing reshape group
+  SmallVector<ReassociationIndices> reassociations;
+  ReassociationIndices reassociation{0};
+  bool prevIsReshape = std::count(reshapeDims.begin(), reshapeDims.end(), 0);
+  auto rank = memrefTypes[0].getRank();
+  for (int64_t i = 1; i < rank; i++) {
+    bool curIsReshape = std::count(reshapeDims.begin(), reshapeDims.end(), i);
+    if (curIsReshape == prevIsReshape &&
+        (permutations.empty() || permutations[i] == permutations[i - 1] + 1)) {
+      reassociation.push_back(i);
+    } else {
+      reassociations.push_back(reassociation);
+      reassociation.clear();
+      reassociation.push_back(i);
+      prevIsReshape = curIsReshape;
+    }
+  }
+  if (!reassociation.empty()) {
+    reassociations.push_back(reassociation);
+  }
+
+  // cut the un-continuous ones into different group
+  auto continuousReassociations =
+      util::getContinuousReassociation(memrefTypes, reassociations);
+  assert(!continuousReassociations.empty());
+  return continuousReassociations;
 }
 } // namespace util
 } // namespace hivm

@@ -1065,6 +1065,22 @@ std::string NoMaxRankExternalModel<Conv2DL1Op>::getOpLibraryCallName(
 }
 
 //===----------------------------------------------------------------------===//
+// LoadMXScaleOp
+//===----------------------------------------------------------------------===//
+
+template <>
+std::string NoMaxRankExternalModel<LoadMXScaleOp>::getOpLibraryCallName(
+    Operation *op, std::optional<bool> /*isOpsAligned*/) const {
+  auto concreteOp = cast<LoadMXScaleOp>(op);
+  auto srcMemref = cast<MemRefType>(concreteOp.getSrcOperandType());
+  assert(srcMemref.getMemorySpace() &&
+         "LoadMXScaleOp source must have a memory space");
+  return getLibraryCallNameForCopyLikeOp(
+      concreteOp.getOpName().str(), concreteOp.getSrc().getType(),
+      concreteOp.getDst().getType(), concreteOp.getLoc(), srcMemref.getRank());
+}
+
+//===----------------------------------------------------------------------===//
 // ND2NZOp
 //===----------------------------------------------------------------------===//
 
@@ -1357,6 +1373,7 @@ void bishengir::hivm::detail::registerLibraryFunctionOpInterfaceExtension(
     REGISTER_STATIC_MAX_RANK(NZ2NDOp, 2);
     REGISTER_NO_MAX_RANK(FixpipeOp);
     REGISTER_NO_MAX_RANK(ND2NZOp);
+    REGISTER_NO_MAX_RANK(LoadMXScaleOp);
     REGISTER_NO_LIBRARY_FUNCTION(AtomicCasOp);
     REGISTER_NO_LIBRARY_FUNCTION(AtomicXchgOp);
     REGISTER_NO_LIBRARY_FUNCTION(AtomicRMWOp);

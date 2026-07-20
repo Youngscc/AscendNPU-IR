@@ -60,14 +60,8 @@ public:
       const HIVMBubbleUpExtractSliceOptions &options)
       : Base(options) {}
 
-  static bool traceAndCheckIsGMOrTightCoupledBuffer(Value value) {
-    auto maybeAlloc = traceDefOp<memref::AllocOp>(value);
-    if (!maybeAlloc.has_value())
-      return true;
-    auto allocOp = cast<memref::AllocOp>(maybeAlloc.value());
-    return utils::getAnnotateOpWithAttr(
-               allocOp.getMemref(), hivm::HIVMTightlyCoupledBufferAttr::name)
-        .has_value();
+  static bool traceAndCheckIsGM(Value value) {
+    return !traceDefOp<memref::AllocOp>(value).has_value();
   }
 
   LogicalResult
@@ -104,7 +98,7 @@ public:
         }
         if (auto bufferizeToTensor = dyn_cast<bufferization::ToTensorOp>(
                 (extractSrc.getDefiningOp()))) {
-          if (!traceAndCheckIsGMOrTightCoupledBuffer(bufferizeToTensor->getOperand(0)) &&
+          if (!traceAndCheckIsGM(bufferizeToTensor->getOperand(0)) &&
               strictMode) {
             return WalkResult::interrupt();
           }
@@ -202,10 +196,9 @@ private:
     strategies.push_back(std::make_shared<ScopeBubbleUpStrategy>());
     strategies.push_back(std::make_shared<SelectBubbleUpStrategy>());
     strategies.push_back(std::make_shared<FixpipeBubbleUpStrategy>());
-    // TODO: Support Operations
-    // strategies.push_back(std::make_shared<IndirectLoadBubbleUpStrategy>());
+    strategies.push_back(std::make_shared<IndirectLoadBubbleUpStrategy>());
     strategies.push_back(std::make_shared<GatherLoadBubbleUpStrategy>());
-    // strategies.push_back(std::make_shared<StrideLoadBubbleUpStrategy>());
+    strategies.push_back(std::make_shared<StrideLoadBubbleUpStrategy>());
     
 
     patterns.add<BubbleUpPattern>(context, std::move(strategies));

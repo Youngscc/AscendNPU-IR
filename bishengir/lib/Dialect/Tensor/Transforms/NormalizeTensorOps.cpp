@@ -1,6 +1,6 @@
 //===--- NormalizeTensorOps.cpp -  optimize tensor ops --------------------===//
 //
-// Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+// Copyright (c) Huawei Technologies Co., Ltd. 2025~2026. All rights reserved.
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -21,6 +21,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "bishengir/Dialect/Annotation/IR/Annotation.h"
+#include "bishengir/Dialect/HFusion/IR/HFusion.h"
 #include "bishengir/Dialect/Tensor/Transforms/Passes.h"
 #include "bishengir/Dialect/Utils/Util.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -51,6 +52,13 @@ using namespace mlir::tensor;
 namespace {
 struct NormalizeTensorOps
     : public impl::NormalizeTensorOpsBase<NormalizeTensorOps> {
+  using NormalizeTensorOpsBase::NormalizeTensorOpsBase;
+
+  // Programmatic construction: set the TableGen option (do not shadow it).
+  explicit NormalizeTensorOps(bool skipAlignedSliceArg) {
+    skipAlignedSlice = skipAlignedSliceArg;
+  }
+
   void runOnOperation() override;
 };
 } // namespace
@@ -299,6 +307,135 @@ public:
   }
 };
 
+struct FoldInsertSliceToConcat : OpRewritePattern<tensor::InsertSliceOp> {
+  FoldInsertSliceToConcat(MLIRContext *context, bool skipAlignedSlice)
+      : OpRewritePattern(context), skipAlignedSlice(skipAlignedSlice) {}
+
+  LogicalResult matchAndRewrite(tensor::InsertSliceOp sliceOp,
+                                PatternRewriter &rewriter) const override {
+    ArrayRef<int64_t> strides = sliceOp.getStaticStrides();
+    if (llvm::any_of(strides, [](int64_t stride) { return stride != 1; }))
+      return rewriter.notifyMatchFailure(
+          sliceOp, "only folds insert_slice operations with unit strides");
+
+    ArrayRef<int64_t> offsets = sliceOp.getStaticOffsets();
+    ArrayRef<int64_t> sizes = sliceOp.getStaticSizes();
+    auto isDynamic = [](int64_t value) { return ShapedType::isDynamic(value); };
+    if (llvm::any_of(offsets, isDynamic) || llvm::any_of(sizes, isDynamic))
+      return rewriter.notifyMatchFailure(
+          sliceOp, "only folds insert_slice operations with static offsets and "
+                   "sizes");
+
+    if (skipAlignedSlice && areOffsetsBlockAligned(sliceOp))
+      return rewriter.notifyMatchFailure(
+          sliceOp, "aligned offsets are disabled by skip-aligned-slice");
+
+    RankedTensorType sourceType = sliceOp.getSourceType();
+    RankedTensorType resultType = sliceOp.getResultType();
+    if (sourceType.getNumDynamicDims() != 0 ||
+        resultType.getNumDynamicDims() != 0)
+      return rewriter.notifyMatchFailure(
+          sliceOp, "cannot fold insert_slice with dynamic source or result");
+    if (sourceType.getRank() != resultType.getRank())
+      return rewriter.notifyMatchFailure(
+          sliceOp, "cannot fold insert_slice with different source and result "
+                   "ranks");
+
+    std::optional<int64_t> concatDim =
+        getUniqueConcatDim(sourceType, resultType, offsets, sizes);
+    if (!concatDim)
+      return rewriter.notifyMatchFailure(
+          sliceOp, "the insertion must slice exactly one dimension");
+
+    rewriter.replaceOp(sliceOp, convertToConcat(sliceOp, *concatDim, rewriter));
+    return success();
+  }
+
+private:
+  static bool areOffsetsBlockAligned(tensor::InsertSliceOp sliceOp) {
+    int64_t bitWidth = sliceOp.getResultType().getElementTypeBitWidth();
+    // Sub-byte elements make bytesPerElement 0 via integer division, which
+    // would treat every offset as aligned. Decline the heuristic instead.
+    if (bitWidth < static_cast<int64_t>(utils::kBitsToByte) ||
+        bitWidth % utils::kBitsToByte != 0)
+      return false;
+    int64_t bytesPerElement = bitWidth / utils::kBitsToByte;
+    return llvm::all_of(sliceOp.getStaticOffsets(), [&](int64_t offset) {
+      if (ShapedType::isDynamic(offset))
+        return false;
+      return offset * bytesPerElement % utils::INTR_BYTES_PER_BLOCK == 0;
+    });
+  }
+
+  static std::optional<int64_t> getUniqueConcatDim(RankedTensorType sourceType,
+                                                   RankedTensorType resultType,
+                                                   ArrayRef<int64_t> offsets,
+                                                   ArrayRef<int64_t> sizes) {
+    std::optional<int64_t> concatDim;
+    for (int64_t dim = 0, rank = sourceType.getRank(); dim < rank; ++dim) {
+      if (offsets[dim] == 0 && sizes[dim] == resultType.getDimSize(dim))
+        continue;
+      if (concatDim)
+        return std::nullopt;
+      concatDim = dim;
+    }
+    return concatDim;
+  }
+
+  static SmallVector<OpFoldResult>
+  withSubstitutedDimension(ArrayRef<int64_t> values, int64_t dimension,
+                           int64_t replacement, PatternRewriter &rewriter) {
+    SmallVector<OpFoldResult> results;
+    results.reserve(values.size());
+    for (auto [index, value] : llvm::enumerate(values))
+      results.push_back(
+          rewriter.getIndexAttr(index == dimension ? replacement : value));
+    return results;
+  }
+
+  static Value createSlice(Value source, Location loc,
+                           ArrayRef<int64_t> offsets, ArrayRef<int64_t> sizes,
+                           ArrayRef<int64_t> strides, int64_t dimension,
+                           int64_t offset, int64_t size,
+                           PatternRewriter &rewriter) {
+    if (size == 0)
+      return {};
+    return rewriter.create<tensor::ExtractSliceOp>(
+        loc, source,
+        withSubstitutedDimension(offsets, dimension, offset, rewriter),
+        withSubstitutedDimension(sizes, dimension, size, rewriter),
+        withSubstitutedDimension(strides, dimension, 1, rewriter));
+  }
+
+  static Value convertToConcat(tensor::InsertSliceOp sliceOp, int64_t concatDim,
+                               PatternRewriter &rewriter) {
+    ArrayRef<int64_t> offsets = sliceOp.getStaticOffsets();
+    ArrayRef<int64_t> sizes = sliceOp.getStaticSizes();
+    ArrayRef<int64_t> strides = sliceOp.getStaticStrides();
+    int64_t insertOffset = offsets[concatDim];
+    int64_t insertSize = sizes[concatDim];
+    int64_t resultSize = sliceOp.getResultType().getDimSize(concatDim);
+    Location loc = sliceOp.getLoc();
+
+    SmallVector<Value> inputs;
+    if (Value prefix =
+            createSlice(sliceOp.getDest(), loc, offsets, sizes, strides,
+                        concatDim, 0, insertOffset, rewriter))
+      inputs.push_back(prefix);
+    inputs.push_back(sliceOp.getSource());
+    if (Value suffix =
+            createSlice(sliceOp.getDest(), loc, offsets, sizes, strides,
+                        concatDim, insertOffset + insertSize,
+                        resultSize - insertOffset - insertSize, rewriter))
+      inputs.push_back(suffix);
+
+    return rewriter.create<tensor::ConcatOp>(loc, sliceOp.getResultType(),
+                                             concatDim, inputs);
+  }
+
+  bool skipAlignedSlice;
+};
+
 struct NormalizeLastDimConcatToInterleave
     : public OpRewritePattern<tensor::ConcatOp> {
 public:
@@ -346,6 +483,70 @@ private:
   }
 };
 
+struct NormalizeInterleaveExpandReshape
+    : OpRewritePattern<hfusion::InterleaveOp> {
+  using OpRewritePattern<hfusion::InterleaveOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(hfusion::InterleaveOp interleaveOp,
+                                PatternRewriter &rewriter) const override {
+    if (interleaveOp->getNumOperands() != 2)
+      return failure();
+
+    auto lhsExpand =
+        interleaveOp.getOperand(0).getDefiningOp<tensor::ExpandShapeOp>();
+    auto rhsExpand =
+        interleaveOp.getOperand(1).getDefiningOp<tensor::ExpandShapeOp>();
+    if (!lhsExpand || !rhsExpand)
+      return failure();
+
+    auto sourceType = dyn_cast<RankedTensorType>(lhsExpand.getSrc().getType());
+    auto rhsSourceType =
+        dyn_cast<RankedTensorType>(rhsExpand.getSrc().getType());
+    auto lhsType = dyn_cast<RankedTensorType>(lhsExpand.getResult().getType());
+    auto rhsType = dyn_cast<RankedTensorType>(rhsExpand.getResult().getType());
+    if (!sourceType || sourceType != rhsSourceType || !lhsType ||
+        lhsType != rhsType || !isUnitLastDimExpansion(sourceType, lhsType))
+      return failure();
+
+    if (!interleaveOp.getResult().hasOneUse())
+      return failure();
+    auto reshapeOp = dyn_cast<tensor::ReshapeOp>(
+        *interleaveOp.getResult().getUsers().begin());
+    auto reshapeType =
+        reshapeOp ? dyn_cast<RankedTensorType>(reshapeOp.getResult().getType())
+                  : RankedTensorType();
+    if (!reshapeType || !isInterleaveResultShape(sourceType, reshapeType))
+      return failure();
+
+    auto normalized = rewriter.create<hfusion::InterleaveOp>(
+        interleaveOp.getLoc(), reshapeType,
+        ValueRange{lhsExpand.getSrc(), rhsExpand.getSrc()});
+    rewriter.replaceOp(reshapeOp, normalized.getResult());
+    return success();
+  }
+
+private:
+  static bool isUnitLastDimExpansion(RankedTensorType sourceType,
+                                     RankedTensorType expandedType) {
+    if (expandedType.getRank() != sourceType.getRank() + 1 ||
+        expandedType.getDimSize(expandedType.getRank() - 1) != 1)
+      return false;
+    return llvm::equal(sourceType.getShape(),
+                       expandedType.getShape().drop_back());
+  }
+
+  static bool isInterleaveResultShape(RankedTensorType sourceType,
+                                      RankedTensorType reshapeType) {
+    if (reshapeType.getRank() != sourceType.getRank())
+      return false;
+    int64_t lastDim = sourceType.getRank() - 1;
+    return llvm::equal(sourceType.getShape().take_front(lastDim),
+                       reshapeType.getShape().take_front(lastDim)) &&
+           reshapeType.getDimSize(lastDim) ==
+               sourceType.getDimSize(lastDim) * 2;
+  }
+};
+
 struct FoldGenerateToFill : public OpRewritePattern<tensor::GenerateOp> {
 public:
   using OpRewritePattern<tensor::GenerateOp>::OpRewritePattern;
@@ -379,13 +580,17 @@ void NormalizeTensorOps::runOnOperation() {
   RewritePatternSet patterns(context);
   patterns.insert<FoldInsertPadPattern>(patterns.getContext());
   patterns.insert<FoldDoublePadPattern>(patterns.getContext());
+  patterns.insert<FoldInsertSliceToConcat>(patterns.getContext(),
+                                           skipAlignedSlice);
   patterns.insert<FoldGenerateToFill>(patterns.getContext());
   patterns.insert<NormalizeLastDimConcatToInterleave>(patterns.getContext());
   patterns.insert<FoldStaticNegativeHighPad>(patterns.getContext());
+  patterns.insert<NormalizeInterleaveExpandReshape>(patterns.getContext());
   if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
     return signalPassFailure();
 }
 
-std::unique_ptr<Pass> mlir::tensor::createNormalizeTensorOpsPass() {
-  return std::make_unique<NormalizeTensorOps>();
+std::unique_ptr<Pass>
+mlir::tensor::createNormalizeTensorOpsPass(bool skipAlignedSlice) {
+  return std::make_unique<NormalizeTensorOps>(skipAlignedSlice);
 }

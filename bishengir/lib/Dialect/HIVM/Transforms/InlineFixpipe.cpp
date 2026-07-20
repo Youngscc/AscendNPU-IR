@@ -180,6 +180,7 @@ static FixpipeOp insertFixpipe(PatternRewriter &rewriter,
   auto fixpipe = rewriter.create<FixpipeOp>(
       point->getLoc(), /*result_tensor=*/dst.getType(), src, dst, dmaModeAttr,
       /*dual_dst_mode=*/nullptr,
+      /*sub_block_idx=*/nullptr,
       /*pre_quant=*/nullptr, /*pre_relu=*/nullptr, /*channel_split=*/nullptr);
 
   SmallPtrSet<Operation *, 4> exceptedOps;
@@ -366,6 +367,7 @@ public:
             op.getLoc(), /*result_tensor=*/innerInit.getType(),
             /*src=*/mmadLikeOpRes,
             /*dst=*/innerInit, dmaModeAttr, FixpipeDualDstModeAttr{},
+            FixpipeSubBlockAttr{},
             /*pre_quant=*/nullptr, /*pre_relu=*/nullptr,
             /*channel_split=*/nullptr);
         for (OpOperand *operand : inLoopVecOperands) {
@@ -436,6 +438,7 @@ public:
         fixpipeInit,                          // dst
         dmaModeAttr,                          // dma_mode (NZ2ND)
         FixpipeDualDstModeAttr{},             // dual_dst_mode (default)
+        FixpipeSubBlockAttr{},                // sub_block_idx (default)
         /*pre_quant=*/nullptr,                // pre_quant
         /*pre_relu=*/nullptr,                 // pre_relu
         /*channel_split=*/nullptr             // channel_split
@@ -620,7 +623,7 @@ private:
     auto newFixpipeOp = rewriter.create<FixpipeOp>(
         loc, fixpipeInit.getType(), /*src=*/newFixpipeSrcTensor,
         /*dst=*/fixpipeInit, dmaModeAttr, FixpipeDualDstModeAttr{},
-        quantModeAttr, reluModeAttr);
+        op.getSubBlockIdxAttr(), quantModeAttr, reluModeAttr);
     rewriter.replaceAllUsesWith(castOp.getResult()[0],
                                 newFixpipeOp.getResultTensor());
     rewriter.eraseOp(castOp);
@@ -649,7 +652,8 @@ private:
         AtomicKindAttr::get(op->getContext(), ::mlir::hivm::AtomicKind::NONE);
     auto newFixpipeOp = rewriter.create<hivm::FixpipeOp>(
         loc, TypeRange{}, fixpipeSrcTensor, dst, op.getDmaModeAttr(),
-        FixpipeDualDstModeAttr{}, op.getPreQuantAttr(), op.getPreReluAttr());
+        FixpipeDualDstModeAttr{}, op.getSubBlockIdxAttr(), op.getPreQuantAttr(),
+        op.getPreReluAttr());
     if (storeAttr) {
       auto typeAttr =
           TypeAttr::get(mlir::cast<ShapedType>(dst.getType()).getElementType());
@@ -691,7 +695,8 @@ private:
     auto newFixpipeOp = rewriter.create<FixpipeOp>(
         extractSliceOp.getLoc(), fixpipeInit.getType(),
         /*src=*/newExtractSliceResult, /*dst=*/fixpipeInit, dmaModeAttr,
-        FixpipeDualDstModeAttr{}, quantModeAttr, reluModeAttr);
+        FixpipeDualDstModeAttr{}, op.getSubBlockIdxAttr(), quantModeAttr,
+        reluModeAttr);
     rewriter.replaceOp(extractSliceOp, newFixpipeOp.getResultTensor());
     rewriter.eraseOp(op);
     LDBG("InlineFixpipeWithExtractSliceReshape");
@@ -719,8 +724,8 @@ private:
         FixpipeDMAModeAttr::get(ctx, FixpipeDMAMode::NZ2ND);
     auto newFixpipeOp = rewriter.create<FixpipeOp>(
         insertSliceOp.getLoc(), TypeRange{fixpipeInit}, newInsertSliceResult,
-        fixpipeInit, dmaModeAttr, FixpipeDualDstModeAttr{}, quantModeAttr,
-        reluModeAttr);
+        fixpipeInit, dmaModeAttr, FixpipeDualDstModeAttr{},
+        op.getSubBlockIdxAttr(), quantModeAttr, reluModeAttr);
     rewriter.replaceOp(insertSliceOp, newFixpipeOp.getResultTensor());
     rewriter.eraseOp(op);
     LDBG("InlineFixpipeWithInsertSliceOpReshape");
@@ -755,7 +760,8 @@ private:
       auto newFixpipeOp = rewriter.create<FixpipeOp>(
           fixPipeOp.getLoc(), TypeRange{fixpipeInit},
           scfForOp->getResult(idx.value()), fixpipeInit, dmaModeAttr,
-          FixpipeDualDstModeAttr{}, quantModeAttr, reluModeAttr);
+          FixpipeDualDstModeAttr{}, fixPipeOp.getSubBlockIdxAttr(),
+          quantModeAttr, reluModeAttr);
       rewriter.replaceAllUsesExcept(scfForOp->getResult(idx.value()),
                                     newFixpipeOp.getResultTensor(),
                                     newFixpipeOp);
@@ -822,7 +828,7 @@ public:
         FixpipeDMAModeAttr::get(ctx, FixpipeDMAMode::NZ2ND);
     auto fixpipeOp = rewriter.create<FixpipeOp>(
         loc, TypeRange{}, maybeMmadRes, workSpaceMemref, dmaModeAttr,
-        FixpipeDualDstModeAttr{}, nullptr, nullptr);
+        FixpipeDualDstModeAttr{}, FixpipeSubBlockAttr{}, nullptr, nullptr);
     fixpipeOp->setAttr(usedForDebugOp, rewriter.getBoolAttr(true));
 
     rewriter.modifyOpInPlace(op, [&]() {

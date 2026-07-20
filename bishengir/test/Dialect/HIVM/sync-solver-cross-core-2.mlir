@@ -1,3 +1,4 @@
+// UNSUPPORTED: bishengir_published
 // RUN: bishengir-opt -pass-pipeline="builtin.module(func.func(hivm-cross-core-gss{force-is-reg-based=true}))" -split-input-file -verify-diagnostics %s | FileCheck %s
 
 module {

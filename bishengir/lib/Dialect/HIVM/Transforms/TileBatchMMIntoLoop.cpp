@@ -19,6 +19,7 @@
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Dialect/HIVM/IR/HIVMImpl.h"
 #include "bishengir/Dialect/HIVM/Transforms/Passes.h"
+#include "bishengir/Dialect/HIVM/Transforms/TileAndBindSubBlock/Helper.h"
 #include "bishengir/Dialect/HIVM/Utils/Utils.h"
 #include "bishengir/Dialect/Utils/Util.h"
 
@@ -250,6 +251,11 @@ Value createTiledMmadL1(hivm::BatchMmadL1Op batchmmOp,
       batchmmOp.getRealK(), batchmmOp.getRealN(), /*C=*/newOutput,
       batchmmOp.getPerChannelBias(), batchmmOp.getATransposeAttr(),
       batchmmOp.getBTransposeAttr(), batchmmOp.getEnable_HF32Attr(), batchmmOp.getEnable_I4Attr());
+  // Set the batch_matmul attribute on the Mmad
+  rewriter.modifyOpInPlace(tiledMmad, [&]() -> void {
+    tiledMmad->setAttr(hivm::batchMatmulAttr,
+                       UnitAttr::get(rewriter.getContext()));
+  });
   if (batchmmOp->getAttr(mmadFixpipeForResultAlreadyInserted)) {
     tiledMmad->setAttr(mmadFixpipeForResultAlreadyInserted,
                        batchmmOp->getAttr(mmadFixpipeForResultAlreadyInserted));
@@ -460,7 +466,8 @@ rewriteFixpipeThrowOutBatch(Value matrixToStore, SmallVector<Value> indexes,
     rewriter.create<hivm::FixpipeOp>(
         originFixpipe.getLoc(), Type{}, /*src=*/matrixToStore,
         /*dst=*/fixpipeDst, originFixpipe.getDmaModeAttr(),
-        originFixpipe.getDualDstModeAttr(), originFixpipe.getPreQuantAttr(),
+        originFixpipe.getDualDstModeAttr(), originFixpipe.getSubBlockIdxAttr(),
+        originFixpipe.getPreQuantAttr(),
         originFixpipe.getPreReluAttr(), originFixpipe.getChannelSplitAttr());
     return std::nullopt;
   }
@@ -479,7 +486,8 @@ rewriteFixpipeThrowOutBatch(Value matrixToStore, SmallVector<Value> indexes,
     auto newfixpipe = rewriter.create<hivm::FixpipeOp>(
         originFixpipe.getLoc(), resultType, /*src=*/matrixToStore,
         /*dst=*/fixpipeDst, originFixpipe.getDmaModeAttr(),
-        originFixpipe.getDualDstModeAttr(), originFixpipe.getPreQuantAttr(),
+        originFixpipe.getDualDstModeAttr(), originFixpipe.getSubBlockIdxAttr(),
+        originFixpipe.getPreQuantAttr(),
         originFixpipe.getPreReluAttr(), originFixpipe.getChannelSplitAttr());
 
     Value insert = insertTensorValueWithoutBatch(
