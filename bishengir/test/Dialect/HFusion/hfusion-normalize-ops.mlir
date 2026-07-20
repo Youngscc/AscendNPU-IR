@@ -1167,6 +1167,53 @@ func.func @test_hfusion_acosh_ops(%arg0 : tensor<32xf32>) -> tensor<32xf32> {
 }
 
 // -----
+// CHECK-LABEL: func.func @test_hfusion_asinh_ops(
+// CHECK-SAME: %[[ARG0:.*]]: tensor<32xf32>) -> tensor<32xf32> {
+// CHECK-DAG: %[[NEG_ONE:.*]] = arith.constant -1.000000e+00 : f32
+// CHECK-DAG: %[[ZERO:.*]] = arith.constant 0.000000e+00 : f32
+// CHECK-DAG: %[[ONE:.*]] = arith.constant 1.000000e+00 : f32
+// CHECK-DAG: %[[LOG2:.*]] = arith.constant 0.693147182 : f32
+// CHECK-DAG: %[[SMALL_THRESH:.*]] = arith.constant 2.44140625E-4 : f32
+// CHECK-DAG: %[[LARGE_THRESH:.*]] = arith.constant 1.000000e+08 : f32
+
+// CHECK: %[[EMPTY:.*]] = tensor.empty() : tensor<32xf32>
+
+// 1. Preprocess: z = abs(x)
+// CHECK: %[[ABS_X:.*]] = linalg.elemwise_unary {fun = #linalg.unary_fn<abs>} ins(%[[ARG0]] : tensor<32xf32>) outs(%[[EMPTY]] : tensor<32xf32>)
+
+// 2. Path 1: Large (|x| >= 1e8) -> log(z) + log(2)
+// CHECK: %[[LOG_Z:.*]] = linalg.elemwise_unary {fun = #linalg.unary_fn<log>} ins(%[[ABS_X]] : tensor<32xf32>) outs(%{{.*}} : tensor<32xf32>)
+// CHECK: %[[RES_LARGE:.*]] = linalg.elemwise_binary {fun = #linalg.binary_fn<add>} ins(%[[LOG_Z]], %[[LOG2]] : tensor<32xf32>, f32) outs(%{{.*}} : tensor<32xf32>)
+
+// 3. Path 2: Normal (|x| < 1e8) -> log(z + sqrt(z^2 + 1))
+// CHECK: %[[Z_SQ:.*]] = linalg.elemwise_binary {fun = #linalg.binary_fn<mul>} ins(%[[ABS_X]], %[[ABS_X]] : tensor<32xf32>, tensor<32xf32>) outs(%{{.*}} : tensor<32xf32>)
+// CHECK: %[[Z_SQ_P1:.*]] = linalg.elemwise_binary {fun = #linalg.binary_fn<add>} ins(%[[Z_SQ]], %[[ONE]] : tensor<32xf32>, f32) outs(%{{.*}} : tensor<32xf32>)
+// CHECK: %[[SQRT_Z:.*]] = hfusion.elemwise_unary {fun = #hfusion.unary_fn<sqrt>} ins(%[[Z_SQ_P1]] : tensor<32xf32>) outs(%{{.*}} : tensor<32xf32>)
+// CHECK: %[[SUM_NORMAL:.*]] = linalg.elemwise_binary {fun = #linalg.binary_fn<add>} ins(%[[ABS_X]], %[[SQRT_Z]] : tensor<32xf32>, tensor<32xf32>) outs(%{{.*}} : tensor<32xf32>)
+// CHECK: %[[RES_NORMAL:.*]] = linalg.elemwise_unary {fun = #linalg.unary_fn<log>} ins(%[[SUM_NORMAL]] : tensor<32xf32>) outs(%{{.*}} : tensor<32xf32>)
+
+// 4. Piecewise Selection for Magnitude
+// Select between Small (z < 2.44e-4) and Normal
+// CHECK: %[[COND_SMALL:.*]] = hfusion.compare {compare_fn = #hfusion.compare_fn<vlt>} ins(%[[ABS_X]], %[[SMALL_THRESH]] : tensor<32xf32>, f32) outs(%{{.*}} : tensor<32xi1>)
+// CHECK: %[[RES_MID_SMALL:.*]] = hfusion.select ins(%[[COND_SMALL]], %[[ABS_X]], %[[RES_NORMAL]] : tensor<32xi1>, tensor<32xf32>, tensor<32xf32>) outs(%[[EMPTY]] : tensor<32xf32>)
+// Select between Large (z >= 1e8) and ResultOfMidSmall
+// CHECK: %[[COND_LARGE:.*]] = hfusion.compare {compare_fn = #hfusion.compare_fn<vge>} ins(%[[ABS_X]], %[[LARGE_THRESH]] : tensor<32xf32>, f32) outs(%{{.*}} : tensor<32xi1>)
+// CHECK: %[[MAG:.*]] = hfusion.select ins(%[[COND_LARGE]], %[[RES_LARGE]], %[[RES_MID_SMALL]] : tensor<32xi1>, tensor<32xf32>, tensor<32xf32>) outs(%[[EMPTY]] : tensor<32xf32>)
+
+// 5. Restore Sign: x < 0 ? -mag : mag
+// CHECK: %[[IS_NEG:.*]] = hfusion.compare {compare_fn = #hfusion.compare_fn<vlt>} ins(%[[ARG0]], %[[ZERO]] : tensor<32xf32>, f32) outs(%{{.*}} : tensor<32xi1>)
+// CHECK: %[[NEG_MAG:.*]] = linalg.elemwise_binary {fun = #linalg.binary_fn<mul>} ins(%[[MAG]], %[[NEG_ONE]] : tensor<32xf32>, f32) outs(%[[EMPTY]] : tensor<32xf32>)
+// CHECK: %[[FINAL:.*]] = hfusion.select ins(%[[IS_NEG]], %[[NEG_MAG]], %[[MAG]] : tensor<32xi1>, tensor<32xf32>, tensor<32xf32>) outs(%[[EMPTY]] : tensor<32xf32>)
+
+// CHECK: return %[[FINAL]] : tensor<32xf32>
+// CHECK: }
+func.func @test_hfusion_asinh_ops(%arg0 : tensor<32xf32>) -> tensor<32xf32> {
+  %0 = tensor.empty() : tensor<32xf32>
+  %1 = hfusion.elemwise_unary {fun = #hfusion.unary_fn<asinh>} ins(%arg0 : tensor<32xf32>) outs(%0 : tensor<32xf32>) -> tensor<32xf32>
+  return %1 : tensor<32xf32>
+}
+
+// -----
 // CHECK-LABEL: func.func @test_hfusion_cos_ops(
 // CHECK-SAME: %[[ARG:.*]]: tensor<5x1xf16>) -> tensor<5x1xf16> {
 // CHECK: %[[VAL_0:.*]] = arith.constant -1.000000e+00 : f32
@@ -3243,7 +3290,7 @@ func.func @test_hfusion_erfinv_ops(%arg0 : tensor<5x1xf16>) -> tensor<5x1xf16> {
 
 // -----
 // CHECK-LABEL: module {
-// CHECK-NEXT:   func.func @test_hfusion_hypot_2_inputs(%arg0: tensor<1024xbf16>, %arg1: tensor<1024xbf16>) -> tensor<1024xbf16> {
+// CHECK-NEXT:   func.func @test_hfusion_hypot_2_inputs_bf16(%arg0: tensor<1024xbf16>, %arg1: tensor<1024xbf16>) -> tensor<1024xbf16> {
 // CHECK-NEXT:     %c-65536_i32 = arith.constant -65536 : i32
 // CHECK-NEXT:     %c32767_i32 = arith.constant 32767 : i32
 // CHECK-NEXT:     %c1_i32 = arith.constant 1 : i32
@@ -3320,7 +3367,7 @@ func.func @test_hfusion_erfinv_ops(%arg0 : tensor<5x1xf16>) -> tensor<5x1xf16> {
 // CHECK-NEXT: }
 // CHECK-EMPTY:
 
-func.func @test_hfusion_hypot_2_inputs(%arg0: tensor<1024xbf16>, %arg1: tensor<1024xbf16>) -> tensor<1024xbf16> {
+func.func @test_hfusion_hypot_2_inputs_bf16(%arg0: tensor<1024xbf16>, %arg1: tensor<1024xbf16>) -> tensor<1024xbf16> {
     %ret = hfusion.hypot %arg0, %arg1 : tensor<1024xbf16>, tensor<1024xbf16> -> tensor<1024xbf16>
     return %ret : tensor<1024xbf16>
   }
@@ -3328,7 +3375,7 @@ func.func @test_hfusion_hypot_2_inputs(%arg0: tensor<1024xbf16>, %arg1: tensor<1
 // -----
 
 // CHECK-LABEL: module {
-// CHECK-NEXT:   func.func @test_hfusion_hypot_2_inputs(%arg0: tensor<1024xf16>, %arg1: tensor<1024xf16>) -> tensor<1024xf16> {
+// CHECK-NEXT:   func.func @test_hfusion_hypot_2_inputs_f16(%arg0: tensor<1024xf16>, %arg1: tensor<1024xf16>) -> tensor<1024xf16> {
 // CHECK-NEXT:     %cst = arith.constant 0x7F800000 : f32
 // CHECK-NEXT:     %cst_0 = arith.constant 0x7FC00000 : f32
 // CHECK-NEXT:     %0 = tensor.empty() : tensor<1024xf32>
@@ -3360,7 +3407,7 @@ func.func @test_hfusion_hypot_2_inputs(%arg0: tensor<1024xbf16>, %arg1: tensor<1
 // CHECK-NEXT: }
 // CHECK-EMPTY:
 
-func.func @test_hfusion_hypot_2_inputs(%arg0: tensor<1024xf16>, %arg1: tensor<1024xf16>) -> tensor<1024xf16> {
+func.func @test_hfusion_hypot_2_inputs_f16(%arg0: tensor<1024xf16>, %arg1: tensor<1024xf16>) -> tensor<1024xf16> {
     %ret = hfusion.hypot %arg0, %arg1 : tensor<1024xf16>, tensor<1024xf16> -> tensor<1024xf16>
     return %ret : tensor<1024xf16>
   }
@@ -3368,7 +3415,7 @@ func.func @test_hfusion_hypot_2_inputs(%arg0: tensor<1024xf16>, %arg1: tensor<10
 // -----
 
 // CHECK-LABEL: module {
-// CHECK-NEXT:   func.func @test_hfusion_hypot_2_inputs(%arg0: tensor<1024xf32>, %arg1: tensor<1024xf32>) -> tensor<1024xf32> {
+// CHECK-NEXT:   func.func @test_hfusion_hypot_2_inputs_f32(%arg0: tensor<1024xf32>, %arg1: tensor<1024xf32>) -> tensor<1024xf32> {
 // CHECK-NEXT:     %cst = arith.constant 0x7FC00000 : f32
 // CHECK-NEXT:     %cst_0 = arith.constant 0x7F800000 : f32
 // CHECK-NEXT:     %cst_1 = arith.constant 1.000000e+00 : f32
@@ -3409,7 +3456,7 @@ func.func @test_hfusion_hypot_2_inputs(%arg0: tensor<1024xf16>, %arg1: tensor<10
 // CHECK-NEXT: }
 // CHECK-EMPTY:
 
-func.func @test_hfusion_hypot_2_inputs(%arg0: tensor<1024xf32>, %arg1: tensor<1024xf32>) -> tensor<1024xf32> {
+func.func @test_hfusion_hypot_2_inputs_f32(%arg0: tensor<1024xf32>, %arg1: tensor<1024xf32>) -> tensor<1024xf32> {
     %ret = hfusion.hypot %arg0, %arg1 : tensor<1024xf32>, tensor<1024xf32> -> tensor<1024xf32>
     return %ret : tensor<1024xf32>
   }

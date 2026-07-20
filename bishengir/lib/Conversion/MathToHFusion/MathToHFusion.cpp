@@ -194,6 +194,7 @@ static void populateMathToHFusionConversionPatterns_membase(
       ElementwiseOpToHFusionUnary<math::AcosOp, hfusion::UnaryFn::acos>,
       ElementwiseOpToHFusionUnary<math::SinhOp, hfusion::UnaryFn::sinh>,
       ElementwiseOpToHFusionUnary<math::AcoshOp, hfusion::UnaryFn::acosh>,
+      ElementwiseOpToHFusionUnary<math::AsinhOp, hfusion::UnaryFn::asinh>,
       ElementwiseOpToHFusionUnary<math::AbsIOp, hfusion::UnaryFn::absi>,
       ElementwiseOpToHFusionUnary<math::ErfOp, hfusion::UnaryFn::erf>,
       ElementwiseOpToHFusionUnary<math::Log2Op, hfusion::UnaryFn::log2>,

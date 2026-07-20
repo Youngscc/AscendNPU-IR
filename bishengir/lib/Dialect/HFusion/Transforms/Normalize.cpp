@@ -1706,6 +1706,158 @@ private:
   }
 };
 
+/// asinh(x)
+/// 1. z = |x|, sgn = x < 0 ? -1.0 : 1.0
+/// 2. Small (|x| < 2⁻¹²): mag = z (Taylor approximation)
+/// 3. Large (|x| >= 10⁸): mag = ln(z) + ln(2) (Avoids z² overflow)
+/// 4. Normal (else): mag = ln(z + sqrt(z² + 1))
+/// 5. asinh(x) = sgn * mag (Odd function symmetry)
+///
+/// NormalizeAsinhOp: Decomposes asinh(x) into high-performance base instructions.
+/// This implementation balances precision and performance using a three-path 
+/// piecewise approach based on the input magnitude.
+struct NormalizeAsinhOp : public OpRewritePattern<hfusion::ElemwiseUnaryOp> {
+  using OpRewritePattern<hfusion::ElemwiseUnaryOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(hfusion::ElemwiseUnaryOp op,
+                                PatternRewriter &rewriter) const override {
+    // Only process asinh operations within the hfusion dialect
+    if (!op.hasPureTensorSemantics() ||
+        op.getFun() != hfusion::UnaryFn::asinh) {
+      return failure();
+    }
+
+    Value input = op.getDpsInputs()[0];
+    auto inTy = getElementTypeOrSelf(input.getType());
+
+    // -------------------------------------------------------------------------
+    // Step 1: Precision Promotion (FP16 -> FP32)
+    // FP16 has a limited dynamic range (max 65504). Calculating x^2 can easily 
+    // cause overflow or significant rounding errors. Promoting to FP32 for 
+    // intermediate transcendental calculations is the standard approach for NPU.
+    // -------------------------------------------------------------------------
+    if (inTy.isF16()) {
+      input = hfusion::castTo(rewriter, input, rewriter.getF32Type(),
+                              hfusion::RoundMode::ROUND);
+    }
+
+    Location loc = op.getLoc();
+    // Call the core computation logic to generate the piecewise subgraph
+    Value finalRes = calculateAsinh(rewriter, loc, input);
+
+    // -------------------------------------------------------------------------
+    // Step 2: Demotion (FP32 -> FP16)
+    // Cast the result back to FP16 only if the original input was FP16.
+    // -------------------------------------------------------------------------
+    if (inTy.isF16()) {
+      finalRes = hfusion::castTo(rewriter, finalRes, rewriter.getF16Type(),
+                                 hfusion::RoundMode::ROUND);
+    }
+
+    // Replace the original operator with the normalized sequence
+    rewriter.replaceOp(op, finalRes);
+    return success();
+  }
+
+private:
+  /// Helper: Create a F32 scalar constant
+  Value f32Const(PatternRewriter &rewriter, Location loc, float v) const {
+    auto f32 = rewriter.getF32Type();
+    return rewriter.create<arith::ConstantOp>(loc, f32, rewriter.getFloatAttr(f32, v));
+  }
+  /// Helper: Create a hfusion.select operation to leverage NPU vsel instructions
+  Value createSelect(PatternRewriter &rewriter, Location loc, Value cond,
+                     Value t, Value f, Value init) const {
+    return rewriter
+        .create<hfusion::SelectOp>(loc, TypeRange(init), ValueRange{cond, t, f},
+                                   ValueRange(init))
+        ->getResult(0);
+  }
+
+  /// Path for large values: ln(|x|) + ln(2)
+  /// Used when |x| >= 10⁸ to prevent z² from overflowing FP32 range.
+  Value pathLarge(PatternRewriter &rewriter, Location loc, Value absInput) const {
+    auto empty = utils::createEmptyOp(rewriter, loc, absInput);
+    // Precomputed ln(2)
+    Value ln2 = f32Const(rewriter, loc, 0.69314718f); 
+    // Calculate log(|x|), which maps to NPU vlog instruction
+    Value logX = hfusion::createUnaryOp<linalg::ElemwiseUnaryOp, linalg::UnaryFn,
+                                       linalg::UnaryFnAttr>(
+        rewriter, loc, linalg::UnaryFn::log, ValueRange{absInput}, empty)->getResult(0);
+    // Final result for large path: ln(z) + ln(2)
+    return hfusion::createBinaryOp<linalg::ElemwiseBinaryOp, linalg::BinaryFn,
+                                   linalg::BinaryFnAttr>(
+        rewriter, loc, linalg::BinaryFn::add, ValueRange{logX, ln2}, empty)->getResult(0);
+  }
+
+  /// Path for normal values: ln(|x| + sqrt(|x|² + 1))
+  /// Used for the range 2⁻¹² <= |x| < 10⁸.
+  Value pathNormal(PatternRewriter &rewriter, Location loc, Value absInput) const {
+    auto empty = utils::createEmptyOp(rewriter, loc, absInput);
+    Value one = f32Const(rewriter, loc, 1.0f);
+    
+    // Calculate |x|^2
+    Value z2 = hfusion::createBinaryOp<linalg::ElemwiseBinaryOp, linalg::BinaryFn,
+                                       linalg::BinaryFnAttr>(
+        rewriter, loc, linalg::BinaryFn::mul, ValueRange{absInput, absInput}, empty)->getResult(0);
+    // Calculate |x|^2 + 1
+    Value z2p1 = hfusion::createBinaryOp<linalg::ElemwiseBinaryOp, linalg::BinaryFn,
+                                         linalg::BinaryFnAttr>(
+        rewriter, loc, linalg::BinaryFn::add, ValueRange{z2, one}, empty)->getResult(0);
+    
+    // Calculate sqrt(|x|^2 + 1) using NPU vsqrt instruction
+    Value sqrtVal = hfusion::createUnaryOp<hfusion::ElemwiseUnaryOp, hfusion::UnaryFn,
+                                           hfusion::UnaryFnAttr>(
+        rewriter, loc, hfusion::UnaryFn::sqrt, ValueRange{z2p1}, empty)->getResult(0);
+    
+    // Calculate ln(|x| + sqrt(...))
+    Value argLog = hfusion::createBinaryOp<linalg::ElemwiseBinaryOp, linalg::BinaryFn,
+                                           linalg::BinaryFnAttr>(
+        rewriter, loc, linalg::BinaryFn::add, ValueRange{absInput, sqrtVal}, empty)->getResult(0);
+    
+    return hfusion::createUnaryOp<linalg::ElemwiseUnaryOp, linalg::UnaryFn,
+                                  linalg::UnaryFnAttr>(
+        rewriter, loc, linalg::UnaryFn::log, ValueRange{argLog}, empty)->getResult(0);
+  }
+  /// Core orchestration: Implements piecewise selection and sign restoration
+  Value calculateAsinh(PatternRewriter &rewriter, Location loc, Value input) const {
+    auto empty = utils::createEmptyOp(rewriter, loc, input);
+    Value zero = f32Const(rewriter, loc, 0.0f);
+    Value largeThr = f32Const(rewriter, loc, 1.0e8f);
+    Value smallThr = f32Const(rewriter, loc, 2.44140625e-4f); // 2^-12
+
+    // 1. Get magnitude z = |x|
+    Value absInput = hfusion::createUnaryOp<linalg::ElemwiseUnaryOp, linalg::UnaryFn,
+                                            linalg::UnaryFnAttr>(
+        rewriter, loc, linalg::UnaryFn::abs, ValueRange{input}, empty)->getResult(0);
+
+    // 2. Pre-construct path results (Greedy rewrite pattern)
+    Value resLarge = pathLarge(rewriter, loc, absInput);
+    Value resNormal = pathNormal(rewriter, loc, absInput);
+    // pathSmall directly reuses absInput (|x| < 2^-12)
+
+   
+    // 3. Nested selection logic for magnitude (Magnitude = f(z))
+    // Decision A: If z < 2^-12, return z (Small Path); else return normal result
+    Value condSmall = createCmpOp(rewriter, loc, absInput, smallThr, CompareFn::vlt)->getResult(0);
+    Value res1 = createSelect(rewriter, loc, condSmall, absInput, resNormal, empty);
+    
+    // Decision B: If z >= 10^8, return resLarge (Large Path); else return result from Decision A
+    Value condLarge = createCmpOp(rewriter, loc, absInput, largeThr, CompareFn::vge)->getResult(0);
+    Value mag = createSelect(rewriter, loc, condLarge, resLarge, res1, empty);
+
+    // 4. Restore sign using the odd function property: asinh(-x) = -asinh(x)
+    // Logic: result = (input < 0) ? -mag : mag
+    Value isNeg = createCmpOp(rewriter, loc, input, zero, CompareFn::vlt)->getResult(0);
+    Value negOne = f32Const(rewriter, loc, -1.0f);
+    Value negMag = hfusion::createBinaryOp<linalg::ElemwiseBinaryOp, linalg::BinaryFn,
+                                           linalg::BinaryFnAttr>(
+        rewriter, loc, linalg::BinaryFn::mul, ValueRange{mag, negOne}, empty)->getResult(0);
+
+    return createSelect(rewriter, loc, isNeg, negMag, mag, empty);
+  }
+};
+
 /// normalize the specific cmp pattern to cast op in the non-bool scenario.
 /// eg.
 ///  scalar = const 0
@@ -9553,6 +9705,7 @@ void populateNormalizeHFusionPatterns(RewritePatternSet &patterns) {
   patterns.add<NormalizeAsinOp>(patterns.getContext());
   patterns.add<NormalizeAcosOp>(patterns.getContext());
   patterns.add<NormalizeAcoshOp>(patterns.getContext());
+  patterns.add<NormalizeAsinhOp>(patterns.getContext());
   patterns.add<NormalizeLgammaOp>(patterns.getContext());
   patterns.add<NormalizeAtanOp>(patterns.getContext());
   patterns.add<NormalizeAtan2Op>(patterns.getContext());
