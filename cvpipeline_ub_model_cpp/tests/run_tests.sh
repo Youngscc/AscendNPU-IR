@@ -22,6 +22,12 @@ cvpipeline_ub_model_cpp/output/tests/test_capability_parity
   -o cvpipeline_ub_model_cpp/output/tests/test_checked_math
 cvpipeline_ub_model_cpp/output/tests/test_checked_math
 
+"${compiler}" -std=c++17 -O0 -g -Wall -Wextra -Wpedantic -Wconversion \
+  -Wshadow -Werror \
+  cvpipeline_ub_model_cpp/tests/test_auto_blockify_parallel_loop.cpp \
+  -o cvpipeline_ub_model_cpp/output/tests/test_auto_blockify_parallel_loop
+cvpipeline_ub_model_cpp/output/tests/test_auto_blockify_parallel_loop
+
 python3 cvpipeline_ub_model_cpp/tests/test_capability_manifest.py
 python3 cvpipeline_ub_model_cpp/tests/test_merged_report.py
 python3 cvpipeline_ub_model_cpp/tests/test_oracle_comparison.py
