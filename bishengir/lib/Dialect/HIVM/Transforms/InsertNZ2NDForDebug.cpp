@@ -46,9 +46,10 @@ using namespace mlir;
 using namespace mlir::hivm;
 
 #define DEBUG_TYPE "hivm-insert-nz2nd-for-debug"
-static constexpr llvm::StringLiteral alreadyInsertNZ2ND = "alreadyInsertNZ2ND";
 
 namespace {
+static constexpr llvm::StringLiteral alreadyInsertNZ2ND = "alreadyInsertNZ2ND";
+
 struct InsertNZ2NDForDebug
     : public impl::InsertNZ2NDForDebugBase<InsertNZ2NDForDebug> {
   using Base::Base;
@@ -123,9 +124,65 @@ public:
   }
 };
 
+/// Insert nz2nd for the inputs of hivm::MmadL1Op.
+struct InsertNZ2NDForA5DebugOpPattern : public OpRewritePattern<hivm::MmadL1Op> {
+public:
+  using OpRewritePattern<hivm::MmadL1Op>::OpRewritePattern;
+  LogicalResult matchAndRewrite(hivm::MmadL1Op op,
+                                PatternRewriter &rewriter) const override {
+    llvm::SmallVector<Value> l1values = {op.getA(), op.getB()};
+    bool allInserted = true;
+    for (Value val : l1values) {
+      if (!isa<TensorType>(val.getType())) {
+        // currently only support tensors
+        continue;
+      }
+      TensorType tensorType = cast<TensorType>(val.getType());
+      if (val.getDefiningOp() == nullptr) {
+        // currently only support MmadL1Op inputs with defining op
+        continue;
+      }
+      Operation *definingOp = val.getDefiningOp();
+      bool inserted = false;
+      for (Operation *user : val.getUsers()) {
+        if (isa<hivm::NZ2NDOp>(user)) {
+          inserted = true;
+          break;
+        }
+      }
+      if (inserted) {
+        continue;
+      }
+      allInserted = false;
+      for (Operation *user : val.getUsers()) {
+        if (isa<hivm::DebugOp>(user)) {
+          hivm::DebugOp debugOp = cast<hivm::DebugOp>(user);
+          rewriter.setInsertionPointAfter(definingOp);
+          Value workSpaceTensor = getLocalWorkSpaceTensor(
+              rewriter, definingOp->getLoc(), tensorType.getShape(),
+              getElementTypeOrSelf(tensorType));
+          auto res = rewriter.create<hivm::NZ2NDOp>(
+              definingOp->getLoc(), workSpaceTensor.getType(),
+              /*src=*/val, /*dst=*/workSpaceTensor);
+          rewriter.modifyOpInPlace(debugOp, [&]() {
+            OpOperand &arg = debugOp.getArgMutable();
+            arg.assign(res.getResultTensor());
+          });
+        }
+      }
+    }
+    return allInserted ? failure() : success();
+  }
+};
+
 void InsertNZ2NDForDebug::runOnOperation() {
   RewritePatternSet patterns(&getContext());
-  patterns.add<InsertNZ2NDForDebugOpPattern>(patterns.getContext());
+  auto moduleOp = dyn_cast<ModuleOp>(getOperation());
+  if (moduleOp && hacc::utils::isRegBasedArch(moduleOp)) {
+    patterns.add<InsertNZ2NDForA5DebugOpPattern>(patterns.getContext());
+  } else {
+    patterns.add<InsertNZ2NDForDebugOpPattern>(patterns.getContext());
+  }
   (void)applyPatternsGreedily(getOperation(), std::move(patterns));
 }
 

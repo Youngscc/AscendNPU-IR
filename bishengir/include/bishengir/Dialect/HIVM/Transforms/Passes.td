@@ -757,7 +757,7 @@ def InsertLoadStoreForScalar
 }
 
 def InsertInferWorkSpaceSizeFunc : Pass<"hivm-insert-infer-workspace-size-func",
-                                        "func::FuncOp"> {
+                                        "ModuleOp"> {
   let summary = "Insert infer-workspace callback func for host";
   let description =
                 "Calculate total static workspace size after plan-workspace "
