@@ -206,6 +206,25 @@ void TestTask7SuccessfulTilingChangesUBSemantics() {
   Check(FindOperation(module, "hivm.hir.vadd").resultTypes.front() !=
             "tensor<16x16xf16>",
         "successful Task7 tiling must shrink the vector UB tile");
+  Check(CountOperation(module, "scf.if") == 1 &&
+            CountOperation(module, "hivm.hir.get_sub_block_idx") == 1,
+        "successful Task7 tiling must limit each unsliced store to sub-block "
+        "0");
+  size_t tiledStores = 0;
+  size_t guardedStores = 0;
+  for (const cvub::GenericOperation &operation : module.operations) {
+    if (operation.name != "hivm.hir.store")
+      continue;
+    if (cvub::HasSplitMixDictionaryEntry(operation.attributes, "tiled_op"))
+      ++tiledStores;
+    if (operation.parentId >= 0 &&
+        module.operations.at(static_cast<size_t>(operation.parentId)).name ==
+            "scf.if")
+      ++guardedStores;
+  }
+  Check(tiledStores == 1 && guardedStores == 1,
+        "successful Task7 tiling must not guard stores already marked "
+        "tiled_op");
 }
 
 void TestTask7EarlyCanonicalizationIsNotSkipped() {
@@ -333,8 +352,22 @@ void TestSinkOpUseMultiplicityAndGreedyOrder() {
   }
   Check(fillOrder == std::vector<std::string>({"second", "first", "first"}),
         "sink pass must reproduce MLIR use-list and greedy worklist order");
-  Check(CountOperation(module, "hivm.hir.vbrc") == 3,
-        "two uses on one consumer must create one clone per OpOperand");
+  size_t secondFills = 0;
+  size_t ifOnlyFills = 0;
+  for (const cvub::GenericOperation &operation : module.operations) {
+    if (operation.name != "hivm.hir.vbrc")
+      continue;
+    secondFills += operation.attributes.find("second_fill") !=
+                   std::string::npos;
+    ifOnlyFills += operation.attributes.find("if_only_fill") !=
+                   std::string::npos;
+  }
+  Check(CountOperation(module, "hivm.hir.vbrc") == 5 && secondFills == 2,
+        "uses in different loops must each receive a clone while repeated "
+        "operands receive one clone per OpOperand");
+  Check(ifOnlyFills == 1,
+        "a consumer nested only in scf.if must not be treated as a loop "
+        "consumer");
 }
 
 } // namespace

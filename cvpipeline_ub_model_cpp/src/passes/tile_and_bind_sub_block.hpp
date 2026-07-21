@@ -78,9 +78,14 @@ inline bool IsCopyToL1ForTileAndBind(const GenericOperation &operation) {
 }
 
 inline bool ShouldLimitUniqueSubBlock(const GenericOperation &operation) {
-  return operation.name == "hivm.hir.store" ||
-         operation.name == "hivm.hir.indirect_store" ||
-         IsCopyToL1ForTileAndBind(operation);
+  // LimitUniqueSubBlockIdToStoreCopy deliberately leaves operations that were
+  // successfully sliced by TileAndBindSubBlock alone: every sub-block owns a
+  // different tile for those operations.  Only the remaining, unsliced
+  // stores/copies must execute on sub-block 0.
+  return !HasSplitMixDictionaryEntry(operation.attributes, "tiled_op") &&
+         (operation.name == "hivm.hir.store" ||
+          operation.name == "hivm.hir.indirect_store" ||
+          IsCopyToL1ForTileAndBind(operation));
 }
 
 inline bool IsAlreadyLimitedToUniqueSubBlock(
@@ -3025,6 +3030,11 @@ inline GenericModule RunTileAndBindSubBlock(GenericModule module) {
     RunCSEAffineApplyPattern(candidate, functionId);
     module = std::move(candidate);
   }
+  // The real pass applies limitUniqueSubBlockToStore to the successfully
+  // tiled AIV functions as well.  It guards only operations that could not be
+  // sliced (for example, a scalar workspace store), while operations marked
+  // tiled_op continue to run independently on both sub-blocks.
+  module = LimitUniqueSubBlockToStore(std::move(module));
   ApplyOperationSemanticsToAll(module.operations);
   return CompactGenericModule(std::move(module));
 }

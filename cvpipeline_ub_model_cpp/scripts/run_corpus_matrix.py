@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import shlex
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -161,14 +163,17 @@ def load_matrix(path: Path) -> list[MatrixConfig]:
     return configs
 
 
-def build_command(args: argparse.Namespace, config: MatrixConfig) -> list[str]:
+def build_command(
+    args: argparse.Namespace,
+    config: MatrixConfig,
+    runtime_timing_output: Path | None = None,
+) -> list[str]:
     command = [
         sys.executable,
         str(args.runner),
         "--corpus-root", str(args.corpus_root),
         "--model", str(args.model),
         "--compiler", str(args.compiler),
-        "--seeds", str(args.seed),
         "--cv-pipeline-depth", str(config.cv_pipeline_depth),
         "--enable-code-motion", str(config.enable_code_motion).lower(),
         "--tile-mix-cube-loop", str(config.tile_mix_cube_loop),
@@ -176,6 +181,10 @@ def build_command(args: argparse.Namespace, config: MatrixConfig) -> list[str]:
         "--local-multi-buffer-strategy", config.local_multi_buffer_strategy,
         "--mix-multi-buffer-strategy", config.mix_multi_buffer_strategy,
     ]
+    if getattr(args, "retry_only", False):
+        command.append("--retry-only")
+    else:
+        command.extend(("--seeds", str(args.seed)))
     if config.restrict_inplace_as_isa:
         command.append("--restrict-inplace-as-isa")
     if config.disable_cv_pipelining:
@@ -198,8 +207,16 @@ def build_command(args: argparse.Namespace, config: MatrixConfig) -> list[str]:
         command.append("--enable-triton-kernel-compile")
     if args.max_cases is not None:
         command.extend(("--max-cases", str(args.max_cases)))
+    if getattr(args, "case_start", 0):
+        command.extend(("--case-start", str(args.case_start)))
     if args.pipeline_manifest is not None:
         command.extend(("--pipeline-manifest", str(args.pipeline_manifest)))
+    if runtime_timing_output is not None:
+        command.extend((
+            "--runtime-timing-output", str(runtime_timing_output)))
+        if getattr(args, "runtime_timing_exclude_dumps", False):
+            command.append("--runtime-timing-exclude-dumps")
+        command.append("--suppress-runtime-timing-summary")
     if args.require_all_exact:
         command.append("--require-all-exact")
     if args.quiet:
@@ -227,10 +244,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compiler", type=Path)
     parser.add_argument("--seed", type=bounded_seed, default=0,
                         help="single fixed PlanMemory seed (default: 0)")
+    parser.add_argument(
+        "--retry-only", action="store_true",
+        help="Run only the default PlanMemory seed-retry mode",
+    )
     parser.add_argument("--config", action="append", default=[], metavar="NAME",
                         help="run only this named configuration; repeatable")
+    parser.add_argument(
+        "--case-start", type=int, default=0,
+        help="Skip this many selected corpus inputs before --max-cases",
+    )
     parser.add_argument("--max-cases", type=int)
     parser.add_argument("--pipeline-manifest", type=Path)
+    parser.add_argument(
+        "--runtime-timing-output", type=Path,
+        help=("Collect executable-internal timing from every selected "
+              "configuration into one TSV"),
+    )
+    timing_dump_group = parser.add_mutually_exclusive_group()
+    timing_dump_group.add_argument(
+        "--runtime-timing-exclude-dumps", action="store_true",
+        dest="runtime_timing_exclude_dumps", default=True,
+        help=("Exclude suffix oracle/debug dump layers from measured time "
+              "using a separate suffix invocation (default)"),
+    )
+    timing_dump_group.add_argument(
+        "--runtime-timing-include-dumps", action="store_false",
+        dest="runtime_timing_exclude_dumps",
+        help="Include suffix oracle/debug dump overhead in measured time",
+    )
     parser.add_argument("--require-all-exact", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--no-progress", action="store_true")
@@ -239,6 +281,44 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--list", action="store_true",
                         help="list matrix configuration names and exit")
     return parser.parse_args()
+
+
+def merge_runtime_timings(
+    output: Path,
+    parts: list[tuple[str, Path]],
+) -> tuple[int, int, int]:
+    expected_header = [
+        "input", "seed", "tool", "kind", "name", "occurrence",
+        "nanoseconds", "milliseconds",
+    ]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    model_total = 0
+    suffix_total = 0
+    record_count = 0
+    with output.open("w", newline="", encoding="utf-8") as target:
+        writer = csv.writer(target, delimiter="\t", lineterminator="\n")
+        writer.writerow(["configuration", *expected_header])
+        for configuration, part in parts:
+            if not part.is_file():
+                continue
+            with part.open(newline="", encoding="utf-8") as source:
+                reader = csv.reader(source, delimiter="\t")
+                header = next(reader, None)
+                if header != expected_header:
+                    raise ValueError(
+                        f"invalid runtime timing header in {part}")
+                for row in reader:
+                    if len(row) != len(expected_header):
+                        raise ValueError(
+                            f"invalid runtime timing row in {part}: {row}")
+                    writer.writerow([configuration, *row])
+                    record_count += 1
+                    if row[3] == "TOTAL":
+                        if row[2] == "model":
+                            model_total += int(row[6])
+                        elif row[2] == "suffix_compile":
+                            suffix_total += int(row[6])
+    return model_total, suffix_total, record_count
 
 
 def main() -> int:
@@ -268,6 +348,9 @@ def main() -> int:
     if args.max_cases is not None and args.max_cases <= 0:
         print("--max-cases must be positive", file=sys.stderr)
         return 2
+    if args.case_start < 0:
+        print("--case-start must be non-negative", file=sys.stderr)
+        return 2
 
     if args.config:
         selected = set(args.config)
@@ -282,37 +365,75 @@ def main() -> int:
     required_failures: list[str] = []
     experimental_failures: list[str] = []
     executed = 0
-    for index, config in enumerate(configs, start=1):
-        command = build_command(args, config)
-        print(f"[{index}/{len(configs)}] {config.name}", flush=True)
-        print("  " + shlex.join(command), flush=True)
-        if args.dry_run:
-            continue
-        completed = subprocess.run(command)
-        executed += 1
-        if completed.returncode != 0:
-            failures = required_failures if config.required else experimental_failures
-            failures.append(config.name)
-            classification = "required" if config.required else "experimental"
-            print(f"[{classification} failure] {config.name}", file=sys.stderr)
-            if args.stop_on_failure and config.required:
-                break
+    timing_parts: list[tuple[str, Path]] = []
+    timing_context = (
+        tempfile.TemporaryDirectory(prefix="cvub-matrix-timing-")
+        if args.runtime_timing_output else contextlib.nullcontext(None)
+    )
+    with timing_context as timing_directory:
+        for index, config in enumerate(configs, start=1):
+            timing_part = (
+                Path(timing_directory) / f"{index:03d}-{config.name}.tsv"
+                if timing_directory else None
+            )
+            command = build_command(args, config, timing_part)
+            print(f"[{index}/{len(configs)}] {config.name}", flush=True)
+            print("  " + shlex.join(command), flush=True)
+            if args.dry_run:
+                continue
+            completed = subprocess.run(command)
+            executed += 1
+            if timing_part is not None:
+                timing_parts.append((config.name, timing_part))
+            if completed.returncode != 0:
+                failures = (required_failures if config.required
+                            else experimental_failures)
+                failures.append(config.name)
+                classification = ("required" if config.required
+                                  else "experimental")
+                print(f"[{classification} failure] {config.name}",
+                      file=sys.stderr)
+                if (args.stop_on_failure and
+                        (config.required or args.require_all_exact)):
+                    break
+
+        if args.runtime_timing_output and not args.dry_run:
+            try:
+                model_ns, suffix_ns, timing_records = merge_runtime_timings(
+                    args.runtime_timing_output, timing_parts)
+            except ValueError as error:
+                print(f"failed to merge runtime timing: {error}",
+                      file=sys.stderr)
+                return 2
+            ratio = suffix_ns / model_ns if model_ns else float("inf")
+            print(
+                "matrix runtime timing: "
+                f"model_total_ms={model_ns / 1_000_000:.3f} "
+                f"suffix_compile_total_ms={suffix_ns / 1_000_000:.3f} "
+                f"suffix_over_model={ratio:.3f} "
+                f"records={timing_records} "
+                f"output={args.runtime_timing_output}"
+            )
 
     if args.dry_run:
-        print(f"dry run complete: {len(configs)} configuration(s), seed={args.seed}")
+        seed_mode = "retry" if args.retry_only else str(args.seed)
+        print(
+            f"dry run complete: {len(configs)} configuration(s), "
+            f"seed={seed_mode}")
         return 0
+    seed_mode = "retry" if args.retry_only else str(args.seed)
     print(
         f"matrix summary: selected={len(configs)} executed={executed} "
         f"passed={executed - len(required_failures) - len(experimental_failures)} "
         f"required_failed={len(required_failures)} "
-        f"experimental_failed={len(experimental_failures)} seed={args.seed}")
+        f"experimental_failed={len(experimental_failures)} seed={seed_mode}")
     if required_failures:
         print("failed required configurations: " + ", ".join(required_failures),
               file=sys.stderr)
     if experimental_failures:
         print("failed experimental configurations: " +
               ", ".join(experimental_failures), file=sys.stderr)
-    if required_failures:
+    if required_failures or (args.require_all_exact and experimental_failures):
         return 1
     return 0
 

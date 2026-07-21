@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from compare_ub_plan_with_suffix_oracle import (
@@ -43,9 +45,181 @@ def positive_int(text: str) -> int:
     return value
 
 
+@dataclass(frozen=True)
+class RuntimeTimingRecord:
+    tool: str
+    kind: str
+    name: str
+    occurrence: int
+    nanoseconds: int
+
+
+def parse_runtime_timing(stderr: str) -> list[RuntimeTimingRecord]:
+    """Parse opt-in timing emitted by the model or suffix compiler itself."""
+    records: list[RuntimeTimingRecord] = []
+    for line in stderr.splitlines():
+        fields = line.split("\t")
+        if not fields or fields[0] != "CVPIPELINE_TIMING":
+            continue
+        if len(fields) != 7 or fields[1] != "1":
+            raise ValueError(f"invalid CVPIPELINE_TIMING record: {line}")
+        tool, kind, name = fields[2:5]
+        if tool not in {"model", "suffix_compile"}:
+            raise ValueError(f"unknown timing tool {tool!r}")
+        if kind not in {"TOTAL", "STAGE", "PASS"}:
+            raise ValueError(f"unknown timing kind {kind!r}")
+        try:
+            occurrence = int(fields[5])
+            nanoseconds = int(fields[6])
+        except ValueError as error:
+            raise ValueError(
+                f"non-integer CVPIPELINE_TIMING value: {line}") from error
+        if occurrence < 0 or nanoseconds < 0:
+            raise ValueError(f"negative CVPIPELINE_TIMING value: {line}")
+        records.append(RuntimeTimingRecord(
+            tool, kind, name, occurrence, nanoseconds))
+    return records
+
+
+def require_runtime_timing(
+    stderr: str, expected_tool: str,
+) -> list[RuntimeTimingRecord]:
+    records = parse_runtime_timing(stderr)
+    unexpected = {record.tool for record in records
+                  if record.tool != expected_tool}
+    if unexpected:
+        raise ValueError(
+            f"unexpected timing tool(s): {', '.join(sorted(unexpected))}")
+    totals = [record for record in records if record.kind == "TOTAL"]
+    if len(totals) != 1:
+        raise ValueError(
+            f"expected one {expected_tool} TOTAL timing record, got "
+            f"{len(totals)}")
+    return records
+
+
+def write_runtime_timing(
+    path: Path,
+    rows: list[tuple[str, int, RuntimeTimingRecord]],
+) -> dict[str, int]:
+    """Write per-input/per-stage records and return summed tool totals."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.writer(stream, delimiter="\t", lineterminator="\n")
+        writer.writerow((
+            "input", "seed", "tool", "kind", "name", "occurrence",
+            "nanoseconds", "milliseconds",
+        ))
+        for input_name, seed, record in rows:
+            writer.writerow((
+                input_name,
+                seed,
+                record.tool,
+                record.kind,
+                record.name,
+                record.occurrence,
+                record.nanoseconds,
+                f"{record.nanoseconds / 1_000_000:.6f}",
+            ))
+    totals: dict[str, int] = {}
+    for _, _, record in rows:
+        if record.kind == "TOTAL":
+            totals[record.tool] = totals.get(record.tool, 0) + record.nanoseconds
+    return totals
+
+
+def print_runtime_timing_comparison(
+    rows: list[tuple[str, int, RuntimeTimingRecord]],
+) -> None:
+    by_input: dict[tuple[str, int], dict[str, object]] = {}
+    for input_name, seed, record in rows:
+        case = by_input.setdefault((input_name, seed), {
+            "totals": {},
+            "steps": {"model": {}, "suffix_compile": {}},
+            "counts": {"model": {}, "suffix_compile": {}},
+            "model_order": [],
+        })
+        totals = case["totals"]
+        steps = case["steps"]
+        counts = case["counts"]
+        if record.kind == "TOTAL":
+            totals[record.tool] = record.nanoseconds
+            continue
+        tool_steps = steps[record.tool]
+        tool_counts = counts[record.tool]
+        if record.tool == "model" and record.name not in tool_steps:
+            case["model_order"].append(record.name)
+        tool_steps[record.name] = (
+            tool_steps.get(record.name, 0) + record.nanoseconds)
+        tool_counts[record.name] = tool_counts.get(record.name, 0) + 1
+    if not by_input:
+        return
+    print("runtime timing comparison (same-name steps are aggregated):")
+    for (input_name, seed), case in by_input.items():
+        totals = case["totals"]
+        steps = case["steps"]
+        counts = case["counts"]
+        model_steps = steps["model"]
+        suffix_steps = steps["suffix_compile"]
+        shared_names = [
+            name for name in case["model_order"] if name in suffix_steps]
+        model_ns = totals.get("model", 0)
+        suffix_ns = totals.get("suffix_compile", 0)
+        seed_text = "retry" if seed == -1 else str(seed)
+        print(f"\n[{seed_text}] {input_name}")
+        step_width = max(
+            len("Step"),
+            min(40, max((len(name) for name in shared_names), default=5)),
+        )
+
+        def short_name(name: str) -> str:
+            if len(name) <= step_width:
+                return name
+            return name[:step_width - 3] + "..."
+
+        header = (
+            f"{'Step':<{step_width}} | {'M#':>3} | {'Model ms':>11} | "
+            f"{'S#':>3} | {'Suffix ms':>11} | {'Delta ms':>11} | {'S/M':>8}")
+        print(header)
+        print("-" * len(header))
+
+        def print_row(name: str, model_count: int, model_value: int,
+                      suffix_count: int, suffix_value: int) -> None:
+            delta_ms = (suffix_value - model_value) / 1_000_000
+            ratio = suffix_value / model_value if model_value else float("inf")
+            print(
+                f"{short_name(name):<{step_width}} | {model_count:>3} | "
+                f"{model_value / 1_000_000:>11.3f} | {suffix_count:>3} | "
+                f"{suffix_value / 1_000_000:>11.3f} | {delta_ms:>11.3f} | "
+                f"{ratio:>8.3f}")
+
+        print_row("TOTAL", 1 if model_ns else 0, model_ns,
+                  1 if suffix_ns else 0, suffix_ns)
+        for name in shared_names:
+            print_row(
+                name,
+                counts["model"][name],
+                model_steps[name],
+                counts["suffix_compile"][name],
+                suffix_steps[name],
+            )
+        model_only = len(model_steps) - len(shared_names)
+        suffix_only = len(suffix_steps) - len(shared_names)
+        if model_only or suffix_only:
+            print(
+                f"unmapped: model-only stages={model_only}, "
+                f"suffix-only passes={suffix_only}; see the TSV for details")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--corpus-root", required=True, type=Path)
+    parser.add_argument(
+        "--input", action="append", type=Path, default=[], metavar="PATH",
+        help=("Run only this input; repeatable. Relative paths are resolved "
+              "against --corpus-root unless they exist from the current "
+              "directory."),
+    )
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--compiler", required=True, type=Path)
     parser.add_argument("--seeds", default="0-19")
@@ -70,10 +244,41 @@ def parse_args() -> argparse.Namespace:
                         choices=("no-limit", "only-cube", "only-vector", "no-l0c"))
     parser.add_argument("--stage-snapshots-dir", type=Path)
     parser.add_argument("--pipeline-manifest", type=Path)
+    parser.add_argument(
+        "--runtime-timing-output", type=Path,
+        help=("Enable internal runtime timing in both executables and write "
+              "the emitted total/stage/pass records as TSV"),
+    )
+    timing_dump_group = parser.add_mutually_exclusive_group()
+    timing_dump_group.add_argument(
+        "--runtime-timing-exclude-dumps", action="store_true",
+        dest="runtime_timing_exclude_dumps", default=True,
+        help=("Measure suffix compilation in a separate invocation with "
+              "oracle/debug dumps disabled (default); correctness still "
+              "uses the normal dump-enabled invocation"),
+    )
+    timing_dump_group.add_argument(
+        "--runtime-timing-include-dumps", action="store_false",
+        dest="runtime_timing_exclude_dumps",
+        help="Include suffix oracle/debug dump overhead in measured time",
+    )
+    parser.add_argument(
+        "--suppress-runtime-timing-summary", action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--case-start", type=int, default=0,
+        help="Skip this many selected corpus inputs before --max-cases",
+    )
     parser.add_argument("--max-cases", type=int)
     parser.add_argument("--require-all-exact", action="store_true")
     parser.add_argument("--check-retry", action="store_true",
                         help="Also compare the default retry-selected plan")
+    parser.add_argument(
+        "--retry-only", action="store_true",
+        help=("Skip fixed seeds and run only the default retry-selected "
+              "PlanMemory plan"),
+    )
     parser.add_argument("--quiet", action="store_true",
                         help="Only print the summary and failures")
     parser.add_argument("--no-progress", action="store_true",
@@ -95,8 +300,55 @@ def seeds(text: str) -> list[int]:
     return sorted(result)
 
 
+def select_inputs(corpus_root: Path, requested: list[Path]) -> list[Path]:
+    root = corpus_root.resolve()
+    if not requested:
+        return discover_inputs(root)
+    selected: list[Path] = []
+    seen: set[Path] = set()
+    for value in requested:
+        candidate = value
+        if not candidate.is_absolute() and not candidate.is_file():
+            candidate = root / candidate
+        candidate = candidate.resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as error:
+            raise ValueError(
+                f"--input must be inside --corpus-root: {value}") from error
+        if not candidate.is_file():
+            raise ValueError(f"--input is not a file: {value}")
+        if candidate not in seen:
+            selected.append(candidate)
+            seen.add(candidate)
+    return selected
+
+
 def run(command: list[str], *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, text=True, capture_output=True, env=env)
+
+
+def run_suffix(
+    command: list[str], *, env: dict[str, str] | None = None,
+    exclude_dumps_from_timing: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], subprocess.CompletedProcess[str]]:
+    """Run the oracle command and, when requested, a clean timing invocation."""
+    compiled = run(command, env=env)
+    if not exclude_dumps_from_timing:
+        return compiled, compiled
+
+    timing_command = [
+        argument for argument in command
+        if argument != "--show-runtime-timing"
+        and not argument.startswith("--dump-stage-oracle-dir=")
+        and not argument.startswith("--dump-pipeline-stage-manifest=")
+    ]
+    timing_command.extend((
+        "--show-runtime-timing", "--runtime-timing-exclude-dumps"))
+    timing_env = dict(os.environ if env is None else env)
+    timing_env.pop("BISHENGIR_DUMP_PLAN_MEMORY_ATTEMPTS", None)
+    timing_env.pop("BISHENGIR_DUMP_BEFORE_PLAN_MEMORY", None)
+    return compiled, run(timing_command, env=timing_env)
 
 
 def bool_text(value: bool) -> str:
@@ -193,8 +445,24 @@ def main() -> int:
     if args.cv_pipeline_depth < -1:
         print("--cv-pipeline-depth must be -1 or non-negative", file=sys.stderr)
         return 2
-    selected_seeds = seeds(args.seeds)
-    inputs = discover_inputs(args.corpus_root)
+    if args.retry_only and args.check_retry:
+        print("--retry-only cannot be combined with --check-retry",
+              file=sys.stderr)
+        return 2
+    if args.case_start < 0:
+        print("--case-start must be non-negative", file=sys.stderr)
+        return 2
+    if args.max_cases is not None and args.max_cases <= 0:
+        print("--max-cases must be positive", file=sys.stderr)
+        return 2
+    selected_seeds = [] if args.retry_only else seeds(args.seeds)
+    run_retry = args.check_retry or args.retry_only
+    try:
+        inputs = select_inputs(args.corpus_root, args.input)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 2
+    inputs = inputs[args.case_start:]
     if args.max_cases is not None:
         inputs = inputs[:args.max_cases]
     if not inputs:
@@ -212,8 +480,9 @@ def main() -> int:
     invalid = 0
     oracle_unavailable = 0
     unavailable_reasons: list[str] = []
+    timing_rows: list[tuple[str, int, RuntimeTimingRecord]] = []
     manifest_written = False
-    tasks_per_case = len(selected_seeds) + int(args.check_retry)
+    tasks_per_case = len(selected_seeds) + int(run_retry)
     progress = ProgressBar(
         len(inputs) * tasks_per_case,
         not args.no_progress and sys.stderr.isatty())
@@ -241,7 +510,18 @@ def main() -> int:
                 ]
                 if args.restrict_inplace_as_isa:
                     model_command.append("--restrict-inplace-as-isa")
+                if args.runtime_timing_output:
+                    model_command.append("--show-runtime-timing")
                 modeled = run(model_command)
+                if args.runtime_timing_output:
+                    try:
+                        timing_rows.extend(
+                            (str(relative), seed, record)
+                            for record in require_runtime_timing(
+                                modeled.stderr, "model")
+                        )
+                    except ValueError as error:
+                        failures.append(f"{relative} seed {seed}: {error}")
                 try:
                     payload = json.loads(modeled.stdout)
                 except json.JSONDecodeError:
@@ -272,6 +552,11 @@ def main() -> int:
                         ]
                         if args.restrict_inplace_as_isa:
                             blocker_command.append("--restrict-inplace-as-isa")
+                        if (args.runtime_timing_output and
+                                not args.runtime_timing_exclude_dumps):
+                            blocker_command.extend((
+                                "--show-runtime-timing",
+                                "--runtime-timing-include-dumps"))
                         if args.stage_snapshots_dir:
                             blocker_command.append(
                                 f"--dump-stage-oracle-dir={args.stage_snapshots_dir / case_name}")
@@ -279,7 +564,21 @@ def main() -> int:
                             blocker_command.append(
                                 f"--dump-pipeline-stage-manifest={args.pipeline_manifest}")
                             manifest_written = True
-                        compiled_blocker = run(blocker_command)
+                        compiled_blocker, timed_blocker = run_suffix(
+                            blocker_command,
+                            exclude_dumps_from_timing=
+                            args.runtime_timing_exclude_dumps)
+                        if args.runtime_timing_output:
+                            try:
+                                timing_rows.extend(
+                                    (str(relative), seed, record)
+                                    for record in require_runtime_timing(
+                                        timed_blocker.stderr,
+                                        "suffix_compile")
+                                )
+                            except ValueError as error:
+                                failures.append(
+                                    f"{relative} seed {seed}: {error}")
                         expected_capacity_failure = re.search(
                             r"error: [^\n]* overflow, requires ",
                             compiled_blocker.stderr) is not None
@@ -319,6 +618,11 @@ def main() -> int:
                 ]
                 if args.restrict_inplace_as_isa:
                     compiler_command.append("--restrict-inplace-as-isa")
+                if (args.runtime_timing_output and
+                        not args.runtime_timing_exclude_dumps):
+                    compiler_command.extend((
+                        "--show-runtime-timing",
+                        "--runtime-timing-include-dumps"))
                 if seed == selected_seeds[0] and args.stage_snapshots_dir:
                     stage_dir = args.stage_snapshots_dir / case_name
                     compiler_command.append(f"--dump-stage-oracle-dir={stage_dir}")
@@ -328,7 +632,19 @@ def main() -> int:
                     manifest_written = True
                 oracle_env = dict(os.environ)
                 oracle_env["BISHENGIR_DUMP_PLAN_MEMORY_ATTEMPTS"] = "1"
-                compiled = run(compiler_command, env=oracle_env)
+                compiled, timed_compiled = run_suffix(
+                    compiler_command, env=oracle_env,
+                    exclude_dumps_from_timing=
+                    args.runtime_timing_exclude_dumps)
+                if args.runtime_timing_output:
+                    try:
+                        timing_rows.extend(
+                            (str(relative), seed, record)
+                            for record in require_runtime_timing(
+                                timed_compiled.stderr, "suffix_compile")
+                        )
+                    except ValueError as error:
+                        failures.append(f"{relative} seed {seed}: {error}")
                 overflow_space = overflow_address_space(compiled.stderr)
                 if (compiled.returncode != 0 and overflow_space is not None and
                         not is_ub_overflow(overflow_space)):
@@ -375,7 +691,7 @@ def main() -> int:
                         f"model buffers={sum(model_plan.values())}, "
                         f"oracle buffers={sum(oracle_plan.values())})")
                     break
-            if not case_was_blocker and args.check_retry:
+            if not case_was_blocker and run_retry:
                 progress.update(
                     case_task_base + len(selected_seeds),
                     f"retry {relative}")
@@ -386,7 +702,18 @@ def main() -> int:
                 ]
                 if args.restrict_inplace_as_isa:
                     retry_model_command.append("--restrict-inplace-as-isa")
+                if args.runtime_timing_output:
+                    retry_model_command.append("--show-runtime-timing")
                 modeled_retry = run(retry_model_command)
+                if args.runtime_timing_output:
+                    try:
+                        timing_rows.extend(
+                            (str(relative), -1, record)
+                            for record in require_runtime_timing(
+                                modeled_retry.stderr, "model")
+                        )
+                    except ValueError as error:
+                        failures.append(f"{relative} retry: {error}")
                 try:
                     retry_payload = json.loads(modeled_retry.stdout)
                 except json.JSONDecodeError:
@@ -395,23 +722,66 @@ def main() -> int:
                         f"{modeled_retry.stderr.strip()}")
                 else:
                     if retry_payload.get("precision") != "exact":
-                        failures.append(
-                            f"{relative} retry: fixed-seed Exact became blocker")
+                        if args.retry_only:
+                            case_reported_exact = False
+                            case_was_blocker = True
+                            if (modeled_retry.returncode != 1 or
+                                    retry_payload.get("status") != "blocker" or
+                                    retry_payload.get("ub_peak_bits") is not None or
+                                    retry_payload.get("required_bits") is not None or
+                                    retry_payload.get("functions") != []):
+                                failures.append(
+                                    f"{relative} retry: incomplete report "
+                                    "violates blocker contract")
+                        else:
+                            failures.append(
+                                f"{relative} retry: fixed-seed Exact became "
+                                "blocker")
                     else:
+                        expected_retry_rc = (
+                            2 if retry_payload.get("status") == "overflow"
+                            else 0)
+                        if modeled_retry.returncode != expected_retry_rc:
+                            failures.append(
+                                f"{relative} retry: exact "
+                                f"{retry_payload.get('status')} returned "
+                                f"{modeled_retry.returncode}, expected "
+                                f"{expected_retry_rc}")
                         retry_output = temp_root / f"{case_name}.retry.mlir"
                         retry_compiler_command = [
                             str(args.compiler), str(input_path), "-o",
                             str(retry_output), "--plan-memory-seed=-1",
-                            "--mlir-disable-threading",
+                            "--mlir-disable-threading", "--ub-oracle-only",
                             *shared_pipeline_options(args),
                         ]
                         if args.restrict_inplace_as_isa:
                             retry_compiler_command.append("--restrict-inplace-as-isa")
+                        if (args.runtime_timing_output and
+                                not args.runtime_timing_exclude_dumps):
+                            retry_compiler_command.extend((
+                                "--show-runtime-timing",
+                                "--runtime-timing-include-dumps"))
                         oracle_env = dict(os.environ)
                         oracle_env["BISHENGIR_DUMP_PLAN_MEMORY_ATTEMPTS"] = "1"
-                        compiled_retry = run(retry_compiler_command,
-                                             env=oracle_env)
-                        if compiled_retry.returncode != 0:
+                        compiled_retry, timed_retry = run_suffix(
+                            retry_compiler_command, env=oracle_env,
+                            exclude_dumps_from_timing=
+                            args.runtime_timing_exclude_dumps)
+                        if args.runtime_timing_output:
+                            try:
+                                timing_rows.extend(
+                                    (str(relative), -1, record)
+                                    for record in require_runtime_timing(
+                                        timed_retry.stderr,
+                                        "suffix_compile")
+                                )
+                            except ValueError as error:
+                                failures.append(f"{relative} retry: {error}")
+                        retry_overflow_space = overflow_address_space(
+                            compiled_retry.stderr)
+                        if (compiled_retry.returncode != 0 and
+                                not (retry_payload.get("status") == "overflow" and
+                                     is_ub_overflow(retry_overflow_space))):
                             failures.append(
                                 f"{relative} retry: real compiler failed: "
                                 f"{compiled_retry.stderr[-2000:]}")
@@ -464,6 +834,21 @@ def main() -> int:
         f"summary: inputs={len(inputs)} reported_exact={reported_exact} "
         f"matched={matched} blockers={blockers} invalid={invalid} "
         f"oracle_unavailable={oracle_unavailable} failures={len(failures)}")
+    if args.runtime_timing_output:
+        totals = write_runtime_timing(args.runtime_timing_output, timing_rows)
+        model_ns = totals.get("model", 0)
+        suffix_ns = totals.get("suffix_compile", 0)
+        ratio = suffix_ns / model_ns if model_ns else float("inf")
+        if not args.suppress_runtime_timing_summary:
+            print(
+                "runtime timing: "
+                f"model_total_ms={model_ns / 1_000_000:.3f} "
+                f"suffix_compile_total_ms={suffix_ns / 1_000_000:.3f} "
+                f"suffix_over_model={ratio:.3f} "
+                f"records={len(timing_rows)} "
+                f"output={args.runtime_timing_output}"
+            )
+            print_runtime_timing_comparison(timing_rows)
     for reason in unavailable_reasons:
         print(f"[UNAVAILABLE] {reason}", file=sys.stderr)
     for failure in failures:

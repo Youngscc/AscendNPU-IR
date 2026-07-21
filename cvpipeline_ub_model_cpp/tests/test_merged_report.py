@@ -81,6 +81,33 @@ assert [
 
 print("[PASS] default PlanMemory inplace pairs remain exact")
 
+timed = subprocess.run(
+    [
+        str(MODEL),
+        f"--before-cvpipelining-ir={VECTOR_ADD}",
+        "--format=json",
+        "--random-seed=0",
+        "--show-runtime-timing",
+    ],
+    text=True,
+    capture_output=True,
+    check=False,
+)
+assert timed.returncode == 0, timed.stderr
+json.loads(timed.stdout)
+timing_rows = [
+    line.split("\t") for line in timed.stderr.splitlines()
+    if line.startswith("CVPIPELINE_TIMING\t")
+]
+assert all(len(row) == 7 for row in timing_rows), timing_rows
+assert sum(row[3] == "TOTAL" for row in timing_rows) == 1, timing_rows
+stage_names = {row[4] for row in timing_rows if row[3] == "STAGE"}
+assert {"ParseGenericIR", "CVPipelining", "MarkMultiBuffer", "PlanMemory"} <= \
+    stage_names, stage_names
+assert all(int(row[6]) >= 0 for row in timing_rows), timing_rows
+
+print("[PASS] opt-in model runtime timing preserves JSON and reports stages")
+
 attention_overflow = subprocess.run(
     [
         str(MODEL),
@@ -101,6 +128,39 @@ assert attention_report["required_bits"] == 1716224, attention_report
 assert len(attention_report["functions"]) == 1, attention_report
 
 print("[PASS] dynamic alignment produces an exact overflow plan")
+
+attention_seed_nine = subprocess.run(
+    [
+        str(MODEL),
+        f"--before-cvpipelining-ir={ATTENTION_OVERFLOW}",
+        "--format=json",
+        "--random-seed=9",
+    ],
+    text=True,
+    capture_output=True,
+    check=False,
+)
+assert attention_seed_nine.returncode == 2, attention_seed_nine
+attention_seed_nine_report = json.loads(attention_seed_nine.stdout)
+assert attention_seed_nine_report["precision"] == "exact", \
+    attention_seed_nine_report
+assert attention_seed_nine_report["status"] == "overflow", \
+    attention_seed_nine_report
+assert attention_seed_nine_report["ub_peak_bits"] == 1716224, \
+    attention_seed_nine_report
+seed_nine_function = attention_seed_nine_report["functions"][0]
+assert len(seed_nine_function["buffers"]) == 44, attention_seed_nine_report
+seed_nine_buffers = {
+    buffer["name"]: buffer for buffer in seed_nine_function["buffers"]
+}
+assert seed_nine_buffers["%base_0"]["free_time"] == 222, \
+    attention_seed_nine_report
+assert seed_nine_buffers["%base_29"]["offsets_bytes"] == [0], \
+    attention_seed_nine_report
+assert ["%base_18", "%base_8"] in seed_nine_function["inplace_pairs"], \
+    attention_seed_nine_report
+
+print("[PASS] non-default seed preserves workspace-load liveness and inplace")
 
 triton_attention_overflow = subprocess.run(
     [

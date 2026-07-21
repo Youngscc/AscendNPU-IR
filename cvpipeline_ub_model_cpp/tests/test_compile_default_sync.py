@@ -80,6 +80,14 @@ assert re.search(
     r"bool enableTritonKernelCompile = false;", model_main
 ), "model Triton default differs from bishengir-compile"
 
+assert "pm.addPass(createEnableStrideAlignPass());" in suffix_source, (
+    "module-scoped EnableStrideAlign must run on the suffix module pass manager"
+)
+assert (
+    "pm.nest<func::FuncOp>().addPass(createEnableStrideAlignPass());"
+    not in suffix_source
+), "suffix must not nest the module-scoped EnableStrideAlign under func.func"
+
 assert re.search(
     r"localMultiBufferStrategy\s*=\s*\n\s*"
     r"cvub::MultiBufferStrategy::CubeNoL0C;",
@@ -114,6 +122,15 @@ assert re.search(
 assert '"--ub-oracle-only"' in corpus_script, (
     "corpus oracle must isolate UB planning from AIC CBUF failures"
 )
+assert '"show-runtime-timing"' in suffix_source
+assert '"runtime-timing-exclude-dumps"' in suffix_source
+assert '"runtime-timing-include-dumps"' in suffix_source
+assert '"--show-runtime-timing"' in model_main
+assert '"--runtime-timing-output"' in corpus_script
+assert '"--runtime-timing-exclude-dumps"' in corpus_script
+assert "enableMemoryDisplay && !excludeDumpLayersForRuntimeTiming()" in suffix_source
+assert "RuntimePassTimingInstrumentation" in suffix_source
+assert "CVPIPELINE_TIMING" in suffix_source
 assert re.search(
     r"std::optional<uint32_t> randomSeed;", model_main
 ), "model must leave the PlanMemory seed unspecified by default"

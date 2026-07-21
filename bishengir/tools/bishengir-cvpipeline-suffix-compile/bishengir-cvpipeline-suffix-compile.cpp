@@ -55,6 +55,8 @@
 #include "mlir/InitAllExtensions.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Parser/Parser.h"
+#include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassInstrumentation.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
@@ -72,7 +74,13 @@
 #include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <chrono>
 #include <cstdlib>
+#include <map>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
 #if defined(__clang__)
 #pragma clang diagnostic pop
@@ -84,6 +92,83 @@ using namespace mlir;
 using namespace mlir::hivm;
 
 namespace {
+class RuntimePassTimingState {
+public:
+  using Clock = std::chrono::steady_clock;
+
+  void Begin(StringRef passName) {
+    const auto started = Clock::now();
+    std::lock_guard<std::mutex> lock(mutex);
+    active[std::this_thread::get_id()].push_back(
+        {passName.str(), started});
+  }
+
+  void End() {
+    const auto ended = Clock::now();
+    std::lock_guard<std::mutex> lock(mutex);
+    const auto thread = std::this_thread::get_id();
+    auto found = active.find(thread);
+    if (found == active.end() || found->second.empty())
+      return;
+    ActivePass entry = std::move(found->second.back());
+    found->second.pop_back();
+    if (found->second.empty())
+      active.erase(found);
+    if (entry.name.find("OpToOpPassAdaptor") == std::string::npos)
+      records.push_back(
+          {std::move(entry.name), ToNanoseconds(ended - entry.started)});
+  }
+
+  template <typename Duration>
+  void Print(raw_ostream &output, Duration total) const {
+    output << "CVPIPELINE_TIMING\t1\tsuffix_compile\tTOTAL\t-\t0\t"
+           << ToNanoseconds(total) << '\n';
+    std::map<std::string, size_t> occurrences;
+    for (const Record &record : records)
+      output << "CVPIPELINE_TIMING\t1\tsuffix_compile\tPASS\t"
+             << record.name << '\t' << ++occurrences[record.name] << '\t'
+             << record.nanoseconds << '\n';
+  }
+
+private:
+  struct ActivePass {
+    std::string name;
+    Clock::time_point started;
+  };
+
+  struct Record {
+    std::string name;
+    uint64_t nanoseconds = 0;
+  };
+
+  template <typename Duration> static uint64_t ToNanoseconds(Duration value) {
+    const auto nanoseconds =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(value).count();
+    return nanoseconds <= 0 ? 0 : static_cast<uint64_t>(nanoseconds);
+  }
+
+  mutable std::mutex mutex;
+  std::unordered_map<std::thread::id, std::vector<ActivePass>> active;
+  std::vector<Record> records;
+};
+
+class RuntimePassTimingInstrumentation final : public PassInstrumentation {
+public:
+  explicit RuntimePassTimingInstrumentation(RuntimePassTimingState &state)
+      : state(state) {}
+
+  void runBeforePass(Pass *pass, Operation *) override {
+    state.Begin(pass->getName());
+  }
+
+  void runAfterPass(Pass *, Operation *) override { state.End(); }
+
+  void runAfterPassFailed(Pass *, Operation *) override { state.End(); }
+
+private:
+  RuntimePassTimingState &state;
+};
+
 struct DumpIRBeforeLocalPlanMemoryPass
     : public PassWrapper<DumpIRBeforeLocalPlanMemoryPass,
                          OperationPass<ModuleOp>> {
@@ -407,6 +492,29 @@ static llvm::cl::opt<bool> enableMemoryDisplay(
     llvm::cl::desc("Enable PlanMemory memory_info*.json output"),
     llvm::cl::init(true));
 
+static llvm::cl::opt<bool> showRuntimeTiming(
+    "show-runtime-timing",
+    llvm::cl::desc(
+        "Emit total and per-pass runtime records to stderr"),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> runtimeTimingExcludeDumps(
+    "runtime-timing-exclude-dumps",
+    llvm::cl::desc(
+        "Exclude oracle/debug dump layers from runtime timing (default: true)"),
+    llvm::cl::init(true));
+
+static llvm::cl::opt<bool> runtimeTimingIncludeDumps(
+    "runtime-timing-include-dumps",
+    llvm::cl::desc(
+        "Include oracle/debug dump layers in runtime timing"),
+    llvm::cl::init(false));
+
+static bool excludeDumpLayersForRuntimeTiming() {
+  return showRuntimeTiming && runtimeTimingExcludeDumps &&
+         !runtimeTimingIncludeDumps;
+}
+
 static llvm::cl::opt<bool> localPlanMemoryOnly(
     "local-plan-memory-only",
     llvm::cl::desc("Run only local PlanMemory on a before-PlanMemory IR"),
@@ -603,6 +711,8 @@ static std::string oracleStageStem(StringRef phase, size_t ordinal,
 
 static void addOracleStageSnapshot(OpPassManager &pm, StringRef phase,
                                    StringRef name) {
+  if (excludeDumpLayersForRuntimeTiming())
+    return;
   size_t ordinal = 1;
   for (const OracleStageRecord &record : oracleStageRecords)
     if (record.phase == phase)
@@ -734,7 +844,7 @@ static void addAlignStoragePipeline(OpPassManager &pm) {
     pm.nest<func::FuncOp>().addPass(createMarkStrideAlignPass());
   pm.nest<func::FuncOp>().addPass(memref::createFoldAllocReshapePass());
   if (!disableEnableStrideAlign)
-    pm.nest<func::FuncOp>().addPass(createEnableStrideAlignPass());
+    pm.addPass(createEnableStrideAlignPass());
 }
 
 static void addSyncBlockLockPreparePipeline(OpPassManager &pm) {
@@ -825,11 +935,13 @@ static void addPostBufferizationToLocalPlanMemoryPipeline(OpPassManager &pm) {
   pm.nest<func::FuncOp>().addPass(
       createMarkMultiBufferPass(multiBufferOptions));
   addOracleStageSnapshot(pm, "suffix", "MarkMultiBuffer");
-  pm.addPass(createDumpIRBeforeLocalPlanMemoryPass());
+  if (!excludeDumpLayersForRuntimeTiming())
+    pm.addPass(createDumpIRBeforeLocalPlanMemoryPass());
   addOracleStageSnapshot(pm, "suffix", "PlanMemoryInputBridge");
 
   PlanMemoryOptions planMemoryOption;
-  planMemoryOption.enableMemoryDisplay = enableMemoryDisplay;
+  planMemoryOption.enableMemoryDisplay =
+      enableMemoryDisplay && !excludeDumpLayersForRuntimeTiming();
   planMemoryOption.restrictInplaceAsISA = restrictInplaceAsISA;
   planMemoryOption.ubOracleOnly = ubOracleOnly;
   pm.nest<func::FuncOp>().addPass(createPlanMemoryPass(planMemoryOption));
@@ -837,9 +949,11 @@ static void addPostBufferizationToLocalPlanMemoryPipeline(OpPassManager &pm) {
 
 static void buildSuffixPipeline(OpPassManager &pm) {
   if (localPlanMemoryOnly) {
-    pm.addPass(createDumpIRBeforeLocalPlanMemoryPass());
+    if (!excludeDumpLayersForRuntimeTiming())
+      pm.addPass(createDumpIRBeforeLocalPlanMemoryPass());
     PlanMemoryOptions planMemoryOption;
-    planMemoryOption.enableMemoryDisplay = enableMemoryDisplay;
+    planMemoryOption.enableMemoryDisplay =
+        enableMemoryDisplay && !excludeDumpLayersForRuntimeTiming();
     planMemoryOption.restrictInplaceAsISA = restrictInplaceAsISA;
     planMemoryOption.ubOracleOnly = ubOracleOnly;
     pm.nest<func::FuncOp>().addPass(createPlanMemoryPass(planMemoryOption));
@@ -853,10 +967,12 @@ static void buildSuffixPipeline(OpPassManager &pm) {
     pipelineOptions.enableLazyLoading = enableCVLazyLoading;
     pm.nest<func::FuncOp>().addPass(createCVPipeliningPass(pipelineOptions));
   }
-  if (!dumpIRAfterCVPipelining.empty())
+  if (!excludeDumpLayersForRuntimeTiming() &&
+      !dumpIRAfterCVPipelining.empty())
     pm.addPass(
         createDumpIRAfterCVPipeliningPass(dumpIRAfterCVPipelining.getValue()));
-  if (!dumpC1SemanticOracle.empty() || !dumpC1GenericIR.empty())
+  if (!excludeDumpLayersForRuntimeTiming() &&
+      (!dumpC1SemanticOracle.empty() || !dumpC1GenericIR.empty()))
     pm.addPass(std::make_unique<DumpC1SemanticOraclePass>(
         dumpC1SemanticOracle.getValue(), dumpC1GenericIR.getValue()));
   if (stopAfterCVPipelining)
@@ -972,6 +1088,31 @@ int main(int argc, char **argv) {
                     "with --local-plan-memory-only\n";
     return EXIT_FAILURE;
   }
+  if (runtimeTimingIncludeDumps && !showRuntimeTiming) {
+    llvm::errs() << "[ERROR] --runtime-timing-include-dumps requires "
+                    "--show-runtime-timing\n";
+    return EXIT_FAILURE;
+  }
+  if (runtimeTimingIncludeDumps &&
+      runtimeTimingExcludeDumps.getNumOccurrences() != 0 &&
+      runtimeTimingExcludeDumps) {
+    llvm::errs() << "[ERROR] --runtime-timing-include-dumps cannot be "
+                    "combined with --runtime-timing-exclude-dumps\n";
+    return EXIT_FAILURE;
+  }
+  if (excludeDumpLayersForRuntimeTiming() &&
+      (!dumpIRAfterCVPipelining.empty() || !dumpC1SemanticOracle.empty() ||
+       !dumpC1GenericIR.empty() || !dumpStageOracleDir.empty() ||
+       !dumpPipelineStageManifest.empty())) {
+    llvm::errs() << "[ERROR] --runtime-timing-exclude-dumps cannot be "
+                    "combined with explicit dump options\n";
+    return EXIT_FAILURE;
+  }
+  if (excludeDumpLayersForRuntimeTiming() &&
+      ::unsetenv("BISHENGIR_DUMP_PLAN_MEMORY_ATTEMPTS") != 0) {
+    llvm::errs() << "[ERROR] Failed to disable PlanMemory attempt dumps\n";
+    return EXIT_FAILURE;
+  }
   if (planMemorySeed >= 0) {
     std::string seed = std::to_string(planMemorySeed.getValue());
     if (::setenv("BISHENGIR_PLAN_MEMORY_FORCE_SEED", seed.c_str(), 1) != 0) {
@@ -1025,6 +1166,9 @@ int main(int argc, char **argv) {
                  << static_cast<int>(disableInferHIVMDataLayout.getValue())
                  << '\n';
   }
+  RuntimePassTimingState::Clock::time_point runtimeStarted;
+  if (showRuntimeTiming)
+    runtimeStarted = RuntimePassTimingState::Clock::now();
   auto file = openInputFile(inputFile, &errorMessage);
   if (!file) {
     llvm::errs() << "[ERROR] Failed to open input file: "
@@ -1058,6 +1202,7 @@ int main(int argc, char **argv) {
     }
   }
   PassManager pm(&context);
+  RuntimePassTimingState runtimePassTiming;
   buildSuffixPipeline(pm);
   if (failed(applyPassManagerCLOptions(pm))) {
     llvm::errs() << "[ERROR] Failed to apply pass manager options\n";
@@ -1065,8 +1210,15 @@ int main(int argc, char **argv) {
   }
   if (failed(writePipelineStageManifest(pm)))
     return EXIT_FAILURE;
+  if (showRuntimeTiming)
+    pm.addInstrumentation(
+        std::make_unique<RuntimePassTimingInstrumentation>(runtimePassTiming));
 
-  if (failed(pm.run(module))) {
+  const LogicalResult pipelineResult = pm.run(module);
+  if (showRuntimeTiming)
+    runtimePassTiming.Print(
+        llvm::errs(), RuntimePassTimingState::Clock::now() - runtimeStarted);
+  if (failed(pipelineResult)) {
     if (dumpPlanMemoryOracle)
       llvm::errs() << "PLANMEM_RUN_RESULT\tfailure\n";
     llvm::errs()

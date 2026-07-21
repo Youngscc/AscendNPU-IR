@@ -372,8 +372,18 @@ private:
       // BlockInfoBuilder gathers useValues and defValues independently, then
       // applies llvm::set_subtract. SmallPtrSet small-mode erase fills the
       // removed slot with the last value, which is observable before the
-      // deterministic PlanMemory shuffle.
-      if (block.uses.size() < block.definitions.size()) {
+      // deterministic PlanMemory shuffle.  Large blocks have already left
+      // SmallPtrSet's inline storage; preserve their semantic walk order.
+      if (block.uses.size() > 16) {
+        block.uses.erase(
+            std::remove_if(block.uses.begin(), block.uses.end(),
+                           [&](const std::string &use) {
+                             return std::find(block.definitions.begin(),
+                                              block.definitions.end(),
+                                              use) != block.definitions.end();
+                           }),
+            block.uses.end());
+      } else if (block.uses.size() < block.definitions.size()) {
         size_t index = 0;
         while (index < block.uses.size()) {
           if (std::find(block.definitions.begin(), block.definitions.end(),
@@ -493,7 +503,20 @@ private:
       }
       // llvm::set_subtract selects the smaller side. SmallPtrSet::remove_if
       // and erase both replace a removed small-mode slot with the last value.
-      if (uses.size() < definitions.size()) {
+      // Once SmallPtrSet<Value, 16> grows out of small mode, the surviving
+      // live-ins observed by PlanMemory retain the walk order relevant to its
+      // deterministic shuffle.  Preserve that order instead of applying the
+      // small-mode swap-with-last behavior to large blocks as well.
+      if (uses.size() > 16) {
+        uses.erase(
+            std::remove_if(uses.begin(), uses.end(),
+                           [&](const std::string &use) {
+                             return std::find(definitions.begin(),
+                                              definitions.end(),
+                                              use) != definitions.end();
+                           }),
+            uses.end());
+      } else if (uses.size() < definitions.size()) {
         size_t index = 0;
         while (index < uses.size()) {
           if (std::find(definitions.begin(), definitions.end(), uses[index]) !=

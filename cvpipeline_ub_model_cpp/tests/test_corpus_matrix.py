@@ -63,8 +63,12 @@ args = argparse.Namespace(
     model=Path("model"),
     compiler=Path("compiler"),
     seed=0,
+    retry_only=False,
     max_cases=None,
+    case_start=0,
     pipeline_manifest=None,
+    runtime_timing_output=None,
+    runtime_timing_exclude_dumps=False,
     require_all_exact=False,
     quiet=True,
     no_progress=True,
@@ -77,6 +81,23 @@ assert "--enable-triton-kernel-compile" in command
 assert "--enable-auto-multi-buffer" not in command
 assert "--enable-preload" not in command
 
+retry_args = argparse.Namespace(**{
+    **vars(args),
+    "retry_only": True,
+})
+retry_command = MODULE.build_command(retry_args, matrix[0])
+assert "--retry-only" in retry_command
+assert "--seeds" not in retry_command
+
+chunk_args = argparse.Namespace(**{
+    **vars(args),
+    "case_start": 32,
+    "max_cases": 32,
+})
+chunk_command = MODULE.build_command(chunk_args, matrix[0])
+assert chunk_command[chunk_command.index("--case-start") + 1] == "32"
+assert chunk_command[chunk_command.index("--max-cases") + 1] == "32"
+
 stride_command = MODULE.build_command(args, configs["stride_align_disabled"])
 assert "--disable-enable-stride-align" in stride_command
 
@@ -86,6 +107,15 @@ assert "--enable-ubuf-saving" in ubuf_command
 tile_command = MODULE.build_command(args, configs["tile_mix_asymmetric"])
 assert tile_command[tile_command.index("--tile-mix-cube-loop") + 1] == "1"
 assert tile_command[tile_command.index("--tile-mix-vector-loop") + 1] == "2"
+
+timing_args = argparse.Namespace(**{
+    **vars(args),
+    "runtime_timing_output": Path("timing.tsv"),
+    "runtime_timing_exclude_dumps": True,
+})
+timing_command = MODULE.build_command(
+    timing_args, matrix[0], Path("default.tsv"))
+assert "--runtime-timing-exclude-dumps" in timing_command
 
 with tempfile.TemporaryDirectory() as directory:
     bad_matrix = Path(directory) / "bad.tsv"

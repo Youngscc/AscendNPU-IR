@@ -131,24 +131,41 @@ inline void TracePlanMemoryResult(DebugTrace *trace,
 inline GenericModule RunPassesBeforeLoopInvariantCodeMotion(
     GenericModule module, const UBAffectingPassOptions &options = {},
     DebugTrace *trace = nullptr) {
-  ApplyOperationSemanticsToAll(module.operations);
-  module = RequireExactStage(RunTileCubeVectorLoop(
-      std::move(module), options.tileMixVectorLoop,
-      options.tileMixCubeLoop));
+  MeasureStage(trace, "ApplyOperationSemantics",
+               [&] { ApplyOperationSemanticsToAll(module.operations); });
+  module = MeasureStage(trace, "TileCubeVectorLoop", [&] {
+    return RequireExactStage(RunTileCubeVectorLoop(
+        std::move(module), options.tileMixVectorLoop,
+        options.tileMixCubeLoop));
+  });
   TraceGenericPass(trace, "TileCubeVectorLoop", module);
-  module = RunInferAndSetBufferSizePipeline(std::move(module));
+  module = MeasureStage(trace, "InferAndSetBufferSize", [&] {
+    return RunInferAndSetBufferSizePipeline(std::move(module));
+  });
   TraceGenericPass(trace, "InferAndSetBufferSize", module);
-  module = RunGlobalWorkspacePlan(std::move(module));
+  module = MeasureStage(trace, "GlobalWorkspacePlan", [&] {
+    return RunGlobalWorkspacePlan(std::move(module));
+  });
   TraceGenericPass(trace, "GlobalWorkspacePlan", module);
-  module = RunFoldTensorEmpty(std::move(module));
+  module = MeasureStage(trace, "FoldTensorEmpty", [&] {
+    return RunFoldTensorEmpty(std::move(module));
+  });
   TraceGenericPass(trace, "FoldTensorEmpty", module);
-  module = RunCanonicalizationHIVMPipeline(std::move(module));
+  module = MeasureStage(trace, "CanonicalizationHIVMPipeline", [&] {
+    return RunCanonicalizationHIVMPipeline(std::move(module));
+  });
   TraceGenericPass(trace, "CanonicalizationHIVMPipeline", module);
-  module = RunMarkRealCoreType(std::move(module));
+  module = MeasureStage(trace, "MarkRealCoreType", [&] {
+    return RunMarkRealCoreType(std::move(module));
+  });
   TraceGenericPass(trace, "MarkRealCoreType", module);
-  module = RunCrossCoreGSS(std::move(module));
+  module = MeasureStage(trace, "CrossCoreGSS", [&] {
+    return RunCrossCoreGSS(std::move(module));
+  });
   TraceGenericPass(trace, "CrossCoreGSS", module);
-  module = RunMarkRealCoreType(std::move(module), true);
+  module = MeasureStage(trace, "MarkRealCoreType", [&] {
+    return RunMarkRealCoreType(std::move(module), true);
+  });
   TraceGenericPass(trace, "MarkRealCoreType", module);
   // Temporarily disabled together with the corresponding suffix passes.
   // module = RequireExactStage(
@@ -156,17 +173,30 @@ inline GenericModule RunPassesBeforeLoopInvariantCodeMotion(
   // TraceGenericPass(trace,
   //                  "MarkTightlyCoupledBuffer;HoistTightlyCoupledAlloc",
   //                  module);
-  module = RunSplitMixKernel(std::move(module));
+  module = MeasureStage(trace, "SplitMixKernel", [&] {
+    return RunSplitMixKernel(std::move(module));
+  });
   TraceGenericPass(trace, "SplitMixKernel", module);
-  module = RequireExactStage(RunStrictInlineScope(std::move(module)));
+  module = MeasureStage(trace, "InlineScope", [&] {
+    return RequireExactStage(RunStrictInlineScope(std::move(module)));
+  });
   TraceGenericPass(trace, "InlineScope", module);
-  module = RunTileAndBindSubBlock(std::move(module));
+  module = MeasureStage(trace, "TileAndBindSubBlock", [&] {
+    return RunTileAndBindSubBlock(std::move(module));
+  });
   TraceGenericPass(trace, "TileAndBindSubBlock", module);
-  module = RunFoldTensorEmpty(std::move(module));
+  module = MeasureStage(trace, "FoldTensorEmpty", [&] {
+    return RunFoldTensorEmpty(std::move(module));
+  });
   TraceGenericPass(trace, "FoldTensorEmpty", module);
-  module =
-      RunCanonicalizationHIVMPipelineSourceAligned(std::move(module));
-  ApplyOperationSemanticsToAll(module.operations);
+  module = MeasureStage(trace, "CanonicalizationHIVMPipelineSourceAligned",
+                        [&] {
+                          GenericModule result =
+                              RunCanonicalizationHIVMPipelineSourceAligned(
+                                  std::move(module));
+                          ApplyOperationSemanticsToAll(result.operations);
+                          return result;
+                        });
   TraceGenericPass(trace, "CanonicalizationHIVMPipelineSourceAligned",
                    module);
   ValidateGenericModule(module);
@@ -179,30 +209,43 @@ inline GenericModule RunPassesBeforeOneShotBufferize(
   module =
       RunPassesBeforeLoopInvariantCodeMotion(std::move(module), options, trace);
   if (options.enableCodeMotion) {
-    RunLoopInvariantCodeMotion(module);
+    MeasureStage(trace, "LoopInvariantCodeMotion",
+                 [&] { RunLoopInvariantCodeMotion(module); });
     TraceGenericPass(trace, "LoopInvariantCodeMotion", module);
-    module = RequireExactStage(
-        RunLoopInvariantSubsetHoisting(std::move(module), true));
+    module = MeasureStage(trace, "LoopInvariantSubsetHoisting", [&] {
+      return RequireExactStage(
+          RunLoopInvariantSubsetHoisting(std::move(module), true));
+    });
     TraceGenericPass(trace, "LoopInvariantSubsetHoisting", module);
   } else if (trace) {
     trace->Pass("LoopInvariantCodeMotion", {{"executed", 0}});
     trace->Pass("LoopInvariantSubsetHoisting", {{"executed", 0}});
   }
-  module = RunCloneTensorEmpty(std::move(module));
+  module = MeasureStage(trace, "CloneTensorEmpty", [&] {
+    return RunCloneTensorEmpty(std::move(module));
+  });
   TraceGenericPass(trace, "CloneTensorEmpty", module);
-  module = RunHIVMInlineOTFLoadStore(std::move(module));
+  module = MeasureStage(trace, "HIVMInlineOTFLoadStore", [&] {
+    return RunHIVMInlineOTFLoadStore(std::move(module));
+  });
   TraceGenericPass(trace, "HIVMInlineOTFLoadStore", module);
   if (options.enableTritonKernelCompile) {
-    module = RunOptimizeDpsOpWithYieldedInsertSlice(std::move(module));
+    module = MeasureStage(trace, "OptimizeDpsOpWithYieldedInsertSlice", [&] {
+      return RunOptimizeDpsOpWithYieldedInsertSlice(std::move(module));
+    });
     TraceGenericPass(trace, "OptimizeDpsOpWithYieldedInsertSlice", module);
-    module = RunCloneTensorEmpty(std::move(module));
+    module = MeasureStage(trace, "CloneTensorEmptyBeforeBufferize", [&] {
+      return RunCloneTensorEmpty(std::move(module));
+    });
     TraceGenericPass(trace, "CloneTensorEmptyBeforeBufferize", module);
   } else if (trace) {
     trace->Pass("OptimizeDpsOpWithYieldedInsertSlice", {{"executed", 0}});
     trace->Pass("CloneTensorEmptyBeforeBufferize", {{"executed", 0}});
   }
   if (options.enableUbufSaving) {
-    module = RunSinkOpToConsumerInLoop(std::move(module));
+    module = MeasureStage(trace, "SinkOpToConsumerInLoop", [&] {
+      return RunSinkOpToConsumerInLoop(std::move(module));
+    });
     TraceGenericPass(trace, "SinkOpToConsumerInLoop", module);
   } else if (trace) {
     trace->Pass("SinkOpToConsumerInLoop", {{"executed", 0}});
@@ -215,9 +258,12 @@ inline PlanMemoryInput BuildPlanMemoryInputFromBeforeOneShotBufferize(
     const GenericModule &module,
     const UBAffectingPassOptions &options = {}, DebugTrace *trace = nullptr,
     const std::string &targetFunction = {}) {
-  const OneShotBufferizationResult bufferization = RunOneShotBufferize(module);
   const BufferizedSemanticIR oneShotBufferizeOutput =
-      BuildBufferizedSemanticIR(module, bufferization);
+      MeasureStage(trace, "OneShotBufferize", [&] {
+        const OneShotBufferizationResult bufferization =
+            RunOneShotBufferize(module);
+        return BuildBufferizedSemanticIR(module, bufferization);
+      });
   if (trace) {
     trace->Pass("OneShotBufferize",
                 {{"allocations", oneShotBufferizeOutput.allocations.size()},
@@ -228,7 +274,9 @@ inline PlanMemoryInput BuildPlanMemoryInputFromBeforeOneShotBufferize(
     });
   }
   const PostBufferizationRewriteState hivmDecomposeOpOutput =
-      BuildPostBufferizationRewriteState(oneShotBufferizeOutput);
+      MeasureStage(trace, "PostBufferizationRewrites", [&] {
+        return BuildPostBufferizationRewriteState(oneShotBufferizeOutput);
+      });
   if (trace) {
     trace->Pass(
         "HIVMOptSinglePoint",
@@ -248,9 +296,11 @@ inline PlanMemoryInput BuildPlanMemoryInputFromBeforeOneShotBufferize(
     });
   }
   const AfterAllocExtraBufferState allocExtraBufferOutput =
-      BuildAfterAllocExtraBufferState(
-          hivmDecomposeOpOutput, !options.disableAlignAllocSize,
-          !options.disableEnableStrideAlign);
+      MeasureStage(trace, "AlignStorageAndAllocExtraBuffer", [&] {
+        return BuildAfterAllocExtraBufferState(
+            hivmDecomposeOpOutput, !options.disableAlignAllocSize,
+            !options.disableEnableStrideAlign);
+      });
   if (trace) {
     const uint64_t extraBuffers = static_cast<uint64_t>(std::count_if(
         allocExtraBufferOutput.buffers.begin(),
@@ -272,8 +322,10 @@ inline PlanMemoryInput BuildPlanMemoryInputFromBeforeOneShotBufferize(
     });
   }
   const AfterInlineLoadCopyState inlineLoadCopyOutput =
-      BuildAfterInlineLoadCopyState(allocExtraBufferOutput,
-                                    options.enableTritonKernelCompile);
+      MeasureStage(trace, "InlineLoadCopy", [&] {
+        return BuildAfterInlineLoadCopyState(
+            allocExtraBufferOutput, options.enableTritonKernelCompile);
+      });
   if (trace) {
     trace->Pass(
         "InlineLoadCopy",
@@ -295,7 +347,10 @@ inline PlanMemoryInput BuildPlanMemoryInputFromBeforeOneShotBufferize(
   multiBufferOptions.inferHIVMDataLayout =
       !options.disableInferHIVMDataLayout;
   const AfterMarkMultiBufferState markMultiBufferOutput =
-      BuildAfterMarkMultiBufferState(inlineLoadCopyOutput, multiBufferOptions);
+      MeasureStage(trace, "MarkMultiBuffer", [&] {
+        return BuildAfterMarkMultiBufferState(inlineLoadCopyOutput,
+                                              multiBufferOptions);
+      });
   if (trace) {
     trace->Pass(
         "MarkMultiBuffer",
@@ -309,7 +364,9 @@ inline PlanMemoryInput BuildPlanMemoryInputFromBeforeOneShotBufferize(
     });
   }
   const PlanMemoryInputSemanticIR semantic =
-      BuildPlanMemoryInputSemanticIR(markMultiBufferOutput);
+      MeasureStage(trace, "PlanMemoryInputSemanticIR", [&] {
+        return BuildPlanMemoryInputSemanticIR(markMultiBufferOutput);
+      });
   if (trace) {
     trace->Pass("PlanMemoryInput",
                 {{"buffers", semantic.buffers.size()},
@@ -320,9 +377,11 @@ inline PlanMemoryInput BuildPlanMemoryInputFromBeforeOneShotBufferize(
     });
   }
 
-  PlanMemoryInput input = targetFunction.empty()
-                              ? BuildPlanMemoryInput(semantic)
-                              : BuildPlanMemoryInput(semantic, targetFunction);
+  PlanMemoryInput input = MeasureStage(trace, "BuildPlanMemoryInput", [&] {
+    return targetFunction.empty() ? BuildPlanMemoryInput(semantic)
+                                  : BuildPlanMemoryInput(semantic,
+                                                         targetFunction);
+  });
   if (trace) {
     trace->Pass("PlanMemory",
                 {{"allocations", input.allocations.size()},
@@ -397,11 +456,12 @@ inline ModulePlanResult RunUBModuleFromAfterCVPipelining(
   for (const std::string &function : functions) {
     const PlanMemoryInput input = BuildPlanMemoryInputFromBeforeOneShotBufferize(
         projected, options, trace, function);
-    PlanMemoryModelResult plan =
-        planMemorySeed
-            ? PlanLocalMemoryForSeed(input, *planMemorySeed,
-                                     restrictInplaceAsISA)
-            : PlanLocalMemory(input, restrictInplaceAsISA);
+    PlanMemoryModelResult plan = MeasureStage(trace, "PlanMemory", [&] {
+      return planMemorySeed
+                 ? PlanLocalMemoryForSeed(input, *planMemorySeed,
+                                          restrictInplaceAsISA)
+                 : PlanLocalMemory(input, restrictInplaceAsISA);
+    });
     TracePlanMemoryResult(trace, plan);
     result.success = result.success && plan.success;
     result.overflow = result.overflow || plan.overflow;
@@ -434,8 +494,11 @@ struct CVPipeliningUBPipelineOptions {
 
 inline ModulePlanResult RunCVPipeliningUBModulePipeline(
     GenericModule module, const CVPipeliningUBPipelineOptions &options = {}) {
-  ApplyOperationSemanticsToAll(module.operations);
-  module = RunCVPipeliningPass(std::move(module), options.cvPipelining);
+  MeasureStage(options.debugTrace, "ApplyOperationSemantics",
+               [&] { ApplyOperationSemanticsToAll(module.operations); });
+  module = MeasureStage(options.debugTrace, "CVPipelining", [&] {
+    return RunCVPipeliningPass(std::move(module), options.cvPipelining);
+  });
   TraceCVPipelining(options.debugTrace, module);
   return RunUBModuleFromAfterCVPipelining(
       module, options.ubAffectingPasses, options.planMemorySeed,
@@ -445,22 +508,29 @@ inline ModulePlanResult RunCVPipeliningUBModulePipeline(
 inline ModulePlanResult RunCVPipeliningUBModulePipeline(
     const fs::path &beforeCVPipeliningIR,
     const CVPipeliningUBPipelineOptions &options = {}) {
-  return RunCVPipeliningUBModulePipeline(
-      ParseGenericIR(beforeCVPipeliningIR, false), options);
+  GenericModule module = MeasureStage(options.debugTrace, "ParseGenericIR", [&] {
+    return ParseGenericIR(beforeCVPipeliningIR, false);
+  });
+  return RunCVPipeliningUBModulePipeline(std::move(module), options);
 }
 
 inline PlanMemoryModelResult RunCVPipeliningUBPipeline(
     GenericModule module, const CVPipeliningUBPipelineOptions &options = {}) {
-  ApplyOperationSemanticsToAll(module.operations);
-  module = RunCVPipeliningPass(std::move(module), options.cvPipelining);
+  MeasureStage(options.debugTrace, "ApplyOperationSemantics",
+               [&] { ApplyOperationSemanticsToAll(module.operations); });
+  module = MeasureStage(options.debugTrace, "CVPipelining", [&] {
+    return RunCVPipeliningPass(std::move(module), options.cvPipelining);
+  });
   TraceCVPipelining(options.debugTrace, module);
   const PlanMemoryInput input = BuildPlanMemoryInputFromAfterCVPipelining(
       std::move(module), options.ubAffectingPasses, options.debugTrace);
   PlanMemoryModelResult result =
-      options.planMemorySeed
-          ? PlanLocalMemoryForSeed(input, *options.planMemorySeed,
-                                   options.restrictInplaceAsISA)
-          : PlanLocalMemory(input, options.restrictInplaceAsISA);
+      MeasureStage(options.debugTrace, "PlanMemory", [&] {
+        return options.planMemorySeed
+                   ? PlanLocalMemoryForSeed(input, *options.planMemorySeed,
+                                            options.restrictInplaceAsISA)
+                   : PlanLocalMemory(input, options.restrictInplaceAsISA);
+      });
   TracePlanMemoryResult(options.debugTrace, result);
   return result;
 }
@@ -468,8 +538,10 @@ inline PlanMemoryModelResult RunCVPipeliningUBPipeline(
 inline PlanMemoryModelResult RunCVPipeliningUBPipeline(
     const fs::path &beforeCVPipeliningIR,
     const CVPipeliningUBPipelineOptions &options = {}) {
-  return RunCVPipeliningUBPipeline(
-      ParseGenericIR(beforeCVPipeliningIR, false), options);
+  GenericModule module = MeasureStage(options.debugTrace, "ParseGenericIR", [&] {
+    return ParseGenericIR(beforeCVPipeliningIR, false);
+  });
+  return RunCVPipeliningUBPipeline(std::move(module), options);
 }
 
 } // namespace cvub

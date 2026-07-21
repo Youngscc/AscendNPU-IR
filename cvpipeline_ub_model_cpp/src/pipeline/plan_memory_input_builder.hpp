@@ -745,8 +745,10 @@ private:
       if (view && view->name == "memref.view" && !view->operands.empty()) {
         const GenericOperation *workspace =
             DefiningOperation(logical, view->operands.front());
-        if (workspace && workspace->name == "memref_ext.alloc_workspace")
+        if (workspace && workspace->name == "memref_ext.alloc_workspace") {
           sunkFillWorkspaceViews[workspace->id] = view->id;
+          sunkFillInlineLoadViews[copy.id] = view->id;
+        }
       }
     }
   }
@@ -796,6 +798,35 @@ private:
                                "map_for_to_forall") ||
             HasDictionaryEntry(operation.attributes,
                                "map_for_to_forall"));
+  }
+
+  std::optional<int>
+  findDominatingSubBlockIndex(const GenericOperation &operation) const {
+    if (operation.blockId < 0 ||
+        static_cast<size_t>(operation.blockId) >= logical.blocks.size())
+      return std::nullopt;
+
+    std::optional<int> index;
+    const GenericBlock &block =
+        logical.blocks.at(static_cast<size_t>(operation.blockId));
+    for (int operationId : block.operations) {
+      if (operationId == operation.id)
+        break;
+      const GenericOperation &candidate =
+          logical.operations.at(static_cast<size_t>(operationId));
+      if (candidate.name != "arith.index_cast" ||
+          candidate.operands.size() != 1 || candidate.results.size() != 1 ||
+          candidate.resultTypes.size() != 1 ||
+          candidate.resultTypes.front() != "index")
+        continue;
+      const GenericOperation *definition =
+          DefiningOperation(logical, candidate.operands.front());
+      if (!definition || definition->blockId != operation.blockId ||
+          definition->name != "hivm.hir.get_sub_block_idx")
+        continue;
+      index = candidate.results.front();
+    }
+    return index;
   }
 
   std::optional<int64_t> evaluateLinearAffineExpression(
@@ -2073,6 +2104,26 @@ private:
         reads.push_back(name);
       else if (effect == "w" || effect == "rw")
         writes.push_back(name);
+    }
+    // InlineLoadCopy can sink a GM-backed load into tensor.insert_slice.  The
+    // GM workspace view is not a local PlanMemory buffer, so it is absent from
+    // event.accesses.  EnableStrideAlign is module-scoped in the real suffix
+    // pipeline and preserves that view as the generated load's input.
+    if (event.operationName == "hivm.hir.load" &&
+        module.afterMarkMultiBuffer.afterInlineLoadCopy
+            .afterAllocExtraBuffer.enableStrideAlign) {
+      auto viewId = sunkFillInlineLoadViews.find(source.id);
+      if (viewId != sunkFillInlineLoadViews.end()) {
+        const GenericOperation &view =
+            logical.operations.at(static_cast<size_t>(viewId->second));
+        if (view.results.size() == 1) {
+          const std::string viewName =
+              PlanMemoryValueName(view.results.front());
+          if (std::find(reads.begin(), reads.end(), viewName) == reads.end())
+            reads.insert(reads.begin(), viewName);
+          namedValueTypes[viewName] = bufferizedResultType(view, 0);
+        }
+      }
     }
     const std::vector<std::string> aliases =
         ((source.name == "hivm.hir.atomic_xchg" ||
@@ -4613,22 +4664,27 @@ private:
     }
 
     if (isMappedFor(source)) {
-      OperationRecord blockIndexOp =
-          baseOperation(source, "hivm.hir.get_sub_block_idx");
-      const std::string raw =
-          "%sub_block_idx_" + std::to_string(nextScalarValue++);
-      blockIndexOp.text =
-          raw + " = hivm.hir.get_sub_block_idx : () -> (i64)";
-      result.operations.push_back(std::move(blockIndexOp));
-      namedValueTypes[raw] = "i64";
+      std::string index;
+      if (const std::optional<int> existing =
+              findDominatingSubBlockIndex(source)) {
+        index = scalarValueName(*existing);
+      } else {
+        OperationRecord blockIndexOp =
+            baseOperation(source, "hivm.hir.get_sub_block_idx");
+        const std::string raw =
+            "%sub_block_idx_" + std::to_string(nextScalarValue++);
+        blockIndexOp.text =
+            raw + " = hivm.hir.get_sub_block_idx : () -> (i64)";
+        result.operations.push_back(std::move(blockIndexOp));
+        namedValueTypes[raw] = "i64";
 
-      OperationRecord cast = baseOperation(source, "arith.index_cast");
-      const std::string index =
-          "%sub_block_index_" + std::to_string(nextScalarValue++);
-      cast.text = index + " = arith.index_cast " + raw +
-                  " : (i64) -> (index)";
-      result.operations.push_back(std::move(cast));
-      namedValueTypes[index] = "index";
+        OperationRecord cast = baseOperation(source, "arith.index_cast");
+        index = "%sub_block_index_" + std::to_string(nextScalarValue++);
+        cast.text = index + " = arith.index_cast " + raw +
+                    " : (i64) -> (index)";
+        result.operations.push_back(std::move(cast));
+        namedValueTypes[index] = "index";
+      }
 
       for (int regionId : source.regions) {
         const GenericRegion &region =
@@ -4755,10 +4811,16 @@ private:
       }
       for (size_t index = firstEvent; index < events->second.size(); ++index) {
         std::map<std::string, std::string> eventAliases;
-        if (sunkFillInlineCopies.count(source.id) != 0 &&
-            events->second[index]->operationName == "hivm.hir.load") {
+        const bool sunkFillLoad =
+            sunkFillInlineCopies.count(source.id) != 0 &&
+            events->second[index]->operationName == "hivm.hir.load";
+        if (sunkFillLoad) {
           emitInsertSliceDestinationSubview(source, *events->second[index],
-                                            eventAliases);
+                                            eventAliases,
+                                            module.afterMarkMultiBuffer
+                                                .afterInlineLoadCopy
+                                                .afterAllocExtraBuffer
+                                                .enableStrideAlign);
         }
         std::optional<std::pair<std::string, std::string>> savedVConcatAlias;
         std::optional<std::pair<std::string, std::string>>
@@ -4862,6 +4924,15 @@ private:
         std::map<std::string, std::string> aliases = emitFlattenAliases(
             source, *events->second[index], nullptr,
             eventAliases.empty() ? nullptr : &eventAliases);
+        // FlattenOps collapses the fill buffer for the preceding copy, but the
+        // generated load still targets the slice-shaped view materialized
+        // above.  Preserve that destination alias after flattening.
+        if (sunkFillLoad)
+          for (const auto &[identity, effect] :
+               events->second[index]->accesses)
+            if ((effect == "w" || effect == "rw") &&
+                eventAliases.count(identity) != 0)
+              aliases[identity] = eventAliases.at(identity);
         emitEventExtraAllocations(source, *events->second[index]);
         emitAtomicTemporaryView(source, *events->second[index], aliases);
         if (source.name == "hivm.hir.atomic_rmw" ||
@@ -4998,8 +5069,10 @@ private:
   void emitInsertSliceDestinationSubview(
       const GenericOperation &source,
       const PlanMemoryInputAccessRecord &event,
-      std::map<std::string, std::string> &aliases) {
-    if (source.name != "tensor.insert_slice" || event.outOfPlaceCopy)
+      std::map<std::string, std::string> &aliases,
+      bool allowUnmodeledSource = false) {
+    if (source.name != "tensor.insert_slice" ||
+        (event.outOfPlaceCopy && !allowUnmodeledSource))
       return;
     std::string sourceIdentity;
     std::string destinationIdentity;
@@ -5010,8 +5083,9 @@ private:
           destinationIdentity.empty())
         destinationIdentity = identity;
     }
-    if (destinationIdentity.empty() || sourceIdentity.empty() ||
-        aliases.count(sourceIdentity) == 0)
+    if (destinationIdentity.empty() ||
+        (!allowUnmodeledSource &&
+         (sourceIdentity.empty() || aliases.count(sourceIdentity) == 0)))
       return;
     std::string sourceMemRefType = source.operandTypes.empty()
                                        ? std::string()
@@ -5172,10 +5246,13 @@ private:
         continue;
       OperationRecord view = std::move(result.operations.back());
       result.operations.pop_back();
-      // The real view feeds the bufferized load.  The model represents that
-      // GM edge semantically, so keep this timeline record out of dead-view
-      // normalization even though it owns no modeled buffer.
-      view.opName = "memref_ext.workspace_view";
+      // EnableStrideAlign is module-scoped in the real suffix pipeline.  It
+      // preserves this view as the source of the generated load.  Without the
+      // pass, retain the semantic-only marker used by the no-stride path.
+      view.opName = module.afterMarkMultiBuffer.afterInlineLoadCopy
+                            .afterAllocExtraBuffer.enableStrideAlign
+                        ? "memref.view"
+                        : "memref_ext.workspace_view";
       result.operations.insert(
           result.operations.begin() + static_cast<std::ptrdiff_t>(position),
           std::move(view));
@@ -5268,6 +5345,7 @@ private:
   std::map<int, std::string> canonicalViewAliases;
   std::map<int, std::string> erasedValueAliases;
   std::map<int, int> sunkFillWorkspaceViews;
+  std::map<int, int> sunkFillInlineLoadViews;
   std::set<int> sunkFillInlineCopies;
   std::set<int> erasedMappedLoops;
   std::set<int> erasedRegionIds;

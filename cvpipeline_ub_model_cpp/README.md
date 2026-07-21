@@ -187,6 +187,38 @@ stdout 的业务结果，可直接与非 debug 输出逐字节比较。
 
 这些入口用于验证后缀 Pass 或 PlanMemory，不属于产品默认输入契约。
 
+### 运行时统计
+
+轻量模型和 suffix 编译器都提供独立的 `--show-runtime-timing` 开关。计时在各自
+进程内部完成，不依赖 Python 的 subprocess 墙钟时间；关闭时不执行阶段计时，也不
+改变原有输出。业务结果仍写 stdout，计时记录写 stderr：
+
+```bash
+cvpipeline_ub_model_cpp/output/bin/cvpipeline_ub_model \
+  --before-cvpipelining-ir=INPUT.mlir \
+  --random-seed=5 --format=json --show-runtime-timing
+
+build/bin/bishengir-cvpipeline-suffix-compile INPUT.mlir \
+  --plan-memory-seed=5 --show-runtime-timing -o /tmp/suffix.mlir
+```
+
+suffix 开启计时后默认使用 `--runtime-timing-exclude-dumps`：移除阶段快照/调试 IR
+Pass，并关闭 PlanMemory TSV 和 `memory_info` 输出。需要测量包含 dump 的旧行为时显式
+追加 `--runtime-timing-include-dumps`。最终 `-o` 输出发生在 `TOTAL` 计时结束之后，
+本来就不计入。
+
+记录格式固定为：
+
+```text
+CVPIPELINE_TIMING  1  model           TOTAL  -           0  <nanoseconds>
+CVPIPELINE_TIMING  1  model           STAGE  CVPipelining 1  <nanoseconds>
+CVPIPELINE_TIMING  1  suffix_compile  PASS   PlanMemory   1  <nanoseconds>
+```
+
+字段实际以 tab 分隔。同名阶段或 Pass 的 `occurrence` 从 1 递增。模型报告逻辑建模
+阶段，suffix 编译器通过 MLIR PassInstrumentation 报告每一次真实 Pass；两者的
+`TOTAL` 都包含输入解析和完整主链路，但不包含最终结果序列化/文件输出。
+
 ## 4. 单独构建和运行 suffix 编译器
 
 suffix 编译器属于原编译器工程，不是轻量模型的核心实现。使用原编译器的
@@ -247,6 +279,38 @@ python3 cvpipeline_ub_model_cpp/scripts/run_corpus_matrix.py \
 corpus runner 会为 suffix compiler 启用 `--ub-oracle-only`：前置流水线保持完整，最终
 本地 PlanMemory 跳过 AIC，只收集 AIV/UB 结果。因此 AIC 的 CBUF overflow 不再阻止
 UB 差分；若其他非 UB 失败仍使 oracle 不完整，结果才记为 `oracle_unavailable`。
+
+测试时只需要让 runner 收集两个可执行文件自己输出的计时。它会在全部用例结束后
+打印双方累计总耗时，并把每个输入的 TOTAL、STAGE 和 PASS 原始记录写入 TSV：
+
+```bash
+python3 cvpipeline_ub_model_cpp/scripts/run_corpus_oracle.py \
+  --corpus-root cvpipeline_ub_model_cpp/data/before_cvpipelining \
+  --model cvpipeline_ub_model_cpp/output/bin/cvpipeline_ub_model \
+  --compiler build/bin/bishengir-cvpipeline-suffix-compile \
+  --seeds 5 --runtime-timing-output /tmp/cvub-runtime.tsv --quiet
+```
+
+suffix 计时默认不包含 oracle/debug dump。runner 对 suffix 执行两次：第一次保留
+dump 并用于差分校验，第二次关闭 dump、只采集计时；TSV 中只写第二次的 suffix
+计时，因此不会为了取得 oracle 数据而污染编译耗时。若需要把 dump 开销也算进去，
+显式追加 `--runtime-timing-include-dumps`，此时只执行一次 suffix。
+
+需要只观察少数 kernel 时，可重复传入 `--input PATH`；相对路径按
+`--corpus-root` 解析，TSV 中仍保留每个输入各自的 TOTAL 和明细。runner 会为每个
+输入打印横向对照表：TOTAL 和双方同名步骤分别列出 model/suffix occurrence 数、
+累计毫秒、差值和倍数。同名步骤的多次执行先求和；无法按名字安全对应的聚合阶段或
+真实 Pass 不会强行配对，仍保留在 TSV 中。
+
+需要同时测量 PlanMemory 的默认 seed retry 时追加 `--check-retry`。runner 会先执行
+`--seeds` 指定的固定 seed，再执行一次 model 不传 `--random-seed`、suffix 使用
+`--plan-memory-seed=-1` 的 retry 路径；计时表中这行的 seed 显示为 `retry`。
+
+只需要 retry、不运行任何固定 seed 时使用 `--retry-only`。该模式忽略 `--seeds`
+默认值，每个 kernel 只执行一组 retry，并且不能和 `--check-retry` 同时使用。
+
+矩阵 runner 采用相同默认值，也接受 `--runtime-timing-include-dumps`。它给合并 TSV
+增加 `configuration` 列，并且只在所有所选配置结束后打印一次累计耗时。
 
 ## 目录说明
 

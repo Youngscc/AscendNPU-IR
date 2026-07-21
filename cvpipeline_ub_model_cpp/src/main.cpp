@@ -3,6 +3,7 @@
 
 #include "pipeline/cvpipelining_ub_pipeline.hpp"
 
+#include <chrono>
 #include <exception>
 #include <filesystem>
 #include <iostream>
@@ -41,6 +42,7 @@ struct Options {
   cvub::MultiBufferStrategy mixMultiBufferStrategy =
       cvub::MultiBufferStrategy::OnlyCube;
   std::string format = "text";
+  bool showRuntimeTiming = false;
   bool debug = false;
   DebugEntry debugEntry = DebugEntry::BeforeCVPipelining;
   std::filesystem::path debugDirectory;
@@ -97,6 +99,8 @@ void PrintHelp() {
       << "  --restrict-inplace-as-isa\n"
       << "  --random-seed=<0..19>\n"
       << "  --format=<text|json>\n"
+      << "  --show-runtime-timing[=<bool>]\n"
+      << "      Emit total and per-stage runtime records to stderr.\n"
       << "\nDebug options:\n"
       << "  --debug\n"
       << "  --debug-dir=<path>\n"
@@ -185,6 +189,10 @@ Options ParseOptions(int argc, char **argv) {
                  readValue("--limit-auto-multi-buffer-buffer"))
       options.mixMultiBufferStrategy =
           cvub::ParseMultiBufferStrategy(*mixStrategy);
+    else if (argument == "--show-runtime-timing")
+      options.showRuntimeTiming = true;
+    else if (auto showTiming = readValue("--show-runtime-timing"))
+      options.showRuntimeTiming = ParseBool(*showTiming);
     else if (argument == "--debug")
       options.debug = true;
     else if (auto debugDirectory = readValue("--debug-dir"))
@@ -285,12 +293,16 @@ cvub::ModulePlanResult RunModel(const Options &options,
 
   if (options.debugEntry == DebugEntry::AfterCVPipelining) {
     return cvub::RunUBModuleFromAfterCVPipelining(
-        cvub::ParseGenericIR(options.afterCVPipeliningIR, false),
+        cvub::MeasureStage(trace, "ParseGenericIR", [&] {
+          return cvub::ParseGenericIR(options.afterCVPipeliningIR, false);
+        }),
         UBAffectingPassOptions(options), options.randomSeed,
         options.restrictInplaceAsISA, trace);
   }
-  const cvub::PlanMemoryInput input =
-      cvub::ParsePlanMemoryInput(options.beforePlanMemoryIR, "AIV");
+  const cvub::PlanMemoryInput input = cvub::MeasureStage(
+      trace, "ParsePlanMemoryInput", [&] {
+        return cvub::ParsePlanMemoryInput(options.beforePlanMemoryIR, "AIV");
+      });
   if (trace) {
     trace->Pass("PlanMemory",
                 {{"allocations", input.allocations.size()},
@@ -300,7 +312,8 @@ cvub::ModulePlanResult RunModel(const Options &options,
       return cvub::SerializeCanonicalPlanMemoryInput(input);
     });
   }
-  cvub::PlanMemoryModelResult result = PlanMemory(input, options);
+  cvub::PlanMemoryModelResult result = cvub::MeasureStage(
+      trace, "PlanMemory", [&] { return PlanMemory(input, options); });
   cvub::TracePlanMemoryResult(trace, result);
   return cvub::ModulePlanFromSingle("debug_aiv", std::move(result));
 }
@@ -515,16 +528,29 @@ void PrintBlocker(const Options &options, const std::string &message) {
 
 int main(int argc, char **argv) {
   Options options;
+  std::optional<cvub::DebugTrace> debugTrace;
+  std::optional<std::chrono::steady_clock::time_point> runtimeStarted;
+  bool runtimeTimingPrinted = false;
   try {
     options = ParseOptions(argc, argv);
     ValidateOptions(options);
-    std::optional<cvub::DebugTrace> debugTrace;
-    if (options.debug)
-      debugTrace.emplace(std::cerr, options.debugDirectory);
+    if (options.debug || options.showRuntimeTiming)
+      debugTrace.emplace(std::cerr, options.debugDirectory, options.debug,
+                         options.showRuntimeTiming);
+    if (options.showRuntimeTiming)
+      runtimeStarted = std::chrono::steady_clock::now();
     const cvub::ModulePlanResult result =
         RunModel(options, debugTrace ? &*debugTrace : nullptr);
+    if (debugTrace && runtimeStarted) {
+      debugTrace->PrintRuntimeTiming(
+          std::chrono::steady_clock::now() - *runtimeStarted);
+      runtimeTimingPrinted = true;
+    }
     return PrintResult(options, result);
   } catch (const std::exception &error) {
+    if (debugTrace && runtimeStarted && !runtimeTimingPrinted)
+      debugTrace->PrintRuntimeTiming(
+          std::chrono::steady_clock::now() - *runtimeStarted);
     PrintBlocker(options, error.what());
     std::cerr << "[ERROR] " << error.what() << '\n';
     return 1;

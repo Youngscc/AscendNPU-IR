@@ -25,6 +25,20 @@ inline int EnclosingForOperation(const GenericModule &module,
   return -1;
 }
 
+inline bool IsInsideOutlinedScope(const GenericModule &module,
+                                  const GenericOperation &operation) {
+  int parent = operation.parentId;
+  while (parent >= 0) {
+    const GenericOperation &ancestor =
+        module.operations.at(static_cast<size_t>(parent));
+    if (ancestor.name == "scope.scope" &&
+        HasSplitMixDictionaryEntry(ancestor.attributes, "outline"))
+      return true;
+    parent = ancestor.parentId;
+  }
+  return false;
+}
+
 inline size_t OperationPosition(const GenericModule &module,
                                 const GenericOperation &operation) {
   const std::vector<int> &operations =
@@ -86,37 +100,23 @@ inline GenericModule RunSinkOpToConsumerInLoop(GenericModule module) {
     if (uses.empty())
       continue;
 
-    // MLIR's value user range is backed by the use list, so the same
-    // operation appears more than once when it consumes the value through
-    // multiple operands.  Keep that distinction: the real pass takes its
-    // multi-use path and creates one clone per OpOperand in that case.
-    if (uses.size() == 1) {
-      const GenericOperation user = module.operations.at(
-          static_cast<size_t>(uses.front().operation));
-      if (user.parentId < 0)
-        continue;
-      const std::string &parentName = module.operations.at(
-          static_cast<size_t>(user.parentId)).name;
-      if ((parentName != "scf.for" && parentName != "scf.if") ||
-          source.blockId == user.blockId)
-        continue;
-      const int clone = CloneSinkOpBefore(module, source.id, user.id);
-      ReplaceAllUses(
-          module, sourceValue,
-          module.operations.at(static_cast<size_t>(clone)).results.front());
-      EraseOperationTree(module, source.id);
-      continue;
-    }
-
-    const int loop = EnclosingForOperation(
-        module, module.operations.at(static_cast<size_t>(uses.front().operation)));
-    if (loop < 0 ||
-        std::any_of(uses.begin(), uses.end(), [&](const SinkOpUse &use) {
-          return EnclosingForOperation(
-                     module, module.operations.at(
-                                 static_cast<size_t>(use.operation))) != loop;
+    // SinkOpToConsumerInLoop checks every OpOperand independently.  All users
+    // must be in a different block from the producer and nested in some
+    // scf.for, but they do not have to belong to the same loop.  In
+    // particular, accepting a user merely because its immediate parent is an
+    // scf.if over-sinks values that the real pass leaves outside the loop.
+    if (std::any_of(uses.begin(), uses.end(), [&](const SinkOpUse &use) {
+          const GenericOperation &user = module.operations.at(
+              static_cast<size_t>(use.operation));
+          return source.blockId == user.blockId ||
+                 EnclosingForOperation(module, user) < 0 ||
+                 IsInsideOutlinedScope(module, user);
         }))
       continue;
+
+    // Value::getUses() contains one entry per OpOperand.  Preserve that
+    // multiplicity and clone once per use, including repeated operands on the
+    // same operation.
     for (const SinkOpUse &use : uses) {
       const int clone = CloneSinkOpBefore(module, source.id, use.operation);
       module.operations.at(static_cast<size_t>(use.operation))

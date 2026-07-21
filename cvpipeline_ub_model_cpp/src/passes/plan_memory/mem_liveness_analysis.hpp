@@ -1253,12 +1253,12 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
           if (!visited.insert(current).second)
             return false;
 
-          // MLIR prepends operand uses to the value use-list. Reproduce
-          // Value::getUsers() by visiting the reconstructed operations in
-          // reverse creation order. PlanMemory deliberately returns after the
-          // first view-like user, even when that branch does not reach dst.
-          for (auto operation = operations.rbegin();
-               operation != operations.rend(); ++operation) {
+          // Reproduce the order observed through MLIR Value::getUsers().
+          // PlanMemory deliberately returns after the first view-like user,
+          // even when that branch does not reach dst, so this order affects
+          // whether a later view branch is considered.
+          for (auto operation = operations.begin();
+               operation != operations.end(); ++operation) {
             const std::vector<std::string> operands =
                 operationOperandNames(*operation);
             if (std::find(operands.begin(), operands.end(), current) ==

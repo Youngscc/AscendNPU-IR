@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import collections
+import contextlib
+import io
 import sys
 import tempfile
 from pathlib import Path
@@ -15,7 +17,14 @@ from compare_ub_plan_with_suffix_oracle import (  # noqa: E402
     parse_oracle_contract,
     plan_multiset_from_model,
 )
-from run_corpus_oracle import is_ub_overflow, overflow_address_space  # noqa: E402
+from run_corpus_oracle import (  # noqa: E402
+    RuntimeTimingRecord,
+    is_ub_overflow,
+    overflow_address_space,
+    parse_runtime_timing,
+    print_runtime_timing_comparison,
+    select_inputs,
+)
 
 
 assert overflow_address_space(
@@ -26,6 +35,52 @@ assert overflow_address_space("[ERROR] unrelated compiler failure") is None
 assert is_ub_overflow("ub")
 assert is_ub_overflow("ubuf")
 assert not is_ub_overflow("cbuf")
+
+timing_records = parse_runtime_timing("""\
+unrelated diagnostic
+CVPIPELINE_TIMING\t1\tmodel\tTOTAL\t-\t0\t123456
+CVPIPELINE_TIMING\t1\tmodel\tSTAGE\tCVPipelining\t1\t2345
+CVPIPELINE_TIMING\t1\tsuffix_compile\tPASS\tPlanMemory\t2\t3456
+""")
+assert [(record.tool, record.kind, record.name, record.occurrence,
+         record.nanoseconds) for record in timing_records] == [
+    ("model", "TOTAL", "-", 0, 123456),
+    ("model", "STAGE", "CVPipelining", 1, 2345),
+    ("suffix_compile", "PASS", "PlanMemory", 2, 3456),
+]
+
+comparison_output = io.StringIO()
+with contextlib.redirect_stdout(comparison_output):
+    print_runtime_timing_comparison([
+        ("kernel.mlir", -1,
+         RuntimeTimingRecord("model", "TOTAL", "-", 0, 10_000_000)),
+        ("kernel.mlir", -1,
+         RuntimeTimingRecord("suffix_compile", "TOTAL", "-", 0,
+                             25_000_000)),
+        ("kernel.mlir", -1,
+         RuntimeTimingRecord("model", "STAGE", "PlanMemory", 1,
+                             2_000_000)),
+        ("kernel.mlir", -1,
+         RuntimeTimingRecord("suffix_compile", "PASS", "PlanMemory", 1,
+                             6_000_000)),
+    ])
+comparison_text = comparison_output.getvalue()
+assert "[retry] kernel.mlir" in comparison_text
+assert "TOTAL" in comparison_text and "25.000" in comparison_text
+assert "PlanMemory" in comparison_text and "6.000" in comparison_text
+
+with tempfile.TemporaryDirectory(prefix="cvub-selected-inputs-") as directory:
+    corpus = Path(directory)
+    first = corpus / "case-a" / "before_cvpipelining_func_a.mlir"
+    second = corpus / "case-b" / "before_cvpipelining_func_b.mlir"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_text("module {}\n", encoding="utf-8")
+    second.write_text("module {}\n", encoding="utf-8")
+    assert select_inputs(corpus, [
+        Path("case-b/before_cvpipelining_func_b.mlir"),
+        Path("case-a/before_cvpipelining_func_a.mlir"),
+    ]) == [second.resolve(), first.resolve()]
 
 with tempfile.TemporaryDirectory() as directory:
     empty_ub_oracle = Path(directory) / "empty-ub.tsv"
