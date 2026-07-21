@@ -15,11 +15,10 @@
 //
 //===----------------------------------------------------------------------===//
 #include "bishengir/Dialect/HIVM/Transforms/InferHIVMDataLayout.h"
-#include "bishengir/Dialect/Annotation/IR/Annotation.h"
 #include "bishengir/Dialect/HACC/Utils/Utils.h"
+#include "bishengir/Dialect/HIVM/IR/CustomOp/DistributedTransformUtils.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Dialect/HIVM/IR/HIVMInterfaces.h"
-#include "bishengir/Dialect/HIVM/Transforms/DistributedTransformUtils.h"
 #include "bishengir/Dialect/HIVM/Transforms/Passes.h"
 #include "bishengir/Dialect/HIVM/Utils/Utils.h"
 #include "bishengir/Dialect/MemRefExt/IR/MemRefExt.h"
@@ -41,11 +40,10 @@
 #include "mlir/IR/ValueRange.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Support/LLVM.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
-#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/SmallVectorExtras.h"
-#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -89,6 +87,14 @@ const std::map<std::pair<hivm::DataLayout, hivm::DataLayout>,
          LayoutConversionKind::nZ_TO_ND},
         {{hivm::DataLayout::zN, hivm::DataLayout::ND},
          LayoutConversionKind::zN_TO_ND},
+        {{hivm::DataLayout::ND, hivm::DataLayout::SCALEA_zZ},
+         LayoutConversionKind::DOT_SCALE_ND_TO_zZ},
+        {{hivm::DataLayout::ND, hivm::DataLayout::SCALEB_nN},
+         LayoutConversionKind::DOT_SCALE_DN_TO_nN},
+        {{hivm::DataLayout::SCALEA_ND, hivm::DataLayout::SCALEA_zZ},
+         LayoutConversionKind::DOT_SCALE_ND_TO_zZ},
+        {{hivm::DataLayout::SCALEB_DN, hivm::DataLayout::SCALEB_nN},
+         LayoutConversionKind::DOT_SCALE_DN_TO_nN},
 };
 
 inline bool isGlobalMemory(Value val) {
@@ -136,7 +142,7 @@ void convertToBatchND2NZOp(Value src, Value dst, OpBuilder &builder) {
   createNestedLoops(builder, src.getLoc(), src, loopDims, buildLoopBody);
 }
 
-void convertToND2NZOp(Value src, Value dst, Operation *originalOp,
+void convertToND2NZOp(Value src, Value dst, Operation &originalOp,
                       OpBuilder &builder) {
   mlir::Value padValue = nullptr;
   mlir::Value initCondition = nullptr;
@@ -149,6 +155,12 @@ void convertToND2NZOp(Value src, Value dst, Operation *originalOp,
   builder.create<hivm::ND2NZOp>(src.getLoc(), TypeRange{}, src, dst,
                                 builder.getUnitAttr(), hasInitOutBuffer,
                                 padValue, initCondition);
+}
+
+void convertToLoadMXScaleOp(Value src, Value dst, Operation &originalOp,
+                            OpBuilder &builder, bool isTransposed) {
+  builder.create<hivm::LoadMXScaleOp>(originalOp.getLoc(), Type(), src, dst,
+                                      isTransposed);
 }
 
 } // namespace
@@ -241,7 +253,6 @@ DataLayoutInferAndPropagateHelper::computeTargetLayoutShape(
   auto fractalSizes = info.targetLayout.getFractalSizesArray();
   if (fractalSizes.has_value()) {
     for (int64_t kBlockSize : *fractalSizes) {
- 
       kBlockSizes.push_back(kBlockSize);
     }
   }
@@ -263,6 +274,13 @@ DataLayoutInferAndPropagateHelper::computeTargetLayoutShape(
   case LayoutConversionKind::ND_TO_nZ:
     return computeDOTNDToFractalnZShape(transCurrentShape, builder, loc,
                                         kBlockSizes);
+  case LayoutConversionKind::DOT_SCALE_ND_TO_zZ:
+  case LayoutConversionKind::DOT_SCALE_DN_TO_nN:
+    return computeScaleNDToFractalzZShape(transCurrentShape, builder, loc,
+                                          kBlockSizes);
+  case LayoutConversionKind::DOT_SCALE_DN_TO_zZ:
+  case LayoutConversionKind::DOT_SCALE_ND_TO_nN:
+    llvm_unreachable("not implemented yet");
   default:
     return failure();
   }
@@ -280,11 +298,10 @@ DataLayoutInferAndPropagateHelper::computeTargetLayoutOffset(
   auto fractalSizes = info.targetLayout.getFractalSizesArray();
   if (fractalSizes.has_value()) {
     for (int64_t kBlockSize : fractalSizes.value()) {
- 
       kBlockSizes.push_back(kBlockSize);
     }
   }
- 
+
   std::optional<bool> srcTransposeInfo = info.currentLayout.getTransposeValue();
   SmallVector<Value> transCurrentOffset(currentOffset);
   if (srcTransposeInfo.has_value() && srcTransposeInfo.value()) {
@@ -303,6 +320,13 @@ DataLayoutInferAndPropagateHelper::computeTargetLayoutOffset(
   case LayoutConversionKind::ND_TO_zN:
     return computeDOTNDToFractalzNOffset(transCurrentOffset, builder, loc,
                                          kBlockSizes);
+  case LayoutConversionKind::DOT_SCALE_ND_TO_zZ:
+  case LayoutConversionKind::DOT_SCALE_DN_TO_nN:
+    return computeScaleNDToFractalzZOffset(transCurrentOffset, builder, loc,
+                                           kBlockSizes);
+  case LayoutConversionKind::DOT_SCALE_DN_TO_zZ:
+  case LayoutConversionKind::DOT_SCALE_ND_TO_nN:
+    llvm_unreachable("not implemented yet");
   default:
     return failure();
   }
@@ -385,6 +409,45 @@ DataLayoutInferAndPropagateHelper::computeDOTNDToFractalnZOffset(
 }
 
 FailureOr<SmallVector<Value>>
+DataLayoutInferAndPropagateHelper::computeScaleNDToFractalzZOffset(
+    SmallVector<Value> currentOffset, OpBuilder &builder, Location loc,
+    SmallVector<int64_t> kBlockSizes) const {
+  OpBuilder::InsertionGuard g(builder);
+  int batchIndexBias = static_cast<int>(currentOffset.size() - 2);
+  // a1=M/16, b1=K_scale/(2byte), a0=16, b0=2byte
+  // DOT{A/B/C}_ND:   (a, b) -> zZ: (a/a0, b/b0, a%a0, b%b0)
+  auto symA = builder.getAffineSymbolExpr(0);
+  auto symB = builder.getAffineSymbolExpr(1);
+  // #mapAOuter = affine_map<(symA, symB) -> (symA / a0)>
+  // #mapAInner = affine_map<(symA, symB) ->(symA % a0)>
+  auto constA0 = builder.getAffineConstantExpr(kBlockSizes[1]);
+  auto mapAOuter = AffineMap::get(0, 2, (symA.floorDiv(constA0)));
+  auto mapAInner = AffineMap::get(0, 2, (symA % constA0));
+
+  // #mapBOuter = affine_map<(symA, symB) -> (symB /b0)>
+  // #mapBInner = affine_map<(symA, symB) -> (symB % b0)>
+  auto constB0 = builder.getAffineConstantExpr(kBlockSizes[0]);
+  auto mapBOuter = AffineMap::get(0, 2, (symB.floorDiv(constB0)));
+  auto mapBInner = AffineMap::get(0, 2, (symB % constB0));
+
+  Value a = currentOffset[0 + batchIndexBias];
+  Value b = currentOffset[1 + batchIndexBias];
+  auto aouter =
+      builder.create<affine::AffineApplyOp>(loc, mapAOuter, ValueRange{a, b});
+  auto ainner =
+      builder.create<affine::AffineApplyOp>(loc, mapAInner, ValueRange{a, b});
+  auto bouter =
+      builder.create<affine::AffineApplyOp>(loc, mapBOuter, ValueRange{a, b});
+  auto binner =
+      builder.create<affine::AffineApplyOp>(loc, mapBInner, ValueRange{a, b});
+  SmallVector<Value> fractalOffset{aouter, bouter, ainner, binner};
+  if (batchIndexBias != 0) {
+    fractalOffset.insert(fractalOffset.begin(), currentOffset[0]);
+  }
+  return fractalOffset;
+}
+
+FailureOr<SmallVector<Value>>
 DataLayoutInferAndPropagateHelper::computeDOTNDToFractalzNShape(
     SmallVector<Value> currentShape, OpBuilder &builder, Location loc,
     SmallVector<int64_t> kBlockSizes) const {
@@ -444,6 +507,37 @@ DataLayoutInferAndPropagateHelper::computeDOTNDToFractalnZShape(
   return fractalShape;
 }
 
+FailureOr<SmallVector<Value>>
+DataLayoutInferAndPropagateHelper::computeScaleNDToFractalzZShape(
+    SmallVector<Value> currentShape, OpBuilder &builder, Location loc,
+    SmallVector<int64_t> kBlockSizes) const {
+  OpBuilder::InsertionGuard g(builder);
+  uint batchIndexBias = currentShape.size() - 2;
+  // ScaleA_ND:   (a1a0, b1b0) -> zZ: (a1=M/16, b1=K_scale/(2byte), a0=16,
+  // b0=2byte)
+  auto symA = builder.getAffineSymbolExpr(0);
+  auto symB = builder.getAffineSymbolExpr(1);
+  auto constA0MinusOne = builder.getAffineConstantExpr(kBlockSizes[1] - 1);
+  auto constA0 = builder.getAffineConstantExpr(kBlockSizes[1]);
+  // #mapA = affine_map<(symA, symB) -> ((symA+constA0-1)/constA0)>
+  auto mapA = AffineMap::get(0, 2, (symA + constA0MinusOne).floorDiv(constA0));
+  // #mapB = affine_map<(symA, symB) -> ((symB+constB0-1)/constB0)>
+  auto constB0MinusOne = builder.getAffineConstantExpr(kBlockSizes[0] - 1);
+  auto constB0 = builder.getAffineConstantExpr(kBlockSizes[0]);
+  auto mapB = AffineMap::get(0, 2, (symB + constB0MinusOne).floorDiv(constB0));
+  Value a = currentShape[0 + batchIndexBias];
+  Value b = currentShape[1 + batchIndexBias];
+  auto a1 = builder.create<affine::AffineApplyOp>(loc, mapA, ValueRange{a, b});
+  auto b1 = builder.create<affine::AffineApplyOp>(loc, mapB, ValueRange{a, b});
+  Value a0 = builder.create<arith::ConstantIndexOp>(loc, kBlockSizes[1]);
+  Value b0 = builder.create<arith::ConstantIndexOp>(loc, kBlockSizes[0]);
+  SmallVector<Value> fractalShape{a1.getResult(), b1.getResult(), a0, b0};
+  if (batchIndexBias != 0) {
+    fractalShape.insert(fractalShape.begin(), currentShape[0]);
+  }
+  return fractalShape;
+}
+
 FailureOr<ConvertLayoutOp>
 DataLayoutInferAndPropagateHelper::createLayoutConversion(
     Value currentValue, const LayoutInfo &info, OpBuilder &builder) {
@@ -484,6 +578,12 @@ void DataLayoutInferAndPropagateHelper::initAnchorLayout() {
           opWithLayout.getOperandsCurrentLayout();
       llvm::SmallDenseMap<Value, DataLayoutAttr> targetLayoutMap =
           opWithLayout.getOperandsTargetLayout();
+      LLVM_DEBUG({
+        llvm::outs() << "\n\nCurrent layout map size:\n"
+                     << currentLayoutMap.size();
+        llvm::outs() << "\n\nTarget layout map size:\n"
+                     << targetLayoutMap.size();
+      });
       assert(currentLayoutMap.size() == targetLayoutMap.size());
       for (auto operand : op->getOperands()) {
         if (!isa<MemRefType>(operand.getType()))
@@ -493,7 +593,7 @@ void DataLayoutInferAndPropagateHelper::initAnchorLayout() {
         auto currentLayout = currentLayoutMap[operand];
         auto targetLayout = targetLayoutMap[operand];
         LLVM_DEBUG(llvm::dbgs() << targetLayout << "\n";);
-          // // Layout Information is appended on to the root alloc.
+        // Layout Information is appended on to the root alloc.
         SmallVector<Value> allocs = getMemRefAllocs(operand);
         if (allocs.empty()) {
           LLVM_DEBUG(llvm::dbgs() << "  Cannot find root alloc for operand: "
@@ -503,9 +603,10 @@ void DataLayoutInferAndPropagateHelper::initAnchorLayout() {
         for (Value alloc : allocs) {
           (void)updateLayoutIfChanged(alloc, {currentLayout, targetLayout});
         }
-        }
-        return WalkResult::advance();
       }
+      return WalkResult::advance();
+    }
+
     // If a value is marked with a layout through annotation::MarkOp, we
     // consider it as an anchor and initialize its layout info accordingly.
     if (auto markOp = dyn_cast<annotation::MarkOp>(op)) {
@@ -544,11 +645,17 @@ void DataLayoutInferAndPropagateHelper::initAnchorLayout() {
   // Func arguments with GM space address is considered to have ND layout.
   // TODO: Get layout information from func arg attrs.
   for (auto arg : func_.getArguments()) {
-    if (!isGlobalMemory(arg))
+    if (!llvm::isa<BaseMemRefType>(arg.getType()))
       continue;
 
-    auto ndLayout = DataLayoutAttr::get(arg.getContext(), DataLayout::ND);
-    (void)updateLayoutIfChanged(arg, {ndLayout, ndLayout});
+    auto memorySpace = dyn_cast<BaseMemRefType>(arg.getType()).getMemorySpace();
+    if (!memorySpace || !isa<hivm::AddressSpaceAttr>(memorySpace))
+      continue;
+    if (dyn_cast<hivm::AddressSpaceAttr>(memorySpace).getAddressSpace() ==
+        AddressSpace::GM) {
+      auto ndLayout = DataLayoutAttr::get(arg.getContext(), DataLayout::ND);
+      (void)updateLayoutIfChanged(arg, {ndLayout, ndLayout});
+    }
   }
 }
 
@@ -581,7 +688,8 @@ void DataLayoutInferAndPropagateHelper::propagateLayout() {
 /// and YieldOp with special handling for scf::IfOp.
 /// @param val The value whose layout should be propagated.
 /// @param info The layout information to propagate.
-/// @return Vector of values whose layouts were changed (for further propagation).
+/// @return Vector of values whose layouts were changed (for further
+/// propagation).
 SmallVector<Value>
 DataLayoutInferAndPropagateHelper::propagateDataLayoutToUsers(
     Value val, const LayoutInfo &info) {
@@ -589,21 +697,49 @@ DataLayoutInferAndPropagateHelper::propagateDataLayoutToUsers(
   auto propagateFn = [&](OpOperand &user) -> void {
     Operation *userDefiningOp = user.getOwner();
     return TypeSwitch<Operation *, void>(userDefiningOp)
+        .Case<arith::SelectOp>([&](arith::SelectOp op) {
+          auto result = op->getResults();
+          updateLayout(result, info, changed);
+        })
         .Case<scf::ForOp>([&](scf::ForOp op) {
           Value arg = op.getTiedLoopRegionIterArg(&user);
           Value result = op.getTiedLoopResult(&user);
           updateLayout({arg, result}, info, changed);
         })
+        .Case<ViewLikeOpInterface>([&](ViewLikeOpInterface op) {
+          updateLayout(op->getResults(), info, changed);
+        })
+        .Case<bishengir::memref_ext::AllocWorkspaceOp>(
+            [&](bishengir::memref_ext::AllocWorkspaceOp op) {
+              // Do not overwrite layouts already set by MarkOp / anchors.
+              populateLayout(op->getResults(), info, changed);
+            })
+        // TODO: adapt custom op's infer data layout in V2
+        .Case<hivm::CustomOp>(
+            [&](hivm::CustomOp op) { populateLayoutToHIVMCustom(op, changed); })
         .Case<scf::YieldOp>([&](scf::YieldOp op) {
-          auto it = llvm::find(op->getOpOperands(), user);
-          auto dist = std::distance(op->getOpOperands().begin(), it);
-          if (auto loopOp = dyn_cast_if_present<LoopLikeOpInterface>(op->getParentOp())) {
+          Operation *parentOp = op->getParentOp();
+          if (auto loopOp =
+                  dyn_cast_if_present<LoopLikeOpInterface>(parentOp)) {
+            auto it = llvm::find(op->getOpOperands(), user);
+            auto dist = std::distance(op->getOpOperands().begin(), it);
             Value result = (*(loopOp.getLoopResults()))[dist];
             updateLayout({result}, info, changed);
-          } else if (auto ifOp = dyn_cast_if_present<scf::IfOp>(op->getParentOp())) {
+          } else if (auto ifOp = dyn_cast_if_present<scf::IfOp>(parentOp)) {
             if (ifOp->getRegions().size() > 1) {
-              Value result = (ifOp.getResults())[dist];
-              updateLayout({result}, info, changed);
+              if (op != ifOp.thenYield()) {
+                auto yieldOp = ifOp.thenYield();
+                auto yieldResult =
+                    yieldOp->getOperand(user.getOperandNumber());
+                auto ifResult = ifOp->getResult(user.getOperandNumber());
+                updateLayout({yieldResult, ifResult}, info, changed);
+              } else if (op != ifOp.elseYield()) {
+                auto yieldOp = ifOp.elseYield();
+                auto ifResult = ifOp->getResult(user.getOperandNumber());
+                auto yieldResult =
+                    yieldOp->getOperand(user.getOperandNumber());
+                updateLayout({yieldResult, ifResult}, info, changed);
+              }
             } else {
               op->emitWarning("Unsupported yield op in single region if op.");
             }
@@ -611,16 +747,6 @@ DataLayoutInferAndPropagateHelper::propagateDataLayoutToUsers(
             op->emitWarning("Unsupported yield op parent.");
           }
         })
-        .Case<ViewLikeOpInterface>([&](ViewLikeOpInterface op) {
-          updateLayout(op->getResults(), info, changed);
-        })
-        .Case<bishengir::memref_ext::AllocWorkspaceOp>(
-            [&](bishengir::memref_ext::AllocWorkspaceOp op) {
-              populateLayout(op->getResults(), info, changed);
-            })
-        // TODO: adapt custom op's infer data layout in V2
-        .Case<hivm::CustomOp>(
-            [&](hivm::CustomOp op) { populateLayoutToHIVMCustom(op, changed); })
         .Default([&](Operation *op) {
           // Don't need to update Ops that don't have results.
           if (op->getNumResults() == 0)
@@ -645,34 +771,11 @@ bool DataLayoutInferAndPropagateHelper::updateLayoutIfChanged(
     Value value, const LayoutInfo &info) {
 
   if (layout_info_.contains(value) && layout_info_.lookup(value) == info) {
-    LDBG("Not updating, layout_info_ for "
-         << value << " exists and consists with new info");
+    LDBG("Not updating, layout_info_ for " << value << " exists");
     return false;
   }
-
   layout_info_[value] = info;
   LLVM_DEBUG(llvm::dbgs() << "  Value [" << value
-                          << "] Current layout is: " << info.currentLayout
-                          << ", Target layout is: " << info.targetLayout
-                          << "\n";);
-  return true;
-}
-
-/// Populates the layout information for a value if it is absent.
-/// @param value The value to populate layout for.
-/// @param info The layout information to insert.
-/// @return True if the layout was populated, false if the value already had
-/// layout information and was not modified.
-bool DataLayoutInferAndPropagateHelper::populateLayoutIfAbsent(
-    Value value, const LayoutInfo &info) {
-
-  if (layout_info_.contains(value)) {
-    LDBG("Not populating, layout_info_ for " << value << " already exists");
-    return false;
-  }
-
-  layout_info_[value] = info;
-  LLVM_DEBUG(llvm::dbgs() << "  [Init] Value [" << value
                           << "] Current layout is: " << info.currentLayout
                           << ", Target layout is: " << info.targetLayout
                           << "\n";);
@@ -689,9 +792,22 @@ void DataLayoutInferAndPropagateHelper::updateLayout(
   }
 }
 
+bool DataLayoutInferAndPropagateHelper::populateLayoutIfAbsent(
+    Value value, const LayoutInfo &info) {
+  if (layout_info_.contains(value)) {
+    LDBG("Not populating, layout_info_ for " << value << " already exists");
+    return false;
+  }
+  layout_info_[value] = info;
+  LLVM_DEBUG(llvm::dbgs() << "  [Init] Value [" << value
+                          << "] Current layout is: " << info.currentLayout
+                          << ", Target layout is: " << info.targetLayout
+                          << "\n";);
+  return true;
+}
+
 void DataLayoutInferAndPropagateHelper::populateLayout(
     ValueRange values, const LayoutInfo &info, SmallVector<Value> &changed) {
-
   for (Value value : values) {
     if (!isa<BaseMemRefType>(value.getType()))
       continue;
@@ -702,14 +818,18 @@ void DataLayoutInferAndPropagateHelper::populateLayout(
 
 void DataLayoutInferAndPropagateHelper::populateLayoutToHIVMCustom(
     hivm::CustomOp op, SmallVector<Value> &changed) {
-  if (!llvm::any_of(op->getResultTypes(), [](Type v) {
-        return ::llvm::isa<::mlir::BaseMemRefType>(v);
-      })) {
+  if (!llvm::any_of(op->getResultTypes(),
+                    [](Type v) { return llvm::isa<BaseMemRefType>(v); }))
+    return;
+
+  auto results = op->getResults();
+  // A3 CustomOp::getSymbol() returns std::string (empty string on missing).
+  std::string symbol = op.getSymbol();
+  llvm::StringRef symbolRef = symbol;
+  if (symbolRef.empty()) {
+    op->emitWarning("unsupport hivm.custom symbol for infer results layout");
     return;
   }
-  auto results = op->getResults();
-  auto symbol = op.getSymbol();
-  llvm::StringRef symbolRef = symbol;
   if (symbolRef.starts_with(kShmemConsumeToken) ||
       symbolRef.starts_with(kShmemPtr)) {
     updateLayout(results, layout_info_[op->getOperand(0)], changed);
@@ -742,10 +862,9 @@ void DataLayoutInferAndPropagateHelper::resolveConflicts() {
                                 << info.currentLayout << "\n";);
         continue;
       }
-      LLVM_DEBUG(llvm::dbgs() << "        Current layout is: "
-                              << info.currentLayout
-                              << ", Target layout is: "
-                              << info.targetLayout << "\n";);
+      LLVM_DEBUG(llvm::dbgs()
+                     << "        Current layout is: " << info.currentLayout
+                     << ", Target layout is: " << info.targetLayout << "\n";);
       if (!isConversionValid(info)) {
         emitError(currentValue.getLoc(),
                   "        Failed to resolve data layout conflicts!\n");
@@ -793,7 +912,8 @@ void DataLayoutInferAndPropagateHelper::rewriteRegion(Region &region) {
       } else if (isa<memref::CopyOp, hivm::CopyOp, hivm::LoadOp, hivm::StoreOp>(
                      &op)) {
         // Use whitelist instead of copy like interface because there maybe
-        // unwanted ops
+        // unwanted ops. A5 Indirect*/Stride* ops are not present (or lack
+        // CopyOpInterface) on A3, so keep the A3 whitelist only.
         LLVM_DEBUG(llvm::dbgs() << "  Remapping op: " << op << "\n";);
         rewriteCopyOp(&op);
       } else {
@@ -831,7 +951,7 @@ Operation *
 DataLayoutInferAndPropagateHelper::rewriteMemrefCastOp(memref::CastOp op) {
   auto srcType = op.getType();
   if (srcType.getRank() != 2 && srcType.getRank() != 3)
-    llvm::report_fatal_error("Unsupported source shape in mad operand memref cast");
+    llvm_unreachable("Unsupported source shape in mad operand memref cast");
   OpBuilder builder(op);
   Location loc = op.getLoc();
   Value src = op.getSource();
@@ -866,17 +986,55 @@ DataLayoutInferAndPropagateHelper::rewriteMemrefCastOp(memref::CastOp op) {
 Operation *DataLayoutInferAndPropagateHelper::rewriteOp(Operation *op) {
   opsToDelete_.insert(op);
   return TypeSwitch<Operation *, Operation *>(op)
+      .Case<arith::SelectOp>([&](auto op) { return rewriteSelectOp(op); })
       .Case<memref::AllocOp>([&](auto op) { return rewriteAllocOp(op); })
       .Case<memref::SubViewOp>([&](auto op) { return rewriteSubViewOp(op); })
       .Case<memref::CollapseShapeOp>(
           [&](auto op) { return rewriteCollapseShapeOp(op); })
       .Case<scf::ForOp>([&](auto op) { return rewriteForOp(op); })
-      .Case<memref::CastOp>([&](auto op) { return rewriteMemrefCastOp(op); })
       .Case<scf::IfOp>([&](auto op) { return rewriteIfOp(op); })
+      .Case<memref::CastOp>([&](auto op) { return rewriteMemrefCastOp(op); })
       .Default([](auto) {
         llvm::report_fatal_error("unexpected op in rewrite");
         return nullptr;
       });
+}
+
+Operation *
+DataLayoutInferAndPropagateHelper::rewriteSelectOp(arith::SelectOp op) {
+  OpBuilder builder(op);
+  Location loc = op.getLoc();
+  auto srcType = cast<MemRefType>(op.getType());
+
+  if (srcType.getRank() != 2 && srcType.getRank() != 3)
+    llvm_unreachable("Unsupported source shape in mad operand subview");
+  // Extract mix-typed shape from SelectOp.
+  auto shape = getValueFromShape(op, builder);
+  assert(succeeded(shape));
+  // Compute the new shape after layout conversion.
+  auto layoutInfo = layout_info_.lookup(op->getResults().front());
+
+  auto newShape = computeTargetLayoutShape(*shape, layoutInfo, builder, loc);
+
+  if (failed(newShape)) {
+    LLVM_DEBUG(llvm::dbgs() << "  Cannot compute new shape.\n";);
+    return nullptr;
+  }
+  auto newRank = (*newShape).size();
+  // Create a fully dynamic SelectOp.
+  Type fullyDynamicShapedType = MemRefType::get(
+      SmallVector<int64_t>(newRank, ShapedType::kDynamic),
+      srcType.getElementType(), builder.getMultiDimIdentityMap(newRank),
+      srcType.getMemorySpace());
+  SmallVector<Value, 3> srcs;
+  for (auto src : op->getOperands()) {
+    srcs.push_back(getValueAs(src, getTargetLayout(src)));
+  }
+  auto newSelect = builder.create<arith::SelectOp>(
+      loc, TypeRange{fullyDynamicShapedType}, srcs);
+  map(op->getResults().front(), newSelect->getResults().front(),
+      layoutInfo.targetLayout);
+  return newSelect.getOperation();
 }
 
 Operation *
@@ -912,10 +1070,20 @@ DataLayoutInferAndPropagateHelper::rewriteAllocOp(memref::AllocOp op) {
   return newAlloc.getOperation();
 }
 
+/// Copy user-defined attributes with the "hivm." prefix (e.g. markers like
+/// hivm.slice_load) from the old op to the new op. Skips auto-generated attrs.
+static void copyHIVMUserAttrs(Operation *oldOp, Operation *newOp) {
+  for (auto namedAttr : oldOp->getAttrs()) {
+    if (namedAttr.getName().strref().starts_with("hivm."))
+      newOp->setAttr(namedAttr.getName(), namedAttr.getValue());
+  }
+}
+
 Operation *
 DataLayoutInferAndPropagateHelper::rewriteSubViewOp(memref::SubViewOp op) {
   auto src = op.getViewSource();
   auto srcType = op.getSourceType();
+
   auto layoutInfo = layout_info_.lookup(src);
   if (srcType.getRank() != 2 && srcType.getRank() != 3) {
     map(op.getResult(), op.getResult(), layoutInfo.targetLayout);
@@ -991,9 +1159,93 @@ DataLayoutInferAndPropagateHelper::rewriteSubViewOp(memref::SubViewOp op) {
       builder.getDenseI64ArrayAttr(newStaticOffsets),
       builder.getDenseI64ArrayAttr(newStaticSizes),
       builder.getDenseI64ArrayAttr(newStaticStrides));
+  copyHIVMUserAttrs(op, newSubViewOp);
   map(op.getResult(), newSubViewOp.getResult(), layoutInfo.targetLayout);
   return newSubViewOp;
 }
+
+struct ExpandLoad1D : public OpRewritePattern<hivm::LoadOp> {
+  using OpRewritePattern<hivm::LoadOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(hivm::LoadOp loadOp,
+                                PatternRewriter &rewriter) const override {
+
+    Value src = loadOp.getSrc();
+    Value dst = loadOp.getDst();
+    auto srcType = mlir::dyn_cast<MemRefType>(src.getType());
+    auto dstType = mlir::dyn_cast<MemRefType>(dst.getType());
+    auto srcSize = srcType.getDimSize(0);
+
+    if (!srcType || !dstType || srcType.getRank() != 1) {
+      LLVM_DEBUG(llvm::dbgs() << "  Match Failed: Not 1D\n");
+      return failure();
+    }
+
+    Location loc = loadOp.getLoc();
+    SmallVector<ReassociationIndices> reassoc = {{0, 1}};
+
+    Value newDst = dst;
+    if (auto allocOp = dst.getDefiningOp<memref::AllocOp>()) {
+      LLVM_DEBUG(llvm::dbgs() << "  Found AllocOp: " << *allocOp << "\n");
+
+      auto newAllocType = MemRefType::get(
+          {1, srcSize}, dstType.getElementType(), MemRefLayoutAttrInterface(),
+          dstType.getMemorySpace());
+
+      rewriter.setInsertionPoint(allocOp);
+      auto newAlloc = rewriter.create<memref::AllocOp>(
+          allocOp.getLoc(), newAllocType, allocOp.getAlignmentAttr());
+
+      LLVM_DEBUG(llvm::dbgs()
+                 << "  Created New 2D Alloc: " << newAlloc << "\n");
+
+      for (auto &use :
+           llvm::make_early_inc_range(allocOp.getResult().getUses())) {
+        if (auto expandOp = dyn_cast<memref::ExpandShapeOp>(use.getOwner())) {
+          auto expandResultType =
+              mlir::cast<MemRefType>(expandOp.getResult().getType());
+          if (expandResultType.getRank() == 2 &&
+              expandResultType.getDimSize(0) == 1) {
+            LLVM_DEBUG(llvm::dbgs()
+                       << "  Found Redundant ExpandShape, Replacing: "
+                       << *expandOp << "\n");
+            rewriter.replaceOp(expandOp, newAlloc.getResult());
+          }
+        }
+      }
+
+      rewriter.replaceOp(allocOp, newAlloc.getResult());
+      newDst = newAlloc.getResult();
+    } else {
+      return failure();
+    }
+
+    int64_t offset;
+    SmallVector<int64_t, 1> strides;
+    if (failed(getStridesAndOffset(srcType, strides, offset))) {
+      LLVM_DEBUG(llvm::dbgs() << "  Failed to get strides/offset for src.\n");
+      return failure();
+    }
+
+    SmallVector<int64_t, 2> newStrides = {srcSize, strides[0]};
+    auto newSrcLayout =
+        offset ? StridedLayoutAttr::get(getContext(), offset, newStrides)
+               : nullptr;
+    auto newSrcType = MemRefType::get({1, srcSize}, srcType.getElementType(),
+                                      newSrcLayout, srcType.getMemorySpace());
+
+    rewriter.setInsertionPoint(loadOp);
+    Value expSrc =
+        rewriter.create<memref::ExpandShapeOp>(loc, newSrcType, src, reassoc);
+
+    rewriter.setInsertionPoint(loadOp);
+    auto newLoad =
+        rewriter.create<hivm::LoadOp>(loc, TypeRange{}, expSrc, newDst);
+    newLoad->setAttrs(loadOp->getAttrs());
+    rewriter.eraseOp(loadOp);
+    return success();
+  }
+};
 
 Operation *DataLayoutInferAndPropagateHelper::rewriteForOp(scf::ForOp op) {
   SmallVector<Value> newOperands;
@@ -1014,6 +1266,10 @@ Operation *DataLayoutInferAndPropagateHelper::rewriteForOp(scf::ForOp op) {
   auto newForOp = rewriter.create<scf::ForOp>(op.getLoc(), op.getLowerBound(),
                                               op.getUpperBound(), op.getStep(),
                                               newOperands);
+  if (!newForOp.getBody() || !op.getBody()) {
+    llvm::report_fatal_error("scf.for body is null");
+    return nullptr;
+  }
   newForOp.getBody()->getOperations().splice(
       newForOp.getBody()->getOperations().begin(),
       op.getBody()->getOperations());
@@ -1044,12 +1300,13 @@ Operation *DataLayoutInferAndPropagateHelper::rewriteForOp(scf::ForOp op) {
 }
 
 Operation *DataLayoutInferAndPropagateHelper::rewriteIfOp(scf::IfOp op) {
-    SmallVector<DataLayoutAttr> newLayouts;
-    OpBuilder builder(op);
-  
-    // 1) Pre-compute 4D type from then branch yield operands
-    SmallVector<Type> newResultTypes;
-    auto yieldOp = cast<scf::YieldOp>(op.thenBlock()->back());
+  SmallVector<DataLayoutAttr> newLayouts;
+  // Get the remapped operands and their target layouts.
+  OpBuilder builder(op);
+  Operation *yieldOp;
+  SmallVector<Type> newResultsTypes;
+  if (!op->getResults().empty()) {
+    yieldOp = dyn_cast<scf::YieldOp>(op.thenBlock()->back());
     for (auto result : yieldOp->getOperands()) {
       DataLayoutAttr layout;
       Type newResType = result.getType();
@@ -1065,40 +1322,48 @@ Operation *DataLayoutInferAndPropagateHelper::rewriteIfOp(scf::IfOp op) {
         }
         auto srcType = cast<MemRefType>(result.getType());
         auto newRank = (*newShape).size();
+        auto newStridesForMemRefType =
+            SmallVector<int64_t>(newRank - 1, ShapedType::kDynamic);
+        newStridesForMemRefType.push_back(1);
         newResType = MemRefType::get(
             SmallVector<int64_t>(newRank, ShapedType::kDynamic),
             srcType.getElementType(), builder.getMultiDimIdentityMap(newRank),
             srcType.getMemorySpace());
       }
-      newResultTypes.push_back(newResType);
+      newResultsTypes.push_back(newResType);
       newLayouts.push_back(layout);
     }
-  
-    // 2) Create new IfOp with correct type, splice body
-    OpBuilder rewriter(op);
-    bool hasElseRegion = !op.getElseRegion().empty();
-    auto newIfOp = rewriter.create<scf::IfOp>(
-        op.getLoc(), newResultTypes, op.getCondition(), hasElseRegion);
-  
-    newIfOp.thenBlock()->getOperations().splice(
-        newIfOp.thenBlock()->begin(), op.thenBlock()->getOperations());
-    if (hasElseRegion && op.elseBlock() && newIfOp.elseBlock()) {
-      newIfOp.elseBlock()->getOperations().splice(
-          newIfOp.elseBlock()->begin(), op.elseBlock()->getOperations());
-    }
-  
-    // 3) Map old results to new results
-    for (auto [oldResult, newResult, newLayout] :
-        llvm::zip(op.getResults(), newIfOp.getResults(), newLayouts)) {
-      if (oldResult.getType() == newResult.getType()) {
-        oldResult.replaceAllUsesWith(newResult);
-      }
-      if (!newLayout)
-        continue;
-      map(oldResult, newResult, newLayout);
-    }
-    return newIfOp.getOperation();
   }
+
+  // Construct new IfOp and transfer all operations to the new IfOp.
+  OpBuilder rewriter(op);
+  bool hasElseRegion = !op.getElseRegion().empty();
+  auto newIfOp = rewriter.create<scf::IfOp>(op.getLoc(), newResultsTypes,
+                                            op.getCondition(), hasElseRegion);
+
+  newIfOp.thenBlock()->getOperations().splice(
+      newIfOp.thenBlock()->getOperations().begin(),
+      op.thenBlock()->getOperations());
+
+  if (hasElseRegion && op.elseBlock() && newIfOp.elseBlock()) {
+    newIfOp.elseBlock()->getOperations().splice(
+        newIfOp.elseBlock()->getOperations().begin(),
+        op.elseBlock()->getOperations());
+  }
+
+  // Replace old result to new ones.
+  for (auto [oldResult, newResult, newLayout] :
+       llvm::zip(op.getResults(), newIfOp.getResults(), newLayouts)) {
+    if (oldResult.getType() == newResult.getType()) {
+      oldResult.replaceAllUsesWith(newResult);
+    }
+    if (!newLayout) {
+      continue;
+    }
+    map(oldResult, newResult, newLayout);
+  }
+  return newIfOp.getOperation();
+}
 
 Operation *DataLayoutInferAndPropagateHelper::rewriteCollapseShapeOp(
     memref::CollapseShapeOp op) {
@@ -1134,15 +1399,9 @@ Operation *DataLayoutInferAndPropagateHelper::rewriteCollapseShapeOp(
 
 LogicalResult
 DataLayoutInferAndPropagateHelper::tryFoldLayoutConversionIntoCopy(
-    Value src, Value dst, Operation *originalOp, OpBuilder &builder) {
+    Value src, Value dst, Operation &originalOp, OpBuilder &builder) {
   assert(llvm::isa<MemRefType>(src.getType()) &&
          llvm::isa<MemRefType>(dst.getType()));
-  if (llvm::dyn_cast<ShapedType>(dst.getType()).getRank() -
-          llvm::dyn_cast<ShapedType>(src.getType()).getRank() !=
-      2)
-    llvm::report_fatal_error("Unsupported operand shape when convert copy to ND2NZ");
-  bool batchFlag = (llvm::dyn_cast<ShapedType>(src.getType()).getRank() == 3);
-
   auto srcLayout = getCurrentLayout(src);
   auto dstLayout = getCurrentLayout(dst);
   if (!srcLayout || !dstLayout) {
@@ -1151,11 +1410,18 @@ DataLayoutInferAndPropagateHelper::tryFoldLayoutConversionIntoCopy(
   auto conversionKind = kSupportedConversion.find(
       std::make_pair(srcLayout.getDataLayout(), dstLayout.getDataLayout()));
   if (conversionKind == kSupportedConversion.cend()) {
+    LLVM_DEBUG(llvm::dbgs() << "kSupportedConversion doesn't contain"
+                            << srcLayout << "->" << dstLayout << ".\n";);
     return failure();
   }
   switch (conversionKind->second) {
   case LayoutConversionKind::ND_TO_nZ:
-  case LayoutConversionKind::ND_TO_zN:
+  case LayoutConversionKind::ND_TO_zN: {
+    if (llvm::dyn_cast<ShapedType>(dst.getType()).getRank() -
+            llvm::dyn_cast<ShapedType>(src.getType()).getRank() !=
+        2)
+      llvm_unreachable("Unsupported operand shape when convert copy to ND2NZ");
+    bool batchFlag = (llvm::dyn_cast<ShapedType>(src.getType()).getRank() == 3);
     if (batchFlag) {
       convertToBatchND2NZOp(src, dst, builder);
       return success();
@@ -1163,6 +1429,15 @@ DataLayoutInferAndPropagateHelper::tryFoldLayoutConversionIntoCopy(
       convertToND2NZOp(src, dst, originalOp, builder);
       return success();
     }
+  }
+  case LayoutConversionKind::DOT_SCALE_ND_TO_zZ:
+  case LayoutConversionKind::DOT_SCALE_ND_TO_nN:
+    convertToLoadMXScaleOp(src, dst, originalOp, builder, false);
+    return success();
+  case LayoutConversionKind::DOT_SCALE_DN_TO_nN:
+  case LayoutConversionKind::DOT_SCALE_DN_TO_zZ:
+    convertToLoadMXScaleOp(src, dst, originalOp, builder, true);
+    return success();
   default:
     LLVM_DEBUG(llvm::dbgs() << "  No matching HIVM data copy op with "
                                "on-the-fly layout conversion available.\n";);
@@ -1196,8 +1471,9 @@ void DataLayoutInferAndPropagateHelper::rewriteCopyOp(mlir::Operation *op) {
   OpBuilder builder(op);
   builder.setInsertionPoint(op);
   auto foldResult =
-      tryFoldLayoutConversionIntoCopy(rewrittenSrc, rewrittenDst, op, builder);
-  LDBG("try to fold layout conversion into copy...");
+      tryFoldLayoutConversionIntoCopy(rewrittenSrc, rewrittenDst, *op, builder);
+  LDBG("layout conversion is" << srcTargetLayout << "->" << dstTargetLayout
+                              << "try to fold into copy...");
   if (succeeded(foldResult)) {
     LDBG("successfully folded");
     opsToDelete_.insert(op);
@@ -1209,12 +1485,46 @@ void DataLayoutInferAndPropagateHelper::rewriteCopyOp(mlir::Operation *op) {
   op->replaceUsesOfWith(src, rewrittenSrc);
 }
 
+class ReplaceMMADOperand : public OpRewritePattern<hivm::MmadL1Op> {
+public:
+  using OpRewritePattern<hivm::MmadL1Op>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(hivm::MmadL1Op op,
+                                PatternRewriter &rewriter) const final {
+    bool modifed = false;
+    for (auto &operand : op->getOpOperands()) {
+      if (auto convertLayout = dyn_cast_if_present<hivm::ConvertLayoutOp>(
+              operand.get().getDefiningOp())) {
+        modifed = true;
+        rewriter.modifyOpInPlace(op, [&convertLayout, &operand]() {
+          operand.assign(convertLayout.getSource());
+        });
+      }
+    }
+    return success(modifed);
+  }
+};
+
 namespace {
 struct InferHIVMDataLayoutPass
     : public impl::InferHIVMDataLayoutBase<InferHIVMDataLayoutPass> {
   void runOnOperation() override;
 };
 } // namespace
+
+/// TODO: refactor the func to optimize the following case:
+/// %alloc = memref.alloc({{.*}}, {{.*}}, {{.*}}, {{.*}}) :
+/// %layout = hivm.hir.convert_layout %alloc -> memref<{{.*}}x{{.*}}...
+/// hivm.hir.mmadL1 ins(%out,
+/// to
+/// %alloc = memref.alloc({{.*}}, {{.*}}, {{.*}}, {{.*}}) :
+/// hivm.hir.mmadL1 ins(%alloc,
+void hasConvertlayoutForCube(func::FuncOp func) {
+  MLIRContext *ctx = func->getContext();
+  RewritePatternSet pattern(ctx);
+  pattern.add<ReplaceMMADOperand>(ctx);
+  (void)(applyPatternsGreedily(func, std::move(pattern)));
+}
 
 void InferHIVMDataLayoutPass::runOnOperation() {
   auto funcOp = getOperation();
@@ -1226,6 +1536,17 @@ void InferHIVMDataLayoutPass::runOnOperation() {
   if (!tFuncCoreTypeAttr ||
       tFuncCoreTypeAttr.getFuncCoreType() == hivm::TFuncCoreType::AIV)
     return;
+
+  MLIRContext *ctx = &getContext();
+  RewritePatternSet prePatterns(ctx);
+  prePatterns.add<ExpandLoad1D>(ctx);
+  if (failed(applyPatternsGreedily(funcOp, std::move(prePatterns)))) {
+    return signalPassFailure();
+  }
+
+  // Mask mmad inputs, the rank of which is 4-dim.
+  hasConvertlayoutForCube(funcOp);
+  LLVM_DEBUG(llvm::dbgs() << "func : " << *funcOp);
 
   DataLayoutInferAndPropagateHelper helper(funcOp);
   // Init "anchor" ops' data layout information.
