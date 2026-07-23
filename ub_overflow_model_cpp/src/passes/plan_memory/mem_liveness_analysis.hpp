@@ -615,7 +615,21 @@ struct PlanMemoryInput {
   std::vector<OperationRecord> operations;
   std::vector<std::string> functionArguments;
   std::shared_ptr<const PlanMemoryOperationIndexStorage> operationIndex;
+  // True only for the in-memory semantic bridge used by the normal pipeline.
+  // Such an input must carry its finalized typed SSA/use-def index; rebuilding
+  // it from OperationRecord::text would reintroduce the bridge conversion this
+  // path is intended to remove.  ParsePlanMemoryInput remains the compatibility
+  // path for a user-supplied before-plan-memory text file.
+  bool hasTypedOperationBridge = false;
 };
+
+inline std::shared_ptr<const PlanMemoryOperationIndexStorage>
+RequirePlanMemoryOperationIndex(const PlanMemoryInput &input) {
+  if (input.hasTypedOperationBridge && !input.operationIndex)
+    throw std::runtime_error(
+        "PlanMemoryInput: typed operation bridge is missing its index");
+  return input.operationIndex;
+}
 
 // Everything below is a pure function of the finalized PlanMemory input.  A
 // retry changes only the random order in which simultaneously-live values are
@@ -628,7 +642,7 @@ public:
   explicit PreparedMemLivenessAnalysis(const PlanMemoryInput &input,
                                        DebugTrace *trace = nullptr)
       : operations(input.operations),
-        operationIndex(operations, input.operationIndex),
+        operationIndex(operations, RequirePlanMemoryOperationIndex(input)),
         liveness(operations, input.functionArguments, operationIndex, trace) {
     // Bridge-generated operation ids intentionally live in a high numeric
     // range.  A dense cache indexed by that id initialized roughly one
@@ -647,6 +661,33 @@ public:
     for (const OperationRecord &operation : operations)
       blockArguments[{operation.regionPath, operation.blockLabel}] =
           operation.blockArguments;
+
+    // Build direct region ownership in the same linear walk. The previous
+    // lazy helpers rescanned the entire operation stream for each parent and
+    // each rollback seed even though this topology is immutable.
+    std::map<std::vector<int>, int> lastOperationAtPath;
+    for (const OperationRecord &operation : operations) {
+      if (!operation.regionPath.empty()) {
+        std::vector<int> parentPath(operation.regionPath.begin(),
+                                    std::prev(operation.regionPath.end()));
+        const int region = operation.regionPath.back();
+        const auto key = std::make_pair(parentPath, region);
+        if (parentOperationByRegionPath.count(key) == 0) {
+          const auto owner = lastOperationAtPath.find(parentPath);
+          const int ownerId = owner == lastOperationAtPath.end()
+                                  ? -1
+                                  : owner->second;
+          parentOperationByRegionPath.emplace(key, ownerId);
+          if (ownerId >= 0) {
+            std::vector<int> &children =
+                childRegionsByOperation[ownerId];
+            if (children.empty() || children.back() != region)
+              children.push_back(region);
+          }
+        }
+      }
+      lastOperationAtPath[operation.regionPath] = operation.operationId;
+    }
   }
 
   PreparedMemLivenessAnalysis(const PreparedMemLivenessAnalysis &) = delete;
@@ -671,26 +712,11 @@ public:
   }
 
   const std::vector<int> &childRegions(int operationId) const {
+    static const std::vector<int> empty;
     auto found = childRegionsByOperation.find(operationId);
     if (found != childRegionsByOperation.end())
       return found->second;
-    const OperationRecord &parent = operationIndex.operation(operationId);
-    std::vector<int> regions;
-    for (const OperationRecord &candidate : operations) {
-      if (candidate.index <= parent.index)
-        continue;
-      if (candidate.regionPath.size() == parent.regionPath.size() + 1 &&
-          pathPrefix(parent.regionPath, candidate.regionPath)) {
-        const int region = candidate.regionPath.back();
-        if (std::find(regions.begin(), regions.end(), region) == regions.end())
-          regions.push_back(region);
-        continue;
-      }
-      if (candidate.regionPath.size() <= parent.regionPath.size())
-        break;
-    }
-    return childRegionsByOperation.emplace(operationId, std::move(regions))
-        .first->second;
+    return empty;
   }
 
   int parentOperation(const std::vector<int> &parentPath, int region) const {
@@ -698,18 +724,7 @@ public:
     auto found = parentOperationByRegionPath.find(key);
     if (found != parentOperationByRegionPath.end())
       return found->second;
-    int parent = -1;
-    for (const OperationRecord &candidate : operations) {
-      if (candidate.regionPath != parentPath)
-        continue;
-      const std::vector<int> &regions = childRegions(candidate.operationId);
-      if (std::find(regions.begin(), regions.end(), region) != regions.end()) {
-        parent = candidate.operationId;
-        break;
-      }
-    }
-    parentOperationByRegionPath.emplace(key, parent);
-    return parent;
+    return -1;
   }
 
   const std::vector<std::string> *
@@ -726,8 +741,8 @@ public:
   PlanMemoryOperationIndex operationIndex;
   Liveness liveness;
   mutable std::unordered_map<int, std::vector<std::string>> orderedLiveValues;
-  mutable std::map<int, std::vector<int>> childRegionsByOperation;
-  mutable std::map<std::pair<std::vector<int>, int>, int>
+  std::map<int, std::vector<int>> childRegionsByOperation;
+  std::map<std::pair<std::vector<int>, int>, int>
       parentOperationByRegionPath;
   std::map<std::pair<std::vector<int>, std::string>,
            std::vector<std::string>>

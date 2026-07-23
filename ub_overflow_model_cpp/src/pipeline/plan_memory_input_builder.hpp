@@ -102,6 +102,12 @@ public:
     preservedSSAValues.reserve(valueCapacity);
     bufferRepresentativeValues.reserve(inputModule.buffers.size());
     alignedViewTypes.reserve(inputModule.buffers.size());
+    finalIdentity.reserve(inputModule.buffers.size());
+    mappedIdentityCache.reserve(valueCapacity);
+    targetSourceIdentities.reserve(inputModule.buffers.size());
+    sourceBuffers.reserve(inputModule.planningContext
+                              .afterAllocBufferBySource.size());
+    bufferByIdentity.reserve(inputModule.buffers.size());
     const size_t operationCapacity = logical.operations.size();
     syntheticBlocks.reserve(logical.regions.size());
     scalarValues.reserve(valueCapacity);
@@ -208,10 +214,19 @@ public:
                                              resultAllocationNames,
                                              resultAllocationTypes));
         });
+    // Normalize rewrites preserve materialized value lists for changed
+    // records.  Finalize any newly synthesized record once here, before the
+    // immutable PlanMemory index is built, rather than allowing downstream
+    // consumers to reconstruct SSA information from textual operation dumps.
+    MeasureStage(trace, "BuildPlanMemoryInput.FinalizeTypedValues", [&] {
+      MaterializeOperationValueLists(result.operations);
+    });
     result.operationIndex = MeasureStage(
         trace, "BuildPlanMemoryInput.BuildOperationIndex", [&] {
-          return BuildPlanMemoryOperationIndexStorage(result.operations);
+          return BuildPlanMemoryOperationIndexStorage(result.operations,
+                                                      true);
         });
+    result.hasTypedOperationBridge = true;
     result.functionArguments = functionArguments;
     return result;
   }
@@ -508,17 +523,26 @@ private:
     if (cached != mappedIdentityCache.end())
       return cached->second;
     const std::set<std::string> alternatives = BufferAlternatives(buffer);
-    std::set<std::string> candidates;
+    std::string candidate;
+    bool hasCandidate = false;
+    bool ambiguousCandidate = false;
     for (const std::string &alternative : alternatives) {
       const std::string source = MappedBufferIdentity(
           alternative, module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.bufferMapping);
-      if (targetSourceIdentities.count(source))
-        candidates.insert(finalIdentity.at(source));
+      if (targetSourceIdentities.count(source) == 0)
+        continue;
+      const std::string &identity = finalIdentity.at(source);
+      if (!hasCandidate) {
+        candidate = identity;
+        hasCandidate = true;
+      } else if (candidate != identity) {
+        ambiguousCandidate = true;
+      }
     }
     MappedIdentityLookup lookup;
     lookup.alternativeCount = alternatives.size();
-    if (candidates.size() == 1)
-      lookup.identity = *candidates.begin();
+    if (hasCandidate && !ambiguousCandidate)
+      lookup.identity = std::move(candidate);
     return mappedIdentityCache.emplace(buffer, std::move(lookup))
         .first->second;
   }
@@ -5537,13 +5561,14 @@ private:
   std::unordered_map<int, int> syntheticBlocks;
   std::unordered_map<int, std::string> scalarValues;
   std::unordered_map<int, int> scalarValueBlocks;
-  std::map<std::string, std::string> finalIdentity;
-  mutable std::map<std::string, MappedIdentityLookup> mappedIdentityCache;
-  std::set<std::string> targetSourceIdentities;
+  std::unordered_map<std::string, std::string> finalIdentity;
+  mutable std::unordered_map<std::string, MappedIdentityLookup>
+      mappedIdentityCache;
+  std::unordered_set<std::string> targetSourceIdentities;
   std::map<std::string, std::string> bufferNames;
   std::map<std::string, std::string> bufferTypes;
   std::map<std::string, const LocalBufferRecord *> finalBufferRecords;
-  std::map<std::string, const LocalBufferRecord *> sourceBuffers;
+  std::unordered_map<std::string, const LocalBufferRecord *> sourceBuffers;
   std::map<std::pair<int, size_t>, std::string> decomposeAllocationTypes;
   std::unordered_map<std::string, std::string> namedValueTypes;
   // Collected alongside allocation emission. The normalize bridge consumes
@@ -5558,7 +5583,8 @@ private:
   std::map<std::string, std::string> stableBufferAliases;
   std::unordered_map<int, std::vector<const PlanMemoryInputBufferRecord *>>
       buffersByOwner;
-  std::map<std::string, const PlanMemoryInputBufferRecord *> bufferByIdentity;
+  std::unordered_map<std::string, const PlanMemoryInputBufferRecord *>
+      bufferByIdentity;
   std::set<std::string> emittedAllocations;
   std::unordered_map<int, std::vector<size_t>> nonTargetBuffersByOwner;
   std::unordered_map<int, std::string> valueBuffers;

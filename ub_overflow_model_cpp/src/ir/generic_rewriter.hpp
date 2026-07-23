@@ -149,6 +149,43 @@ public:
       listener->operationMoved(operation, block, -1);
   }
 
+  // Detach a rewrite wave in one linear block rebuild. Operation/value IDs
+  // remain stable tombstones until CompactGenericModule runs, while each
+  // surviving operation receives its final ordinal only once. This preserves
+  // the observable block order of repeated removeFromBlock calls without the
+  // quadratic suffix-renumbering cost.
+  size_t removeManyFromBlocks(const std::vector<int> &operations) {
+    if (operations.empty())
+      return 0;
+    std::vector<uint8_t> remove(module.operations.size(), uint8_t{0});
+    for (int operation : operations)
+      if (operation >= 0 &&
+          static_cast<size_t>(operation) < module.operations.size())
+        remove[static_cast<size_t>(operation)] = 1;
+
+    size_t removed = 0;
+    for (GenericBlock &block : module.blocks) {
+      size_t write = 0;
+      for (int operation : block.operations) {
+        if (operation >= 0 &&
+            static_cast<size_t>(operation) < remove.size() &&
+            remove[static_cast<size_t>(operation)] != 0) {
+          detachedOperations.insert(operation);
+          if (listener)
+            listener->operationMoved(operation, block.id, -1);
+          ++removed;
+          continue;
+        }
+        block.operations[write] = operation;
+        module.operations.at(static_cast<size_t>(operation)).ordinal =
+            static_cast<int>(write);
+        ++write;
+      }
+      block.operations.resize(write);
+    }
+    return removed;
+  }
+
   int cloneOperation(int sourceId, int parent, int region, int block,
                      const std::map<int, int> &values) {
     const GenericOperation &source =
@@ -193,30 +230,41 @@ public:
   int cloneOperationTree(int sourceId, int parent, int region, int block,
                          std::map<int, int> &values,
                          std::map<int, int> *blocks = nullptr) {
-    const GenericOperation source =
+    // createOperation may grow the operation table and invalidate references
+    // into it.  Preserve only the structural vectors needed after the clone;
+    // copying the complete operation also copied attributes, properties,
+    // types, effects and operand payloads a second time for every node in a
+    // cloned tree.
+    const GenericOperation &source =
         module.operations.at(static_cast<size_t>(sourceId));
+    const std::vector<int> sourceResults = source.results;
+    const std::vector<int> sourceRegions = source.regions;
     const int clone = cloneOperation(sourceId, parent, region, block, values);
     GenericOperation &cloned =
         module.operations.at(static_cast<size_t>(clone));
     for (size_t index = 0;
-         index < source.results.size() && index < cloned.results.size(); ++index)
-      values[source.results[index]] = cloned.results[index];
-    for (int sourceRegionId : source.regions) {
-      const GenericRegion sourceRegion =
-          module.regions.at(static_cast<size_t>(sourceRegionId));
+         index < sourceResults.size() && index < cloned.results.size(); ++index)
+      values[sourceResults[index]] = cloned.results[index];
+    for (int sourceRegionId : sourceRegions) {
+      const std::vector<int> sourceBlocks =
+          module.regions.at(static_cast<size_t>(sourceRegionId)).blocks;
       const int clonedRegion = createRegion(clone);
-      for (int sourceBlockId : sourceRegion.blocks) {
-        const GenericBlock sourceBlock =
+      for (int sourceBlockId : sourceBlocks) {
+        const GenericBlock &sourceBlock =
             module.blocks.at(static_cast<size_t>(sourceBlockId));
+        const std::vector<int> sourceArguments = sourceBlock.arguments;
+        const std::vector<std::string> sourceArgumentTypes =
+            sourceBlock.argumentTypes;
+        const std::vector<int> sourceOperations = sourceBlock.operations;
         const int clonedBlock = createBlock(clonedRegion,
-                                            sourceBlock.argumentTypes);
+                                            sourceArgumentTypes);
         if (blocks)
           (*blocks)[sourceBlockId] = clonedBlock;
         const GenericBlock &newBlock =
             module.blocks.at(static_cast<size_t>(clonedBlock));
-        for (size_t index = 0; index < sourceBlock.arguments.size(); ++index)
-          values[sourceBlock.arguments[index]] = newBlock.arguments[index];
-        for (int child : sourceBlock.operations) {
+        for (size_t index = 0; index < sourceArguments.size(); ++index)
+          values[sourceArguments[index]] = newBlock.arguments[index];
+        for (int child : sourceOperations) {
           const int clonedChild =
               cloneOperationTree(child, clone, clonedRegion, clonedBlock,
                                  values, blocks);

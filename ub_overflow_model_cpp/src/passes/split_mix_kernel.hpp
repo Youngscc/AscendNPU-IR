@@ -262,6 +262,7 @@ inline void RemoveUselessSplitMixMarkOps(
 
   GenericRewriter rewriter(module);
   std::vector<int> marks;
+  std::vector<int> erasedMarks;
   for (int operationId : activeOperations)
     if (module.operations.at(static_cast<size_t>(operationId)).name ==
         "annotation.mark")
@@ -288,9 +289,10 @@ inline void RemoveUselessSplitMixMarkOps(
                     });
     if (onlyMarks)
       continue;
-    rewriter.removeFromBlock(mark.blockId, operationId);
+    erasedMarks.push_back(operationId);
     activeOperations.erase(operationId);
   }
+  rewriter.removeManyFromBlocks(erasedMarks);
 }
 
 // Mirrors postProcessVectorFunc. InsertLoadStoreForMixCV may duplicate a
@@ -315,6 +317,7 @@ inline void PostProcessSplitMixVectorFunc(
   collect(functionId);
 
   GenericRewriter rewriter(module, &useLists);
+  std::vector<int> erasedOperations;
   for (int operationId : descendants) {
     if (activeOperations.count(operationId) == 0)
       continue;
@@ -332,9 +335,10 @@ inline void PostProcessSplitMixVectorFunc(
             std::string::npos;
     if (!replacementMark && !cubeExtract)
       continue;
-    rewriter.removeFromBlock(operation.blockId, operationId);
+    erasedOperations.push_back(operationId);
     activeOperations.erase(operationId);
   }
+  rewriter.removeManyFromBlocks(erasedOperations);
 }
 
 // Mirrors PostCubeReplacement and the explicit cube-erasure cleanup in
@@ -360,6 +364,7 @@ inline void PostProcessSplitMixCubeFunc(
   collect(functionId);
 
   GenericRewriter rewriter(module, &useLists);
+  std::vector<int> erasedOperations;
   for (int operationId : descendants) {
     if (activeOperations.count(operationId) == 0)
       continue;
@@ -383,10 +388,11 @@ inline void PostProcessSplitMixCubeFunc(
         (operation.name == "bufferization.to_tensor" ||
          operation.name == "hivm.hir.load" ||
          operation.name == "memref.alloc")) {
-      rewriter.removeFromBlock(operation.blockId, operationId);
+      erasedOperations.push_back(operationId);
       activeOperations.erase(operationId);
     }
   }
+  rewriter.removeManyFromBlocks(erasedOperations);
 }
 
 inline std::optional<bool>
@@ -686,6 +692,7 @@ inline GenericModule RunSplitMixKernelSelectedProjections(
   bool erased = true;
   while (erased) {
     erased = false;
+    std::vector<int> erasedOperations;
     const std::vector<int> candidates(activeOperations.rbegin(),
                                       activeOperations.rend());
     for (int operationId : candidates) {
@@ -696,10 +703,11 @@ inline GenericModule RunSplitMixKernelSelectedProjections(
       if (!IsSplitMixTriviallyDead(module, operation, activeOperations,
                                    useLists))
         continue;
-      rewriter.removeFromBlock(operation.blockId, operationId);
+      erasedOperations.push_back(operationId);
       activeOperations.erase(operationId);
       erased = true;
     }
+    rewriter.removeManyFromBlocks(erasedOperations);
   }
   RemoveUselessSplitMixMarkOps(module, activeOperations);
   return CompactGenericModule(std::move(module));

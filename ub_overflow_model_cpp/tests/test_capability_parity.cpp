@@ -5,6 +5,7 @@
 #include "../src/passes/tile_and_bind_sub_block.hpp"
 #include "../src/passes/tightly_coupled_buffer_guard.hpp"
 #include "../src/passes/mark_multi_buffer.hpp"
+#include "../src/passes/plan_memory/operation_index.hpp"
 #include "../src/passes/sink_op_to_consumer_in_loop.hpp"
 
 #include <iostream>
@@ -308,6 +309,54 @@ void TestGenericRewriterIncrementalReplaceAllUses() {
         "reattaching an operation must restore its operands in the use-list");
 }
 
+void TestGenericRewriterBatchTombstones() {
+  cvub::GenericModule module = cvub::ParseGenericIR(
+      "ub_overflow_model_cpp/tests/fixtures/batch_tombstones.mlir", false);
+  cvub::PipelineAnalysisContext analysis(module, cvub::kGenericAnalysisUsers);
+  std::vector<int> additions;
+  for (const cvub::GenericOperation &operation : module.operations)
+    if (operation.name == "arith.addi")
+      additions.push_back(operation.id);
+  Check(additions.size() == 3, "expected three batch rewrite operations");
+  cvub::GenericRewriter rewriter(module, &analysis);
+  const size_t removed =
+      rewriter.removeManyFromBlocks({additions[1], additions.back()});
+  Check(removed == 2, "batch tombstone count mismatch");
+  const cvub::GenericOperation &survivor =
+      module.operations.at(static_cast<size_t>(additions.front()));
+  Check(survivor.ordinal == 0,
+        "batch tombstones must renumber each surviving suffix once");
+  Check(!analysis.hasUsers(module.operations
+                               .at(static_cast<size_t>(additions[1]))
+                               .results.front()),
+        "batch tombstones must update incremental use counts");
+}
+
+void TestTypedPlanMemoryIndexRejectsTextFallback() {
+  cvub::OperationRecord operation;
+  operation.index = 0;
+  operation.operationId = 7;
+  operation.opName = "arith.addi";
+  operation.text = "%sum = arith.addi %lhs, %rhs : index";
+  std::vector<cvub::OperationRecord> operations{operation};
+  bool rejected = false;
+  try {
+    (void)cvub::BuildPlanMemoryOperationIndexStorage(operations, true);
+  } catch (const std::runtime_error &) {
+    rejected = true;
+  }
+  Check(rejected,
+        "typed PlanMemory index must not reconstruct SSA from operation text");
+  cvub::MaterializeOperationValueLists(operations);
+  const auto index =
+      cvub::BuildPlanMemoryOperationIndexStorage(operations, true);
+  Check(index->resultsByRecord.front() ==
+            std::vector<std::string>{"%sum"} &&
+            index->operandsByRecord.front() ==
+                std::vector<std::string>({"%lhs", "%rhs"}),
+        "typed PlanMemory index must consume materialized SSA lists");
+}
+
 void TestMarkMultiBufferExplicitMarksAndFailFast() {
   cvub::GenericModule module = cvub::ParseGenericIR(
       "ub_overflow_model_cpp/tests/fixtures/two_aiv_functions.mlir", false);
@@ -434,6 +483,10 @@ int main() {
   std::cout << "[PASS] GenericRewriter assigns region ordinals\n";
   TestGenericRewriterIncrementalReplaceAllUses();
   std::cout << "[PASS] GenericRewriter replaces uses incrementally\n";
+  TestGenericRewriterBatchTombstones();
+  std::cout << "[PASS] GenericRewriter batches tombstones\n";
+  TestTypedPlanMemoryIndexRejectsTextFallback();
+  std::cout << "[PASS] typed PlanMemory index rejects text fallback\n";
   TestMarkMultiBufferExplicitMarksAndFailFast();
   std::cout << "[PASS] MarkMultiBuffer preserves explicit order and fails closed\n";
   TestSinkOpUseMultiplicityAndGreedyOrder();

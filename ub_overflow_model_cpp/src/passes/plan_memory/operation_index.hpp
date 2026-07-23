@@ -21,7 +21,8 @@ struct PlanMemoryOperationIndexStorage {
 
 inline std::shared_ptr<const PlanMemoryOperationIndexStorage>
 BuildPlanMemoryOperationIndexStorage(
-    const std::vector<OperationRecord> &operations) {
+    const std::vector<OperationRecord> &operations,
+    bool requireMaterializedValueLists = false) {
   static constexpr size_t kMissingPosition =
       std::numeric_limits<size_t>::max();
   auto result = std::make_shared<PlanMemoryOperationIndexStorage>();
@@ -53,6 +54,10 @@ BuildPlanMemoryOperationIndexStorage(
       operations.empty() ? 0 : maximumLinearIndex + 1, kMissingPosition);
   for (size_t position = 0; position < operations.size(); ++position) {
     const OperationRecord &operation = operations[position];
+    if (requireMaterializedValueLists && !operation.materializedValueLists)
+      throw std::runtime_error(
+          "PlanMemoryOperationIndex: typed bridge operation is not "
+          "materialized");
     const size_t linearIndex = static_cast<size_t>(operation.index);
     if (result->positionByLinearIndex[linearIndex] != kMissingPosition)
       throw std::runtime_error(
@@ -61,8 +66,17 @@ BuildPlanMemoryOperationIndexStorage(
     // Match the previous Liveness behavior: the first record carrying a
     // given semantic operation id is authoritative.
     result->positionByOperationId.emplace(operation.operationId, position);
-    result->resultsByRecord.push_back(operationResultNames(operation));
-    result->operandsByRecord.push_back(operationOperandNames(operation));
+    // The normal pipeline already carries typed SSA result/operand lists from
+    // the bridge.  Consume those vectors directly so PlanMemory cannot
+    // silently fall back to reparsing OperationRecord::text.  The fallback is
+    // retained only for the explicit before-plan-memory text interface.
+    if (requireMaterializedValueLists) {
+      result->resultsByRecord.push_back(operation.materializedResults);
+      result->operandsByRecord.push_back(operation.materializedOperands);
+    } else {
+      result->resultsByRecord.push_back(operationResultNames(operation));
+      result->operandsByRecord.push_back(operationOperandNames(operation));
+    }
     for (const std::string &value : result->resultsByRecord.back())
       (void)internValue(value);
     for (const std::string &operand : result->operandsByRecord.back()) {

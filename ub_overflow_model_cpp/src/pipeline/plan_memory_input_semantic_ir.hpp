@@ -452,7 +452,9 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
         FindBufferizedOperationBuffer(bufferized, operation, operand);
     return buffer ? *buffer : std::string();
   };
-  std::map<std::string, std::string> mappedBufferCache;
+  std::unordered_map<std::string, std::string> mappedBufferCache;
+  mappedBufferCache.reserve(
+      afterMarkMultiBuffer.afterInlineLoadCopy.buffers.size());
   auto mappedBufferIdentity = [&](const std::string &buffer)
       -> const std::string & {
     auto found = mappedBufferCache.find(buffer);
@@ -526,8 +528,11 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
          afterMarkMultiBuffer.markMultiBuffer.preloadLocalBuffers.count(
              buffer.sourceIdentity) != 0});
   }
-  std::map<std::string, std::string> finalIdentity;
-  std::set<std::string> targetBuffers;
+  std::unordered_map<std::string, std::string> finalIdentity;
+  std::unordered_set<std::string> targetBuffers;
+  finalIdentity.reserve(
+      afterMarkMultiBuffer.afterInlineLoadCopy.buffers.size());
+  targetBuffers.reserve(result.buffers.size());
   for (const LocalBufferRecord &buffer :
        afterMarkMultiBuffer.afterInlineLoadCopy.buffers)
     finalIdentity[buffer.sourceIdentity] = buffer.identity;
@@ -599,22 +604,29 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
         AccessEffects(event.operationName, buffers.size(), effectProperties,
                       metadata);
     for (size_t operand = 0; operand < buffers.size(); ++operand) {
-      std::set<std::string> candidates;
+      // Only the cardinality 0/1/many matters here. Building a tree-backed
+      // set for every operand was pure bridge overhead; retain the first
+      // distinct target and flag a second distinct identity instead.
+      std::string candidate;
+      bool ambiguousCandidate = false;
       for (const std::string &alternative :
            BufferAlternatives(buffers[operand])) {
         const std::string mapped =
             buffersArePostSinglePoint && startsWith(alternative, "local:")
                 ? "base:" + alternative.substr(6)
                 : mappedBufferIdentity(alternative);
-        if (targetBuffers.count(mapped) != 0)
-          candidates.insert(mapped);
+        if (targetBuffers.count(mapped) == 0)
+          continue;
+        if (candidate.empty())
+          candidate = mapped;
+        else if (candidate != mapped)
+          ambiguousCandidate = true;
       }
-      if (candidates.empty())
+      if (candidate.empty())
         continue;
-      if (candidates.size() != 1)
+      if (ambiguousCandidate)
         continue;
-      const std::string &identity = *candidates.begin();
-      auto final = finalIdentity.find(identity);
+      auto final = finalIdentity.find(candidate);
       if (final == finalIdentity.end())
         throw std::runtime_error(
             "PlanMemoryInput: access references missing buffer");

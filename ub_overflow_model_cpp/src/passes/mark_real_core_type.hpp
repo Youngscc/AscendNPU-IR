@@ -103,8 +103,6 @@ CollectMarkedRealCoreTypeCombinedProjection(GenericModule projection,
   MarkRealCoreTypeProjectionSets retained{
       std::vector<uint8_t>(sourceOperationCount, uint8_t{0}),
       std::vector<uint8_t>(sourceOperationCount, uint8_t{0})};
-  const GenericModuleAnalysisSnapshot analysis(
-      projection, kGenericAnalysisFunctionDescendants);
   auto retainOperation = [&](int operationId, bool inCube, bool inVector) {
     const GenericOperation &operation =
         projection.operations.at(static_cast<size_t>(operationId));
@@ -119,6 +117,20 @@ CollectMarkedRealCoreTypeCombinedProjection(GenericModule projection,
     if (inVector)
       retained.vector[source] = 1;
   };
+  std::function<void(int, bool, bool)> retainTree =
+      [&](int operationId, bool inCube, bool inVector) {
+        retainOperation(operationId, inCube, inVector);
+        const GenericOperation &operation =
+            projection.operations.at(static_cast<size_t>(operationId));
+        for (int regionId : operation.regions)
+          for (int blockId : projection.regions
+                                 .at(static_cast<size_t>(regionId))
+                                 .blocks)
+            for (int child : projection.blocks
+                                 .at(static_cast<size_t>(blockId))
+                                 .operations)
+              retainTree(child, inCube, inVector);
+      };
   for (const GenericOperation &function : projection.operations) {
     if (function.name != "func.func")
       continue;
@@ -128,9 +140,7 @@ CollectMarkedRealCoreTypeCombinedProjection(GenericModule projection,
         function.attributes, "hivm.func_core_type"));
     const bool inCube = !partOfMix || core == "AIC";
     const bool inVector = !partOfMix || core == "AIV";
-    retainOperation(function.id, inCube, inVector);
-    for (int operationId : analysis.descendants(function))
-      retainOperation(operationId, inCube, inVector);
+    retainTree(function.id, inCube, inVector);
   }
   return retained;
 }
@@ -150,9 +160,9 @@ inline GenericModule RunMarkRealCoreType(GenericModule module,
     return module;
   }
 
-  // MIX inputs still require independent Cube and Vector projections.  Both
-  // start from the same instruction-marked snapshot so marker construction is
-  // shared while their projection/canonicalization semantics remain exact.
+  // MIX inputs require both Cube and Vector survival sets. Build both sides in
+  // one combined SplitMix/canonicalization run so cloning, analysis and fixed
+  // point setup are shared while each side's survival semantics remain exact.
   const size_t sourceOperationCount = module.operations.size();
   const bool hasMixFunction = std::any_of(
       module.operations.begin(), module.operations.end(),

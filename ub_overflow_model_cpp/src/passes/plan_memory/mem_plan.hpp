@@ -5,6 +5,8 @@
 #include "storage_entry.hpp"
 #include "../../support/debug_trace.hpp"
 
+#include <memory_resource>
+
 namespace cvub {
 
 struct MemoryBoundModel {
@@ -14,10 +16,19 @@ struct MemoryBoundModel {
   int lastStorageEntry = -1;
 };
 
-using MemBoundListModel = std::list<MemoryBoundModel>;
+// Preserve the compiler-equivalent linked outline/iterator semantics while
+// allocating its nodes from a retry-scoped pool. Clearing an attempt returns
+// nodes to this standard-library arena instead of repeatedly calling the
+// global allocator for every split and rollback record.
+using MemBoundListModel = std::pmr::list<MemoryBoundModel>;
 using MemBoundListModelIter = MemBoundListModel::iterator;
 
 struct PlanRecordModel {
+  explicit PlanRecordModel(
+      std::pmr::memory_resource *resource =
+          std::pmr::get_default_resource())
+      : replaced(resource) {}
+
   int specLevel = SPEC_LEVEL_0;
   int childIdx = -1;
   bool tailed = false;
@@ -43,6 +54,10 @@ struct SpecInfoModel {
 };
 
 struct MemPlanStateModel {
+  std::pmr::unsynchronized_pool_resource outlineNodePool;
+  PlanRecHisModel historyScratch;
+  std::vector<MemoryBoundModel> splitBoundScratch;
+  std::vector<uint64_t> relationOffsetScratch;
   bool splitOutline = false;
   int nextStorageEntryId = 0;
   std::list<StorageEntryModel> relationStorageEntries;
@@ -61,6 +76,9 @@ struct MemPlanStateModel {
 };
 
 inline void ResetMemPlanState(MemPlanStateModel &state) {
+  state.historyScratch.clear();
+  state.splitBoundScratch.clear();
+  state.relationOffsetScratch.clear();
   state.splitOutline = false;
   state.nextStorageEntryId = 0;
   state.relationStorageEntries.clear();
@@ -255,13 +273,14 @@ inline void UpdateOutline(MemBoundListModel &outline, PlanRecHisModel &history,
                           MemBoundListModelIter start,
                           MemBoundListModelIter endInclusive, uint64_t size,
                           bool isDirectlyRollback, int localLevel,
-                          bool splitOutline) {
+                          MemPlanStateModel &state) {
   uint64_t res = size - entry.alignedConstBits;
   const MemoryBoundModel last = *endInclusive;
   auto end = endInclusive;
   ++end;
-  std::vector<MemoryBoundModel> splitBound;
-  if (splitOutline) {
+  std::vector<MemoryBoundModel> &splitBound = state.splitBoundScratch;
+  splitBound.clear();
+  if (state.splitOutline) {
     AddMemBoundInSectionalWay(entry, start, end, splitBound);
   } else {
     std::vector<BufferLifeModel> life = entry.bufferLifeVec;
@@ -280,7 +299,7 @@ inline void UpdateOutline(MemBoundListModel &outline, PlanRecHisModel &history,
   for (int i = static_cast<int>(splitBound.size()) - 1; i >= 0; --i)
     end = outline.insert(end, std::move(splitBound[static_cast<size_t>(i)]));
 
-  PlanRecordModel record;
+  PlanRecordModel record(&state.outlineNodePool);
   record.specLevel = localLevel;
   record.childIdx = entry.childIdx;
   record.tailed = res > 0;
@@ -605,7 +624,7 @@ inline void SpecAllocRelationOtherBufferEntry(
         throw std::runtime_error(
             "SpecAllocRelationOtherBufferEntry: relation not found");
       UpdateOutline(outline, history, *other, start, end, size, true,
-                    SPEC_LEVEL_1, state.splitOutline);
+                    SPEC_LEVEL_1, state);
       return;
     }
   }
@@ -646,7 +665,9 @@ inline bool SpecAlloc(
       if (size < entry.alignedConstBits)
         continue;
 
-      std::vector<uint64_t> otherBufferOffsets;
+      std::vector<uint64_t> &otherBufferOffsets =
+          state.relationOffsetScratch;
+      otherBufferOffsets.clear();
       if (localLevel == SPEC_LEVEL_1 &&
           VerifyConflictStage1(history, entry, start, end,
                                otherBufferOffsets, entries, state))
@@ -660,7 +681,7 @@ inline bool SpecAlloc(
 
       entry.bitsOffset = allocOffset;
       UpdateOutline(outline, history, entry, start, end, size, false,
-                    localLevel, state.splitOutline);
+                    localLevel, state);
       if (localLevel == SPEC_LEVEL_1) {
         if (otherBufferOffsets.empty())
           throw std::runtime_error("SPEC_LEVEL_1 missing relation offsets");
@@ -796,10 +817,11 @@ inline uint64_t PlanMemAddressForLevel0(
         std::max(state.nextStorageEntryId, entry.id + 1);
   RebuildStorageEntryLookup(entries, state);
   BuildStorageEntryConflictTables(entries, state, inplacableBufferPairs);
-  MemBoundListModel outline;
+  MemBoundListModel outline(&state.outlineNodePool);
   outline.push_back(MemoryBoundModel{
       {}, 0, std::numeric_limits<uint64_t>::max(), -1});
-  PlanRecHisModel history;
+  PlanRecHisModel &history = state.historyScratch;
+  history.clear();
   SpecInfoModel specInfo;
   specInfo.specLevel = SPEC_LEVEL_0;
   specInfo.maxLevel = SPEC_LEVEL_0;
@@ -839,9 +861,10 @@ inline bool PlanMemAddressOfWholeLocalBuffer(
         std::max(state.nextStorageEntryId, entry.id + 1);
   RebuildStorageEntryLookup(entries, state);
   BuildStorageEntryConflictTables(entries, state, inplacableBufferPairs);
-  MemBoundListModel outline;
+  MemBoundListModel outline(&state.outlineNodePool);
   outline.push_back(MemoryBoundModel{{}, 0, maxBits, -1});
-  PlanRecHisModel history;
+  PlanRecHisModel &history = state.historyScratch;
+  history.clear();
   SpecInfoModel specInfo;
 
   while (specInfo.childIdx < static_cast<int>(entries.size()) - 1) {
