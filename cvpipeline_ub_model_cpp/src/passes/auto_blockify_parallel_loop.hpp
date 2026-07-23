@@ -16,19 +16,23 @@
 //   `annotation.mark {logical_block_num}` op AND a `hivm.hir.get_block_idx`),
 //   wrap the per-block body in
 //
-//     scf.for %iv = trunci(block_idx) to logical_block_num
+//     scf.for %iv = trunci(block_idx)
+//                   to ceildiv(logical_block_num, blockify_size)
 //                   step physical_core_count : i32 {
 //       %mul    = arith.muli %iv, %blockify_size : i32
 //       %casted = arith.extsi %mul : i32 to i64        // per-iteration block id
 //       ...body...
 //     } {autoblockify.subloop}
 //
+//   The ceildiv is omitted when blockify_size <= 1, matching the real pass.
+//
 //   * OUTSIDE the loop, unchanged: the `annotation.mark {logical_block_num}`
 //     op, the transitive def-chain of `logical_block_num` (`traceExceptions`),
 //     and the `hivm.hir.get_block_idx` op.
 //   * INSIDE the loop: every other body op in original order; uses of the
 //     block-idx result are rewritten to the per-iteration `arith.extsi` value.
-//   * `physical_core_count` = VECTOR_CORE_COUNT (AIV) / CUBE_CORE_COUNT (AIC),
+//   * `physical_core_count` = VECTOR_CORE_COUNT (AIV) / CUBE_CORE_COUNT
+//     (AIC and MIX),
 //     read from the module `dlti.target_system_spec`. AIC_OR_AIV / a missing
 //     spec makes the real `getPhysicalBlockNum` fail; this model fails closed
 //     (throws) rather than emitting an unmodeled result.
@@ -98,14 +102,17 @@ inline std::string AutoBlockifyFunctionName(const GenericOperation &function) {
   return name;
 }
 
-// Mirror `getPhysicalBlockNum`: AIV -> VECTOR_CORE_COUNT, AIC -> CUBE_CORE_COUNT,
-// AIC_OR_AIV / missing spec -> no value (the real pass fails).
+// Mirror `getPhysicalBlockNum`: AIV -> VECTOR_CORE_COUNT; every other concrete
+// core type (AIC and MIX) -> CUBE_CORE_COUNT. AIC_OR_AIV / missing spec has no
+// value and makes the real pass fail.
 inline std::optional<int64_t>
 AutoBlockifyPhysicalBlockNum(const std::string &coreType,
                              const std::string &moduleAttributes) {
   if (coreType == "AIV")
     return AutoBlockifySpecCount(moduleAttributes, "VECTOR_CORE_COUNT");
-  if (coreType == "AIC")
+  if (coreType == "AIC_OR_AIV")
+    return std::nullopt;
+  if (coreType == "AIC" || coreType == "MIX")
     return AutoBlockifySpecCount(moduleAttributes, "CUBE_CORE_COUNT");
   return std::nullopt;
 }
@@ -118,7 +125,10 @@ inline void AutoBlockifyOneFunction(GenericModule &module,
   const std::string coreKind = AutoBlockifyEnumInner(FindDictionaryValue(
       module.operations.at(static_cast<size_t>(funcId)).attributes,
       "hacc.function_kind"));
-  if (coreKind != "DEVICE")
+  const bool isEntry = AutoBlockifyHasAttr(
+      module.operations.at(static_cast<size_t>(funcId)).attributes,
+      "hacc.entry");
+  if (coreKind != "DEVICE" || !isEntry)
     return;
   {
     const GenericOperation &function =
@@ -136,7 +146,7 @@ inline void AutoBlockifyOneFunction(GenericModule &module,
   const std::vector<int> original =
       module.blocks.at(static_cast<size_t>(entryBlockId)).operations;
 
-  int markId = -1;
+  std::set<int> logicalMarkIds;
   int getBlockIdxId = -1;
   int returnId = -1;
   int logicalValue = -1;
@@ -146,7 +156,7 @@ inline void AutoBlockifyOneFunction(GenericModule &module,
         module.operations.at(static_cast<size_t>(operationId));
     if (operation.name == "annotation.mark" &&
         AutoBlockifyHasAttr(operation.attributes, "logical_block_num")) {
-      markId = operationId;
+      logicalMarkIds.insert(operationId);
       if (!operation.operands.empty())
         logicalValue = operation.operands.front();
       continue;
@@ -160,16 +170,18 @@ inline void AutoBlockifyOneFunction(GenericModule &module,
       returnId = operationId;
   }
 
-  // The real pass returns success (no-op) when there is no get_block_idx.
-  if (getBlockIdxId < 0)
-    return;
-
   const std::string functionName =
       AutoBlockifyFunctionName(module.operations.at(static_cast<size_t>(funcId)));
-  if (markId < 0 || logicalValue < 0)
+  // `loopOnLogicBlock` diagnoses a missing logical mark before checking for a
+  // missing get_block_idx. Keep that order: a device entry with neither is a
+  // pass failure, not a no-op.
+  if (logicalMarkIds.empty() || logicalValue < 0)
     throw std::runtime_error(
         "AutoBlockifyParallelLoop: logical_block_num mark not found in " +
         functionName);
+  // With a logical mark but no get_block_idx the real pass is a no-op.
+  if (getBlockIdxId < 0)
+    return;
   if (blockIdxResult < 0)
     throw std::runtime_error(
         "AutoBlockifyParallelLoop: get_block_idx has no result in " +
@@ -198,11 +210,6 @@ inline void AutoBlockifyOneFunction(GenericModule &module,
           functionName);
     }
   }
-  if (blockifyNum != 1)
-    throw std::runtime_error(
-        "AutoBlockifyParallelLoop: auto_blockify_size > 1 is not modeled in " +
-        functionName);
-
   // traceExceptions: the transitive def-chain of logical_block_num stays
   // outside the loop, together with get_block_idx.
   std::unordered_map<int, int> definitionOf;
@@ -231,32 +238,45 @@ inline void AutoBlockifyOneFunction(GenericModule &module,
 
   std::vector<int> opsToMove;
   for (int operationId : original) {
-    if (operationId == returnId || operationId == markId ||
+    if (operationId == returnId || logicalMarkIds.count(operationId) != 0 ||
         exceptions.count(operationId) != 0)
       continue;
     opsToMove.push_back(operationId);
   }
 
   // New per-block loop bounds, created in the entry block.
+  const std::string physicalConstantAttr =
+      "{value = " + std::to_string(*physical) + " : i32}";
+  const std::string blockifyConstantAttr =
+      "{value = " + std::to_string(blockifyNum) + " : i32}";
   const int physicalConst = rewriter.createOperation(
-      funcId, entryRegionId, entryBlockId, "arith.constant", {"i32"}, {}, {}, "",
-      "{value = " + std::to_string(*physical) + " : i32}");
+      funcId, entryRegionId, entryBlockId, "arith.constant", {"i32"}, {}, {},
+      physicalConstantAttr, physicalConstantAttr);
   const int blockifyConst = rewriter.createOperation(
-      funcId, entryRegionId, entryBlockId, "arith.constant", {"i32"}, {}, {}, "",
-      "{value = " + std::to_string(blockifyNum) + " : i32}");
+      funcId, entryRegionId, entryBlockId, "arith.constant", {"i32"}, {}, {},
+      blockifyConstantAttr, blockifyConstantAttr);
+  const int blockifyValue =
+      module.operations.at(static_cast<size_t>(blockifyConst)).results.front();
+  int upperBoundValue = logicalValue;
+  int upperBoundOp = -1;
+  if (blockifyNum > 1) {
+    upperBoundOp = rewriter.createOperation(
+        funcId, entryRegionId, entryBlockId, "arith.ceildivsi", {"i32"},
+        {logicalValue, blockifyValue}, {"i32", "i32"}, "", "{}");
+    upperBoundValue =
+        module.operations.at(static_cast<size_t>(upperBoundOp)).results.front();
+  }
   const int blockIdTrunc = rewriter.createOperation(
       funcId, entryRegionId, entryBlockId, "arith.trunci", {"i32"},
       {blockIdxResult}, {"i64"}, "", "{}");
   const int physicalValue =
       module.operations.at(static_cast<size_t>(physicalConst)).results.front();
-  const int blockifyValue =
-      module.operations.at(static_cast<size_t>(blockifyConst)).results.front();
   const int blockIdValue =
       module.operations.at(static_cast<size_t>(blockIdTrunc)).results.front();
 
   const int forOp = rewriter.createOperation(
       funcId, entryRegionId, entryBlockId, "scf.for", {},
-      {blockIdValue, logicalValue, physicalValue}, {"i32", "i32", "i32"}, "",
+      {blockIdValue, upperBoundValue, physicalValue}, {"i32", "i32", "i32"}, "",
       std::string("{") + kAutoBlockifySubloopAttr + "}");
   const int loopRegionId = rewriter.createRegion(forOp);
   const int loopBlockId = rewriter.createBlock(loopRegionId, {"i32"});
@@ -264,9 +284,12 @@ inline void AutoBlockifyOneFunction(GenericModule &module,
       module.blocks.at(static_cast<size_t>(loopBlockId)).arguments.front();
 
   // Per-iteration block id: extsi(muli(iv, blockify_size)).
+  const std::string noOverflowAttr =
+      "{overflowFlags = #arith.overflow<none>}";
   const int mulOp = rewriter.createOperation(
       forOp, loopRegionId, loopBlockId, "arith.muli", {"i32"},
-      {inductionValue, blockifyValue}, {"i32", "i32"}, "", "{}");
+      {inductionValue, blockifyValue}, {"i32", "i32"}, noOverflowAttr,
+      noOverflowAttr);
   const int mulValue =
       module.operations.at(static_cast<size_t>(mulOp)).results.front();
   const int extOp = rewriter.createOperation(
@@ -301,6 +324,8 @@ inline void AutoBlockifyOneFunction(GenericModule &module,
     }
   rewriter.insertToBlock(entryBlockId, insertPosition++, physicalConst);
   rewriter.insertToBlock(entryBlockId, insertPosition++, blockifyConst);
+  if (upperBoundOp >= 0)
+    rewriter.insertToBlock(entryBlockId, insertPosition++, upperBoundOp);
   rewriter.insertToBlock(entryBlockId, insertPosition++, blockIdTrunc);
   rewriter.insertToBlock(entryBlockId, insertPosition, forOp);
 

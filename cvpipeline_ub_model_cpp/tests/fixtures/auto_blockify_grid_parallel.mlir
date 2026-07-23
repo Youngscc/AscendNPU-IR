@@ -17,6 +17,8 @@
   ^bb0:
     %c0 = "arith.constant"() <{value = 0.000000e+00 : f32}> : () -> f32
     %idx = "arith.constant"() <{value = 0 : index}> : () -> index
+    %logical = "arith.constant"() <{value = 1 : i32}> : () -> i32
+    "annotation.mark"(%logical) {logical_block_num} : (i32) -> ()
     %b = "memref.alloc"() : () -> memref<1024xf32, #hivm.address_space<UB>>
     "memref.store"(%c0, %b, %idx) : (f32, memref<1024xf32, #hivm.address_space<UB>>, index) -> ()
     "func.return"() : () -> ()

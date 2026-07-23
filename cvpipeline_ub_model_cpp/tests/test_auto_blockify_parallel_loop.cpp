@@ -73,11 +73,13 @@ int main() {
   int getBlockIdxBlock = -1;
   int markBlock = -1;
   for (const cvub::GenericOperation &operation : after.operations) {
-    if (operation.name == "hivm.hir.get_block_idx") {
+    if (operation.name == "hivm.hir.get_block_idx" &&
+        operation.parentId == loop.parentId) {
       blockIdxResult = operation.results.front();
       getBlockIdxBlock = operation.blockId;
     }
     if (operation.name == "annotation.mark" &&
+        operation.parentId == loop.parentId &&
         cvub::AutoBlockifyHasAttr(operation.attributes, "logical_block_num")) {
       logicalValue = operation.operands.front();
       markBlock = operation.blockId;
