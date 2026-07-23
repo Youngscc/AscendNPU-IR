@@ -33,14 +33,14 @@ dist/
 # --- OS ---
 .DS_Store
 Thumbs.db
-cvpipeline_ub_model_cpp/output/
+ub_overflow_model_cpp/output/
 /Output/
 
 # Local CVPipeline UB design notes (user-facing usage stays in README.md)
-/cvpipeline_ub_model_cpp/AUTO_BLOCKIFY_VERIFICATION.md
-/cvpipeline_ub_model_cpp/CVPIPELINE_MULTIBUFFER_TECHNICAL_REPORT.md
-/cvpipeline_ub_model_cpp/PERFORMANCE_OPTIMIZATION_ANALYSIS.md
-/cvpipeline_ub_model_cpp/local_suffix_option_exposure_backup.md
+/ub_overflow_model_cpp/AUTO_BLOCKIFY_VERIFICATION.md
+/ub_overflow_model_cpp/CVPIPELINE_MULTIBUFFER_TECHNICAL_REPORT.md
+/ub_overflow_model_cpp/PERFORMANCE_OPTIMIZATION_ANALYSIS.md
+/ub_overflow_model_cpp/local_suffix_option_exposure_backup.md
 
 memory_info_aic.json
 memory_info_aiv.json

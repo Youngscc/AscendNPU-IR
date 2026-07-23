@@ -111,7 +111,7 @@ CVPipelining
 1. 快速门禁全部通过：
 
 ```bash
-bash cvpipeline_ub_model_cpp/tests/run_tests.sh
+bash ub_overflow_model_cpp/tests/run_tests.sh
 ```
 
 覆盖 C++ pass/PlanMemory 单测、严格告警编译、166 项 capability 映射、14 个真实
@@ -131,9 +131,9 @@ failures=0
 复现命令：
 
 ```bash
-python3 cvpipeline_ub_model_cpp/scripts/run_corpus_oracle.py \
-  --corpus-root cvpipeline_ub_model_cpp/data/before_cvpipelining \
-  --model cvpipeline_ub_model_cpp/output/bin/cvpipeline_ub_model \
+python3 ub_overflow_model_cpp/scripts/run_corpus_oracle.py \
+  --corpus-root ub_overflow_model_cpp/data/before_cvpipelining \
+  --model ub_overflow_model_cpp/output/bin/cvpipeline_ub_model \
   --compiler build/bin/bishengir-cvpipeline-suffix-compile \
   --seeds 0 --require-all-exact --quiet --no-progress
 ```
@@ -184,7 +184,7 @@ direct lifetime、multi-buffer 数量和 applied inplace pair。
 
 ## 本地临时备份
 
-`cvpipeline_ub_model_cpp/local_suffix_option_exposure_backup.md` 是未跟踪的本地说明，
+`ub_overflow_model_cpp/local_suffix_option_exposure_backup.md` 是未跟踪的本地说明，
 记录了一次已撤销的参数暴露尝试。它不是当前实现、不是验收证据，也不应被误提交。
 
 ## 测试资产审计待办（2026-07-17）

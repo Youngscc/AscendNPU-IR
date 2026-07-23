@@ -1,0 +1,1704 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UB Overflow Model Plan Visualizer v2</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #5d687a;
+      --line: #d8dee8;
+      --accent: #167c80;
+      --danger: #c0392b;
+      --ok: #237a45;
+      --warn: #9a6a00;
+      --track: #ecf0f4;
+      --shadow: 0 10px 28px rgba(24, 35, 50, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--bg);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(1440px, calc(100vw - 32px));
+      margin: 20px auto 36px;
+    }
+
+    header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 16px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      margin-top: 6px;
+      max-width: 860px;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+      min-width: 340px;
+    }
+
+    button, .file-button {
+      appearance: none;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--ink);
+      border-radius: 6px;
+      padding: 8px 11px;
+      font: inherit;
+      cursor: pointer;
+      min-height: 36px;
+    }
+
+    button.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: white;
+    }
+
+    input[type="file"] { display: none; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 16px;
+      align-items: start;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+    }
+
+    .panel h2 {
+      font-size: 15px;
+      line-height: 1.2;
+      margin: 0;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      padding: 14px;
+    }
+
+    .summary .metric:last-child:nth-child(odd) {
+      grid-column: 1 / -1;
+      min-height: 64px;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      min-height: 74px;
+    }
+
+    .metric .label {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .metric .value {
+      margin-top: 6px;
+      font-size: 20px;
+      font-weight: 700;
+      line-height: 1.15;
+      overflow-wrap: anywhere;
+    }
+
+    .metric.ok .value { color: var(--ok); }
+    .metric.danger .value { color: var(--danger); }
+    .metric.warn .value { color: var(--warn); }
+
+    .capacity {
+      padding: 0 14px 14px;
+    }
+
+    .capacity-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .capacity-track {
+      height: 16px;
+      border-radius: 999px;
+      background: var(--track);
+      overflow: hidden;
+      border: 1px solid var(--line);
+    }
+
+    .capacity-fill {
+      height: 100%;
+      background: var(--accent);
+      width: 0%;
+    }
+
+    .capacity-fill.overflow { background: var(--danger); }
+
+    .kv {
+      display: grid;
+      grid-template-columns: minmax(120px, 38%) 1fr;
+      gap: 6px 10px;
+      padding: 14px;
+      border-top: 1px solid var(--line);
+    }
+
+    .kv div:nth-child(odd) { color: var(--muted); }
+    .kv div:nth-child(even) {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .kv .input-path {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .input-panel textarea {
+      display: block;
+      width: calc(100% - 28px);
+      height: 240px;
+      margin: 14px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--ink);
+      background: #fbfcfd;
+    }
+
+    .input-actions {
+      display: flex;
+      gap: 8px;
+      padding: 0 14px 14px;
+    }
+
+    .status {
+      color: var(--muted);
+      padding: 0 14px 14px;
+      min-height: 24px;
+    }
+
+    .viz {
+      padding: 14px;
+    }
+
+    .chart-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 10px;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 220px;
+    }
+
+    .swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      border: 1px solid rgba(0, 0, 0, 0.16);
+      flex: 0 0 auto;
+    }
+
+    .swatch.shared {
+      border: 2px solid var(--ink);
+    }
+
+    .swatch.reused {
+      border: 2px dashed var(--accent);
+    }
+
+    .zoom-controls {
+      display: grid;
+      grid-template-columns: auto minmax(86px, 120px) 42px;
+      align-items: center;
+      gap: 5px 8px;
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .zoom-controls input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+    }
+
+    .zoom-value {
+      color: var(--ink);
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+    }
+
+    .view-options {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 12px;
+      grid-column: 1 / -1;
+    }
+
+    .view-options label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+    }
+
+    .view-options button {
+      min-height: 28px;
+      padding: 4px 8px;
+      font-size: 12px;
+    }
+
+    .chart-wrap {
+      position: relative;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+    }
+
+    .plan-chart-wrap {
+      height: 480px;
+    }
+
+    .util-chart-wrap {
+      height: 550px;
+    }
+
+    .interactive-chart-wrap {
+      overflow: hidden;
+      cursor: grab;
+      touch-action: none;
+      user-select: none;
+    }
+
+    .interactive-chart-wrap.is-dragging { cursor: grabbing; }
+
+    svg {
+      display: block;
+      min-width: 760px;
+      width: 100%;
+    }
+
+    #chart {
+      width: 100%;
+      height: 100%;
+      min-width: 0;
+    }
+
+    #utilChart {
+      width: 100%;
+      height: 100%;
+      min-width: 0;
+    }
+
+    .axis text {
+      fill: var(--muted);
+      font-size: 11px;
+    }
+
+    .axis line, .axis path, .gridline {
+      stroke: var(--line);
+      shape-rendering: crispEdges;
+    }
+
+    .buffer-rect {
+      stroke: rgba(23, 32, 51, 0.35);
+      stroke-width: 1;
+      cursor: crosshair;
+      transition: opacity 100ms ease, stroke-width 100ms ease;
+    }
+
+    .buffer-rect.shared-placement {
+      stroke: var(--ink);
+      stroke-width: 2.5;
+    }
+
+    .buffer-rect.reused-address {
+      stroke: var(--accent);
+      stroke-width: 2;
+      stroke-dasharray: 5 3;
+    }
+
+    .buffer-rect.is-dimmed {
+      opacity: 0.14;
+    }
+
+    .buffer-rect.is-active {
+      opacity: 1;
+      stroke: #111827;
+      stroke-width: 3;
+      stroke-dasharray: none;
+    }
+
+    .buffer-label {
+      fill: #111827;
+      font-size: 11px;
+      pointer-events: none;
+    }
+
+    .peak-line {
+      stroke: var(--accent);
+      stroke-width: 2;
+      stroke-dasharray: 6 4;
+    }
+
+    .peak-line.overflow { stroke: var(--danger); }
+
+    .peak-label {
+      fill: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .peak-label.overflow { fill: var(--danger); }
+
+    .chart-tooltip {
+      position: fixed;
+      z-index: 10;
+      display: none;
+      min-width: 210px;
+      max-width: 340px;
+      padding: 9px 11px;
+      border: 1px solid #c8d0dc;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.97);
+      box-shadow: 0 8px 24px rgba(24, 35, 50, 0.16);
+      color: var(--ink);
+      font-size: 12px;
+      pointer-events: none;
+    }
+
+    .chart-tooltip strong,
+    .chart-tooltip span { display: block; }
+
+    .chart-tooltip span {
+      margin-top: 3px;
+      color: var(--muted);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th, td {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      background: #f8fafc;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+
+    tbody tr { transition: background 100ms ease; }
+    tbody tr:hover, tbody tr.is-active { background: #eaf5f4; }
+    tbody tr.is-dimmed { opacity: 0.42; }
+
+    td.name {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      max-width: 280px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .table-wrap {
+      max-height: 320px;
+      overflow: auto;
+      border-top: 1px solid var(--line);
+    }
+
+    .hidden { display: none; }
+
+    @media (max-width: 980px) {
+      main { width: min(100vw - 20px, 900px); }
+      header { display: block; }
+      .toolbar { justify-content: flex-start; margin-top: 12px; min-width: 0; }
+      .grid { grid-template-columns: 1fr; }
+      .chart-head { display: block; }
+      .zoom-controls { margin-top: 12px; }
+      .plan-chart-wrap { height: 430px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>UB Overflow Model Plan Visualizer</h1>
+        <div class="subtitle">
+          Inspect the exact local UB plan from the lightweight model: peak,
+          capacity, buffer offsets, and live intervals.
+        </div>
+      </div>
+      <div class="toolbar">
+        <label class="file-button" title="Load JSON produced by plan_before_cvpipelining_ub.py">
+          Open JSON
+          <input id="fileInput" type="file" accept=".json,application/json,text/plain">
+        </label>
+        <button id="sampleButton" type="button">Sample</button>
+        <button id="clearButton" type="button">Clear</button>
+      </div>
+    </header>
+
+    <section class="grid">
+      <aside>
+        <section class="panel">
+          <h2>Summary</h2>
+          <div class="summary" id="summary"></div>
+          <div class="capacity">
+            <div class="capacity-label">
+              <span>UB usage</span>
+              <span id="capacityLabel">-</span>
+            </div>
+            <div class="capacity-track" title="displayed peak or required memory over capacity">
+              <div class="capacity-fill" id="capacityFill"></div>
+            </div>
+          </div>
+          <div class="kv" id="metadata"></div>
+        </section>
+
+        <section class="panel input-panel" style="margin-top: 16px;">
+          <h2>Input</h2>
+          <textarea id="inputText" spellcheck="false" placeholder="Paste JSON from plan_before_cvpipelining_ub.py --format=json, or paste the text table output."></textarea>
+          <div class="input-actions">
+            <button id="renderButton" class="primary" type="button">Render</button>
+            <button id="copySampleButton" type="button">Copy Sample</button>
+          </div>
+          <div class="status" id="status"></div>
+        </section>
+      </aside>
+
+      <section>
+        <section class="panel">
+          <h2>UB Offset x Lifetime</h2>
+          <div class="viz">
+            <div class="chart-head">
+              <div class="legend" id="legend"></div>
+              <div class="zoom-controls" aria-label="Chart zoom controls">
+                <label for="timeZoom">Time</label>
+                <input id="timeZoom" type="range" min="1" max="8" step="0.25" value="1">
+                <output id="timeZoomValue" class="zoom-value" for="timeZoom">100%</output>
+                <label for="addressZoom">Address</label>
+                <input id="addressZoom" type="range" min="1" max="8" step="0.25" value="1">
+                <output id="addressZoomValue" class="zoom-value" for="addressZoom">100%</output>
+                <div class="view-options">
+                  <label><input id="showLabels" type="checkbox" checked> Labels</label>
+                  <button id="resetView" type="button">Reset view</button>
+                </div>
+              </div>
+            </div>
+            <div class="chart-wrap plan-chart-wrap interactive-chart-wrap"
+                 id="planChartWrap" tabindex="0"
+                 aria-label="Pannable UB memory plan viewport">
+              <svg id="chart" role="img" aria-label="UB memory plan chart"></svg>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" style="margin-top: 16px;">
+          <h2>UB Utilization</h2>
+          <div class="viz">
+            <div class="chart-wrap util-chart-wrap interactive-chart-wrap"
+                 id="utilChartWrap" tabindex="0"
+                 aria-label="Pannable UB utilization viewport">
+              <svg id="utilChart" role="img" aria-label="UB utilization chart"></svg>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" style="margin-top: 16px;">
+          <h2>Buffer Plan</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Extent</th>
+                  <th>Offset</th>
+                  <th>Multi-buffer / Copies</th>
+                  <th>Live Range</th>
+                  <th>End Byte</th>
+                  <th>Storage</th>
+                </tr>
+              </thead>
+              <tbody id="planTable"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </section>
+  </main>
+  <div id="chartTooltip" class="chart-tooltip" role="tooltip"></div>
+
+  <script>
+    const sample = {
+      schema_version: 1,
+      input: { before_cvpipelining_ir: "sample/before_cvpipelining_generic.mlir" },
+      options: {
+        cvpipelining: {
+          disable_pipelining: false,
+          pipeline_depth: -1,
+          enable_preload: false,
+          enable_lazy_loading: false
+        },
+        suffix_plan_memory: {
+          enable_auto_multi_buffer: false,
+          local_multi_buffer_strategy: "no-limit",
+          mix_multi_buffer_strategy: "no-limit",
+          random_seed: null,
+          restrict_inplace_as_isa: false
+        }
+      },
+      result: {
+        precision: "before_cvpipelining_model",
+        success: true,
+        overflow: false,
+        selected_seed: 0,
+        restrict_inplace_as_isa: false,
+        peak_bits: 640,
+        required_bits: 768,
+        capacity_bits: 1572864,
+        plan: [
+          { name: "%base_0", extent_bits: 256, offset_bytes: 0, alloc_time: 8, free_time: 14 },
+          { name: "%base_1", extent_bits: 128, offset_bytes: 32, alloc_time: 11, free_time: 16 },
+          { name: "%base_2", extent_bits: 128, offset_bytes: 64, alloc_time: 14, free_time: 18 }
+        ]
+      }
+    };
+
+    const palette = [
+      "#58a6a6", "#d98e4a", "#7a9c3e", "#8d6ccf", "#c95f6a",
+      "#4f8bc9", "#b77b35", "#4f9d69", "#c45b94", "#6877c9",
+      "#9a8b2e", "#5c9db2"
+    ];
+
+    const inputText = document.getElementById("inputText");
+    const fileInput = document.getElementById("fileInput");
+    const status = document.getElementById("status");
+    const timeZoom = document.getElementById("timeZoom");
+    const addressZoom = document.getElementById("addressZoom");
+    const showLabels = document.getElementById("showLabels");
+    const tooltip = document.getElementById("chartTooltip");
+    const planChartWrap = document.getElementById("planChartWrap");
+    const utilChartWrap = document.getElementById("utilChartWrap");
+    const interactiveChartWraps = [planChartWrap, utilChartWrap];
+    let currentModel = null;
+    let resizeTimer = null;
+    const viewState = {
+      timeScale: 1,
+      addressScale: 1,
+      panX: 0,
+      panY: 0,
+      pointerId: null,
+      startX: 0,
+      startY: 0,
+      startPanX: 0,
+      startPanY: 0,
+      dragTarget: null
+    };
+
+    document.getElementById("sampleButton").addEventListener("click", () => render(sample));
+    document.getElementById("copySampleButton").addEventListener("click", () => {
+      inputText.value = JSON.stringify(sample, null, 2);
+      status.textContent = "Sample JSON copied into the input box.";
+    });
+    document.getElementById("clearButton").addEventListener("click", clearView);
+    document.getElementById("resetView").addEventListener("click", () => {
+      timeZoom.value = "1";
+      addressZoom.value = "1";
+      showLabels.checked = true;
+      viewState.timeScale = 1;
+      viewState.addressScale = 1;
+      viewState.panX = 0;
+      viewState.panY = 0;
+      updateZoomLabels();
+      rerenderCharts();
+    });
+    for (const control of [timeZoom, addressZoom]) {
+      control.addEventListener("input", () => {
+        const nextScale = Number(control.value);
+        if (control === timeZoom) {
+          viewState.panX = preserveViewCenter(
+            viewState.panX, viewState.timeScale, nextScale);
+          viewState.timeScale = nextScale;
+        } else {
+          viewState.panY = preserveViewCenter(
+            viewState.panY, viewState.addressScale, nextScale);
+          viewState.addressScale = nextScale;
+        }
+        updateZoomLabels();
+        rerenderCharts();
+      });
+    }
+    showLabels.addEventListener("change", rerenderCharts);
+    for (const chartWrap of interactiveChartWraps) {
+      chartWrap.addEventListener("wheel", handleChartWheel, { passive: false });
+      chartWrap.addEventListener("pointerdown", startChartDrag);
+      chartWrap.addEventListener("pointermove", moveChartDrag);
+      chartWrap.addEventListener("pointerup", finishChartDrag);
+      chartWrap.addEventListener("pointercancel", finishChartDrag);
+      chartWrap.addEventListener("keydown", handleChartKey);
+    }
+    window.addEventListener("resize", () => {
+      window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(rerenderCharts, 120);
+    });
+    document.getElementById("renderButton").addEventListener("click", () => {
+      try {
+        render(parseInput(inputText.value));
+      } catch (error) {
+        status.textContent = error.message;
+      }
+    });
+    fileInput.addEventListener("change", async () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      inputText.value = await file.text();
+      try {
+        render(parseInput(inputText.value));
+      } catch (error) {
+        status.textContent = error.message;
+      }
+    });
+
+    function parseInput(text) {
+      const trimmed = text.trim();
+      if (!trimmed) throw new Error("Paste JSON or text output first.");
+      if (trimmed.startsWith("{")) return JSON.parse(trimmed);
+      return parseTextOutput(trimmed);
+    }
+
+    function parseTextOutput(text) {
+      const lines = text.split(/\r?\n/);
+      const result = { plan: [] };
+      let inPlan = false;
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const parts = line.split("\t");
+        if (parts.join("\t") === "name\textent_bits\toffset_bytes\talloc_time\tfree_time") {
+          inPlan = true;
+          continue;
+        }
+        if (inPlan) {
+          if (parts.length < 5) continue;
+          result.plan.push({
+            name: parts[0],
+            extent_bits: Number(parts[1]),
+            offset_bytes: Number(parts[2]),
+            alloc_time: Number(parts[3]),
+            free_time: Number(parts[4])
+          });
+          continue;
+        }
+        if (parts.length >= 2) {
+          const key = parts[0];
+          const value = parts.slice(1).join("\t");
+          if (["peak_bits", "required_bits", "capacity_bits", "selected_seed"].includes(key)) {
+            result[key] = Number(value);
+          } else if (["success", "overflow", "restrict_inplace_as_isa"].includes(key)) {
+            result[key] = value === "true";
+          } else if (key === "precision") {
+            result[key] = value;
+          }
+        }
+      }
+      return { schema_version: 1, result };
+    }
+
+    function normalize(data) {
+      const result = data.result || data;
+      if (!Array.isArray(result.plan)) {
+        throw new Error("Input does not contain result.plan.");
+      }
+      const plan = result.plan.map((buffer, index) => ({
+        functionName: String(buffer.function ?? ""),
+        name: String(buffer.name ?? `buffer_${index}`),
+        extentBits: Number(buffer.extent_bits ?? buffer.extentBits ?? 0),
+        offsetBytes: Number(buffer.offset_bytes ?? buffer.offsetBytes ?? 0),
+        allocTime: Number(buffer.alloc_time ?? buffer.allocTime ?? 0),
+        freeTime: Number(buffer.free_time ?? buffer.freeTime ?? 0),
+        multiBufferNum: Math.max(1, Number(
+          buffer.multi_buffer_num ?? buffer.multiBufferNum ?? 1))
+      })).filter(buffer => Number.isFinite(buffer.extentBits) &&
+                           Number.isFinite(buffer.offsetBytes) &&
+                           Number.isFinite(buffer.allocTime) &&
+                           Number.isFinite(buffer.freeTime) &&
+                           Number.isFinite(buffer.multiBufferNum));
+      if (plan.length === 0) throw new Error("The plan table is empty.");
+      const physicalCopyCounts = new Map();
+      for (const buffer of plan) {
+        const logicalKey = `${buffer.functionName}\u0000${buffer.name}`;
+        physicalCopyCounts.set(
+          logicalKey, (physicalCopyCounts.get(logicalKey) || 0) + 1);
+      }
+      const copyOrdinals = new Map();
+      for (const buffer of plan) {
+        const logicalKey = `${buffer.functionName}\u0000${buffer.name}`;
+        const copyIndex = (copyOrdinals.get(logicalKey) || 0) + 1;
+        copyOrdinals.set(logicalKey, copyIndex);
+        buffer.copyIndex = copyIndex;
+        buffer.physicalCopyCount = physicalCopyCounts.get(logicalKey);
+      }
+      const placements = groupPlacements(plan);
+      const addresses = analyzeAddresses(placements);
+      return {
+        data, result, plan, placements, addresses,
+        logicalBufferCount: copyOrdinals.size
+      };
+    }
+
+    function groupPlacements(plan) {
+      const byGeometry = new Map();
+      const placements = [];
+      for (const buffer of plan) {
+        const key = geometryKey(buffer);
+        let placement = byGeometry.get(key);
+        if (!placement) {
+          placement = {
+            extentBits: buffer.extentBits,
+            offsetBytes: buffer.offsetBytes,
+            allocTime: buffer.allocTime,
+            freeTime: buffer.freeTime,
+            names: []
+          };
+          byGeometry.set(key, placement);
+          placements.push(placement);
+        }
+        placement.names.push(buffer.physicalCopyCount > 1
+          ? `${buffer.name} [${buffer.copyIndex}/${buffer.physicalCopyCount}]`
+          : buffer.name);
+      }
+      return placements;
+    }
+
+    function analyzeAddresses(placements) {
+      const addresses = new Map();
+      for (const placement of placements) {
+        const key = addressKey(placement);
+        if (!addresses.has(key)) addresses.set(key, []);
+        addresses.get(key).push(placement);
+      }
+      return addresses;
+    }
+
+    function geometryKey(buffer) {
+      return [buffer.extentBits, buffer.offsetBytes,
+              buffer.allocTime, buffer.freeTime].join("|");
+    }
+
+    function addressKey(buffer) {
+      return String(buffer.offsetBytes);
+    }
+
+    function placementLabel(names) {
+      if (names.length <= 2) return names.join(" / ");
+      return `${names[0]} / ${names[1]} +${names.length - 2}`;
+    }
+
+    function render(data) {
+      const model = normalize(data);
+      currentModel = model;
+      renderSummary(model);
+      renderChart(model);
+      renderTable(model);
+      renderUtilChart(model.result, model.plan);
+      inputText.value = JSON.stringify(data, null, 2);
+      status.textContent =
+        `Rendered ${model.logicalBufferCount} logical buffers as ` +
+        `${model.plan.length} physical copies in ` +
+        `${model.placements.length} visual placements.`;
+    }
+
+    function updateZoomLabels() {
+      document.getElementById("timeZoomValue").textContent =
+        `${Math.round(Number(timeZoom.value) * 100)}%`;
+      document.getElementById("addressZoomValue").textContent =
+        `${Math.round(Number(addressZoom.value) * 100)}%`;
+    }
+
+    function preserveViewCenter(pan, oldScale, newScale) {
+      if (newScale <= 1) return 0;
+      const oldVisible = 1 / Math.max(1, oldScale);
+      const oldCenter = pan * (1 - oldVisible) + oldVisible / 2;
+      const newVisible = 1 / newScale;
+      return clamp((oldCenter - newVisible / 2) / (1 - newVisible), 0, 1);
+    }
+
+    function handleChartWheel(event) {
+      if (!currentModel) return;
+      let nextX = viewState.panX;
+      let nextY = viewState.panY;
+      let handled = false;
+      const horizontalDelta = event.shiftKey ? event.deltaY : event.deltaX;
+      const verticalDelta = event.shiftKey ? 0 : event.deltaY;
+
+      if (viewState.timeScale > 1 && Math.abs(horizontalDelta) > 0.1) {
+        nextX += horizontalDelta / (600 * (viewState.timeScale - 1));
+        handled = true;
+      }
+      if (viewState.addressScale > 1 && Math.abs(verticalDelta) > 0.1) {
+        nextY -= verticalDelta / (600 * (viewState.addressScale - 1));
+        handled = true;
+      } else if (viewState.timeScale > 1 && viewState.addressScale === 1 &&
+                 Math.abs(verticalDelta) > 0.1) {
+        nextX += verticalDelta / (600 * (viewState.timeScale - 1));
+        handled = true;
+      }
+      if (!handled) return;
+      event.preventDefault();
+      setChartPan(nextX, nextY);
+    }
+
+    function startChartDrag(event) {
+      if (event.button !== 0 || !currentModel ||
+          (viewState.timeScale === 1 && viewState.addressScale === 1)) return;
+      const chartWrap = event.currentTarget;
+      viewState.pointerId = event.pointerId;
+      viewState.dragTarget = chartWrap;
+      viewState.startX = event.clientX;
+      viewState.startY = event.clientY;
+      viewState.startPanX = viewState.panX;
+      viewState.startPanY = viewState.panY;
+      chartWrap.classList.add("is-dragging");
+      chartWrap.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    }
+
+    function moveChartDrag(event) {
+      if (event.pointerId !== viewState.pointerId) return;
+      const chartWrap = viewState.dragTarget;
+      if (!chartWrap) return;
+      const width = Math.max(1, chartWrap.clientWidth);
+      const height = Math.max(1, chartWrap.clientHeight);
+      const deltaX = event.clientX - viewState.startX;
+      const deltaY = event.clientY - viewState.startY;
+      const nextX = viewState.timeScale > 1
+        ? viewState.startPanX - deltaX / (width * (viewState.timeScale - 1))
+        : 0;
+      const nextY = viewState.addressScale > 1
+        ? viewState.startPanY + deltaY / (height * (viewState.addressScale - 1))
+        : 0;
+      setChartPan(nextX, nextY);
+    }
+
+    function finishChartDrag(event) {
+      if (event.pointerId !== viewState.pointerId) return;
+      const chartWrap = viewState.dragTarget;
+      if (chartWrap?.hasPointerCapture(event.pointerId))
+        chartWrap.releasePointerCapture(event.pointerId);
+      viewState.pointerId = null;
+      viewState.dragTarget = null;
+      chartWrap?.classList.remove("is-dragging");
+    }
+
+    function handleChartKey(event) {
+      const stepX = viewState.timeScale > 1
+        ? 0.1 / (viewState.timeScale - 1) : 0;
+      const stepY = viewState.addressScale > 1
+        ? 0.1 / (viewState.addressScale - 1) : 0;
+      const directions = {
+        ArrowLeft: [-stepX, 0],
+        ArrowRight: [stepX, 0],
+        ArrowDown: [0, -stepY],
+        ArrowUp: [0, stepY]
+      };
+      if (!directions[event.key]) return;
+      event.preventDefault();
+      const [deltaX, deltaY] = directions[event.key];
+      setChartPan(viewState.panX + deltaX, viewState.panY + deltaY);
+    }
+
+    function setChartPan(x, y) {
+      const nextX = clamp(x, 0, 1);
+      const nextY = clamp(y, 0, 1);
+      if (nextX === viewState.panX && nextY === viewState.panY) return;
+      viewState.panX = nextX;
+      viewState.panY = nextY;
+      rerenderCharts();
+    }
+
+    function rerenderCharts() {
+      if (!currentModel) return;
+      renderChart(currentModel);
+      renderUtilChart(currentModel.result, currentModel.plan);
+    }
+
+    function clearView() {
+      inputText.value = "";
+      status.textContent = "";
+      document.getElementById("summary").innerHTML = "";
+      document.getElementById("metadata").innerHTML = "";
+      document.getElementById("legend").innerHTML = "";
+      document.getElementById("planTable").innerHTML = "";
+      document.getElementById("capacityFill").style.width = "0%";
+      document.getElementById("capacityLabel").textContent = "-";
+      document.getElementById("chart").innerHTML = "";
+      document.getElementById("utilChart").innerHTML = "";
+      currentModel = null;
+      hideTooltip();
+    }
+
+    function renderSummary({ data, result, plan, placements }) {
+      const requiredBits = Number(result.required_bits ?? result.requiredBits ?? 0);
+      const peakBits = Number(result.peak_bits ?? result.peakBits ?? requiredBits);
+      const capacityBits = Number(result.capacity_bits ?? result.capacityBits ?? 0);
+      const overflow = Boolean(result.overflow);
+      const success = result.success !== false && !overflow;
+      const displayBits = overflow ? requiredBits : peakBits;
+      const usage = capacityBits > 0 ? displayBits / capacityBits : 0;
+      const summary = document.getElementById("summary");
+      summary.innerHTML = "";
+      const logicalBuffers = new Set(plan.map(buffer =>
+        `${buffer.functionName}\u0000${buffer.name}`)).size;
+      const multiBufferCopies = plan.filter(buffer =>
+        buffer.physicalCopyCount > 1).length;
+      const multiBufferOwners = new Set(plan.filter(buffer =>
+        buffer.physicalCopyCount > 1).map(buffer =>
+          `${buffer.functionName}\u0000${buffer.name}`)).size;
+      summary.append(
+        metric("Status", overflow ? "Overflow" : success ? "Success" : "Blocked", overflow ? "danger" : success ? "ok" : "warn"),
+        metric(overflow ? "Required" : "Peak",
+               formatBits(displayBits),
+               overflow ? "danger" : success ? "ok" : "warn"),
+        metric("Buffers / Placements", `${logicalBuffers} / ${placements.length}`, ""),
+        metric("Multi-buffer", multiBufferOwners > 0
+          ? `${multiBufferOwners} buffers / ${multiBufferCopies} copies`
+          : "Disabled / none", "")
+      );
+      const fill = document.getElementById("capacityFill");
+      fill.style.width = `${Math.min(100, Math.max(0, usage * 100))}%`;
+      fill.classList.toggle("overflow", overflow);
+      document.getElementById("capacityLabel").textContent = capacityBits > 0
+        ? `${formatBits(displayBits)} / ${formatBits(capacityBits)} (${formatPercent(usage)})`
+        : "Capacity unavailable";
+
+      const inputPath = data.input && data.input.before_cvpipelining_ir
+        ? data.input.before_cvpipelining_ir : "";
+      const metadata = document.getElementById("metadata");
+      metadata.innerHTML = "";
+      const rows = [
+        ["Precision", result.precision ?? ""],
+        ["Seed", result.selected_seed ?? ""],
+        ["Restrict Inplace", result.restrict_inplace_as_isa ?? ""],
+        ["Capacity", formatBits(capacityBits)],
+        ["Usage", capacityBits > 0 ? `${(usage * 100).toFixed(4)}%` : ""],
+        ["Input", inputPath]
+      ];
+      for (const [key, value] of rows) {
+        const k = document.createElement("div");
+        const v = document.createElement("div");
+        k.textContent = key;
+        v.textContent = key === "Input" ? shortPath(String(value)) : String(value);
+        if (key === "Input") {
+          v.className = "input-path";
+          v.title = String(value);
+        }
+        metadata.append(k, v);
+      }
+    }
+
+    function metric(label, value, tone) {
+      const node = document.createElement("div");
+      node.className = `metric ${tone || ""}`;
+      const labelNode = document.createElement("div");
+      labelNode.className = "label";
+      labelNode.textContent = label;
+      const valueNode = document.createElement("div");
+      valueNode.className = "value";
+      valueNode.textContent = value;
+      node.append(labelNode, valueNode);
+      return node;
+    }
+
+    function renderChart({ result, plan, placements, addresses }) {
+      const svg = document.getElementById("chart");
+      const wrap = document.getElementById("planChartWrap");
+      svg.innerHTML = "";
+      hideTooltip();
+
+      const timeScale = viewState.timeScale;
+      const addressScale = viewState.addressScale;
+      const width = Math.max(320, wrap.clientWidth - 2 || 920);
+      const height = Math.max(300, wrap.clientHeight - 2 || 480);
+      const margin = { top: 32, right: 72, bottom: 46, left: 70 };
+      svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+      svg.setAttribute("width", width);
+      svg.setAttribute("height", height);
+      svg.style.width = "100%";
+      svg.style.height = "100%";
+
+      const minTime = Math.min(...plan.map(buffer => buffer.allocTime));
+      const maxTime = Math.max(...plan.map(buffer => buffer.freeTime), minTime + 1);
+      const maxEndByte = Math.max(...plan.map(buffer =>
+        buffer.offsetBytes + bitsToBytes(buffer.extentBits)));
+      const overflow = Boolean(result.overflow);
+      const requiredBits = Number(result.required_bits ?? result.requiredBits ?? maxEndByte * 8);
+      const peakBits = Number(result.peak_bits ?? result.peakBits ?? requiredBits);
+      const displayBits = overflow ? requiredBits : peakBits;
+      const yMax = Math.max(maxEndByte, bitsToBytes(displayBits), 1);
+      const timeSpan = Math.max(1, maxTime - minTime);
+      const visibleTimeSpan = timeSpan / timeScale;
+      const visibleMinTime = minTime + viewState.panX * (timeSpan - visibleTimeSpan);
+      const visibleByteSpan = yMax / addressScale;
+      const visibleMinByte = viewState.panY * (yMax - visibleByteSpan);
+      const visibleMaxByte = visibleMinByte + visibleByteSpan;
+      const innerWidth = width - margin.left - margin.right;
+      const innerHeight = height - margin.top - margin.bottom;
+      const x = time => margin.left +
+        ((time - visibleMinTime) / visibleTimeSpan) * innerWidth;
+      const y = byte => margin.top + innerHeight -
+        ((byte - visibleMinByte) / visibleByteSpan) * innerHeight;
+      const group = element("g", {});
+      const defs = element("defs", {});
+      const clipPath = element("clipPath", { id: "planPlotClip" });
+      clipPath.append(element("rect", {
+        x: margin.left,
+        y: margin.top,
+        width: innerWidth,
+        height: innerHeight
+      }));
+      defs.append(clipPath);
+      svg.append(defs);
+      svg.append(group);
+      const dataGroup = element("g", { "clip-path": "url(#planPlotClip)" });
+
+      const yTicks = 5;
+      for (let index = 0; index <= yTicks; ++index) {
+        const byte = visibleMinByte + (visibleByteSpan / yTicks) * index;
+        group.append(element("line", {
+          class: "gridline", x1: margin.left, y1: y(byte),
+          x2: width - margin.right, y2: y(byte)
+        }));
+        const label = element("text", {
+          x: margin.left - 10, y: y(byte) + 4, "text-anchor": "end",
+          fill: "var(--muted)", "font-size": 11
+        });
+        label.textContent = formatBytes(byte);
+        group.append(label);
+      }
+
+      for (const time of integerTimeTicks(
+             visibleMinTime, visibleMinTime + visibleTimeSpan, 6)) {
+        group.append(element("line", {
+          class: "gridline", x1: x(time), y1: margin.top,
+          x2: x(time), y2: margin.top + innerHeight
+        }));
+        const label = element("text", {
+          x: x(time), y: height - 18, "text-anchor": "middle",
+          fill: "var(--muted)", "font-size": 11
+        });
+        label.textContent = String(time);
+        group.append(label);
+      }
+
+      const yAxis = element("text", {
+        x: 18, y: margin.top + innerHeight / 2,
+        transform: `rotate(-90 18 ${margin.top + innerHeight / 2})`,
+        "text-anchor": "middle", fill: "var(--muted)", "font-size": 12
+      });
+      yAxis.textContent = "UB offset";
+      group.append(yAxis);
+      const xAxis = element("text", {
+        x: margin.left + innerWidth / 2, y: height - 4,
+        "text-anchor": "middle", fill: "var(--muted)", "font-size": 12
+      });
+      xAxis.textContent = "PlanMemory operation time";
+      group.append(xAxis);
+      group.append(dataGroup);
+
+      const addressColors = new Map();
+      [...addresses.keys()].sort((a, b) => Number(a) - Number(b))
+        .forEach((key, index) => addressColors.set(key, palette[index % palette.length]));
+
+      placements.forEach(placement => {
+        const top = placement.offsetBytes + bitsToBytes(placement.extentBits);
+        const isZeroDuration = placement.allocTime === placement.freeTime;
+        const key = addressKey(placement);
+        const shared = placement.names.length > 1;
+        const reused = addresses.get(key).length > 1;
+        const classes = ["buffer-rect"];
+        if (shared) classes.push("shared-placement");
+        if (reused) classes.push("reused-address");
+        const rect = element("rect", {
+          class: classes.join(" "),
+          "data-address-key": key,
+          x: isZeroDuration ? x(placement.allocTime) - 1.5 : x(placement.allocTime),
+          y: y(top),
+          width: isZeroDuration ? 3 :
+            Math.max(3, x(placement.freeTime) - x(placement.allocTime)),
+          height: Math.max(3, y(placement.offsetBytes) - y(top)),
+          rx: isZeroDuration ? 0 : 3,
+          fill: addressColors.get(key),
+          opacity: isZeroDuration ? 0.7 : 1
+        });
+        const storage = storageLabel(shared, reused, placement.names.length,
+                                     addresses.get(key).length);
+        rect.addEventListener("pointerenter", event => {
+          highlightAddress(key);
+          showTooltip(event, placement, storage);
+        });
+        rect.addEventListener("pointermove", moveTooltip);
+        rect.addEventListener("pointerleave", () => {
+          clearHighlight();
+          hideTooltip();
+        });
+        dataGroup.append(rect);
+
+        if (showLabels.checked &&
+            x(placement.freeTime) - x(placement.allocTime) > 54 &&
+            y(placement.offsetBytes) - y(top) > 16) {
+          const label = element("text", {
+            class: "buffer-label",
+            x: x(placement.allocTime) + 5,
+            y: y(top) + 14
+          });
+          label.textContent = placementLabel(placement.names);
+          dataGroup.append(label);
+        }
+      });
+
+      const displayByte = bitsToBytes(displayBits);
+      if (displayByte >= visibleMinByte && displayByte <= visibleMaxByte) {
+        dataGroup.append(element("line", {
+          class: `peak-line${overflow ? " overflow" : ""}`,
+          x1: margin.left, y1: y(displayByte),
+          x2: width - margin.right, y2: y(displayByte)
+        }));
+        const limitLabel = element("text", {
+          class: `peak-label${overflow ? " overflow" : ""}`,
+          x: width - margin.right - 4,
+          y: Math.max(margin.top + 14, y(displayByte) - 7),
+          "text-anchor": "end"
+        });
+        limitLabel.textContent = `${overflow ? "required" : "peak"} ${formatBits(displayBits)}`;
+        dataGroup.append(limitLabel);
+      }
+
+      renderSemanticLegend();
+    }
+
+    function renderTable({ plan, placements, addresses }) {
+      const tbody = document.getElementById("planTable");
+      tbody.innerHTML = "";
+      const placementByGeometry = new Map();
+      for (const placement of placements)
+        placementByGeometry.set(geometryKey(placement), placement);
+      const sorted = [...plan].sort((a, b) =>
+        a.allocTime - b.allocTime || a.offsetBytes - b.offsetBytes ||
+        a.name.localeCompare(b.name));
+      for (const buffer of sorted) {
+        const tr = document.createElement("tr");
+        const endByte = buffer.offsetBytes + bitsToBytes(buffer.extentBits);
+        const placement = placementByGeometry.get(geometryKey(buffer));
+        const key = addressKey(buffer);
+        const shared = placement.names.length > 1;
+        const reused = addresses.get(key).length > 1;
+        const storage = storageLabel(shared, reused, placement.names.length,
+                                     addresses.get(key).length);
+        tr.dataset.addressKey = key;
+        const cells = [
+          [buffer.name, "name"],
+          [formatBits(buffer.extentBits), ""],
+          [formatBytes(buffer.offsetBytes), ""],
+          [buffer.physicalCopyCount > 1
+            ? `x${buffer.physicalCopyCount} · copy ${buffer.copyIndex}/${buffer.physicalCopyCount}` +
+              (buffer.multiBufferNum !== buffer.physicalCopyCount
+                ? ` · mark x${buffer.multiBufferNum}` : "")
+            : "x1", ""],
+          [`${buffer.allocTime} -> ${buffer.freeTime}`, ""],
+          [formatBytes(endByte), ""],
+          [storage, ""]
+        ];
+        for (const [value, className] of cells) {
+          const td = document.createElement("td");
+          td.textContent = value;
+          if (className) td.className = className;
+          tr.append(td);
+        }
+        tr.addEventListener("pointerenter", event => {
+          highlightAddress(key);
+          showTooltip(event, placement, storage);
+        });
+        tr.addEventListener("pointermove", moveTooltip);
+        tr.addEventListener("pointerleave", () => {
+          clearHighlight();
+          hideTooltip();
+        });
+        tbody.append(tr);
+      }
+    }
+
+    function storageLabel(shared, reused, sharedCount, reuseCount) {
+      const labels = [];
+      if (shared) labels.push(`Inplace x${sharedCount}`);
+      if (reused) labels.push(`Reused x${reuseCount}`);
+      return labels.length > 0 ? labels.join(" + ") : "Unique";
+    }
+
+    function renderSemanticLegend() {
+      const legend = document.getElementById("legend");
+      legend.innerHTML = "";
+      const entries = [
+        ["Unique placement", ""],
+        ["Inplace / shared", "shared"],
+        ["Address reused over time", "reused"],
+        ["Physical copies use [copy/total] labels", ""]
+      ];
+      for (const [label, tone] of entries) {
+        const item = document.createElement("span");
+        item.className = "legend-item";
+        const swatch = document.createElement("span");
+        swatch.className = `swatch ${tone}`.trim();
+        swatch.style.background = tone === "reused" ? "#dff2f0" : "#58a6a6";
+        const textNode = document.createElement("span");
+        textNode.textContent = label;
+        item.append(swatch, textNode);
+        legend.append(item);
+      }
+      const note = document.createElement("span");
+      note.textContent = "Color identifies the UB base address";
+      legend.append(note);
+    }
+
+    function highlightAddress(key) {
+      document.querySelectorAll(".buffer-rect[data-address-key]").forEach(node => {
+        const active = node.dataset.addressKey === key;
+        node.classList.toggle("is-active", active);
+        node.classList.toggle("is-dimmed", !active);
+      });
+      document.querySelectorAll("#planTable tr[data-address-key]").forEach(node => {
+        const active = node.dataset.addressKey === key;
+        node.classList.toggle("is-active", active);
+        node.classList.toggle("is-dimmed", !active);
+      });
+    }
+
+    function clearHighlight() {
+      document.querySelectorAll(".is-active, .is-dimmed").forEach(node =>
+        node.classList.remove("is-active", "is-dimmed"));
+    }
+
+    function showTooltip(event, placement, storage) {
+      const title = document.createElement("strong");
+      title.textContent = placementLabel(placement.names);
+      const detail = document.createElement("span");
+      detail.textContent = `${formatBits(placement.extentBits)} at ${formatBytes(placement.offsetBytes)}`;
+      const lifetime = document.createElement("span");
+      lifetime.textContent = `Lifetime ${placement.allocTime} -> ${placement.freeTime}`;
+      const storageNode = document.createElement("span");
+      storageNode.textContent = storage;
+      tooltip.replaceChildren(title, detail, lifetime, storageNode);
+      tooltip.style.display = "block";
+      moveTooltip(event);
+    }
+
+    function moveTooltip(event) {
+      const gap = 14;
+      const width = tooltip.offsetWidth;
+      const height = tooltip.offsetHeight;
+      const left = Math.min(event.clientX + gap, window.innerWidth - width - 8);
+      const top = Math.min(event.clientY + gap, window.innerHeight - height - 8);
+      tooltip.style.left = `${Math.max(8, left)}px`;
+      tooltip.style.top = `${Math.max(8, top)}px`;
+    }
+
+    function hideTooltip() {
+      tooltip.style.display = "none";
+    }
+
+    function renderUtilChart(result, plan) {
+      const chart = document.getElementById("utilChart");
+      const width = Math.max(320, utilChartWrap.clientWidth - 2 || 920);
+      chart.innerHTML = "";
+
+      const minTime = Math.min(...plan.map(buffer => buffer.allocTime));
+      const maxTime = Math.max(...plan.map(buffer => buffer.freeTime), minTime + 1);
+
+      const normalBuffers = plan.filter(b => b.allocTime !== b.freeTime);
+      const zeroDurationBuffers = plan.filter(b => b.allocTime === b.freeTime);
+
+      const events = [];
+      normalBuffers.forEach(buffer => {
+        events.push({ time: buffer.allocTime, type: 'alloc', offset: buffer.offsetBytes, extent: bitsToBytes(buffer.extentBits) });
+        events.push({ time: buffer.freeTime, type: 'free', offset: buffer.offsetBytes, extent: bitsToBytes(buffer.extentBits) });
+      });
+      events.sort((a, b) => {
+        if (a.time !== b.time) return a.time - b.time;
+        return a.type === 'free' ? -1 : 1;
+      });
+
+      const activeRanges = [];
+      let utilPoints = [];
+
+      const mergeRanges = () => {
+        if (activeRanges.length === 0) return 0;
+        activeRanges.sort((a, b) => a.start - b.start);
+        let total = 0;
+        let lastEnd = activeRanges[0].start;
+        for (const r of activeRanges) {
+          if (r.start >= lastEnd) {
+            total += r.end - r.start;
+            lastEnd = r.end;
+          } else if (r.end > lastEnd) {
+            total += r.end - lastEnd;
+            lastEnd = r.end;
+          }
+        }
+        return total;
+      };
+
+      const baseUtilAtTime = {};
+      let currentTime = minTime;
+      let i = 0;
+      while (i < events.length) {
+        const evt = events[i];
+        if (evt.time > currentTime) {
+          const bytes = mergeRanges();
+          utilPoints.push({ time: currentTime, bytes });
+          baseUtilAtTime[currentTime] = bytes;
+          currentTime = evt.time;
+        }
+        const sameTimeEvts = [];
+        while (i < events.length && events[i].time === currentTime) {
+          sameTimeEvts.push(events[i]);
+          i++;
+        }
+        sameTimeEvts.filter(e => e.type === 'free').forEach(e => {
+          const idx = activeRanges.findIndex(r => r.start === e.offset && r.end === e.offset + e.extent);
+          if (idx !== -1) activeRanges.splice(idx, 1);
+        });
+        sameTimeEvts.filter(e => e.type === 'alloc').forEach(e => {
+          activeRanges.push({ start: e.offset, end: e.offset + e.extent });
+        });
+        const bytes = mergeRanges();
+        utilPoints.push({ time: currentTime, bytes });
+        baseUtilAtTime[currentTime] = bytes;
+      }
+      if (utilPoints.length === 0 || utilPoints[utilPoints.length - 1].time !== maxTime) {
+        utilPoints.push({ time: maxTime, bytes: 0 });
+      }
+
+      const zeroDurationPeaks = [];
+      zeroDurationBuffers.forEach(buffer => {
+        const time = buffer.allocTime;
+        zeroDurationPeaks.push({ time, bytes: (baseUtilAtTime[time] || 0) + bitsToBytes(buffer.extentBits), baseBytes: baseUtilAtTime[time] || 0 });
+      });
+
+      const capacityBits = Number(result.capacity_bits ?? result.capacityBits ?? 0);
+      const capacityBytes = bitsToBytes(capacityBits);
+      const utilToPercent = bytes => (bytes / capacityBytes) * 100;
+
+      const peakUtil = Math.max(...utilPoints.map(p => p.bytes), 1);
+      const peakPercent = utilToPercent(peakUtil);
+      const targetYMax = Math.max(peakPercent * 2, Math.ceil(peakPercent / 5) * 5);
+      const yMax = Math.min(100, Math.max(10, targetYMax));
+
+      const height = 550;
+      const margin = { top: 30, right: 45, bottom: 50, left: 70 };
+      const innerWidth = width - margin.left - margin.right;
+      const innerHeight = height - margin.top - margin.bottom;
+
+      chart.setAttribute("width", width);
+      chart.setAttribute("height", height);
+      chart.setAttribute("viewBox", `0 0 ${width} ${height}`);
+
+      const timeSpan = Math.max(1, maxTime - minTime);
+      const visibleTimeSpan = timeSpan / viewState.timeScale;
+      const visibleMinTime = minTime +
+        viewState.panX * (timeSpan - visibleTimeSpan);
+      const visibleMaxTime = visibleMinTime + visibleTimeSpan;
+      const visiblePercentSpan = yMax / viewState.addressScale;
+      const visibleMinPercent =
+        viewState.panY * (yMax - visiblePercentSpan);
+      const x = time => margin.left +
+        ((time - visibleMinTime) / visibleTimeSpan) * innerWidth;
+      const y = percent => margin.top + innerHeight -
+        ((percent - visibleMinPercent) / visiblePercentSpan) * innerHeight;
+
+      const group = element("g", {});
+      const defs = element("defs", {});
+      const clipPath = element("clipPath", { id: "utilPlotClip" });
+      clipPath.append(element("rect", {
+        x: margin.left,
+        y: margin.top,
+        width: innerWidth,
+        height: innerHeight
+      }));
+      defs.append(clipPath);
+      chart.append(defs);
+      const dataGroup = element("g", { "clip-path": "url(#utilPlotClip)" });
+
+      const numTicks = Math.min(Math.max(Math.ceil(yMax / 5), 2), 5);
+      for (let i = 0; i <= numTicks; ++i) {
+        const percent = visibleMinPercent + (visiblePercentSpan / numTicks) * i;
+        group.append(element("line", {
+          class: "util-hgridline",
+          x1: margin.left,
+          y1: y(percent),
+          x2: width - margin.right,
+          y2: y(percent),
+          stroke: "#e5e5e5",
+          "stroke-width": 1,
+          "stroke-dasharray": "4,4"
+        }));
+        const label = element("text", {
+          x: margin.left - 8,
+          y: y(percent) + 4,
+          "text-anchor": "end",
+          fill: "#666",
+          "font-size": 11
+        });
+        label.textContent = `${Number(percent.toFixed(1))}%`;
+        group.append(label);
+      }
+
+      for (const tick of integerTimeTicks(
+             visibleMinTime, visibleMaxTime, 6)) {
+        group.append(element("line", {
+          class: "util-vgridline",
+          x1: x(tick),
+          y1: margin.top,
+          x2: x(tick),
+          y2: height - margin.bottom,
+          stroke: "#e5e5e5",
+          "stroke-width": 1,
+          "stroke-dasharray": "4,4"
+        }));
+        const label = element("text", {
+          x: x(tick),
+          y: height - margin.bottom + 20,
+          "text-anchor": "middle",
+          fill: "#666",
+          "font-size": 11
+        });
+        label.textContent = tick;
+        group.append(label);
+      }
+
+      group.append(dataGroup);
+      if (utilPoints.length > 1 && capacityBytes > 0) {
+        const pathD = [];
+        for (let i = 0; i < utilPoints.length - 1; i++) {
+          const p1 = utilPoints[i];
+          const p2 = utilPoints[i + 1];
+          pathD.push(`${i === 0 ? "M" : "L"} ${x(p1.time)} ${y(utilToPercent(p1.bytes))}`);
+          pathD.push(`L ${x(p2.time)} ${y(utilToPercent(p1.bytes))}`);
+        }
+        const lastP = utilPoints[utilPoints.length - 1];
+        pathD.push(`L ${x(lastP.time)} ${y(utilToPercent(lastP.bytes))}`);
+
+        const lastPoint = utilPoints[utilPoints.length - 1];
+        const firstPoint = utilPoints[0];
+        const areaD = `${pathD.join(" ")} L ${x(lastPoint.time)} ${y(0)} L ${x(firstPoint.time)} ${y(0)} Z`;
+        dataGroup.append(element("path", {
+          class: "util-area",
+          d: areaD,
+          fill: "rgba(255,99,71,0.15)"
+        }));
+
+        dataGroup.append(element("path", {
+          class: "util-line",
+          d: pathD.join(" "),
+          fill: "none",
+          stroke: "rgba(255,99,71,0.85)",
+          "stroke-width": "2.5",
+          "stroke-linecap": "round",
+          "stroke-linejoin": "round"
+        }));
+
+        zeroDurationPeaks.forEach(peak => {
+          const baseY = y(utilToPercent(peak.baseBytes));
+          const peakY = y(utilToPercent(peak.bytes));
+          dataGroup.append(element("line", {
+            x1: x(peak.time),
+            y1: baseY,
+            x2: x(peak.time),
+            y2: peakY,
+            stroke: "rgba(255,99,71,0.7)",
+            "stroke-width": "2",
+            "stroke-linecap": "round"
+          }));
+        });
+
+        const allPeaks = [...utilPoints.map(p => p.bytes), ...zeroDurationPeaks.map(p => p.bytes)];
+        const peakUtil = Math.max(...allPeaks);
+        const avgUtil = utilPoints.reduce((sum, p) => sum + p.bytes, 0) / utilPoints.length;
+        const peakPercent = utilToPercent(peakUtil);
+        const avgPercent = utilToPercent(avgUtil);
+
+        const peakLabel = element("text", {
+          class: "util-label",
+          x: width - margin.right - 8,
+          y: margin.top + 18,
+          "text-anchor": "end",
+          fill: "rgba(255,99,71,0.85)",
+          "font-size": 12,
+          "font-weight": "bold"
+        });
+        peakLabel.textContent = `${peakPercent.toFixed(1)}% peak`;
+        group.append(peakLabel);
+
+        const avgLabel = element("text", {
+          class: "util-label",
+          x: width - margin.right - 8,
+          y: margin.top + 36,
+          "text-anchor": "end",
+          fill: "rgba(255,99,71,0.6)",
+          "font-size": 11
+        });
+        avgLabel.textContent = `${avgPercent.toFixed(1)}% avg`;
+        group.append(avgLabel);
+      }
+
+      const yAxisLabel = element("text", {
+        x: 8,
+        y: height / 2,
+        "text-anchor": "middle",
+        fill: "#333",
+        "font-size": 12,
+        transform: `rotate(-90, 8, ${height / 2})`
+      });
+      yAxisLabel.textContent = "UB Utilization";
+      group.append(yAxisLabel);
+
+      const xAxisLabel = element("text", {
+        x: width / 2,
+        y: height - 8,
+        "text-anchor": "middle",
+        fill: "#333",
+        "font-size": 12
+      });
+      xAxisLabel.textContent = "PlanMemory operation time";
+      group.append(xAxisLabel);
+
+      chart.append(group);
+    }
+
+    function element(name, attributes) {
+      const node = document.createElementNS("http://www.w3.org/2000/svg", name);
+      for (const [key, value] of Object.entries(attributes)) {
+        node.setAttribute(key, value);
+      }
+      return node;
+    }
+
+    function bitsToBytes(bits) {
+      return Math.ceil(Number(bits || 0) / 8);
+    }
+
+    function formatBits(bits) {
+      const value = Number(bits || 0);
+      if (value >= 8 * 1024 * 1024) return `${(value / 8 / 1024 / 1024).toFixed(2)} MiB`;
+      if (value >= 8 * 1024) return `${(value / 8 / 1024).toFixed(2)} KiB`;
+      return `${value} bits`;
+    }
+
+    function formatBytes(bytes) {
+      const value = Number(bytes || 0);
+      if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(2)} MiB`;
+      if (value >= 1024) return `${(value / 1024).toFixed(2)} KiB`;
+      return `${Math.round(value)} B`;
+    }
+
+    function formatPercent(ratio) {
+      const percent = Number(ratio || 0) * 100;
+      const digits = percent >= 10 ? 1 : percent >= 1 ? 2 : 3;
+      return `${percent.toFixed(digits)}%`;
+    }
+
+    function integerTimeTicks(minimum, maximum, targetCount) {
+      const first = Math.ceil(minimum - 1e-9);
+      const last = Math.floor(maximum + 1e-9);
+      if (first > last) return [];
+
+      const rawStep = Math.max(1, Math.ceil((last - first) / targetCount));
+      const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+      const normalized = rawStep / magnitude;
+      const niceStep = (normalized <= 1 ? 1 : normalized <= 2 ? 2 :
+                        normalized <= 5 ? 5 : 10) * magnitude;
+      const ticks = [];
+      for (let time = Math.ceil(first / niceStep) * niceStep;
+           time <= last; time += niceStep) {
+        ticks.push(time);
+      }
+      return ticks;
+    }
+
+    function shortPath(path) {
+      if (!path) return "";
+      const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
+      return parts.slice(-2).join("/");
+    }
+
+    function clamp(value, minimum, maximum) {
+      return Math.min(maximum, Math.max(minimum, value));
+    }
+
+    updateZoomLabels();
+    render(sample);
+  </script>
+</body>
+</html>
