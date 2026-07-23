@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -15,6 +16,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from compare_ub_plan_with_suffix_oracle import (
     canonical_function_name,
@@ -222,6 +224,22 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--compiler", required=True, type=Path)
+    parser.add_argument(
+        "--suffix-cache-dir", type=Path,
+        help=("Cache suffix oracle results by compiler, input contents, seed, "
+              "and pipeline options"),
+    )
+    parser.add_argument(
+        "--suffix-cache-mode",
+        choices=("read-write", "read-only", "refresh"),
+        default="read-write",
+        help=("read-write fills misses (default); read-only never invokes "
+              "suffix; refresh replaces matching entries"),
+    )
+    parser.add_argument(
+        "--suffix-compiler-sha256",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--seeds", default="0-19")
     parser.add_argument("--restrict-inplace-as-isa", action="store_true")
     parser.add_argument("--disable-cv-pipelining", action="store_true")
@@ -328,12 +346,204 @@ def run(command: list[str], *, env: dict[str, str] | None = None) -> subprocess.
     return subprocess.run(command, text=True, capture_output=True, env=env)
 
 
+SUFFIX_CACHE_SCHEMA = 1
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+@dataclass
+class SuffixCacheStats:
+    hits: int = 0
+    misses: int = 0
+    writes: int = 0
+    bypasses: int = 0
+
+
+class SuffixResultCache:
+    """Content-addressed cache for suffix oracle stdout/stderr and status."""
+
+    def __init__(
+        self,
+        root: Path,
+        compiler: Path,
+        mode: str,
+        compiler_digest: str | None = None,
+    ) -> None:
+        self.root = root
+        self.mode = mode
+        self.compiler_digest = (
+            compiler_digest if compiler_digest is not None
+            else sha256_file(compiler)
+        )
+        self.stats = SuffixCacheStats()
+        self._input_digests: dict[Path, str] = {}
+
+    def _input_digest(self, path: Path) -> str:
+        resolved = path.resolve()
+        digest = self._input_digests.get(resolved)
+        if digest is None:
+            digest = sha256_file(resolved)
+            self._input_digests[resolved] = digest
+        return digest
+
+    @staticmethod
+    def _normalized_arguments(
+        command: list[str], input_path: Path,
+    ) -> list[str]:
+        """Remove temporary/output paths while retaining semantic options."""
+        normalized: list[str] = []
+        skip_next = False
+        resolved_input = input_path.resolve()
+        for argument in command[1:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if argument == "-o":
+                skip_next = True
+                continue
+            try:
+                is_input = Path(argument).resolve() == resolved_input
+            except (OSError, RuntimeError):
+                is_input = False
+            if is_input:
+                normalized.append("<INPUT>")
+            else:
+                normalized.append(argument)
+        return normalized
+
+    def _key_and_record(
+        self,
+        command: list[str],
+        input_path: Path,
+        env: dict[str, str] | None,
+    ) -> tuple[str, dict[str, Any]]:
+        effective_env = os.environ if env is None else env
+        cache_env = {
+            name: effective_env.get(name)
+            for name in (
+                "BISHENGIR_DUMP_PLAN_MEMORY_ATTEMPTS",
+                "BISHENGIR_DUMP_BEFORE_PLAN_MEMORY",
+            )
+            if effective_env.get(name) is not None
+        }
+        identity: dict[str, Any] = {
+            "schema": SUFFIX_CACHE_SCHEMA,
+            "compiler_sha256": self.compiler_digest,
+            "input_sha256": self._input_digest(input_path),
+            "arguments": self._normalized_arguments(command, input_path),
+            "environment": cache_env,
+        }
+        encoded = json.dumps(
+            identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest(), identity
+
+    def _path(self, key: str) -> Path:
+        return self.root / self.compiler_digest[:16] / key[:2] / f"{key}.json"
+
+    def load_or_run(
+        self,
+        command: list[str],
+        input_path: Path,
+        *,
+        env: dict[str, str] | None = None,
+        allow_cache: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        if not allow_cache:
+            self.stats.bypasses += 1
+            return run(command, env=env)
+
+        key, identity = self._key_and_record(command, input_path, env)
+        cache_path = self._path(key)
+        if self.mode != "refresh":
+            try:
+                payload = json.loads(cache_path.read_text(encoding="utf-8"))
+                if payload.get("identity") != identity:
+                    raise ValueError("cache identity mismatch")
+                returncode = int(payload["returncode"])
+                stdout = str(payload["stdout"])
+                stderr = str(payload["stderr"])
+            except (OSError, ValueError, KeyError, TypeError,
+                    json.JSONDecodeError):
+                self.stats.misses += 1
+            else:
+                self.stats.hits += 1
+                return subprocess.CompletedProcess(
+                    command, returncode, stdout, stderr)
+        else:
+            self.stats.misses += 1
+
+        if self.mode == "read-only":
+            return subprocess.CompletedProcess(
+                command,
+                125,
+                "",
+                f"suffix cache miss: {cache_path}\n",
+            )
+
+        completed = run(command, env=env)
+        cacheable_result = (
+            completed.returncode == 0
+            or re.search(
+                r"\berror:\s+[A-Za-z][A-Za-z0-9_-]* overflow, requires\s+",
+                completed.stderr,
+                re.IGNORECASE,
+            ) is not None
+        )
+        if not cacheable_result:
+            return completed
+
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "identity": identity,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        }
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=cache_path.parent,
+                prefix=f".{key}.",
+                suffix=".tmp",
+                delete=False,
+            ) as stream:
+                temporary_path = Path(stream.name)
+                json.dump(record, stream, sort_keys=True, separators=(",", ":"))
+                stream.write("\n")
+            os.replace(temporary_path, cache_path)
+            self.stats.writes += 1
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink()
+                except FileNotFoundError:
+                    pass
+        return completed
+
+
 def run_suffix(
     command: list[str], *, env: dict[str, str] | None = None,
     exclude_dumps_from_timing: bool = False,
+    cache: SuffixResultCache | None = None,
+    input_path: Path | None = None,
+    allow_cache: bool = True,
 ) -> tuple[subprocess.CompletedProcess[str], subprocess.CompletedProcess[str]]:
     """Run the oracle command and, when requested, a clean timing invocation."""
-    compiled = run(command, env=env)
+    if cache is not None:
+        if input_path is None:
+            raise ValueError("input_path is required when suffix cache is enabled")
+        compiled = cache.load_or_run(
+            command, input_path, env=env, allow_cache=allow_cache)
+    else:
+        compiled = run(command, env=env)
     if not exclude_dumps_from_timing:
         return compiled, compiled
 
@@ -449,6 +659,14 @@ def main() -> int:
         print("--retry-only cannot be combined with --check-retry",
               file=sys.stderr)
         return 2
+    if args.suffix_cache_mode != "read-write" and args.suffix_cache_dir is None:
+        print("--suffix-cache-mode requires --suffix-cache-dir", file=sys.stderr)
+        return 2
+    if (args.suffix_compiler_sha256 is not None and
+            re.fullmatch(r"[0-9a-f]{64}", args.suffix_compiler_sha256) is None):
+        print("--suffix-compiler-sha256 must be 64 lowercase hex digits",
+              file=sys.stderr)
+        return 2
     if args.case_start < 0:
         print("--case-start must be non-negative", file=sys.stderr)
         return 2
@@ -472,6 +690,21 @@ def main() -> int:
         if not executable.is_file() or not os.access(executable, os.X_OK):
             print(f"not an executable: {executable}", file=sys.stderr)
             return 1
+
+    suffix_cache = (
+        SuffixResultCache(
+            args.suffix_cache_dir.resolve(),
+            args.compiler.resolve(),
+            args.suffix_cache_mode,
+            args.suffix_compiler_sha256,
+        )
+        if args.suffix_cache_dir is not None else None
+    )
+    cache_safe_for_run = (
+        args.runtime_timing_output is None
+        and args.stage_snapshots_dir is None
+        and args.pipeline_manifest is None
+    )
 
     failures: list[str] = []
     blockers = 0
@@ -566,7 +799,11 @@ def main() -> int:
                             manifest_written = True
                         compiled_blocker, timed_blocker = run_suffix(
                             blocker_command,
+                            cache=suffix_cache,
+                            input_path=input_path,
+                            allow_cache=cache_safe_for_run,
                             exclude_dumps_from_timing=
+                            bool(args.runtime_timing_output) and
                             args.runtime_timing_exclude_dumps)
                         if args.runtime_timing_output:
                             try:
@@ -634,7 +871,11 @@ def main() -> int:
                 oracle_env["BISHENGIR_DUMP_PLAN_MEMORY_ATTEMPTS"] = "1"
                 compiled, timed_compiled = run_suffix(
                     compiler_command, env=oracle_env,
+                    cache=suffix_cache,
+                    input_path=input_path,
+                    allow_cache=cache_safe_for_run,
                     exclude_dumps_from_timing=
+                    bool(args.runtime_timing_output) and
                     args.runtime_timing_exclude_dumps)
                 if args.runtime_timing_output:
                     try:
@@ -765,7 +1006,11 @@ def main() -> int:
                         oracle_env["BISHENGIR_DUMP_PLAN_MEMORY_ATTEMPTS"] = "1"
                         compiled_retry, timed_retry = run_suffix(
                             retry_compiler_command, env=oracle_env,
+                            cache=suffix_cache,
+                            input_path=input_path,
+                            allow_cache=cache_safe_for_run,
                             exclude_dumps_from_timing=
+                            bool(args.runtime_timing_output) and
                             args.runtime_timing_exclude_dumps)
                         if args.runtime_timing_output:
                             try:
@@ -834,6 +1079,14 @@ def main() -> int:
         f"summary: inputs={len(inputs)} reported_exact={reported_exact} "
         f"matched={matched} blockers={blockers} invalid={invalid} "
         f"oracle_unavailable={oracle_unavailable} failures={len(failures)}")
+    if suffix_cache is not None:
+        stats = suffix_cache.stats
+        print(
+            "suffix cache: "
+            f"mode={args.suffix_cache_mode} hits={stats.hits} "
+            f"misses={stats.misses} writes={stats.writes} "
+            f"bypasses={stats.bypasses} dir={args.suffix_cache_dir}"
+        )
     if args.runtime_timing_output:
         totals = write_runtime_timing(args.runtime_timing_output, timing_rows)
         model_ns = totals.get("model", 0)

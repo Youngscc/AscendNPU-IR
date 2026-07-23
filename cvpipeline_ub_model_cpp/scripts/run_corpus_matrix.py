@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+import hashlib
 import shlex
 import subprocess
 import sys
@@ -38,6 +39,14 @@ FIELDS = (
     "local_multi_buffer_strategy",
     "mix_multi_buffer_strategy",
 )
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def parse_zero_one(value: str, *, field: str, line: int) -> bool:
@@ -184,7 +193,20 @@ def build_command(
     if getattr(args, "retry_only", False):
         command.append("--retry-only")
     else:
-        command.extend(("--seeds", str(args.seed)))
+        selected_seeds = getattr(args, "seeds", None)
+        command.extend((
+            "--seeds",
+            selected_seeds if selected_seeds is not None
+            else str(args.seed if args.seed is not None else 0),
+        ))
+    if getattr(args, "suffix_cache_dir", None) is not None:
+        command.extend((
+            "--suffix-cache-dir", str(args.suffix_cache_dir),
+            "--suffix-cache-mode", args.suffix_cache_mode,
+        ))
+        compiler_digest = getattr(args, "suffix_compiler_sha256", None)
+        if compiler_digest is not None:
+            command.extend(("--suffix-compiler-sha256", compiler_digest))
     if config.restrict_inplace_as_isa:
         command.append("--restrict-inplace-as-isa")
     if config.disable_cv_pipelining:
@@ -242,11 +264,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--corpus-root", type=Path)
     parser.add_argument("--model", type=Path)
     parser.add_argument("--compiler", type=Path)
-    parser.add_argument("--seed", type=bounded_seed, default=0,
-                        help="single fixed PlanMemory seed (default: 0)")
-    parser.add_argument(
+    seed_group = parser.add_mutually_exclusive_group()
+    seed_group.add_argument(
+        "--seed", type=bounded_seed,
+        help="single fixed PlanMemory seed (default: 0)")
+    seed_group.add_argument(
+        "--seeds",
+        help="PlanMemory seed selection, for example 0-19",
+    )
+    seed_group.add_argument(
         "--retry-only", action="store_true",
         help="Run only the default PlanMemory seed-retry mode",
+    )
+    parser.add_argument(
+        "--suffix-cache-dir", type=Path,
+        help=("Share a content-addressed suffix oracle cache across all "
+              "matrix configurations"),
+    )
+    parser.add_argument(
+        "--suffix-cache-mode",
+        choices=("read-write", "read-only", "refresh"),
+        default="read-write",
+        help=("read-write fills misses (default); read-only never invokes "
+              "suffix; refresh replaces matching entries"),
     )
     parser.add_argument("--config", action="append", default=[], metavar="NAME",
                         help="run only this named configuration; repeatable")
@@ -351,6 +391,16 @@ def main() -> int:
     if args.case_start < 0:
         print("--case-start must be non-negative", file=sys.stderr)
         return 2
+    if args.suffix_cache_mode != "read-write" and args.suffix_cache_dir is None:
+        print("--suffix-cache-mode requires --suffix-cache-dir", file=sys.stderr)
+        return 2
+    if args.suffix_cache_dir is not None:
+        try:
+            args.suffix_compiler_sha256 = sha256_file(args.compiler)
+        except OSError as error:
+            print(f"cannot hash suffix compiler {args.compiler}: {error}",
+                  file=sys.stderr)
+            return 2
 
     if args.config:
         selected = set(args.config)
@@ -416,12 +466,16 @@ def main() -> int:
             )
 
     if args.dry_run:
-        seed_mode = "retry" if args.retry_only else str(args.seed)
+        seed_mode = ("retry" if args.retry_only else
+                     (args.seeds if args.seeds is not None else
+                      str(args.seed if args.seed is not None else 0)))
         print(
             f"dry run complete: {len(configs)} configuration(s), "
             f"seed={seed_mode}")
         return 0
-    seed_mode = "retry" if args.retry_only else str(args.seed)
+    seed_mode = ("retry" if args.retry_only else
+                 (args.seeds if args.seeds is not None else
+                  str(args.seed if args.seed is not None else 0)))
     print(
         f"matrix summary: selected={len(configs)} executed={executed} "
         f"passed={executed - len(required_failures) - len(experimental_failures)} "

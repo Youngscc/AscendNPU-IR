@@ -15,10 +15,12 @@ from compare_ub_plan_with_suffix_oracle import (  # noqa: E402
     model_multi_and_inplace,
     normalized_lifetimes_from_model,
     parse_oracle_contract,
+    parse_oracle_retry,
     plan_multiset_from_model,
 )
 from run_corpus_oracle import (  # noqa: E402
     RuntimeTimingRecord,
+    SuffixResultCache,
     is_ub_overflow,
     overflow_address_space,
     parse_runtime_timing,
@@ -35,6 +37,28 @@ assert overflow_address_space("[ERROR] unrelated compiler failure") is None
 assert is_ub_overflow("ub")
 assert is_ub_overflow("ubuf")
 assert not is_ub_overflow("cbuf")
+
+# Retry keeps the final failed attempt when every seed overflows. The compiler
+# still emits an exact fallback plan for that attempt, so the oracle parser
+# must not discard it merely because no PLANMEM_PLAN_ATTEMPT says "success".
+all_failed_retry_oracle = """\
+PLANMEM_LIVENESS_ATTEMPT\tkernel_mix_aiv\t0\t0
+PLANMEM_PLAN_ATTEMPT\tkernel_mix_aiv\t0\tfailure
+PLANMEM_PEAK\t0\t6\t98304
+PLANMEM_LIVENESS_ATTEMPT\tkernel_mix_aiv\t1\t0
+PLANMEM_EXACT_BUFFER\t1\tb0\t32768\t6\t0\t10\t20
+PLANMEM_PLAN_ATTEMPT\tkernel_mix_aiv\t1\tfailure
+PLANMEM_EXACT_PLANNED_BUFFER\t1\t6\tb0\t32768\t0
+PLANMEM_PEAK\t1\t6\t32768
+"""
+with tempfile.TemporaryDirectory(prefix="cvub-retry-overflow-") as directory:
+    path = Path(directory) / "oracle.tsv"
+    path.write_text(all_failed_retry_oracle, encoding="utf-8")
+    selected, peak, plan, lifetimes = parse_oracle_retry(path, "6")
+assert selected == {"kernel": 1}
+assert peak == 32768
+assert plan == collections.Counter({(32768, 0): 1})
+assert len(lifetimes) == 1
 
 timing_records = parse_runtime_timing("""\
 unrelated diagnostic
@@ -81,6 +105,33 @@ with tempfile.TemporaryDirectory(prefix="cvub-selected-inputs-") as directory:
         Path("case-b/before_cvpipelining_func_b.mlir"),
         Path("case-a/before_cvpipelining_func_a.mlir"),
     ]) == [second.resolve(), first.resolve()]
+with tempfile.TemporaryDirectory(prefix="cvub-suffix-cache-") as directory:
+    root = Path(directory)
+    input_path = root / "input.mlir"
+    input_path.write_text("module {}\n", encoding="utf-8")
+    command = [
+        sys.executable,
+        "-c", "print('cached oracle')",
+        str(input_path),
+        "-o", str(root / "first.mlir"),
+        "--plan-memory-seed=3",
+    ]
+    cache = SuffixResultCache(root / "cache", Path(sys.executable), "read-write")
+    first_result = cache.load_or_run(command, input_path)
+    assert first_result.returncode == 0
+    assert cache.stats.misses == 1 and cache.stats.writes == 1
+    command[command.index("-o") + 1] = str(root / "second.mlir")
+    second_result = cache.load_or_run(command, input_path)
+    assert second_result.stdout == first_result.stdout
+    assert cache.stats.hits == 1
+
+    read_only = SuffixResultCache(
+        root / "cache", Path(sys.executable), "read-only")
+    assert read_only.load_or_run(command, input_path).returncode == 0
+    command[-1] = "--plan-memory-seed=4"
+    missing = read_only.load_or_run(command, input_path)
+    assert missing.returncode == 125
+    assert "suffix cache miss" in missing.stderr
 
 with tempfile.TemporaryDirectory() as directory:
     empty_ub_oracle = Path(directory) / "empty-ub.tsv"

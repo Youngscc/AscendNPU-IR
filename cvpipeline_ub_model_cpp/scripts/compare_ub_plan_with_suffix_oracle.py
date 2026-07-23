@@ -334,6 +334,7 @@ def parse_oracle_retry(
 ) -> tuple[dict[str, int], int, Counter[PlanKey], Counter[LifetimeKey]]:
     current_function = ""
     successful: dict[str, int] = {}
+    last_attempt: dict[str, int] = {}
     peaks: dict[tuple[str, int], int] = {}
     lives: dict[tuple[str, int, str], tuple[int, int, int]] = {}
     offsets: dict[tuple[str, int, str], list[int]] = collections.defaultdict(list)
@@ -345,6 +346,7 @@ def parse_oracle_retry(
             current_function = canonical_function_name(fields[1])
         elif fields[0] == "PLANMEM_PLAN_ATTEMPT" and len(fields) >= 4:
             current_function = canonical_function_name(fields[1])
+            last_attempt[current_function] = int(fields[2])
             if fields[3] == "success" and current_function not in successful:
                 successful[current_function] = int(fields[2])
         elif fields[0] == "PLANMEM_PEAK" and len(fields) >= 4:
@@ -360,10 +362,18 @@ def parse_oracle_retry(
             key = (current_function, int(fields[1]), fields[3])
             offsets[key].extend(int(value) for value in fields[5:])
 
+    # PlanMemory stops at the first successful attempt. If all 20 attempts
+    # overflow, the compiler returns the final failed attempt as its exact
+    # fallback plan. Mirror that selection rule instead of treating the
+    # retry result as an empty plan merely because no attempt said "success".
+    selected_by_function = dict(successful)
+    for function, attempt in last_attempt.items():
+        selected_by_function.setdefault(function, attempt)
+
     plan: Counter[PlanKey] = collections.Counter()
     normalized: Counter[LifetimeKey] = collections.Counter()
     module_peak = 0
-    for function, selected in successful.items():
+    for function, selected in selected_by_function.items():
         function_lives = {
             buffer_id: life
             for (life_function, attempt, buffer_id), life in lives.items()
@@ -378,14 +388,14 @@ def parse_oracle_retry(
                 normalized[(function, extent, offset,
                             ranks[gen], ranks[kill])] += 1
         module_peak = max(module_peak, peaks.get((function, selected), 0))
-    ub_successful = {
+    ub_selected = {
         function: selected
-        for function, selected in successful.items()
+        for function, selected in selected_by_function.items()
         if ((function, selected) in peaks or
             any(life_function == function and attempt == selected
                 for life_function, attempt, _ in lives))
     }
-    return ub_successful, module_peak, plan, normalized
+    return ub_selected, module_peak, plan, normalized
 
 
 def format_pair(pair: tuple[int, int], count: int) -> str:

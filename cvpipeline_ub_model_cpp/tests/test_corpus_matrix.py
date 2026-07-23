@@ -63,6 +63,7 @@ args = argparse.Namespace(
     model=Path("model"),
     compiler=Path("compiler"),
     seed=0,
+    seeds=None,
     retry_only=False,
     max_cases=None,
     case_start=0,
@@ -88,6 +89,14 @@ retry_args = argparse.Namespace(**{
 retry_command = MODULE.build_command(retry_args, matrix[0])
 assert "--retry-only" in retry_command
 assert "--seeds" not in retry_command
+
+all_seed_args = argparse.Namespace(**{
+    **vars(args),
+    "seed": None,
+    "seeds": "0-19",
+})
+all_seed_command = MODULE.build_command(all_seed_args, matrix[0])
+assert all_seed_command[all_seed_command.index("--seeds") + 1] == "0-19"
 
 chunk_args = argparse.Namespace(**{
     **vars(args),
@@ -116,6 +125,17 @@ timing_args = argparse.Namespace(**{
 timing_command = MODULE.build_command(
     timing_args, matrix[0], Path("default.tsv"))
 assert "--runtime-timing-exclude-dumps" in timing_command
+
+cache_args = argparse.Namespace(**{
+    **vars(args),
+    "suffix_cache_dir": Path("suffix-cache"),
+    "suffix_cache_mode": "read-only",
+    "suffix_compiler_sha256": "a" * 64,
+})
+cache_command = MODULE.build_command(cache_args, matrix[0])
+assert cache_command[cache_command.index("--suffix-cache-dir") + 1] == "suffix-cache"
+assert cache_command[cache_command.index("--suffix-cache-mode") + 1] == "read-only"
+assert cache_command[cache_command.index("--suffix-compiler-sha256") + 1] == "a" * 64
 
 with tempfile.TemporaryDirectory() as directory:
     bad_matrix = Path(directory) / "bad.tsv"
