@@ -17,9 +17,9 @@ inline const GenericOperation *EnclosingFunction(
 }
 
 inline AddressSpace FunctionDefaultAddressSpace(
-    const GenericOperation &function) {
+    const GenericOperation &function, PipelineMetadataCache &metadata) {
   const std::string core = DecomposeEnumValue(
-      FindDictionaryValue(function.attributes, "hivm.func_core_type"));
+      metadata.dictionaryValue(function.attributes, "hivm.func_core_type"));
   return core == "AIC" ? AddressSpace::L1 : AddressSpace::UB;
 }
 
@@ -59,34 +59,45 @@ inline std::map<std::string, AddressSpace>
 InferHIVMMemScope(const PostBufferizationRewriteState &module) {
   std::map<std::string, AddressSpace> result;
   const GenericModule &logical = module.bufferized.logicalModule;
+  const GenericModuleAnalysisIndexes &analysis =
+      module.bufferized.logicalContext.analysis;
+  PipelineMetadataCache &metadata = module.bufferized.logicalContext.metadata;
+  analysis.ensureCompatible(logical);
   for (size_t index = 0; index < module.singlePoint.allocations.size(); ++index) {
     const BufferAllocation &allocation = module.singlePoint.allocations[index];
     const int operationId = AllocationSourceOperation(allocation.source);
     if (operationId < 0)
       throw std::runtime_error("InferHIVMMemScope: malformed allocation source");
-    const GenericOperation &operation =
-        logical.operations.at(static_cast<size_t>(operationId));
-    const GenericOperation *function = EnclosingFunction(logical, operation);
+    const int functionId = analysis.enclosingFunctionId(operationId);
+    const GenericOperation *function =
+        functionId < 0
+            ? nullptr
+            : &logical.operations.at(static_cast<size_t>(functionId));
     if (!function)
       throw std::runtime_error("InferHIVMMemScope: allocation outside function");
-    const std::optional<MemRefTypeModel> type = ParseMemRefType(allocation.type);
+    const std::optional<MemRefTypeModel> type =
+        metadata.memRefType(allocation.type);
     result["base:" + std::to_string(index)] =
         type && type->addressSpace != AddressSpace::Unknown
             ? type->addressSpace
-            : FunctionDefaultAddressSpace(*function);
+            : FunctionDefaultAddressSpace(*function, metadata);
   }
 
   std::map<int, size_t> decomposeOrdinals;
   for (const DecomposeBufferAllocation &allocation :
        module.decomposeAllocations) {
-    const GenericOperation &operation = logical.operations.at(
-        static_cast<size_t>(allocation.ownerOperation));
-    const GenericOperation *function = EnclosingFunction(logical, operation);
+    const int functionId =
+        analysis.enclosingFunctionId(allocation.ownerOperation);
+    const GenericOperation *function =
+        functionId < 0
+            ? nullptr
+            : &logical.operations.at(static_cast<size_t>(functionId));
     if (!function)
       throw std::runtime_error("InferHIVMMemScope: temp outside function");
     const size_t ordinal = decomposeOrdinals[allocation.ownerOperation]++;
     result["decompose:" + std::to_string(allocation.ownerOperation) + ":" +
-           std::to_string(ordinal)] = FunctionDefaultAddressSpace(*function);
+           std::to_string(ordinal)] =
+        FunctionDefaultAddressSpace(*function, metadata);
   }
 
   for (const GenericOperation &operation : logical.operations) {

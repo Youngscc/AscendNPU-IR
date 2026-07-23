@@ -1,7 +1,10 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_PLANMEMORY_INPUT_SEMANTIC_IR_HPP
 #define CVPIPELINE_UB_MODEL_CPP_PLANMEMORY_INPUT_SEMANTIC_IR_HPP
 
+#include "../ir/generic_analysis.hpp"
 #include "after_mark_multi_buffer.hpp"
+
+#include <string_view>
 
 namespace cvub {
 
@@ -10,12 +13,52 @@ struct PlanMemoryInputBufferRecord {
   std::string identity;
   std::string sourceIdentity;
   std::string functionName;
-  std::string physicalType;
+  // Final PlanMemory allocation type.  Earlier revisions stored an
+  // intermediate "element|shape|strides|offset" string here and immediately
+  // parsed it again in PlanMemoryInputBuilder.  Keep the typed projection in
+  // its final textual form so the normal path performs the conversion once.
+  std::string memrefType;
   uint64_t constBits = 0;
   bool extraBuffer = false;
   uint32_t multiBufferNum = 1;
   bool preloadLocalBuffer = false;
 };
+
+enum class PlanMemoryAccessEffect : uint8_t {
+  None,
+  Read,
+  Write,
+  ReadWrite,
+};
+
+inline const char *PlanMemoryAccessEffectName(PlanMemoryAccessEffect effect) {
+  switch (effect) {
+  case PlanMemoryAccessEffect::None:
+    return "none";
+  case PlanMemoryAccessEffect::Read:
+    return "r";
+  case PlanMemoryAccessEffect::Write:
+    return "w";
+  case PlanMemoryAccessEffect::ReadWrite:
+    return "rw";
+  }
+  throw std::runtime_error("PlanMemoryInput: unknown access effect");
+}
+
+inline bool operator==(PlanMemoryAccessEffect effect,
+                       std::string_view name) {
+  return name == PlanMemoryAccessEffectName(effect);
+}
+
+inline bool operator!=(PlanMemoryAccessEffect effect,
+                       std::string_view name) {
+  return !(effect == name);
+}
+
+inline std::ostream &operator<<(std::ostream &output,
+                                PlanMemoryAccessEffect effect) {
+  return output << PlanMemoryAccessEffectName(effect);
+}
 
 struct PlanMemoryInputAccessRecord {
   std::string functionName;
@@ -29,12 +72,31 @@ struct PlanMemoryInputAccessRecord {
   bool outOfPlaceCopy = false;
   int sourceOperandNumber = -1;
   bool decomposedScalarVSub = false;
-  std::vector<std::pair<std::string, std::string>> accesses;
+  using Access = std::pair<std::string, PlanMemoryAccessEffect>;
+  std::vector<Access> accesses;
   std::set<std::string> temporaryBuffers;
+};
+
+// Shared, serialization-independent indexes for the immutable planning
+// state.  Stages keep their existing semantic records and debug formats, but
+// downstream consumers no longer rebuild the same string/owner/rewrite maps
+// from the nested OneShot-to-MultiBuffer state.
+struct UBPlanningContext {
+  std::vector<std::vector<bool>> outOfPlaceOperands;
+  std::map<std::string, size_t> afterAllocBufferBySource;
+  std::map<std::string, size_t> liveBufferBySource;
+  std::vector<int> liveBufferOwners;
+  // Generic operation IDs are dense.  Dense ordinal tables avoid allocating
+  // tree nodes for indexes that are queried once per operation while
+  // projecting the final PlanMemory event stream.
+  std::vector<size_t> operationRewriteBySource;
+  std::vector<size_t> inlineLoadByCopyOperation;
+  std::vector<bool> erasedInlineLoadOperations;
 };
 
 struct PlanMemoryInputSemanticIR {
   AfterMarkMultiBufferState afterMarkMultiBuffer;
+  UBPlanningContext planningContext;
   std::vector<PlanMemoryInputBufferRecord> buffers;
   std::vector<PlanMemoryInputAccessRecord> accesses;
   std::vector<std::string> accessBlockers;
@@ -47,25 +109,65 @@ inline bool IsControlAliasOperation(const std::string &name) {
          name == "cf.cond_br";
 }
 
-inline std::string AccessEffect(const std::string &name, size_t operand,
-                                  size_t operandCount,
-                                  const std::string &properties = "") {
-  if (IsControlAliasOperation(name))
-    return "alias";
-  GenericOperation operation;
-  operation.name = name;
-  operation.operands.resize(operandCount);
-  operation.properties = properties;
-  if (operation.properties.empty() && IsDestinationStyleOp(name) &&
+inline std::vector<PlanMemoryAccessEffect>
+AccessEffects(const std::string &name, size_t operandCount,
+              const std::string &properties,
+              PipelineMetadataCache &metadata) {
+  std::vector<PlanMemoryAccessEffect> result(
+      operandCount, PlanMemoryAccessEffect::ReadWrite);
+  if (IsControlAliasOperation(name)) {
+    std::fill(result.begin(), result.end(), PlanMemoryAccessEffect::None);
+    return result;
+  }
+  std::string synthesizedProperties;
+  const std::string *effectiveProperties = &properties;
+  if (properties.empty() && IsDestinationStyleOp(name) &&
       name != "hivm.hir.varange" && name != "hivm.hir.vconcat" &&
       operandCount != 0)
-    operation.properties =
+    synthesizedProperties =
         "operandSegmentSizes = array<i32: " +
         std::to_string(operandCount - 1) + ", 1>";
-  const InlineLoadCopyMemoryEffect effect = OperandMemoryEffect(operation, operand);
-  const bool read = HasMemoryEffect(effect, InlineLoadCopyMemoryEffect::Read);
-  const bool write = HasMemoryEffect(effect, InlineLoadCopyMemoryEffect::Write);
-  return read && write ? "rw" : read ? "r" : write ? "w" : "none";
+  if (!synthesizedProperties.empty())
+    effectiveProperties = &synthesizedProperties;
+  // OperandMemoryEffect used to call DpsInitOperandIndices once per operand.
+  // Compute the destination set once per event and project all effects in a
+  // single pass instead.
+  std::vector<bool> destinations(operandCount, false);
+  if (IsDestinationStyleOp(name))
+    for (size_t operand : metadata.dpsInitOperandIndices(
+             name, operandCount, *effectiveProperties))
+      if (operand < destinations.size())
+        destinations[operand] = true;
+  for (size_t operand = 0; operand < operandCount; ++operand) {
+    InlineLoadCopyMemoryEffect effect;
+    if (IsViewLikeOperation(name))
+      effect = InlineLoadCopyMemoryEffect::None;
+    else if (name == "hivm.hir.load" || name == "hivm.hir.copy" ||
+             name == "hivm.hir.store" || name == "tensor.insert_slice")
+      effect = operand == 0 ? InlineLoadCopyMemoryEffect::Read
+                            : InlineLoadCopyMemoryEffect::Write;
+    else if (name == "memref.load")
+      effect = InlineLoadCopyMemoryEffect::Read;
+    else if (name == "memref.store")
+      effect = operand == 0 ? InlineLoadCopyMemoryEffect::Read
+                            : InlineLoadCopyMemoryEffect::Write;
+    else if (IsDestinationStyleOp(name))
+      effect = destinations[operand] ? InlineLoadCopyMemoryEffect::Write
+                                     : InlineLoadCopyMemoryEffect::Read;
+    else
+      effect = InlineLoadCopyMemoryEffect::Read |
+               InlineLoadCopyMemoryEffect::Write;
+    const bool read =
+        HasMemoryEffect(effect, InlineLoadCopyMemoryEffect::Read);
+    const bool write =
+        HasMemoryEffect(effect, InlineLoadCopyMemoryEffect::Write);
+    result[operand] =
+        read && write ? PlanMemoryAccessEffect::ReadWrite
+        : read        ? PlanMemoryAccessEffect::Read
+        : write       ? PlanMemoryAccessEffect::Write
+                      : PlanMemoryAccessEffect::None;
+  }
+  return result;
 }
 
 inline bool IsElidedOperation(const std::string &name) {
@@ -91,68 +193,6 @@ inline bool SinglePointBufferSurvives(
   for (const std::string &alternative : BufferAlternatives(buffer))
     if (bufferMapping.count(alternative) != 0)
       return true;
-  return false;
-}
-
-inline std::string OriginalOperationBuffer(const PostBufferizationRewriteState &module,
-                                             int operation,
-                                             size_t operand) {
-  for (const BufferizedOperandAccess &access : module.bufferized.accesses)
-    if (access.operationId == operation &&
-        access.operandNumber == static_cast<int>(operand))
-      return access.bufferId;
-  return "";
-}
-
-inline std::string ValueBuffer(const BufferizedSemanticIR &module,
-                                 int value) {
-  for (const BufferizedValueBinding &binding : module.values)
-    if (binding.valueId == value)
-      return binding.bufferId;
-  return "";
-}
-
-inline bool ValueHasUser(const GenericModule &module, int value) {
-  return std::any_of(module.operations.begin(), module.operations.end(),
-                     [&](const GenericOperation &operation) {
-                       return std::find(operation.operands.begin(),
-                                        operation.operands.end(), value) !=
-                              operation.operands.end();
-                     });
-}
-
-inline const GenericOperation *DefiningOperation(
-    const GenericModule &module, int value) {
-  for (const GenericOperation &operation : module.operations)
-    if (std::find(operation.results.begin(), operation.results.end(), value) !=
-        operation.results.end())
-      return &operation;
-  return nullptr;
-}
-
-inline bool IsOutOfPlaceOperand(const PostBufferizationRewriteState &module, int operation,
-                                  size_t operand) {
-  const std::string source = "operand:" + std::to_string(operation) + ":" +
-                             std::to_string(operand);
-  return std::any_of(module.bufferized.allocations.begin(),
-                     module.bufferized.allocations.end(),
-                     [&](const BufferAllocation &allocation) {
-                       return allocation.source == source;
-                     });
-}
-
-inline bool TensorInsertMustMaterialize(const PostBufferizationRewriteState &module,
-                                          const GenericOperation &insert) {
-  if (insert.results.empty())
-    return false;
-  const int result = insert.results.front();
-  for (const GenericOperation &user : module.bufferized.logicalModule.operations) {
-    if (std::find(user.operands.begin(), user.operands.end(), result) ==
-        user.operands.end())
-      continue;
-    if (module.singlePoint.scalarizedOperations.count(user.id) == 0)
-      return true;
-  }
   return false;
 }
 
@@ -187,9 +227,11 @@ inline std::string PhysicalTypeSignature(const std::string &type) {
   return output.str();
 }
 
-inline std::string PhysicalBufferTypeSignature(
-    const LocalBufferRecord &buffer, const AlignStorageResult &alignStorage) {
-  const std::optional<MemRefTypeModel> parsed = ParseMemRefType(buffer.type);
+inline std::string PhysicalBufferMemRefType(
+    const LocalBufferRecord &buffer, const AlignStorageResult &alignStorage,
+    PipelineMetadataCache &metadata) {
+  const std::optional<MemRefTypeModel> &parsed =
+      metadata.memRefType(buffer.type);
   if (!parsed)
     throw std::runtime_error("PlanMemoryInput: expected buffer memref type");
   const uint64_t bitWidth = GetElementBitWidth(*parsed);
@@ -201,8 +243,8 @@ inline std::string PhysicalBufferTypeSignature(
                   })) {
     if (buffer.constBits % 8 != 0)
       throw std::runtime_error("PlanMemoryInput: dynamic byte allocation is not integral");
-    return PhysicalTypeSignature(
-        "memref<" + std::to_string(buffer.constBits / 8) + "xi8>");
+    return "memref<" + std::to_string(buffer.constBits / 8) +
+           "xi8, strided<[1], offset: 0>, #hivm.address_space<ub>>";
   }
   std::vector<uint64_t> shape;
   for (size_t axis = 0; axis < parsed->shape.size(); ++axis) {
@@ -265,12 +307,23 @@ inline std::string PhysicalBufferTypeSignature(
         "PlanMemoryInput: physical shape does not match constBits: " +
         buffer.sourceIdentity + " calculated=" + std::to_string(physicalBits) +
         " expected=" + std::to_string(buffer.constBits));
+  std::vector<uint64_t> strides(shape.size(), 1);
+  for (size_t reverse = shape.size(); reverse > 1; --reverse)
+    strides[reverse - 2] = CheckedMul(
+        strides[reverse - 1], shape[reverse - 1],
+        "PlanMemoryInput physical allocation stride");
   std::ostringstream type;
   type << "memref<";
   for (uint64_t extent : shape)
     type << extent << 'x';
-  type << parsed->elementType << '>';
-  return PhysicalTypeSignature(type.str());
+  type << parsed->elementType << ", strided<[";
+  for (size_t index = 0; index < strides.size(); ++index) {
+    if (index)
+      type << ", ";
+    type << strides[index];
+  }
+  type << "], offset: 0>, #hivm.address_space<ub>>";
+  return type.str();
 }
 
 inline bool IsAIVFunction(const GenericOperation &function) {
@@ -279,53 +332,220 @@ inline bool IsAIVFunction(const GenericOperation &function) {
          "AIV";
 }
 
+inline UBPlanningContext
+BuildUBPlanningContext(const AfterMarkMultiBufferState &state) {
+  UBPlanningContext result;
+  const AfterInlineLoadCopyState &afterInline = state.afterInlineLoadCopy;
+  const AfterAllocExtraBufferState &afterAlloc =
+      afterInline.afterAllocExtraBuffer;
+  const PostBufferizationRewriteState &post = afterAlloc.postBufferization;
+  const size_t operationCount = post.bufferized.logicalModule.operations.size();
+  result.outOfPlaceOperands.resize(operationCount);
+  for (const GenericOperation &operation :
+       post.bufferized.logicalModule.operations)
+    result.outOfPlaceOperands[static_cast<size_t>(operation.id)].assign(
+        operation.operands.size(), false);
+  result.operationRewriteBySource.assign(operationCount,
+                                         std::numeric_limits<size_t>::max());
+  result.inlineLoadByCopyOperation.assign(operationCount,
+                                          std::numeric_limits<size_t>::max());
+  result.erasedInlineLoadOperations.assign(operationCount, false);
+  for (const BufferAllocation &allocation : post.bufferized.allocations) {
+    if (!startsWith(allocation.source, "operand:"))
+      continue;
+    const size_t operationEnd = allocation.source.find(':', 8);
+    if (operationEnd == std::string::npos)
+      continue;
+    const size_t operation = static_cast<size_t>(
+        std::stoull(allocation.source.substr(8, operationEnd - 8)));
+    const size_t operand = static_cast<size_t>(
+        std::stoull(allocation.source.substr(operationEnd + 1)));
+    if (operation < result.outOfPlaceOperands.size() &&
+        operand < result.outOfPlaceOperands[operation].size())
+      result.outOfPlaceOperands[operation][operand] = true;
+  }
+  for (size_t ordinal = 0; ordinal < afterAlloc.buffers.size(); ++ordinal)
+    result.afterAllocBufferBySource.emplace(
+        afterAlloc.buffers[ordinal].sourceIdentity, ordinal);
+  result.liveBufferOwners.reserve(afterInline.buffers.size());
+  for (size_t ordinal = 0; ordinal < afterInline.buffers.size(); ++ordinal) {
+    const LocalBufferRecord &buffer = afterInline.buffers[ordinal];
+    result.liveBufferBySource.emplace(buffer.sourceIdentity, ordinal);
+    result.liveBufferOwners.push_back(BufferOwnerOperation(afterAlloc, buffer));
+  }
+  for (size_t ordinal = 0; ordinal < post.operationRewrites.size(); ++ordinal) {
+    const int source = post.operationRewrites[ordinal].sourceOperation;
+    if (source >= 0 && static_cast<size_t>(source) < operationCount)
+      result.operationRewriteBySource[static_cast<size_t>(source)] = ordinal;
+  }
+  for (size_t ordinal = 0; ordinal < afterInline.inlineLoadCopy.rewrites.size();
+       ++ordinal) {
+    const InlineLoadCopyRewrite &rewrite =
+        afterInline.inlineLoadCopy.rewrites[ordinal];
+    if (rewrite.copyOperation >= 0 &&
+        static_cast<size_t>(rewrite.copyOperation) < operationCount)
+      result.inlineLoadByCopyOperation[
+          static_cast<size_t>(rewrite.copyOperation)] = ordinal;
+    if (rewrite.loadOperation >= 0 &&
+        static_cast<size_t>(rewrite.loadOperation) < operationCount)
+      result.erasedInlineLoadOperations[
+          static_cast<size_t>(rewrite.loadOperation)] = true;
+  }
+  return result;
+}
+
 inline PlanMemoryInputSemanticIR
 BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
   PlanMemoryInputSemanticIR result;
-  const GenericModule &module = afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized.logicalModule;
+  UBPlanningContext planningContext =
+      BuildUBPlanningContext(afterMarkMultiBuffer);
+  const PostBufferizationRewriteState &postBufferization =
+      afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer
+          .postBufferization;
+  const BufferizedSemanticIR &bufferized = postBufferization.bufferized;
+  const GenericModule &module = bufferized.logicalModule;
+  result.buffers.reserve(
+      afterMarkMultiBuffer.afterInlineLoadCopy.buffers.size());
+  result.accesses.reserve(module.operations.size());
+
+  // Build the stage-local indexes once.  The original staged implementation
+  // answered these queries by repeatedly scanning operations, accesses,
+  // values, and allocations while materializing the final access stream.
+  const GenericModuleAnalysisIndexes &analysis =
+      bufferized.logicalContext.analysis;
+  PipelineMetadataCache &metadata = bufferized.logicalContext.metadata;
+  analysis.ensureCompatible(module);
+  std::vector<bool> aivFunctions(module.operations.size(), false);
+  std::vector<std::string> functionNames(module.operations.size());
+  for (const GenericOperation &operation : module.operations) {
+    if (operation.name != "func.func")
+      continue;
+    aivFunctions[static_cast<size_t>(operation.id)] =
+        DecomposeEnumValue(metadata.dictionaryValue(
+            operation.attributes, "hivm.func_core_type")) == "AIV";
+    std::string functionName =
+        metadata.dictionaryValue(operation.properties, "sym_name");
+    if (functionName.empty())
+      functionName =
+          metadata.dictionaryValue(operation.attributes, "sym_name");
+    if (functionName.size() >= 2 && functionName.front() == '"' &&
+        functionName.back() == '"')
+      functionName = functionName.substr(1, functionName.size() - 2);
+    functionNames[static_cast<size_t>(operation.id)] =
+        std::move(functionName);
+  }
+  auto definingOperation = [&](int value) -> const GenericOperation * {
+    const int operation = analysis.definingOperationId(value);
+    return operation < 0
+               ? nullptr
+               : &module.operations.at(static_cast<size_t>(operation));
+  };
+  auto valueHasUser = [&](int value) {
+    return !analysis.users(value).empty();
+  };
+  auto valueBuffer = [&](int value) {
+    const std::string *buffer = FindBufferizedValueBuffer(bufferized, value);
+    return buffer ? *buffer : std::string();
+  };
+  auto originalOperationBuffer = [&](int operation, size_t operand) {
+    const std::string *buffer =
+        FindBufferizedOperationBuffer(bufferized, operation, operand);
+    return buffer ? *buffer : std::string();
+  };
+  std::map<std::string, std::string> mappedBufferCache;
+  auto mappedBufferIdentity = [&](const std::string &buffer)
+      -> const std::string & {
+    auto found = mappedBufferCache.find(buffer);
+    if (found != mappedBufferCache.end())
+      return found->second;
+    return mappedBufferCache
+        .emplace(buffer,
+                 MappedBufferIdentity(
+                     buffer, postBufferization.singlePoint.bufferMapping))
+        .first->second;
+  };
+  auto mappedOperationBuffers = [&](const GenericOperation &operation) {
+    std::vector<std::string> buffers(operation.operands.size());
+    ForEachBufferizedOperationBuffer(
+        bufferized, operation.id,
+        [&](size_t operand, const std::string &buffer) {
+          if (operand < buffers.size())
+            buffers[operand] = mappedBufferIdentity(buffer);
+        });
+    return buffers;
+  };
+  auto isOutOfPlaceOperand = [&](int operation, size_t operand) {
+    return operation >= 0 &&
+           static_cast<size_t>(operation) <
+               planningContext.outOfPlaceOperands.size() &&
+           operand < planningContext
+                         .outOfPlaceOperands[static_cast<size_t>(operation)]
+                         .size() &&
+           planningContext
+               .outOfPlaceOperands[static_cast<size_t>(operation)][operand];
+  };
+  auto tensorInsertMustMaterialize = [&](const GenericOperation &insert) {
+    if (insert.results.empty())
+      return false;
+    const std::vector<int> &users = analysis.users(insert.results.front());
+    if (users.empty())
+      return false;
+    return std::any_of(
+        users.begin(), users.end(), [&](int user) {
+          return postBufferization.singlePoint.scalarizedOperations.count(
+                     user) == 0;
+        });
+  };
   for (size_t ordinal = 0; ordinal < afterMarkMultiBuffer.afterInlineLoadCopy.buffers.size(); ++ordinal) {
     const LocalBufferRecord &buffer = afterMarkMultiBuffer.afterInlineLoadCopy.buffers[ordinal];
     if (buffer.addressSpace != AddressSpace::UB)
       continue;
-    const int ownerId = BufferOwnerOperation(afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer, buffer);
+    const int ownerId = planningContext.liveBufferOwners.at(ordinal);
     if (ownerId < 0 || static_cast<size_t>(ownerId) >= module.operations.size())
       throw std::runtime_error("PlanMemoryInput: buffer owner operation is missing");
-    const GenericOperation *function = EnclosingFunction(
-        module, module.operations.at(static_cast<size_t>(ownerId)));
-    if (!function || !IsAIVFunction(*function))
+    const int functionId = analysis.enclosingFunctionId(ownerId);
+    const GenericOperation *function =
+        functionId < 0
+            ? nullptr
+            : &module.operations.at(static_cast<size_t>(functionId));
+    if (!function ||
+        !aivFunctions.at(static_cast<size_t>(function->id)))
       continue;
     auto multi = afterMarkMultiBuffer.markMultiBuffer.buffer2MultiNum.find(buffer.sourceIdentity);
     result.buffers.push_back(
         {ordinal, buffer.identity, buffer.sourceIdentity,
-         GenericFunctionName(*function),
-         PhysicalBufferTypeSignature(buffer, afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.alignStorage),
+         functionNames.at(static_cast<size_t>(function->id)),
+         PhysicalBufferMemRefType(
+             buffer, afterMarkMultiBuffer.afterInlineLoadCopy
+                         .afterAllocExtraBuffer.alignStorage,
+             metadata),
          buffer.constBits, buffer.extraBuffer,
-         multi == afterMarkMultiBuffer.markMultiBuffer.buffer2MultiNum.end() ? 1U
-                                                           : multi->second,
-         afterMarkMultiBuffer.markMultiBuffer.preloadLocalBuffers.count(buffer.sourceIdentity) !=
-             0});
+         multi == afterMarkMultiBuffer.markMultiBuffer.buffer2MultiNum.end()
+             ? 1U
+             : multi->second,
+         afterMarkMultiBuffer.markMultiBuffer.preloadLocalBuffers.count(
+             buffer.sourceIdentity) != 0});
   }
   std::map<std::string, std::string> finalIdentity;
   std::set<std::string> targetBuffers;
-  for (const LocalBufferRecord &buffer : afterMarkMultiBuffer.afterInlineLoadCopy.buffers)
+  for (const LocalBufferRecord &buffer :
+       afterMarkMultiBuffer.afterInlineLoadCopy.buffers)
     finalIdentity[buffer.sourceIdentity] = buffer.identity;
   for (const PlanMemoryInputBufferRecord &buffer : result.buffers)
     targetBuffers.insert(buffer.sourceIdentity);
-  std::map<int, const OperationRewriteDelta *> rewrites;
-  for (const OperationRewriteDelta &rewrite : afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.operationRewrites)
-    rewrites[rewrite.sourceOperation] = &rewrite;
-  std::map<int, const InlineLoadCopyRewrite *> inlineLoads;
-  for (const InlineLoadCopyRewrite &rewrite : afterMarkMultiBuffer.afterInlineLoadCopy.inlineLoadCopy.rewrites)
-    inlineLoads[rewrite.copyOperation] = &rewrite;
   std::map<std::pair<int, std::string>, std::vector<std::string>> extraBuffers;
-  for (const LocalBufferRecord &buffer : afterMarkMultiBuffer.afterInlineLoadCopy.buffers) {
+  for (size_t ordinal = 0;
+       ordinal < afterMarkMultiBuffer.afterInlineLoadCopy.buffers.size();
+       ++ordinal) {
+    const LocalBufferRecord &buffer =
+        afterMarkMultiBuffer.afterInlineLoadCopy.buffers[ordinal];
     if (!buffer.extraBuffer)
       continue;
-    const int owner = BufferOwnerOperation(afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer, buffer);
+    const int owner = planningContext.liveBufferOwners.at(ordinal);
     extraBuffers[{owner, buffer.ownerName}].push_back(buffer.sourceIdentity);
   }
   std::map<std::pair<int, std::string>, size_t> nextExtraBuffer;
-  std::map<std::string, size_t> functionOrdinals;
+  std::vector<size_t> functionOrdinals(module.operations.size(), 0);
   auto append = [&](const GenericOperation &source, const std::string &name,
                     std::vector<std::string> buffers,
                     const std::string &properties = "",
@@ -335,8 +555,14 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
                     bool preserveSourceProperties = false,
                     bool decomposedScalarVSub = false,
                     int sourceOperandNumber = -1) {
-    const GenericOperation *function = EnclosingFunction(module, source);
-    if (!function || !IsAIVFunction(*function) || IsElidedOperation(name))
+    const int functionId = analysis.enclosingFunctionId(source.id);
+    const GenericOperation *function =
+        functionId < 0
+            ? nullptr
+            : &module.operations.at(static_cast<size_t>(functionId));
+    if (!function ||
+        !aivFunctions.at(static_cast<size_t>(function->id)) ||
+        IsElidedOperation(name))
       return;
     const auto extraKey = std::make_pair(source.id, name);
     auto extra = extraBuffers.find(extraKey);
@@ -349,8 +575,10 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
       }
     }
     PlanMemoryInputAccessRecord event;
-    event.functionName = GenericFunctionName(*function);
-    event.ordinal = functionOrdinals[event.functionName]++;
+    event.functionName = functionNames.at(static_cast<size_t>(function->id));
+    size_t &functionOrdinal =
+        functionOrdinals.at(static_cast<size_t>(function->id));
+    event.ordinal = functionOrdinal++;
     event.sourceOperation = source.id;
     event.sourceOperationName = source.name;
     event.operationName = BufferizedOperationName(name);
@@ -360,6 +588,16 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
     event.sourceOperandNumber = sourceOperandNumber;
     event.preserveSourceProperties = preserveSourceProperties;
     event.decomposedScalarVSub = decomposedScalarVSub;
+    event.accesses.reserve(buffers.size());
+    std::string effectProperties = properties;
+    if (effectProperties.empty() && appendedExtraBuffer &&
+        IsDestinationStyleOp(event.operationName) && buffers.size() >= 2)
+      effectProperties =
+          "operandSegmentSizes = array<i32: " +
+          std::to_string(buffers.size() - 2) + ", 1, 1>";
+    const std::vector<PlanMemoryAccessEffect> effects =
+        AccessEffects(event.operationName, buffers.size(), effectProperties,
+                      metadata);
     for (size_t operand = 0; operand < buffers.size(); ++operand) {
       std::set<std::string> candidates;
       for (const std::string &alternative :
@@ -367,9 +605,7 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
         const std::string mapped =
             buffersArePostSinglePoint && startsWith(alternative, "local:")
                 ? "base:" + alternative.substr(6)
-                : MappedBufferIdentity(
-                      alternative,
-                      afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.bufferMapping);
+                : mappedBufferIdentity(alternative);
         if (targetBuffers.count(mapped) != 0)
           candidates.insert(mapped);
       }
@@ -380,23 +616,16 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
       const std::string &identity = *candidates.begin();
       auto final = finalIdentity.find(identity);
       if (final == finalIdentity.end())
-        throw std::runtime_error("PlanMemoryInput: access references missing buffer");
-      std::string effectProperties = properties;
-      if (effectProperties.empty() && appendedExtraBuffer &&
-          IsDestinationStyleOp(event.operationName) && buffers.size() >= 2)
-        effectProperties =
-            "operandSegmentSizes = array<i32: " +
-            std::to_string(buffers.size() - 2) + ", 1, 1>";
-      event.accesses.push_back(
-          {final->second, AccessEffect(event.operationName, operand,
-                                         buffers.size(), effectProperties)});
+        throw std::runtime_error(
+            "PlanMemoryInput: access references missing buffer");
+      event.accesses.push_back({final->second, effects[operand]});
       if (appendedExtraBuffer && operand + 1 == buffers.size())
         event.temporaryBuffers.insert(final->second);
     }
     if (!event.accesses.empty())
       result.accesses.push_back(std::move(event));
     else
-      --functionOrdinals[event.functionName];
+      --functionOrdinal;
   };
 
   for (const GenericOperation &operation : module.operations) {
@@ -406,11 +635,11 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
     const bool tensorSinglePointBufferization =
         operation.name == "tensor.insert" || operation.name == "tensor.extract";
     if (operation.name == "tensor.extract" && !operation.results.empty() &&
-        !ValueHasUser(module, operation.results.front()))
+        !valueHasUser(operation.results.front()))
       continue;
     if (operation.name == "tensor.extract" && !operation.operands.empty()) {
       const GenericOperation *definition =
-          DefiningOperation(module, operation.operands.front());
+          definingOperation(operation.operands.front());
       if (definition &&
           afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.scalarizedOperations.count(definition->id) !=
               0)
@@ -418,49 +647,57 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
     }
     if (afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.scalarizedOperations.count(operation.id) != 0 &&
         !tensorSinglePointBufferization) {
-      const std::map<size_t, std::string> scalarBuffers =
-          OperationBufferMap(afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization, operation.id);
-      const std::vector<size_t> destinations = DpsInitOperandIndices(
-          operation.name, operation.operands.size(), operation.properties);
+      const std::vector<std::string> scalarBuffers =
+          mappedOperationBuffers(operation);
+      const std::vector<size_t> &destinations =
+          metadata.dpsInitOperandIndices(
+              operation.name, operation.operands.size(),
+              operation.properties);
       for (size_t input = 0; input < operation.operandTypes.size(); ++input) {
         if ((!IsTensorType(operation.operandTypes[input]) &&
              !IsMemRefType(operation.operandTypes[input])) ||
             std::find(destinations.begin(), destinations.end(), input) !=
                 destinations.end())
           continue;
-        auto buffer = scalarBuffers.find(input);
-        if (buffer == scalarBuffers.end())
+        if (input >= scalarBuffers.size() || scalarBuffers[input].empty())
           continue;
-        const std::string original = OriginalOperationBuffer(
-            afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization, operation.id, input);
+        const std::string original =
+            originalOperationBuffer(operation.id, input);
         if (SinglePointBufferSurvives(
                 original, afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.bufferMapping))
-          append(operation, "memref.load", {buffer->second});
+          append(operation, "memref.load", {scalarBuffers[input]});
       }
       for (size_t destination : destinations) {
-        auto buffer = scalarBuffers.find(destination);
-        if (buffer == scalarBuffers.end())
+        if (destination >= scalarBuffers.size() ||
+            scalarBuffers[destination].empty())
           continue;
-        const std::string original = OriginalOperationBuffer(
-            afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization, operation.id, destination);
+        const std::string original =
+            originalOperationBuffer(operation.id, destination);
         if (SinglePointBufferSurvives(
                 original, afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.bufferMapping))
-          append(operation, "memref.store", {"", buffer->second});
+          append(operation, "memref.store",
+                 {"", scalarBuffers[destination]});
       }
       continue;
     }
-    auto inlineLoad = inlineLoads.find(operation.id);
-    if (inlineLoad == inlineLoads.end() &&
+    const size_t operationId = static_cast<size_t>(operation.id);
+    const size_t noOrdinal = std::numeric_limits<size_t>::max();
+    const size_t inlineLoad =
+        planningContext.inlineLoadByCopyOperation.at(operationId);
+    if (inlineLoad == noOrdinal &&
         afterMarkMultiBuffer.afterInlineLoadCopy.inlineLoadCopy
                 .erasedOperations.count(operation.id) != 0)
       continue;
-    auto rewritten = rewrites.find(operation.id);
-    if (rewritten != rewrites.end()) {
+    const size_t rewritten =
+        planningContext.operationRewriteBySource.at(operationId);
+    if (rewritten != noOrdinal) {
+      const OperationRewriteDelta &rewrite =
+          postBufferization.operationRewrites.at(rewritten);
       for (size_t generatedOrdinal = 0;
-           generatedOrdinal < rewritten->second->replacement.size();
+           generatedOrdinal < rewrite.replacement.size();
            ++generatedOrdinal) {
         const GeneratedOperationRewrite &generated =
-            rewritten->second->replacement[generatedOrdinal];
+            rewrite.replacement[generatedOrdinal];
         if (generated.name == "hivm.hir.vbrc" &&
             generated.buffers.size() == 1)
           append(operation, generated.name, {"", generated.buffers.front()},
@@ -475,17 +712,17 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
       }
       continue;
     }
-    const std::map<size_t, std::string> operationBuffers =
-        OperationBufferMap(afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization, operation.id);
-    std::vector<std::string> buffers(operation.operands.size());
-    for (const auto &[operand, buffer] : operationBuffers)
-      if (operand < buffers.size() &&
-          afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.canonicalizedIterArgAccesses.count(
-              {operation.id, static_cast<int>(operand)}) == 0)
-        buffers[operand] = buffer;
+    std::vector<std::string> buffers = mappedOperationBuffers(operation);
+    for (size_t operand = 0; operand < buffers.size(); ++operand)
+      if (!buffers[operand].empty() &&
+          postBufferization.singlePoint.canonicalizedIterArgAccesses.count(
+              {operation.id, static_cast<int>(operand)}) != 0)
+        buffers[operand].clear();
     if (operation.name == "hivm.hir.vconcat") {
-      const std::vector<size_t> destinations = DpsInitOperandIndices(
-          operation.name, operation.operands.size(), operation.properties);
+      const std::vector<size_t> &destinations =
+          metadata.dpsInitOperandIndices(
+              operation.name, operation.operands.size(),
+              operation.properties);
       if (destinations.size() != 1 || destinations.front() >= buffers.size())
         throw std::runtime_error("PlanMemoryInput: vconcat must have one destination");
       const size_t destination = destinations.front();
@@ -497,8 +734,7 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
     }
     if (operation.name == "tensor.from_elements" &&
         !operation.results.empty()) {
-      const std::string destination =
-          ValueBuffer(afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized, operation.results.front());
+      const std::string destination = valueBuffer(operation.results.front());
       for (size_t element = 0; element < operation.operands.size(); ++element)
         append(operation, "memref.store", {"", destination}, "", false,
                element);
@@ -506,48 +742,49 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
     }
     const bool materializedTensorInsert =
         operation.name == "tensor.insert" &&
-        TensorInsertMustMaterialize(afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization, operation);
+        tensorInsertMustMaterialize(operation);
     if (materializedTensorInsert && buffers.size() > 1 &&
         !operation.results.empty()) {
-      const std::string resultBuffer = ValueBuffer(
-          afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized, operation.results.front());
+      const std::string resultBuffer = valueBuffer(operation.results.front());
       if (!resultBuffer.empty())
         buffers[1] = resultBuffer;
     }
+    const std::vector<size_t> &initOperands =
+        metadata.dpsInitOperandIndices(operation.name,
+                                       operation.operands.size(),
+                                       operation.properties);
     for (size_t operand = 0; operand < operation.operandTypes.size(); ++operand) {
       if (!IsTensorType(operation.operandTypes[operand]) ||
           operand >= buffers.size() || buffers[operand].empty() ||
-          !IsOutOfPlaceOperand(afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization, operation.id, operand))
+          !isOutOfPlaceOperand(operation.id, operand))
         continue;
-      const std::vector<size_t> initOperands = DpsInitOperandIndices(
-          operation.name, operation.operands.size(), operation.properties);
       if (startsWith(operation.name, "hivm.hir.v") &&
           std::find(initOperands.begin(), initOperands.end(), operand) !=
               initOperands.end())
         continue;
-      const std::string destination = MappedBufferIdentity(
-          buffers[operand], afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.bufferMapping);
+      const std::string destination =
+          mappedBufferIdentity(buffers[operand]);
       if (targetBuffers.count(destination) == 0)
         continue;
-      const std::string source =
-          ValueBuffer(afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized, operation.operands[operand]);
+      const std::string source = valueBuffer(operation.operands[operand]);
       if (!source.empty())
         append(operation, "hivm.hir.copy", {source, buffers[operand]},
                "", false, 0, true, false, false,
                static_cast<int>(operand));
     }
-    if (inlineLoad != inlineLoads.end()) {
+    if (inlineLoad != noOrdinal) {
+      const InlineLoadCopyRewrite &rewrite =
+          afterMarkMultiBuffer.afterInlineLoadCopy.inlineLoadCopy.rewrites.at(
+              inlineLoad);
       append(operation, "hivm.hir.load",
-             {inlineLoad->second->loadSource,
-              inlineLoad->second->copyDestination});
+             {rewrite.loadSource, rewrite.copyDestination});
       continue;
     }
     if (tensorSinglePointBufferization) {
       const size_t bufferOperand = operation.name == "tensor.insert" ? 1 : 0;
       if (bufferOperand >= buffers.size() ||
           (!SinglePointBufferSurvives(
-               OriginalOperationBuffer(afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization, operation.id,
-                                         bufferOperand),
+               originalOperationBuffer(operation.id, bufferOperand),
                afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.bufferMapping) &&
            !materializedTensorInsert))
         continue;
@@ -563,16 +800,21 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
         buffers.size() > 1)
       append(operation, "hivm.hir.vbrc", {"", buffers[1]});
     if (name == "hivm.hir.load" && buffers.size() > 1) {
-      const std::string destination = MappedBufferIdentity(
-          buffers[1], afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.bufferMapping);
+      const std::string destination = mappedBufferIdentity(buffers[1]);
+      const auto recordOrdinal =
+          planningContext.liveBufferBySource.find(destination);
       const LocalBufferRecord *record =
-          FindSourceBuffer(afterMarkMultiBuffer.afterInlineLoadCopy.buffers, destination);
+          recordOrdinal == planningContext.liveBufferBySource.end()
+              ? nullptr
+              : &afterMarkMultiBuffer.afterInlineLoadCopy.buffers.at(
+                    recordOrdinal->second);
       if (afterMarkMultiBuffer.options.inferHIVMDataLayout && record &&
           record->addressSpace == AddressSpace::L1)
         name = "hivm.hir.nd2nz";
     }
     append(operation, name, buffers, operation.properties);
   }
+  result.planningContext = std::move(planningContext);
   result.afterMarkMultiBuffer = std::move(afterMarkMultiBuffer);
   return result;
 }
@@ -585,7 +827,8 @@ inline std::string SerializePlanMemoryInputBuffers(
     output << "BUFFER\t" << buffer.globalOrdinal << '\t'
            << HexEncode(buffer.identity) << '\t'
            << HexEncode(buffer.functionName) << '\t'
-           << HexEncode(buffer.physicalType) << '\t' << buffer.constBits << '\t'
+           << HexEncode(PhysicalTypeSignature(buffer.memrefType)) << '\t'
+           << buffer.constBits << '\t'
            << (buffer.extraBuffer ? 1 : 0) << '\t' << buffer.multiBufferNum
            << '\t' << (buffer.preloadLocalBuffer ? 1 : 0) << '\n';
   return output.str();

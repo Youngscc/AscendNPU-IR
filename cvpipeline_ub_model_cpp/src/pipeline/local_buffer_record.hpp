@@ -24,6 +24,30 @@ inline const LocalBufferRecord *FindSourceBuffer(
   return nullptr;
 }
 
+// Read-only sidecar for stages that repeatedly resolve symbolic buffer
+// identities. The ordered vector remains authoritative; emplace preserves the
+// previous "first record wins" behavior if a focused test constructs duplicate
+// source identities.
+class LocalBufferIndex {
+public:
+  explicit LocalBufferIndex(const std::vector<LocalBufferRecord> &inputBuffers)
+      : buffers(inputBuffers) {
+    for (size_t ordinal = 0; ordinal < buffers.size(); ++ordinal)
+      bySourceIdentity.emplace(buffers[ordinal].sourceIdentity, ordinal);
+  }
+
+  const LocalBufferRecord *findSource(const std::string &identity) const {
+    auto found = bySourceIdentity.find(identity);
+    return found == bySourceIdentity.end()
+               ? nullptr
+               : &buffers.at(found->second);
+  }
+
+private:
+  const std::vector<LocalBufferRecord> &buffers;
+  std::map<std::string, size_t> bySourceIdentity;
+};
+
 inline std::string MappedBufferIdentity(
     const std::string &buffer,
     const std::map<std::string, std::string> &mapping) {

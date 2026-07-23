@@ -3,6 +3,8 @@
 #define CVPIPELINE_UB_MODEL_CPP_LIVENESS_HPP
 
 #include "buffer_alias.hpp"
+#include "operation_index.hpp"
+#include "../../support/debug_trace.hpp"
 
 namespace cvub {
 
@@ -33,21 +35,35 @@ struct CFGBlockLivenessInfo {
   std::vector<int> successors;
 };
 
+struct OrderedLiveCandidate {
+  std::string name;
+  int firstOperation = 0;
+  int lastOperation = -1;
+};
+
 class Liveness {
 public:
   Liveness(const std::vector<OperationRecord> &linearOperations,
-                const std::vector<std::string> &functionArguments) {
+           const std::vector<std::string> &functionArguments,
+           const PlanMemoryOperationIndex &indexedOperations,
+           DebugTrace *trace = nullptr)
+      : operationIndex(indexedOperations) {
     for (const OperationRecord &op : linearOperations) {
-      if (!operationById.count(op.operationId)) {
-        operationById[op.operationId] = op;
+      if (operationIds.insert(op.operationId).second) {
         operationOrder.push_back(op.operationId);
         blocks[op.regionPath].path = op.regionPath;
         blocks[op.regionPath].operations.push_back(op.operationId);
       }
     }
+    for (const auto &[path, blockInfo] : blocks) {
+      auto &orders = blockOperationOrder[path];
+      for (size_t index = 0; index < blockInfo.operations.size(); ++index)
+        orders[blockInfo.operations[index]] = static_cast<int>(index);
+    }
     blocks[{}].path = {};
+    blockOperationOrder[{}];
     for (int operationId : operationOrder) {
-      const OperationRecord &op = operationById.at(operationId);
+      const OperationRecord &op = operation(operationId);
       for (size_t depth = 0; depth < op.regionPath.size(); ++depth) {
         int region = op.regionPath[depth];
         if (regionOwner.count(region))
@@ -58,7 +74,7 @@ public:
             std::next(op.regionPath.begin(), static_cast<Difference>(depth)));
         int owner = -1;
         for (int candidateId : blocks[parentPath].operations) {
-          const OperationRecord &candidate = operationById.at(candidateId);
+          const OperationRecord &candidate = operation(candidateId);
           if (candidate.index >= op.index)
             break;
           if (candidate.opName == "scf.for" ||
@@ -75,42 +91,55 @@ public:
       addBlockArgument({}, argument);
 
     for (const OperationRecord &op : linearOperations) {
-      if (operationById.at(op.operationId).index != op.index)
+      if (!operationIndex.isCanonicalRecord(op))
         continue;
       for (const std::string &argument : op.blockArguments)
         addBlockArgument(op.regionPath, argument);
       if (op.opName != "scf.for" && op.opName != "scf.while")
         continue;
       std::vector<int> child = childPath(op);
+      std::vector<std::string> childArguments;
       if (op.opName == "scf.for") {
-        if (auto induction = extractForInductionVariable(op.text))
+        if (auto induction = extractForInductionVariable(op.text)) {
           addBlockArgument(child, *induction);
-        for (const auto &pair : extractIterArgPairs(op.text))
+          childArguments.push_back(*induction);
+        }
+        for (const auto &pair : extractIterArgPairs(op.text)) {
           addBlockArgument(child, pair.first);
+          childArguments.push_back(pair.first);
+        }
       } else {
-        for (const auto &pair : extractWhileInitArgPairs(op.text))
+        for (const auto &pair : extractWhileInitArgPairs(op.text)) {
           addBlockArgument(child, pair.first);
+          childArguments.push_back(pair.first);
+        }
       }
+      structuredChildArguments.emplace(op.operationId,
+                                       std::move(childArguments));
     }
 
     for (int operationId : operationOrder) {
-      const OperationRecord &op = operationById.at(operationId);
-      for (const std::string &result : operationResultNames(op)) {
+      const OperationRecord &op = operation(operationId);
+      for (const std::string &result : results(operationId)) {
         ValueLivenessInfo &value = values[result];
         value.definingOperationId = operationId;
         value.definingBlock = op.regionPath;
       }
-      for (const std::string &operand : operationOperandNames(op)) {
+      for (const std::string &operand : operands(operationId)) {
         ensureExternalValue(operand);
         values[operand].users.push_back(operationId);
       }
     }
-    buildLiveIns();
-    buildCFGLiveness(functionArguments);
+    MeasureStage(trace, "PlanMemory.Liveness.LiveIns",
+                 [&] { buildLiveIns(); });
+    MeasureStage(trace, "PlanMemory.Liveness.Intervals",
+                 [&] { buildLiveIntervals(); });
+    MeasureStage(trace, "PlanMemory.Liveness.CFG",
+                 [&] { buildCFGLiveness(functionArguments); });
   }
 
   const OperationRecord &operation(int operationId) const {
-    return operationById.at(operationId);
+    return operationIndex.operation(operationId);
   }
 
   const ValueLivenessInfo *value(const std::string &name) const {
@@ -126,24 +155,15 @@ public:
     const OperationRecord &query = operation(operationId);
     if (hasMultipleBlocks(query.regionPath))
       return currentlyLiveValuesOrderedCFG(operationId);
-    const BlockLivenessInfo &blockInfo = block(query.regionPath);
     std::vector<std::string> result;
-    auto addIfLive = [&](const std::string &name) {
-      if (isCurrentlyLive(name, operationId, blockInfo) &&
-          std::find(result.begin(), result.end(), name) == result.end())
-        result.push_back(name);
-    };
-    for (const std::string &argument : blockInfo.arguments)
-      addIfLive(argument);
-    for (const std::string &liveIn : blockInfo.liveIns)
-      addIfLive(liveIn);
-    for (int blockOperationId : blockInfo.operations) {
-      for (const std::string &opResult :
-           operationResultNames(operation(blockOperationId)))
-        addIfLive(opResult);
-      if (blockOperationId == operationId)
-        break;
-    }
+    const int queryOrder = orderInBlock(operationId, query.regionPath);
+    const std::vector<OrderedLiveCandidate> &candidates =
+        orderedCandidates(query.regionPath);
+    result.reserve(candidates.size());
+    for (const OrderedLiveCandidate &candidate : candidates)
+      if (candidate.firstOperation <= queryOrder &&
+          queryOrder <= candidate.lastOperation)
+        result.push_back(candidate.name);
     return result;
   }
 
@@ -232,11 +252,11 @@ private:
   }
 
   int orderInCFGBlock(int operationId, int blockId) const {
-    const std::vector<int> &operations = cfgBlocks.at(blockId).operations;
-    auto it = std::find(operations.begin(), operations.end(), operationId);
-    return it == operations.end()
-               ? -1
-               : static_cast<int>(std::distance(operations.begin(), it));
+    auto block = cfgBlockOperationOrder.find(blockId);
+    if (block == cfgBlockOperationOrder.end())
+      return -1;
+    auto operation = block->second.find(operationId);
+    return operation == block->second.end() ? -1 : operation->second;
   }
 
   bool isCurrentlyLiveCFG(const std::string &name, int operationId,
@@ -271,24 +291,100 @@ private:
   std::vector<std::string>
   currentlyLiveValuesOrderedCFG(int operationId) const {
     const OperationRecord &query = operation(operationId);
-    const CFGBlockLivenessInfo &blockInfo = cfgBlocks.at(query.blockId);
     std::vector<std::string> result;
-    auto addIfLive = [&](const std::string &name) {
-      if (isCurrentlyLiveCFG(name, operationId, blockInfo))
-        insertUnique(result, name);
+    const int queryOrder = orderInCFGBlock(operationId, query.blockId);
+    const std::vector<OrderedLiveCandidate> &candidates =
+        orderedCFGCandidates(query.blockId);
+    result.reserve(candidates.size());
+    for (const OrderedLiveCandidate &candidate : candidates)
+      if (candidate.firstOperation <= queryOrder &&
+          queryOrder <= candidate.lastOperation)
+        result.push_back(candidate.name);
+    return result;
+  }
+
+  const std::vector<OrderedLiveCandidate> &
+  orderedCandidates(const std::vector<int> &path) const {
+    auto cached = orderedCandidateCache.find(path);
+    if (cached != orderedCandidateCache.end())
+      return cached->second;
+    const BlockLivenessInfo &blockInfo = block(path);
+    std::vector<std::string> names;
+    std::unordered_set<std::string> observed;
+    auto append = [&](const std::string &name) {
+      if (observed.insert(name).second)
+        names.push_back(name);
     };
     for (const std::string &argument : blockInfo.arguments)
-      addIfLive(argument);
+      append(argument);
     for (const std::string &liveIn : blockInfo.liveIns)
-      addIfLive(liveIn);
-    for (int blockOperationId : blockInfo.operations) {
-      for (const std::string &opResult :
-           operationResultNames(operation(blockOperationId)))
-        addIfLive(opResult);
-      if (blockOperationId == operationId)
-        break;
+      append(liveIn);
+    for (int blockOperationId : blockInfo.operations)
+      for (const std::string &result : results(blockOperationId))
+        append(result);
+    std::vector<OrderedLiveCandidate> candidates;
+    candidates.reserve(names.size());
+    const auto &intervals = liveIntervals.at(path);
+    for (std::string &name : names) {
+      auto interval = intervals.find(name);
+      if (interval == intervals.end())
+        continue;
+      candidates.push_back(
+          {std::move(name), interval->second.first, interval->second.second});
     }
-    return result;
+    return orderedCandidateCache.emplace(path, std::move(candidates))
+        .first->second;
+  }
+
+  const std::vector<OrderedLiveCandidate> &
+  orderedCFGCandidates(int blockId) const {
+    auto cached = orderedCFGCandidateCache.find(blockId);
+    if (cached != orderedCFGCandidateCache.end())
+      return cached->second;
+    const CFGBlockLivenessInfo &blockInfo = cfgBlocks.at(blockId);
+    std::vector<std::string> names;
+    std::unordered_set<std::string> observed;
+    auto append = [&](const std::string &name) {
+      if (observed.insert(name).second)
+        names.push_back(name);
+    };
+    for (const std::string &argument : blockInfo.arguments)
+      append(argument);
+    for (const std::string &liveIn : blockInfo.liveIns)
+      append(liveIn);
+    for (int blockOperationId : blockInfo.operations)
+      for (const std::string &result : results(blockOperationId))
+        append(result);
+    std::vector<OrderedLiveCandidate> candidates;
+    candidates.reserve(names.size());
+    for (std::string &name : names) {
+      const ValueLivenessInfo *valueInfo = value(name);
+      if (!valueInfo)
+        continue;
+      const bool liveIn =
+          std::find(blockInfo.liveIns.begin(), blockInfo.liveIns.end(), name) !=
+          blockInfo.liveIns.end();
+      const bool blockArgument =
+          std::find(blockInfo.arguments.begin(), blockInfo.arguments.end(),
+                    name) != blockInfo.arguments.end();
+      int first = 0;
+      if (!liveIn && !blockArgument) {
+        if (valueInfo->definingOperationId < 0 ||
+            operation(valueInfo->definingOperationId).blockId != blockId)
+          continue;
+        first = orderInCFGBlock(valueInfo->definingOperationId, blockId);
+      }
+      int last = first;
+      for (int userId : valueInfo->users)
+        if (operation(userId).blockId == blockId)
+          last = std::max(last, orderInCFGBlock(userId, blockId));
+      if (std::find(blockInfo.liveOuts.begin(), blockInfo.liveOuts.end(),
+                    name) != blockInfo.liveOuts.end())
+        last = static_cast<int>(blockInfo.operations.size()) - 1;
+      candidates.push_back({std::move(name), first, last});
+    }
+    return orderedCFGCandidateCache.emplace(blockId, std::move(candidates))
+        .first->second;
   }
 
   bool isDeadAfterCFG(const std::string &name, int operationId) const {
@@ -315,6 +411,8 @@ private:
       block.path = op.regionPath;
       block.label = op.blockLabel;
       block.operations.push_back(operationId);
+      cfgBlockOperationOrder[op.blockId][operationId] =
+          static_cast<int>(block.operations.size() - 1);
       for (const std::string &argument : op.blockArguments)
         insertUnique(block.arguments, argument);
       insertUnique(regionBlocks[op.regionPath], op.blockId);
@@ -344,24 +442,19 @@ private:
       }
       if (childBlock < 0)
         continue;
-      if (op.opName == "scf.for") {
-        if (auto induction = extractForInductionVariable(op.text))
-          insertUnique(cfgBlocks[childBlock].arguments, *induction);
-        for (const auto &pair : extractIterArgPairs(op.text))
-          insertUnique(cfgBlocks[childBlock].arguments, pair.first);
-      } else {
-        for (const auto &pair : extractWhileInitArgPairs(op.text))
-          insertUnique(cfgBlocks[childBlock].arguments, pair.first);
-      }
+      auto arguments = structuredChildArguments.find(operationId);
+      if (arguments != structuredChildArguments.end())
+        for (const std::string &argument : arguments->second)
+          insertUnique(cfgBlocks[childBlock].arguments, argument);
     }
     for (auto &entry : cfgBlocks) {
       CFGBlockLivenessInfo &block = entry.second;
       block.definitions = block.arguments;
       for (int operationId : block.operations) {
         const OperationRecord &op = operation(operationId);
-        for (const std::string &operand : operationOperandNames(op))
+        for (const std::string &operand : operands(operationId))
           insertUnique(block.uses, operand);
-        for (const std::string &result : operationResultNames(op))
+        for (const std::string &result : results(operationId))
           insertUnique(block.definitions, result);
         for (const std::string &label : op.successorLabels) {
           auto destination = labelToBlock.find({op.regionPath, label});
@@ -449,17 +542,23 @@ private:
   }
 
   std::vector<int> childPath(const OperationRecord &parent) const {
+    auto cached = childPathCache.find(parent.operationId);
+    if (cached != childPathCache.end())
+      return cached->second;
     for (int operationId : operationOrder) {
       const OperationRecord &candidate = operation(operationId);
       if (candidate.index <= parent.index)
         continue;
       if (candidate.regionPath.size() == parent.regionPath.size() + 1 &&
           pathPrefix(parent.regionPath, candidate.regionPath))
-        return candidate.regionPath;
+        return childPathCache.emplace(parent.operationId,
+                                      candidate.regionPath)
+            .first->second;
       if (candidate.regionPath.size() <= parent.regionPath.size())
         break;
     }
-    return parent.regionPath;
+    return childPathCache.emplace(parent.operationId, parent.regionPath)
+        .first->second;
   }
 
   void buildLiveIns() {
@@ -467,10 +566,16 @@ private:
       const std::vector<int> &path = blockEntry.first;
       std::vector<std::string> definitions = blockEntry.second.arguments;
       std::vector<std::string> uses;
-      auto insertUnique = [](std::vector<std::string> &set,
-                             const std::string &value) {
-        if (std::find(set.begin(), set.end(), value) == set.end())
-          set.push_back(value);
+      std::unordered_set<std::string> definitionSet(definitions.begin(),
+                                                    definitions.end());
+      std::unordered_set<std::string> useSet;
+      const auto insertDefinition = [&](const std::string &value) {
+        if (definitionSet.insert(value).second)
+          definitions.push_back(value);
+      };
+      const auto insertUse = [&](const std::string &value) {
+        if (useSet.insert(value).second)
+          uses.push_back(value);
       };
       for (int operationId : operationOrder) {
         const OperationRecord &op = operation(operationId);
@@ -481,23 +586,18 @@ private:
         // region argument (for example an scf.while `do` argument) is
         // incorrectly classified as a live-in of the enclosing block.
         for (const std::string &argument : op.blockArguments)
-          insertUnique(definitions, argument);
-        for (const std::string &result : operationResultNames(op))
-          insertUnique(definitions, result);
-        for (const std::string &operand : operationOperandNames(op))
-          insertUnique(uses, operand);
+          insertDefinition(argument);
+        for (const std::string &result : results(operationId))
+          insertDefinition(result);
+        for (const std::string &operand : operands(operationId))
+          insertUse(operand);
         if (op.opName == "scf.for" || op.opName == "scf.while") {
           std::vector<int> child = childPath(op);
           if (pathPrefix(path, child)) {
-            if (op.opName == "scf.for") {
-              if (auto induction = extractForInductionVariable(op.text))
-                insertUnique(definitions, *induction);
-              for (const auto &pair : extractIterArgPairs(op.text))
-                insertUnique(definitions, pair.first);
-            } else {
-              for (const auto &pair : extractWhileInitArgPairs(op.text))
-                insertUnique(definitions, pair.first);
-            }
+            auto arguments = structuredChildArguments.find(operationId);
+            if (arguments != structuredChildArguments.end())
+              for (const std::string &argument : arguments->second)
+                insertDefinition(argument);
           }
         }
       }
@@ -511,16 +611,14 @@ private:
         uses.erase(
             std::remove_if(uses.begin(), uses.end(),
                            [&](const std::string &use) {
-                             return std::find(definitions.begin(),
-                                              definitions.end(),
-                                              use) != definitions.end();
+                             return definitionSet.find(use) !=
+                                    definitionSet.end();
                            }),
             uses.end());
       } else if (uses.size() < definitions.size()) {
         size_t index = 0;
         while (index < uses.size()) {
-          if (std::find(definitions.begin(), definitions.end(), uses[index]) !=
-              definitions.end()) {
+          if (definitionSet.find(uses[index]) != definitionSet.end()) {
             uses[index] = uses.back();
             uses.pop_back();
           } else {
@@ -540,15 +638,42 @@ private:
     }
   }
 
+  void buildLiveIntervals() {
+    for (const auto &[path, blockInfo] : blocks) {
+      if (hasMultipleBlocks(path))
+        continue;
+      auto &intervals = liveIntervals[path];
+      for (const auto &[name, valueInfo] : values) {
+        const bool liveIn =
+            std::find(blockInfo.liveIns.begin(), blockInfo.liveIns.end(),
+                      name) != blockInfo.liveIns.end();
+        int start = 0;
+        if (!liveIn && !valueInfo.blockArgument) {
+          std::optional<int> projected =
+              projectToBlock(valueInfo.definingOperationId, path);
+          if (!projected)
+            continue;
+          start = orderInBlock(*projected, path);
+        }
+        int end = start;
+        for (int userId : valueInfo.users) {
+          std::optional<int> projected = projectToBlock(userId, path);
+          if (projected)
+            end = std::max(end, orderInBlock(*projected, path));
+        }
+        intervals.emplace(name, std::make_pair(start, end));
+      }
+    }
+  }
+
   int orderInBlock(int operationId, const std::vector<int> &path) const {
-    const auto &ops = blocks.at(path).operations;
-    auto it = std::find(ops.begin(), ops.end(), operationId);
-    if (it != ops.end())
-      return static_cast<int>(std::distance(ops.begin(), it));
+    const auto &orders = blockOperationOrder.at(path);
+    auto found = orders.find(operationId);
+    if (found != orders.end())
+      return found->second;
     int projected = projectAtCommonBlock(operationId, path);
-    it = std::find(ops.begin(), ops.end(), projected);
-    return it == ops.end() ? -1
-                           : static_cast<int>(std::distance(ops.begin(), it));
+    found = orders.find(projected);
+    return found == orders.end() ? -1 : found->second;
   }
 
   std::optional<int> projectToBlock(int operationId,
@@ -575,36 +700,44 @@ private:
 
   bool isCurrentlyLive(const std::string &name, int operationId,
                        const BlockLivenessInfo &blockInfo) const {
-    const ValueLivenessInfo *valueInfo = value(name);
-    if (!valueInfo)
+    auto blockIntervals = liveIntervals.find(blockInfo.path);
+    if (blockIntervals == liveIntervals.end())
       return false;
-    int queryOrder = orderInBlock(operationId, blockInfo.path);
-    bool liveIn = std::find(blockInfo.liveIns.begin(), blockInfo.liveIns.end(),
-                            name) != blockInfo.liveIns.end();
-    int start = 0;
-    if (!liveIn && !valueInfo->blockArgument) {
-      std::optional<int> projected =
-          projectToBlock(valueInfo->definingOperationId, blockInfo.path);
-      if (!projected)
-        return false;
-      start = orderInBlock(*projected, blockInfo.path);
-    }
-    int end = start;
-    for (int userId : valueInfo->users) {
-      std::optional<int> projected = projectToBlock(userId, blockInfo.path);
-      if (projected)
-        end = std::max(end, orderInBlock(*projected, blockInfo.path));
-    }
-    return start <= queryOrder && queryOrder <= end;
+    auto interval = blockIntervals->second.find(name);
+    if (interval == blockIntervals->second.end())
+      return false;
+    const int queryOrder = orderInBlock(operationId, blockInfo.path);
+    return interval->second.first <= queryOrder &&
+           queryOrder <= interval->second.second;
   }
 
-  std::map<int, OperationRecord> operationById;
+  const std::vector<std::string> &results(int operationId) const {
+    return operationIndex.results(operationId);
+  }
+
+  const std::vector<std::string> &operands(int operationId) const {
+    return operationIndex.operands(operationId);
+  }
+
+  const PlanMemoryOperationIndex &operationIndex;
+  std::set<int> operationIds;
   std::vector<int> operationOrder;
-  std::map<std::string, ValueLivenessInfo> values;
+  std::unordered_map<std::string, ValueLivenessInfo> values;
   std::map<std::vector<int>, BlockLivenessInfo> blocks;
+  std::map<std::vector<int>, std::map<int, int>> blockOperationOrder;
+  std::map<std::vector<int>,
+           std::map<std::string, std::pair<int, int>>>
+      liveIntervals;
   std::map<int, int> regionOwner;
+  std::map<int, std::vector<std::string>> structuredChildArguments;
+  mutable std::map<int, std::vector<int>> childPathCache;
   std::map<int, CFGBlockLivenessInfo> cfgBlocks;
+  std::map<int, std::map<int, int>> cfgBlockOperationOrder;
   std::map<std::vector<int>, std::vector<int>> regionBlocks;
+  mutable std::map<std::vector<int>, std::vector<OrderedLiveCandidate>>
+      orderedCandidateCache;
+  mutable std::map<int, std::vector<OrderedLiveCandidate>>
+      orderedCFGCandidateCache;
 };
 
 } // namespace cvub

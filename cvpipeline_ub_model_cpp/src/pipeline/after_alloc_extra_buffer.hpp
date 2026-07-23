@@ -15,8 +15,9 @@ struct AfterAllocExtraBufferState {
   std::map<std::string, int> bufferOwnerOperations;
 };
 
-inline uint64_t StaticBufferBits(const std::string &type) {
-  const std::optional<MemRefTypeModel> parsed = ParseMemRefType(type);
+inline uint64_t StaticBufferBits(const std::string &type,
+                                 PipelineMetadataCache &metadata) {
+  const std::optional<MemRefTypeModel> parsed = metadata.memRefType(type);
   if (!parsed)
     throw std::runtime_error("AllocExtraBuffer: expected memref type");
   uint64_t elements = 1;
@@ -37,8 +38,10 @@ inline int AllocationSourceOrder(const BufferAllocation &allocation) {
   return AllocationSourceOperation(allocation.source);
 }
 
-inline std::optional<uint64_t> TryStaticBufferBits(const std::string &type) {
-  const std::optional<MemRefTypeModel> parsed = ParseMemRefType(type);
+inline std::optional<uint64_t>
+TryStaticBufferBits(const std::string &type,
+                    PipelineMetadataCache &metadata) {
+  const std::optional<MemRefTypeModel> parsed = metadata.memRefType(type);
   if (!parsed)
     return std::nullopt;
   uint64_t elements = 1;
@@ -62,15 +65,17 @@ inline std::optional<uint64_t> TryStaticBufferBits(const std::string &type) {
 // bound is tileSize. The generic IR stores affine expressions in the same
 // value-based form used by ConvertArithToAffine.
 inline std::optional<int64_t> ConstantizeBufferSizeUpperBound(
-    const GenericModule &module, int value) {
-  const std::map<int, const GenericOperation *> definitions =
-      DefiningOperations(module);
-  const auto definition = definitions.find(value);
-  if (definition == definitions.end() ||
-      definition->second->name != "affine.apply")
+    int value, const GenericModule &module,
+    const GenericModuleAnalysisIndexes &analysis) {
+  const int definitionId = analysis.definingOperationId(value);
+  const GenericOperation *definition =
+      definitionId < 0
+          ? nullptr
+          : &module.operations.at(static_cast<size_t>(definitionId));
+  if (!definition || definition->name != "affine.apply")
     return std::nullopt;
   const std::optional<std::string> expression =
-      ExistingAffineApplyExpression(*definition->second);
+      ExistingAffineApplyExpression(*definition);
   if (!expression)
     return std::nullopt;
   const std::optional<AffineLinearForm> extent =
@@ -93,12 +98,15 @@ inline std::optional<int64_t> ConstantizeBufferSizeUpperBound(
   }
   if (!minValue || !baseValue)
     return std::nullopt;
-  const auto minDefinition = definitions.find(*minValue);
-  if (minDefinition == definitions.end() ||
-      minDefinition->second->name != "affine.min")
+  const int minDefinitionId = analysis.definingOperationId(*minValue);
+  const GenericOperation *minDefinition =
+      minDefinitionId < 0
+          ? nullptr
+          : &module.operations.at(static_cast<size_t>(minDefinitionId));
+  if (!minDefinition || minDefinition->name != "affine.min")
     return std::nullopt;
   const std::optional<std::vector<std::string>> minExpressions =
-      ExistingAffineMinMaxExpressions(*minDefinition->second);
+      ExistingAffineMinMaxExpressions(*minDefinition);
   if (!minExpressions)
     return std::nullopt;
 
@@ -117,9 +125,14 @@ inline std::optional<int64_t> ConstantizeBufferSizeUpperBound(
 }
 
 inline std::vector<std::optional<int64_t>> AllocationUpperBounds(
-    const PostBufferizationRewriteState &postBufferization, const BufferAllocation &allocation) {
+    const PostBufferizationRewriteState &postBufferization,
+    const BufferAllocation &allocation,
+    const GenericModuleAnalysisIndexes &analysis,
+    PipelineMetadataCache &metadata) {
+  const GenericModule &module =
+      postBufferization.bufferized.logicalModule;
   const std::optional<MemRefTypeModel> allocationType =
-      ParseMemRefType(allocation.type);
+      metadata.memRefType(allocation.type);
   if (!allocationType)
     throw std::runtime_error("AllocExtraBuffer: expected allocation memref type");
   std::vector<std::optional<int64_t>> bounds = allocationType->shape;
@@ -141,8 +154,7 @@ inline std::vector<std::optional<int64_t>> AllocationUpperBounds(
         throw std::runtime_error(
             "AllocExtraBuffer: dynamic result allocation extent is missing");
       bound = ConstantizeBufferSizeUpperBound(
-          postBufferization.bufferized.logicalModule,
-          allocation.dynamicExtentValues[dynamicIndex++]);
+          allocation.dynamicExtentValues[dynamicIndex++], module, analysis);
       if (!bound)
         throw std::runtime_error(
             "AllocExtraBuffer: dynamic result allocation upper bound is unknown");
@@ -157,26 +169,28 @@ inline std::vector<std::optional<int64_t>> AllocationUpperBounds(
       std::stoi(allocation.source.substr(first + 1, second - first - 1));
   const size_t operand =
       static_cast<size_t>(std::stoull(allocation.source.substr(second + 1)));
-  const GenericModule &module = postBufferization.bufferized.logicalModule;
   const GenericOperation &owner =
       module.operations.at(static_cast<size_t>(operationId));
   if (operand >= owner.operands.size())
     throw std::runtime_error("AllocExtraBuffer: dynamic allocation operand is missing");
-  const std::map<int, const GenericOperation *> definitions =
-      DefiningOperations(module);
-  auto definition = definitions.find(owner.operands[operand]);
-  if (definition == definitions.end() ||
-      (definition->second->name != "tensor.extract_slice" &&
-       definition->second->name != "memref.subview") ||
-      definition->second->operandTypes.empty())
+  const int definitionId =
+      analysis.definingOperationId(owner.operands[operand]);
+  const GenericOperation *definition =
+      definitionId < 0
+          ? nullptr
+          : &module.operations.at(static_cast<size_t>(definitionId));
+  if (!definition ||
+      (definition->name != "tensor.extract_slice" &&
+       definition->name != "memref.subview") ||
+      definition->operandTypes.empty())
     throw std::runtime_error(
         "AllocExtraBuffer: dynamic allocation upper bound is not an extract slice");
   const std::string sourceTypeText =
-      IsTensorType(definition->second->operandTypes.front())
-          ? ConvertTensorToMemRefType(definition->second->operandTypes.front())
-          : definition->second->operandTypes.front();
+      IsTensorType(definition->operandTypes.front())
+          ? ConvertTensorToMemRefType(definition->operandTypes.front())
+          : definition->operandTypes.front();
   const std::optional<MemRefTypeModel> sourceType =
-      ParseMemRefType(sourceTypeText);
+      metadata.memRefType(sourceTypeText);
   if (!sourceType || sourceType->shape.size() != bounds.size())
     throw std::runtime_error("AllocExtraBuffer: dynamic slice source rank mismatch");
   for (size_t axis = 0; axis < bounds.size(); ++axis)
@@ -192,8 +206,9 @@ inline std::vector<std::optional<int64_t>> AllocationUpperBounds(
 
 inline uint64_t BufferBitsFromUpperBounds(
     const std::string &type,
-    const std::vector<std::optional<int64_t>> &upperBounds) {
-  const std::optional<MemRefTypeModel> parsed = ParseMemRefType(type);
+    const std::vector<std::optional<int64_t>> &upperBounds,
+    PipelineMetadataCache &metadata) {
+  const std::optional<MemRefTypeModel> parsed = metadata.memRefType(type);
   if (!parsed || parsed->shape.size() != upperBounds.size())
     throw std::runtime_error("AllocExtraBuffer: allocation upper-bound rank mismatch");
   uint64_t elements = 1;
@@ -209,9 +224,10 @@ inline uint64_t BufferBitsFromUpperBounds(
 
 inline uint64_t DecomposeBufferBits(
     const PostBufferizationRewriteState &postBufferization, const DecomposeBufferAllocation &allocation,
-    const std::vector<LocalBufferRecord> &baseBuffers) {
+    const LocalBufferIndex &baseBufferIndex,
+    PipelineMetadataCache &metadata) {
   if (const std::optional<uint64_t> bits =
-          TryStaticBufferBits(allocation.type))
+          TryStaticBufferBits(allocation.type, metadata))
     return *bits;
 
   for (const BufferizedOperandAccess &access : postBufferization.bufferized.accesses) {
@@ -221,7 +237,7 @@ inline uint64_t DecomposeBufferBits(
     const std::string identity = MappedBufferIdentity(
         access.bufferId, postBufferization.singlePoint.bufferMapping);
     if (const LocalBufferRecord *source =
-            FindSourceBuffer(baseBuffers, identity))
+            baseBufferIndex.findSource(identity))
       return source->constBits;
   }
   throw std::runtime_error(
@@ -230,12 +246,15 @@ inline uint64_t DecomposeBufferBits(
 }
 
 inline std::string GeneratedBufferType(
-    const PostBufferizationRewriteState &postBufferization, const std::string &buffer,
-    const std::vector<LocalBufferRecord> &buffers) {
+    const PostBufferizationRewriteState &postBufferization,
+    const std::string &buffer, const LocalBufferIndex &bufferIndex,
+    const std::map<std::string, std::string> &valueTypeByBuffer) {
   if (startsWith(buffer, "choice(") && buffer.back() == ')') {
     for (const std::string &alternative :
          splitTopLevel(buffer.substr(7, buffer.size() - 8))) {
-      const std::string type = GeneratedBufferType(postBufferization, alternative, buffers);
+      const std::string type =
+          GeneratedBufferType(postBufferization, alternative, bufferIndex,
+                              valueTypeByBuffer);
       if (!type.empty())
         return type;
     }
@@ -249,18 +268,17 @@ inline std::string GeneratedBufferType(
     else
       identity = "base:" + identity.substr(6);
   }
-  if (const LocalBufferRecord *record = FindSourceBuffer(buffers, identity))
+  if (const LocalBufferRecord *record = bufferIndex.findSource(identity))
     return record->type;
-  for (const BufferizedValueBinding &binding : postBufferization.bufferized.values)
-    if (binding.bufferId == buffer)
-      return IsTensorType(binding.type) ? ConvertTensorToMemRefType(binding.type)
-                                        : binding.type;
-  return "";
+  auto valueType = valueTypeByBuffer.find(buffer);
+  return valueType == valueTypeByBuffer.end() ? std::string()
+                                               : valueType->second;
 }
 
 inline std::optional<ExtraBufferAllocation> ModelExtraBufferForOperation(
     GenericOperation operation,
-    std::vector<std::string> physicalTypes) {
+    std::vector<std::string> physicalTypes,
+    PipelineMetadataCache &metadata) {
   // AllocExtraBufferPass walks only operations implementing
   // ExtraBufferOpInterface. Operations such as hivm.hir.copy are not visited.
   if (!HasAllocExtraBufferInterface(operation.name))
@@ -268,7 +286,7 @@ inline std::optional<ExtraBufferAllocation> ModelExtraBufferForOperation(
   if (operation.name == "hivm.hir.vinterleave") {
     for (size_t index = 0; index < operation.operandTypes.size(); ++index) {
       const std::optional<MemRefTypeModel> type =
-          ParseMemRefType(operation.operandTypes[index]);
+          metadata.memRefType(operation.operandTypes[index]);
       if (!type)
         continue;
       const int64_t elements = StaticElementCount(*type);
@@ -321,8 +339,10 @@ inline std::optional<ExtraBufferAllocation> ModelExtraBufferForOperation(
   return extra.front();
 }
 
-inline std::string AllocationTypeForTrace(const LocalBufferRecord &record) {
-  const std::optional<MemRefTypeModel> type = ParseMemRefType(record.type);
+inline std::string AllocationTypeForTrace(
+    const LocalBufferRecord &record, PipelineMetadataCache &metadata) {
+  const std::optional<MemRefTypeModel> type =
+      metadata.memRefType(record.type);
   if (!type)
     throw std::runtime_error("AllocExtraBuffer: malformed traced allocation type");
   const uint64_t bitWidth = GetElementBitWidth(*type);
@@ -379,14 +399,15 @@ inline std::string SetDictionaryValue(const std::string &dictionary,
 
 inline MemRefTypeModel AlignedOperandType(
     const LocalBufferRecord &record, MemRefTypeModel type,
-    const AlignStorageResult &alignStorage) {
+    const AlignStorageResult &alignStorage,
+    PipelineMetadataCache &metadata) {
   auto found = alignStorage.strideAlignments.find(record.sourceIdentity);
   if (found == alignStorage.strideAlignments.end())
     return type;
   std::set<size_t> dimensions;
   for (size_t rootDimension : found->second)
     if (const std::optional<size_t> dimension =
-            RootDimToOperandDim(record, type, rootDimension))
+            RootDimToOperandDim(record, type, rootDimension, metadata))
       dimensions.insert(*dimension);
   const uint64_t bitWidth = GetElementBitWidth(type);
   if (bitWidth == 0 || 256 % bitWidth != 0)
@@ -446,12 +467,13 @@ inline MemRefTypeModel AlignedOperandType(
 
 inline void FlattenLimitedOperationForAllocExtraBuffer(
     GenericOperation &operation, const std::string &dimensionName,
-    const std::vector<int64_t> &dimensions) {
+    const std::vector<int64_t> &dimensions,
+    PipelineMetadataCache &metadata) {
   std::vector<MemRefTypeModel> types;
   std::vector<size_t> indices;
   for (size_t index = 0; index < operation.operandTypes.size(); ++index) {
     if (std::optional<MemRefTypeModel> type =
-            ParseMemRefType(operation.operandTypes[index])) {
+            metadata.memRefType(operation.operandTypes[index])) {
       indices.push_back(index);
       types.push_back(*type);
     }
@@ -498,32 +520,46 @@ inline void FlattenLimitedOperationForAllocExtraBuffer(
       SetDictionaryValue(operation.attributes, dimensionName, value);
 }
 
-inline void FlattenForAllocExtraBuffer(GenericOperation &operation) {
+inline void FlattenForAllocExtraBuffer(GenericOperation &operation,
+                                       PipelineMetadataCache &metadata) {
   if (operation.name == "hivm.hir.vreduce") {
     FlattenLimitedOperationForAllocExtraBuffer(operation, "reduce_dims",
-                              GetLimitedAxes(operation));
+                                               GetLimitedAxes(operation),
+                                               metadata);
     return;
   }
   if (operation.name == "hivm.hir.vbrc") {
     std::string value =
-        FindDictionaryValue(operation.properties, "broadcast_dims");
+        metadata.dictionaryValue(operation.properties, "broadcast_dims");
     if (value.empty())
-      value = FindDictionaryValue(operation.attributes, "broadcast_dims");
+      value =
+          metadata.dictionaryValue(operation.attributes, "broadcast_dims");
     FlattenLimitedOperationForAllocExtraBuffer(operation, "broadcast_dims",
-                              DecomposeI64Array(value));
+                                               DecomposeI64Array(value),
+                                               metadata);
   }
 }
 
 inline std::vector<std::pair<int, ExtraBufferAllocation>>
 ModelConnectedAllocExtraBuffer(const PostBufferizationRewriteState &postBufferization,
                                const std::vector<LocalBufferRecord> &buffers,
-                               const AlignStorageResult &alignStorage) {
+                               const AlignStorageResult &alignStorage,
+                               const GenericModuleAnalysisIndexes &analysis,
+                               PipelineMetadataCache &metadata) {
   std::map<int, const OperationRewriteDelta *> rewrites;
   for (const OperationRewriteDelta &rewrite : postBufferization.operationRewrites)
     rewrites[rewrite.sourceOperation] = &rewrite;
   std::vector<std::pair<int, ExtraBufferAllocation>> result;
-  const std::map<int, const GenericOperation *> definitions =
-      DefiningOperations(postBufferization.bufferized.logicalModule);
+  const GenericModule &module =
+      postBufferization.bufferized.logicalModule;
+  const LocalBufferIndex bufferIndex(buffers);
+  std::map<std::string, std::string> valueTypeByBuffer;
+  for (const BufferizedValueBinding &binding :
+       postBufferization.bufferized.values)
+    valueTypeByBuffer.emplace(
+        binding.bufferId,
+        IsTensorType(binding.type) ? ConvertTensorToMemRefType(binding.type)
+                                   : binding.type);
   for (const GenericOperation &source :
        postBufferization.bufferized.logicalModule.operations) {
     if (postBufferization.bufferized.preBufferizationCSE.erasedOperations.count(
@@ -532,11 +568,12 @@ ModelConnectedAllocExtraBuffer(const PostBufferizationRewriteState &postBufferiz
     if (postBufferization.singlePoint.scalarizedOperations.count(source.id) != 0)
       continue;
     std::map<size_t, std::string> operandBuffers;
-    for (const BufferizedOperandAccess &access : postBufferization.bufferized.accesses)
-      if (access.operationId == source.id)
-        operandBuffers[static_cast<size_t>(access.operandNumber)] =
-            MappedBufferIdentity(access.bufferId,
-                                   postBufferization.singlePoint.bufferMapping);
+    ForEachBufferizedOperationBuffer(
+        postBufferization.bufferized, source.id,
+        [&](size_t operandNumber, const std::string &bufferId) {
+        operandBuffers[operandNumber] = MappedBufferIdentity(
+            bufferId, postBufferization.singlePoint.bufferMapping);
+        });
 
     auto buildOriginal = [&]() {
       GenericOperation operation = source;
@@ -545,20 +582,30 @@ ModelConnectedAllocExtraBuffer(const PostBufferizationRewriteState &postBufferiz
         auto buffer = operandBuffers.find(index);
         const std::string identity =
             buffer == operandBuffers.end() ? std::string() : buffer->second;
-        operation.operandTypes[index] = BufferTypeAfterMapping(
-            identity, buffers, operation.operandTypes[index]);
-        auto definition = index < source.operands.size()
-                              ? definitions.find(source.operands[index])
-                              : definitions.end();
-        if (definition != definitions.end() &&
-            definition->second->name == "hivm.hir.bitcast")
+        const LocalBufferRecord *mappedBuffer =
+            bufferIndex.findSource(identity);
+        operation.operandTypes[index] =
+            mappedBuffer
+                ? mappedBuffer->type
+                : (IsTensorType(operation.operandTypes[index])
+                       ? ConvertTensorToMemRefType(operation.operandTypes[index])
+                       : operation.operandTypes[index]);
+        const int definitionId =
+            index < source.operands.size()
+                ? analysis.definingOperationId(source.operands[index])
+                : -1;
+        const GenericOperation *definition =
+            definitionId < 0
+                ? nullptr
+                : &module.operations.at(static_cast<size_t>(definitionId));
+        if (definition && definition->name == "hivm.hir.bitcast")
           operation.operandTypes[index] =
               IsTensorType(source.operandTypes[index])
                   ? ConvertTensorToMemRefType(source.operandTypes[index])
                   : source.operandTypes[index];
         physical[index] = operation.operandTypes[index];
         if (const LocalBufferRecord *record =
-                FindSourceBuffer(buffers, identity)) {
+                bufferIndex.findSource(identity)) {
           if (operation.name == "hivm.hir.vreduce" ||
               operation.name == "hivm.hir.vbrc") {
             // FlattenInterface operates on the operand view type, not on the
@@ -572,22 +619,21 @@ ModelConnectedAllocExtraBuffer(const PostBufferizationRewriteState &postBufferiz
                     ? ConvertTensorToMemRefType(source.operandTypes[index])
                     : source.operandTypes[index];
             if (std::optional<MemRefTypeModel> type =
-                    ParseMemRefType(operation.operandTypes[index]))
+                    metadata.memRefType(operation.operandTypes[index]))
               operation.operandTypes[index] = FormatMemRefType(
-                  AlignedOperandType(*record, *type, alignStorage));
+                  AlignedOperandType(*record, *type, alignStorage, metadata));
           }
           physical[index] = record->type;
           if (operation.name == "hivm.hir.vreduce" ||
               operation.name == "hivm.hir.vbrc") {
-            physical[index] = AllocationTypeForTrace(*record);
-            if (definition != definitions.end() &&
-                definition->second->name == "hivm.hir.bitcast") {
+            physical[index] = AllocationTypeForTrace(*record, metadata);
+            if (definition && definition->name == "hivm.hir.bitcast") {
               const std::string logical =
                   IsTensorType(source.operandTypes[index])
                       ? ConvertTensorToMemRefType(source.operandTypes[index])
                       : source.operandTypes[index];
               const std::optional<MemRefTypeModel> type =
-                  ParseMemRefType(logical);
+                  metadata.memRefType(logical);
               if (!type)
                 throw std::runtime_error("AllocExtraBuffer: malformed bitcast trace type");
               physical[index] =
@@ -597,7 +643,7 @@ ModelConnectedAllocExtraBuffer(const PostBufferizationRewriteState &postBufferiz
           }
         }
       }
-      FlattenForAllocExtraBuffer(operation);
+      FlattenForAllocExtraBuffer(operation, metadata);
       operation.operands.resize(operation.operandTypes.size());
       return std::pair<GenericOperation, std::vector<std::string>>{
           std::move(operation), std::move(physical)};
@@ -607,7 +653,8 @@ ModelConnectedAllocExtraBuffer(const PostBufferizationRewriteState &postBufferiz
     if (rewrite == rewrites.end()) {
       auto [operation, physical] = buildOriginal();
       if (std::optional<ExtraBufferAllocation> extra =
-              ModelExtraBufferForOperation(std::move(operation), physical))
+              ModelExtraBufferForOperation(std::move(operation), physical,
+                                           metadata))
         result.push_back({source.id, std::move(*extra)});
       continue;
     }
@@ -618,7 +665,9 @@ ModelConnectedAllocExtraBuffer(const PostBufferizationRewriteState &postBufferiz
       operation.attributes = source.attributes;
       std::vector<std::string> physical;
       for (const std::string &buffer : generated.buffers) {
-        const std::string type = GeneratedBufferType(postBufferization, buffer, buffers);
+        const std::string type =
+            GeneratedBufferType(postBufferization, buffer, bufferIndex,
+                                valueTypeByBuffer);
         if (type.empty())
           throw std::runtime_error("AllocExtraBuffer: generated operation buffer is missing: " +
                                    buffer);
@@ -627,7 +676,8 @@ ModelConnectedAllocExtraBuffer(const PostBufferizationRewriteState &postBufferiz
       }
       operation.operands.resize(operation.operandTypes.size());
       if (std::optional<ExtraBufferAllocation> extra =
-              ModelExtraBufferForOperation(std::move(operation), physical))
+              ModelExtraBufferForOperation(std::move(operation), physical,
+                                           metadata))
         result.push_back({source.id, std::move(*extra)});
     }
   }
@@ -638,6 +688,13 @@ inline AfterAllocExtraBufferState BuildAfterAllocExtraBufferState(
     PostBufferizationRewriteState postBufferization,
     bool alignAllocSize = true, bool enableStrideAlign = true) {
   AfterAllocExtraBufferState result;
+  const GenericModule &module =
+      postBufferization.bufferized.logicalModule;
+  const GenericModuleAnalysisIndexes &analysis =
+      postBufferization.bufferized.logicalContext.analysis;
+  PipelineMetadataCache &metadata =
+      postBufferization.bufferized.logicalContext.metadata;
+  analysis.ensureCompatible(module);
   const std::map<std::string, AddressSpace> scopes = InferHIVMMemScope(postBufferization);
   const bool preserveCompactedBaseOrder =
       !postBufferization.bufferized.preBufferizationCSE.erasedOperations.empty();
@@ -653,17 +710,19 @@ inline AfterAllocExtraBufferState BuildAfterAllocExtraBufferState(
     const BufferAllocation &allocation = postBufferization.singlePoint.allocations[index];
     const std::string identity = "base:" + std::to_string(index);
     const std::vector<std::optional<int64_t>> upperBounds =
-        AllocationUpperBounds(postBufferization, allocation);
+        AllocationUpperBounds(postBufferization, allocation, analysis,
+                              metadata);
     basePending.push_back({AllocationSourceOrder(allocation), 0, index,
                            {identity, identity, allocation.source,
                             allocation.type, scopes.at(identity),
                             BufferBitsFromUpperBounds(allocation.type,
-                                                      upperBounds),
+                                                      upperBounds, metadata),
                             false, upperBounds}});
   }
   std::vector<LocalBufferRecord> baseBuffers;
   for (const Pending &item : basePending)
     baseBuffers.push_back(item.buffer);
+  const LocalBufferIndex baseBufferIndex(baseBuffers);
   std::map<int, size_t> decomposeOrdinals;
   for (const DecomposeBufferAllocation &allocation : postBufferization.decomposeAllocations) {
     const size_t ordinal = decomposeOrdinals[allocation.ownerOperation]++;
@@ -673,7 +732,8 @@ inline AfterAllocExtraBufferState BuildAfterAllocExtraBufferState(
     pending.push_back({allocation.ownerOperation, 1, ordinal,
                        {identity, identity, allocation.ownerName, allocation.type,
                         scopes.at(identity),
-                        DecomposeBufferBits(postBufferization, allocation, baseBuffers),
+                        DecomposeBufferBits(postBufferization, allocation,
+                                            baseBufferIndex, metadata),
                         false, {}}});
   }
   std::vector<LocalBufferRecord> sourceBuffers;
@@ -691,19 +751,23 @@ inline AfterAllocExtraBufferState BuildAfterAllocExtraBufferState(
   size_t extraOrdinal = 0;
   for (auto &[operation, allocation] :
        ModelConnectedAllocExtraBuffer(postBufferization, sourceBuffers,
-                                      result.alignStorage)) {
-    const GenericOperation &owner = postBufferization.bufferized.logicalModule.operations.at(
-        static_cast<size_t>(operation));
+                                      result.alignStorage, analysis,
+                                      metadata)) {
+    const int functionId = analysis.enclosingFunctionId(operation);
     const GenericOperation *function =
-        EnclosingFunction(postBufferization.bufferized.logicalModule, owner);
+        functionId < 0
+            ? nullptr
+            : &module.operations.at(static_cast<size_t>(functionId));
     if (!function)
       throw std::runtime_error("AllocExtraBuffer: extra buffer outside function");
     const std::string identity = "extra-source:" + std::to_string(extraOrdinal++);
-    const AddressSpace space = FunctionDefaultAddressSpace(*function);
+    const AddressSpace space =
+        FunctionDefaultAddressSpace(*function, metadata);
     pending.push_back({operation, 2, extraOrdinal,
                        {identity, identity, allocation.ownerName,
                         allocation.type, space,
-                        StaticBufferBits(allocation.type), true, {}}});
+                        StaticBufferBits(allocation.type, metadata), true,
+                        {}}});
   }
   std::sort(pending.begin(), pending.end(), [](const Pending &lhs,
                                                 const Pending &rhs) {

@@ -114,11 +114,12 @@ inline std::string ProjectedBufferValue(const GenericModule &module,
 inline std::map<size_t, std::string> OperationBufferMap(
     const PostBufferizationRewriteState &postBufferization, int operationId) {
   std::map<size_t, std::string> result;
-  for (const BufferizedOperandAccess &access : postBufferization.bufferized.accesses)
-    if (access.operationId == operationId)
-      result[static_cast<size_t>(access.operandNumber)] =
-          MappedBufferIdentity(access.bufferId,
-                                 postBufferization.singlePoint.bufferMapping);
+  ForEachBufferizedOperationBuffer(
+      postBufferization.bufferized, operationId,
+      [&](size_t operand, const std::string &buffer) {
+        result[operand] = MappedBufferIdentity(
+            buffer, postBufferization.singlePoint.bufferMapping);
+      });
   return result;
 }
 

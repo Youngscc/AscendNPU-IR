@@ -1,6 +1,7 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_CROSS_CORE_GSS_HPP
 #define CVPIPELINE_UB_MODEL_CPP_CROSS_CORE_GSS_HPP
 
+#include "../ir/generic_analysis.hpp"
 #include "mark_real_core_type.hpp"
 
 #include <queue>
@@ -35,25 +36,6 @@ inline std::optional<int> GetFFTSBaseAddressArgument(
   return std::nullopt;
 }
 
-inline std::vector<int> GetFunctionDescendants(
-    const GenericModule &module, const GenericOperation &function) {
-  std::vector<int> result;
-  std::function<void(int)> collect = [&](int operationId) {
-    const GenericOperation &operation =
-        module.operations.at(static_cast<size_t>(operationId));
-    for (int regionId : operation.regions)
-      for (int blockId :
-           module.regions.at(static_cast<size_t>(regionId)).blocks)
-        for (int child :
-             module.blocks.at(static_cast<size_t>(blockId)).operations) {
-          result.push_back(child);
-          collect(child);
-        }
-  };
-  collect(function.id);
-  return result;
-}
-
 struct CrossCoreSyncDependency {
   int producer = -1;
   int consumer = -1;
@@ -72,8 +54,10 @@ struct CrossCoreMemoryAccess {
 // deliberately not roots.
 class CrossCoreMemoryValueTracer {
 public:
-  explicit CrossCoreMemoryValueTracer(const GenericModule &inputModule)
-      : module(inputModule), definitions(DefiningOperations(inputModule)) {
+  CrossCoreMemoryValueTracer(
+      const GenericModule &inputModule,
+      const GenericModuleAnalysisSnapshot &inputAnalysis)
+      : module(inputModule), analysis(inputAnalysis) {
     indexBlockArguments();
     indexBranchAliases();
   }
@@ -280,9 +264,9 @@ private:
       if (blockArgument != blockArguments.end()) {
         next = tracebackBlockArgumentStep(current);
       } else {
-        const auto definition = definitions.find(current);
-        if (definition != definitions.end()) {
-          const GenericOperation &operation = *definition->second;
+        const GenericOperation *definition = analysis.definingOperation(current);
+        if (definition) {
+          const GenericOperation &operation = *definition;
           const auto result =
               std::find(operation.results.begin(), operation.results.end(),
                         current);
@@ -304,9 +288,8 @@ private:
           roots.push_back(current);
         continue;
       }
-      const auto definition = definitions.find(current);
-      if (definition != definitions.end() &&
-          definition->second->name == "memref_ext.alloc_workspace" &&
+      const GenericOperation *definition = analysis.definingOperation(current);
+      if (definition && definition->name == "memref_ext.alloc_workspace" &&
           seenRoots.insert(current).second)
         roots.push_back(current);
     }
@@ -314,7 +297,7 @@ private:
   }
 
   const GenericModule &module;
-  std::map<int, const GenericOperation *> definitions;
+  const GenericModuleAnalysisSnapshot &analysis;
   std::map<int, BlockArgumentOwner> blockArguments;
   std::map<int, std::vector<int>> blockArgAliases;
 };
@@ -360,9 +343,11 @@ inline bool CrossCoreMemoryHazard(const CrossCoreMemoryAccess &producer,
 inline std::vector<CrossCoreSyncDependency>
 FindCrossCoreSyncDependencies(const GenericModule &module,
                               const GenericOperation &function) {
-  const std::vector<int> descendants =
-      GetFunctionDescendants(module, function);
-  CrossCoreMemoryValueTracer tracer(module);
+  const GenericModuleAnalysisSnapshot analysis(
+      module, kGenericAnalysisDefinitions |
+                  kGenericAnalysisFunctionDescendants);
+  const std::vector<int> &descendants = analysis.descendants(function);
+  CrossCoreMemoryValueTracer tracer(module, analysis);
   std::map<int, CrossCoreMemoryAccess> accesses;
   for (int operationId : descendants) {
     const GenericOperation &operation =

@@ -20,6 +20,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace cvub {
@@ -58,6 +60,14 @@ struct OperationRecord {
   std::vector<std::string> blockArguments;
   std::vector<std::string> successorLabels;
   std::vector<BranchDestination> branchDestinations;
+  // Final PlanMemory records are created semantically and only serialized to
+  // text for compatibility/debugging.  Keep their already-normalized value
+  // lists so liveness and alias analysis do not repeatedly recover the same
+  // information with regex/string scans.  Parsed before-plan-memory files
+  // leave this false until all textual normalization has completed.
+  bool materializedValueLists = false;
+  std::vector<std::string> materializedResults;
+  std::vector<std::string> materializedOperands;
 };
 
 struct LifetimeRecord {
@@ -69,30 +79,14 @@ struct LifetimeRecord {
   std::vector<std::string> group;
 };
 
-struct GenKillRecord {
-  int operationIndex = -1;
-  std::vector<std::string> gen;
-  std::vector<std::string> kill;
-};
-
-struct LiveShuffleRecord {
-  int operationIndex = -1;
-  std::vector<std::string> before;
-  std::vector<std::string> after;
-};
-
 struct LifetimeAnalysis {
   std::vector<LifetimeRecord> records;
   std::vector<OperationRecord> operations;
   std::vector<std::string> bufferGenOrder;
-  std::vector<std::pair<std::string, std::string>> initialInplacePairList;
   std::vector<std::pair<std::string, std::string>> inplacePairList;
   std::vector<std::pair<std::string, std::string>> inplacableBufferPairs;
   std::map<std::string, std::string> canonicalAllocByValue;
   std::map<std::string, uint32_t> buffer2MultiNum;
-  std::map<std::string, bool> bufferIgnoreInplace;
-  std::vector<GenKillRecord> genKillMap;
-  std::vector<LiveShuffleRecord> liveShuffleTrace;
 };
 
 struct BufferInfoRecord {
@@ -249,9 +243,49 @@ inline std::string extractSSANameBeforeEqual(const std::string &line) {
   if (equal == std::string::npos)
     return "";
   std::string resultList = trim(stripped.substr(0, equal));
-  static const std::regex resultListRegex(
-      R"(^%[\w$.#-]+(?::[0-9]+)?(?:\s*,\s*%[\w$.#-]+(?::[0-9]+)?)*$)");
-  return std::regex_match(resultList, resultListRegex) ? resultList : "";
+  // This parser is on the hot path of PlanMemory liveness queries.  The
+  // previous std::regex validation rebuilt a regex execution state for every
+  // operation/result lookup, which dominated small and medium kernels.  Keep
+  // the exact accepted grammar while validating it with one linear scan.
+  size_t cursor = 0;
+  while (cursor < resultList.size()) {
+    if (resultList[cursor] != '%')
+      return "";
+    ++cursor;
+    const size_t nameBegin = cursor;
+    while (cursor < resultList.size()) {
+      const unsigned char character =
+          static_cast<unsigned char>(resultList[cursor]);
+      if (!std::isalnum(character) && resultList[cursor] != '_' &&
+          resultList[cursor] != '$' && resultList[cursor] != '.' &&
+          resultList[cursor] != '#' && resultList[cursor] != '-')
+        break;
+      ++cursor;
+    }
+    if (cursor == nameBegin)
+      return "";
+    if (cursor < resultList.size() && resultList[cursor] == ':') {
+      ++cursor;
+      const size_t arityBegin = cursor;
+      while (cursor < resultList.size() &&
+             std::isdigit(static_cast<unsigned char>(resultList[cursor])))
+        ++cursor;
+      if (cursor == arityBegin)
+        return "";
+    }
+    while (cursor < resultList.size() &&
+           std::isspace(static_cast<unsigned char>(resultList[cursor])))
+      ++cursor;
+    if (cursor == resultList.size())
+      return resultList;
+    if (resultList[cursor] != ',')
+      return "";
+    ++cursor;
+    while (cursor < resultList.size() &&
+           std::isspace(static_cast<unsigned char>(resultList[cursor])))
+      ++cursor;
+  }
+  return "";
 }
 
 inline void collectTempBufferNames(const std::string &line,
@@ -409,11 +443,23 @@ inline bool isOperationLine(const std::string &line) {
 }
 
 inline std::vector<std::string> extractSSAs(const std::string &fragment) {
-  static const std::regex ssaRegex(R"(%[\w$.#-]+)");
   std::vector<std::string> values;
-  for (std::sregex_iterator it(fragment.begin(), fragment.end(), ssaRegex), end;
-       it != end; ++it)
-    values.push_back(it->str());
+  auto isSSAChar = [](unsigned char character) {
+    return std::isalnum(character) || character == '_' || character == '$' ||
+           character == '.' || character == '#' || character == '-';
+  };
+  for (size_t cursor = 0; cursor < fragment.size();) {
+    if (fragment[cursor] != '%') {
+      ++cursor;
+      continue;
+    }
+    const size_t begin = cursor++;
+    while (cursor < fragment.size() &&
+           isSSAChar(static_cast<unsigned char>(fragment[cursor])))
+      ++cursor;
+    if (cursor != begin + 1)
+      values.push_back(fragment.substr(begin, cursor - begin));
+  }
   return values;
 }
 
@@ -520,9 +566,9 @@ inline bool parseBlockHeader(const std::string &line, std::string &label,
   return true;
 }
 
-inline std::string canonical(const std::map<std::string, std::string> &alias,
-                             const std::string &value) {
-  std::set<std::string> seen;
+template <typename AliasMap>
+inline std::string canonical(const AliasMap &alias, const std::string &value) {
+  std::unordered_set<std::string> seen;
   std::string current = value;
   while (alias.count(current) && !seen.count(current)) {
     seen.insert(current);
@@ -534,8 +580,9 @@ inline std::string canonical(const std::map<std::string, std::string> &alias,
   return current;
 }
 
+template <typename AliasMap>
 inline std::optional<std::string>
-canonicalAlloc(const std::map<std::string, std::string> &alias,
+canonicalAlloc(const AliasMap &alias,
                const std::set<std::string> &allocNames,
                const std::string &value) {
   std::string base = canonical(alias, value);
@@ -1059,6 +1106,54 @@ inline std::string replaceSSAUse(std::string text, const std::string &from,
   return text;
 }
 
+// Apply an alias map with the same semantics as calling replaceSSAUse once for
+// every entry in std::map order, but scan the text only once.  The map-order
+// cursor matters for chains: an alias introduced by a later entry must not be
+// rewritten by an entry that has already been visited.
+inline std::string resolveSSAUseInMapOrder(
+    std::string value, const std::map<std::string, std::string> &aliases) {
+  auto cursor = aliases.begin();
+  while (cursor != aliases.end()) {
+    auto found = aliases.lower_bound(value);
+    if (found == aliases.end() || found->first != value ||
+        found->first < cursor->first)
+      break;
+    value = found->second;
+    cursor = std::next(found);
+  }
+  return value;
+}
+
+inline std::string replaceSSAUsesInMapOrder(
+    const std::string &text,
+    const std::map<std::string, std::string> &aliases) {
+  if (aliases.empty() || text.find('%') == std::string::npos)
+    return text;
+  auto isSSAChar = [](unsigned char character) {
+    return std::isalnum(character) || character == '_' || character == '$' ||
+           character == '.' || character == '#' || character == '-';
+  };
+  std::string result;
+  result.reserve(text.size());
+  for (size_t cursor = 0; cursor < text.size();) {
+    if (text[cursor] != '%') {
+      result.push_back(text[cursor++]);
+      continue;
+    }
+    const size_t begin = cursor++;
+    while (cursor < text.size() &&
+           isSSAChar(static_cast<unsigned char>(text[cursor])))
+      ++cursor;
+    if (cursor == begin + 1) {
+      result.push_back('%');
+      continue;
+    }
+    result += resolveSSAUseInMapOrder(
+        text.substr(begin, cursor - begin), aliases);
+  }
+  return result;
+}
+
 inline std::optional<std::string>
 extractForInductionVariable(const std::string &line) {
   static const std::regex regex(R"(scf\.for\s+(%[\w$.#-]+)\s*=)");
@@ -1070,6 +1165,8 @@ extractForInductionVariable(const std::string &line) {
 
 inline std::vector<std::string>
 operationResultNames(const OperationRecord &op) {
+  if (op.materializedValueLists)
+    return op.materializedResults;
   return resultNamesBeforeEqual(op.text);
 }
 
@@ -1093,6 +1190,8 @@ operationResultBaseNames(const OperationRecord &op) {
 
 inline std::vector<std::string>
 operationOperandNames(const OperationRecord &op) {
+  if (op.materializedValueLists)
+    return op.materializedOperands;
   if ((op.opName == "cf.br" || op.opName == "cf.cond_br") &&
       !op.branchDestinations.empty()) {
     std::vector<std::string> operands;
@@ -1126,6 +1225,24 @@ operationOperandNames(const OperationRecord &op) {
     if (!definitions.count(value))
       result.push_back(value);
   return result;
+}
+
+inline void MaterializeOperationValueLists(OperationRecord &operation) {
+  if (operation.materializedValueLists)
+    return;
+  // Operand extraction depends on the textual result list in order to remove
+  // definitions, so compute both before enabling the cached path.
+  std::vector<std::string> results = operationResultNames(operation);
+  std::vector<std::string> operands = operationOperandNames(operation);
+  operation.materializedResults = std::move(results);
+  operation.materializedOperands = std::move(operands);
+  operation.materializedValueLists = true;
+}
+
+inline void
+MaterializeOperationValueLists(std::vector<OperationRecord> &operations) {
+  for (OperationRecord &operation : operations)
+    MaterializeOperationValueLists(operation);
 }
 
 inline bool pathPrefix(const std::vector<int> &prefix,

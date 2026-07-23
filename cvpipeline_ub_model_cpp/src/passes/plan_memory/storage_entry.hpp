@@ -14,6 +14,7 @@ struct BufferLifeModel {
 
 struct StorageEntryModel {
   int id = -1;
+  int conflictProfileId = -1;
   std::vector<std::string> inplaceBuffers;
   std::vector<BufferLifeModel> bufferLifeVec;
   uint64_t constBits = 0;
@@ -90,93 +91,109 @@ inline bool IsInplacableBufferPairMatched(
   return false;
 }
 
+struct PreparedStorageEntryAnalysis {
+  std::unordered_map<std::string, BufferInfoRecord> bufferInfoByName;
+  std::unordered_set<std::string> dmaBuffers;
+  std::unordered_set<std::string> scalarBuffers;
+  std::unordered_map<std::string, int> parentLoopByBuffer;
+
+  PreparedStorageEntryAnalysis(
+      const std::vector<BufferInfoRecord> &bufferInfos,
+      const LifetimeAnalysis &liveness) {
+    bufferInfoByName.reserve(bufferInfos.size());
+    dmaBuffers.reserve(bufferInfos.size());
+    scalarBuffers.reserve(bufferInfos.size());
+    parentLoopByBuffer.reserve(bufferInfos.size());
+    for (const BufferInfoRecord &info : bufferInfos)
+      bufferInfoByName[info.name] = info;
+    const StrideAlignmentMap strideAlignments =
+        CollectStrideAlignmentMarks(liveness.operations);
+    std::set<int> loopRegions;
+    for (size_t i = 0; i < liveness.operations.size(); ++i) {
+      const OperationRecord &operation = liveness.operations[i];
+      if (operation.opName != "scf.for")
+        continue;
+      for (size_t j = i + 1; j < liveness.operations.size(); ++j) {
+        const OperationRecord &candidate = liveness.operations[j];
+        if (candidate.regionPath.size() == operation.regionPath.size() + 1 &&
+            pathPrefix(operation.regionPath, candidate.regionPath)) {
+          loopRegions.insert(candidate.regionPath.back());
+          break;
+        }
+        if (candidate.regionPath.size() <= operation.regionPath.size())
+          break;
+      }
+    }
+    auto recordCanonical = [&](const std::vector<std::string> &values,
+                               std::unordered_set<std::string> &destination) {
+      for (const std::string &value : values) {
+        auto canonical = liveness.canonicalAllocByValue.find(value);
+        if (canonical != liveness.canonicalAllocByValue.end())
+          destination.insert(canonical->second);
+      }
+    };
+    for (const OperationRecord &operation : liveness.operations) {
+      if (operation.opName == "memref.alloc") {
+        std::vector<std::string> results = operationResultNames(operation);
+        if (!results.empty()) {
+          int parentLoop = -1;
+          for (int region : operation.regionPath)
+            if (loopRegions.count(region))
+              parentLoop = region;
+          parentLoopByBuffer[results.front()] = parentLoop;
+        }
+      }
+      if (IsHIVMStructuredOp(operation.opName) &&
+          IsSinglePipeOp(operation.opName)) {
+        const HIVMPipe pipe = GetPipe(operation);
+        if (pipe == HIVMPipe::Unassigned)
+          throw std::runtime_error(
+              "PlanMemory exact blocker: unrecognized HIVM pipe: " +
+              operation.opName);
+        if (pipe == HIVMPipe::MTE2)
+          recordCanonical(extractGroupSSAs(operation.text, "outs"),
+                          dmaBuffers);
+        else if (pipe == HIVMPipe::MTE3)
+          recordCanonical(extractGroupSSAs(operation.text, "ins"),
+                          dmaBuffers);
+      }
+      if (shouldLowerToScalarLoops(operation, strideAlignments))
+        recordCanonical(operationOperandNames(operation), scalarBuffers);
+      else if (operation.opName == "memref.load" ||
+               operation.opName == "memref.store")
+        recordCanonical(operationOperandNames(operation), scalarBuffers);
+    }
+  }
+};
+
 inline std::vector<StorageEntryModel>
-GenerateStorageEntry(const std::vector<BufferInfoRecord> &bufferInfos,
+GenerateStorageEntry(const PreparedStorageEntryAnalysis &prepared,
                      const LifetimeAnalysis &liveness) {
-  std::map<std::string, BufferInfoRecord> bufferInfoByName;
-  for (const BufferInfoRecord &info : bufferInfos)
-    bufferInfoByName[info.name] = info;
-  std::map<std::string, LifetimeRecord> lifeByName;
+  std::unordered_map<std::string, LifetimeRecord> lifeByName;
+  lifeByName.reserve(liveness.records.size());
   for (const LifetimeRecord &life : liveness.records)
     lifeByName[life.name] = life;
-  std::set<std::string> dmaBuffers;
-  std::set<std::string> scalarBuffers;
-  const StrideAlignmentMap strideAlignments =
-      CollectStrideAlignmentMarks(liveness.operations);
-  std::map<std::string, int> parentLoopByBuffer;
-  std::set<int> loopRegions;
-  for (size_t i = 0; i < liveness.operations.size(); ++i) {
-    const OperationRecord &operation = liveness.operations[i];
-    if (operation.opName != "scf.for")
-      continue;
-    for (size_t j = i + 1; j < liveness.operations.size(); ++j) {
-      const OperationRecord &candidate = liveness.operations[j];
-      if (candidate.regionPath.size() == operation.regionPath.size() + 1 &&
-          pathPrefix(operation.regionPath, candidate.regionPath)) {
-        loopRegions.insert(candidate.regionPath.back());
-        break;
-      }
-      if (candidate.regionPath.size() <= operation.regionPath.size())
-        break;
-    }
-  }
-  auto recordCanonical = [&](const std::vector<std::string> &values,
-                             std::set<std::string> &destination) {
-    for (const std::string &value : values) {
-      auto canonical = liveness.canonicalAllocByValue.find(value);
-      if (canonical != liveness.canonicalAllocByValue.end())
-        destination.insert(canonical->second);
-    }
-  };
-  for (const OperationRecord &operation : liveness.operations) {
-    if (operation.opName == "memref.alloc") {
-      std::vector<std::string> results = operationResultNames(operation);
-      if (!results.empty()) {
-        int parentLoop = -1;
-        for (int region : operation.regionPath)
-          if (loopRegions.count(region))
-            parentLoop = region;
-        parentLoopByBuffer[results.front()] = parentLoop;
-      }
-    }
-    if (IsHIVMStructuredOp(operation.opName) &&
-        IsSinglePipeOp(operation.opName)) {
-      const HIVMPipe pipe = GetPipe(operation);
-      if (pipe == HIVMPipe::Unassigned)
-        throw std::runtime_error(
-            "PlanMemory exact blocker: unrecognized HIVM pipe: " +
-            operation.opName);
-      if (pipe == HIVMPipe::MTE2)
-        recordCanonical(extractGroupSSAs(operation.text, "outs"), dmaBuffers);
-      else if (pipe == HIVMPipe::MTE3)
-        recordCanonical(extractGroupSSAs(operation.text, "ins"), dmaBuffers);
-    }
-    if (shouldLowerToScalarLoops(operation, strideAlignments))
-      recordCanonical(operationOperandNames(operation), scalarBuffers);
-    else if (operation.opName == "memref.load" ||
-             operation.opName == "memref.store")
-      recordCanonical(operationOperandNames(operation), scalarBuffers);
-  }
 
   std::vector<StorageEntryModel> entries;
   for (const std::string &name : liveness.bufferGenOrder) {
     auto lifeIt = lifeByName.find(name);
     if (lifeIt == lifeByName.end() || lifeIt->second.directAllocTime < 0)
       continue;
-    auto info = bufferInfoByName.find(name);
-    if (info == bufferInfoByName.end())
+    auto info = prepared.bufferInfoByName.find(name);
+    if (info == prepared.bufferInfoByName.end())
       continue;
     StorageEntryModel entry;
     entry.id = static_cast<int>(entries.size());
     entry.inplaceBuffers.push_back(name);
     entry.constBits = info->second.constBits;
-    if (dmaBuffers.count(name) != 0)
+    if (prepared.dmaBuffers.count(name) != 0)
       entry.dmaBuffers.insert(name);
-    if (scalarBuffers.count(name) != 0)
+    if (prepared.scalarBuffers.count(name) != 0)
       entry.scalarBuffers.insert(name);
-    entry.parentLoop = parentLoopByBuffer.count(name)
-                           ? parentLoopByBuffer[name]
-                           : -1;
+    auto parentLoop = prepared.parentLoopByBuffer.find(name);
+    entry.parentLoop = parentLoop == prepared.parentLoopByBuffer.end()
+                           ? -1
+                           : parentLoop->second;
     auto multiBuffer = liveness.buffer2MultiNum.find(name);
     if (multiBuffer != liveness.buffer2MultiNum.end())
       entry.multiBufferNum = multiBuffer->second;
@@ -187,12 +204,20 @@ GenerateStorageEntry(const std::vector<BufferInfoRecord> &bufferInfos,
   return entries;
 }
 
+inline std::vector<StorageEntryModel>
+GenerateStorageEntry(const std::vector<BufferInfoRecord> &bufferInfos,
+                     const LifetimeAnalysis &liveness) {
+  return GenerateStorageEntry(
+      PreparedStorageEntryAnalysis(bufferInfos, liveness), liveness);
+}
+
 inline void MergeInplaceSE(
     std::vector<StorageEntryModel> &entries,
     const std::vector<std::pair<std::string, std::string>> &inplacePairList) {
   std::vector<std::optional<StorageEntryModel>> storageEntries;
   storageEntries.reserve(entries.size());
-  std::map<std::string, size_t> buffer2storageEntry;
+  std::unordered_map<std::string, size_t> buffer2storageEntry;
+  buffer2storageEntry.reserve(entries.size());
   for (StorageEntryModel &entry : entries) {
     size_t index = storageEntries.size();
     for (const std::string &buffer : entry.inplaceBuffers)

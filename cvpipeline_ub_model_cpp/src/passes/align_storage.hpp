@@ -1,6 +1,8 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_ALIGN_STORAGE_HPP
 #define CVPIPELINE_UB_MODEL_CPP_ALIGN_STORAGE_HPP
 
+#include "../analysis/pipeline_metadata_cache.hpp"
+#include "../ir/generic_analysis.hpp"
 #include "../pipeline/local_buffer_record.hpp"
 
 namespace cvub {
@@ -19,7 +21,7 @@ struct AlignStorageResult {
 
 inline std::optional<size_t> RootDimToOperandDim(
     const LocalBufferRecord &record, const MemRefTypeModel &operandType,
-    size_t rootDimension);
+    size_t rootDimension, PipelineMetadataCache &metadata);
 
 inline bool IsLastDimContiguous(const MemRefTypeModel &type) {
   return type.shape.empty() ||
@@ -466,11 +468,11 @@ GetLimitedAxes(const GenericOperation &operation) {
 
 inline void MarkSizeAlignment(
     const AlignedOperand &operand, size_t axis, uint64_t alignmentBytes,
-    const std::vector<LocalBufferRecord> &buffers,
+    const LocalBufferIndex &bufferIndex,
     std::map<std::string, std::map<size_t, uint64_t>> &marks) {
   if (axis >= operand.type.shape.size() || !operand.type.shape[axis]) {
     const LocalBufferRecord *record =
-        FindSourceBuffer(buffers, operand.buffer);
+        bufferIndex.findSource(operand.buffer);
     if (record && record->addressSpace == AddressSpace::UB)
       marks[record->sourceIdentity][axis] = std::max(
           marks[record->sourceIdentity][axis], alignmentBytes);
@@ -482,7 +484,7 @@ inline void MarkSizeAlignment(
               alignmentBytes ==
           0)
     return;
-  const LocalBufferRecord *record = FindSourceBuffer(buffers, operand.buffer);
+  const LocalBufferRecord *record = bufferIndex.findSource(operand.buffer);
   if (record && record->addressSpace == AddressSpace::UB)
     marks[record->sourceIdentity][axis] =
         std::max(marks[record->sourceIdentity][axis], alignmentBytes);
@@ -505,7 +507,7 @@ TransposeLoopDims(const GenericOperation &operation, size_t rank) {
 inline void MarkVCastAllocSize(
     const GenericOperation &operation,
     const std::vector<AlignedOperand> &operands,
-    const std::vector<LocalBufferRecord> &buffers,
+    const LocalBufferIndex &bufferIndex,
     std::map<std::string, std::map<size_t, uint64_t>> &marks) {
   if (operands.size() < 2)
     return;
@@ -524,15 +526,16 @@ inline void MarkVCastAllocSize(
     if (sourceExtent && *sourceExtent <= 32)
       sourceAlignment =
           AlignUp(static_cast<uint64_t>(*sourceExtent) * bytesFactor, 32);
-    MarkSizeAlignment(operands.front(), 0, sourceAlignment, buffers, marks);
-    MarkSizeAlignment(operands.back(), 0, 32 * 32, buffers, marks);
+    MarkSizeAlignment(operands.front(), 0, sourceAlignment, bufferIndex,
+                      marks);
+    MarkSizeAlignment(operands.back(), 0, 32 * 32, bufferIndex, marks);
     return;
   }
-  MarkSizeAlignment(operands.front(), rank - 1, 32, buffers, marks);
-  MarkSizeAlignment(operands.front(), rank - 2, 32 * bytesFactor, buffers,
-                      marks);
-  MarkSizeAlignment(operands.back(), rank - 1, 32, buffers, marks);
-  MarkSizeAlignment(operands.back(), rank - 2, 32, buffers, marks);
+  MarkSizeAlignment(operands.front(), rank - 1, 32, bufferIndex, marks);
+  MarkSizeAlignment(operands.front(), rank - 2, 32 * bytesFactor,
+                    bufferIndex, marks);
+  MarkSizeAlignment(operands.back(), rank - 1, 32, bufferIndex, marks);
+  MarkSizeAlignment(operands.back(), rank - 2, 32, bufferIndex, marks);
   (void)sourceBytes;
   (void)operation;
 }
@@ -540,7 +543,7 @@ inline void MarkVCastAllocSize(
 inline void MarkVTransposeAllocSize(
     const GenericOperation &operation,
     const std::vector<AlignedOperand> &operands,
-    const std::vector<LocalBufferRecord> &buffers,
+    const LocalBufferIndex &bufferIndex,
     std::map<std::string, std::map<size_t, uint64_t>> &marks) {
   if (operands.size() < 2 || operands.front().type.shape.empty() ||
       HasBooleanProperty(operation, "disable_align"))
@@ -553,7 +556,7 @@ inline void MarkVTransposeAllocSize(
     return;
   for (const AlignedOperand &operand : operands)
     for (size_t axis : dimensions)
-      MarkSizeAlignment(operand, axis, 32, buffers, marks);
+      MarkSizeAlignment(operand, axis, 32, bufferIndex, marks);
   if (GetElementBitWidth(operands.front().type) != 32 ||
       dimensions.size() != 2)
     return;
@@ -565,13 +568,13 @@ inline void MarkVTransposeAllocSize(
   }
   if (doubleAligned)
     return;
-  MarkSizeAlignment(operands.front(), dimensions[1], 64, buffers, marks);
-  MarkSizeAlignment(operands.back(), dimensions[0], 64, buffers, marks);
+  MarkSizeAlignment(operands.front(), dimensions[1], 64, bufferIndex, marks);
+  MarkSizeAlignment(operands.back(), dimensions[0], 64, bufferIndex, marks);
 }
 
 inline void MarkVSortAllocSize(
     const std::vector<AlignedOperand> &operands,
-    const std::vector<LocalBufferRecord> &buffers,
+    const LocalBufferIndex &bufferIndex,
     std::map<std::string, std::map<size_t, uint64_t>> &marks) {
   for (const AlignedOperand &operand : operands) {
     if (operand.type.shape.empty())
@@ -581,13 +584,15 @@ inline void MarkVSortAllocSize(
       continue;
     const uint64_t elementsPerBlock = 32 / elementBytes;
     MarkSizeAlignment(operand, operand.type.shape.size() - 1,
-                        32 * (32 / elementsPerBlock), buffers, marks);
+                      32 * (32 / elementsPerBlock), bufferIndex, marks);
   }
 }
 
 inline void MarkBufferizationConflictCopies(
-    const PostBufferizationRewriteState &postBufferization, const std::vector<LocalBufferRecord> &buffers,
-    std::map<std::string, std::set<size_t>> &marks) {
+    const PostBufferizationRewriteState &postBufferization,
+    const LocalBufferIndex &bufferIndex,
+    std::map<std::string, std::set<size_t>> &marks,
+    PipelineMetadataCache &metadata) {
   const GenericModule &module = postBufferization.bufferized.logicalModule;
   for (size_t ordinal = 0; ordinal < postBufferization.singlePoint.allocations.size();
        ++ordinal) {
@@ -606,28 +611,24 @@ inline void MarkBufferizationConflictCopies(
         module.operations.at(static_cast<size_t>(operationId));
     if (operand >= operation.operands.size())
       continue;
-    const BufferizedValueBinding *original = nullptr;
-    for (const BufferizedValueBinding &binding : postBufferization.bufferized.values)
-      if (binding.valueId == operation.operands[operand]) {
-        original = &binding;
-        break;
-      }
+    const std::string *original = FindBufferizedValueBuffer(
+        postBufferization.bufferized, operation.operands[operand]);
     if (!original)
       continue;
     const std::string sourceIdentity = MappedBufferIdentity(
-        original->bufferId, postBufferization.singlePoint.bufferMapping);
+        *original, postBufferization.singlePoint.bufferMapping);
     const std::string destinationIdentity =
         "base:" + std::to_string(ordinal);
     const LocalBufferRecord *source =
-        FindSourceBuffer(buffers, sourceIdentity);
+        bufferIndex.findSource(sourceIdentity);
     const LocalBufferRecord *destination =
-        FindSourceBuffer(buffers, destinationIdentity);
+        bufferIndex.findSource(destinationIdentity);
     std::optional<MemRefTypeModel> sourceType =
-        ParseMemRefType(allocation.type);
+        metadata.memRefType(allocation.type);
     const std::optional<MemRefTypeModel> rootType =
-        source ? ParseMemRefType(source->type) : std::nullopt;
+        source ? metadata.memRefType(source->type) : std::nullopt;
     const std::optional<MemRefTypeModel> destinationType =
-        destination ? ParseMemRefType(destination->type) : std::nullopt;
+        destination ? metadata.memRefType(destination->type) : std::nullopt;
     if (!source || !destination || !sourceType || !rootType ||
         !destinationType || sourceType->shape.size() != rootType->shape.size())
       continue;
@@ -680,8 +681,9 @@ inline std::vector<std::vector<size_t>> StaticShapePartition(
 
 inline std::optional<size_t> RootDimToOperandDim(
     const LocalBufferRecord &record, const MemRefTypeModel &operandType,
-    size_t rootDimension) {
-  const std::optional<MemRefTypeModel> rootType = ParseMemRefType(record.type);
+    size_t rootDimension, PipelineMetadataCache &metadata) {
+  const std::optional<MemRefTypeModel> rootType =
+      metadata.memRefType(record.type);
   if (!rootType)
     return std::nullopt;
   if (rootType->shape.size() == operandType.shape.size())
@@ -714,8 +716,9 @@ inline std::optional<size_t> RootDimToOperandDim(
 
 inline std::optional<size_t> OperandDimToRootDim(
     const LocalBufferRecord &record, const MemRefTypeModel &operandType,
-    size_t operandDimension) {
-  const std::optional<MemRefTypeModel> rootType = ParseMemRefType(record.type);
+    size_t operandDimension, PipelineMetadataCache &metadata) {
+  const std::optional<MemRefTypeModel> rootType =
+      metadata.memRefType(record.type);
   if (!rootType)
     return std::nullopt;
   if (rootType->shape.size() == operandType.shape.size())
@@ -748,46 +751,47 @@ inline std::optional<size_t> OperandDimToRootDim(
 
 inline std::vector<AlignedOperand> OperationOperandTypes(
     const PostBufferizationRewriteState &postBufferization, const GenericOperation &operation,
-    const std::vector<LocalBufferRecord> &buffers,
+    const LocalBufferIndex &bufferIndex,
+    const GenericModuleAnalysisIndexes &analysis,
+    PipelineMetadataCache &metadata,
     const std::map<std::string, std::set<size_t>> *strideMarks = nullptr) {
-  std::map<size_t, std::string> accesses;
-  for (const BufferizedOperandAccess &access : postBufferization.bufferized.accesses)
-    if (access.operationId == operation.id)
-      accesses[static_cast<size_t>(access.operandNumber)] =
-          MappedBufferIdentity(access.bufferId, postBufferization.singlePoint.bufferMapping);
   std::vector<AlignedOperand> result;
-  const std::vector<size_t> initIndices = DpsInitOperandIndices(
+  const std::vector<size_t> &initIndices = metadata.dpsInitOperandIndices(
       operation.name, operation.operands.size(), operation.properties);
   const std::set<size_t> initSet(initIndices.begin(), initIndices.end());
   for (size_t index = 0; index < operation.operandTypes.size(); ++index) {
     if (!IsMemRefType(operation.operandTypes[index]) &&
         !IsTensorType(operation.operandTypes[index]))
       continue;
-    const std::string buffer = accesses[index];
+    const std::string *rawBuffer = FindBufferizedOperationBuffer(
+        postBufferization.bufferized, operation.id, index);
+    const std::string buffer =
+        rawBuffer ? MappedBufferIdentity(
+                        *rawBuffer, postBufferization.singlePoint.bufferMapping)
+                  : std::string();
     const std::string typeText =
         IsTensorType(operation.operandTypes[index])
             ? ConvertTensorToMemRefType(operation.operandTypes[index])
             : operation.operandTypes[index];
-    std::optional<MemRefTypeModel> type = ParseMemRefType(typeText);
+    std::optional<MemRefTypeModel> type = metadata.memRefType(typeText);
     if (type && IsTensorType(operation.operandTypes[index])) {
-      const std::map<int, const GenericOperation *> definitions =
-          DefiningOperations(postBufferization.bufferized.logicalModule);
-      auto definition = definitions.find(operation.operands[index]);
-      if (definition != definitions.end() &&
-          definition->second->name == "tensor.extract_slice") {
-        const BufferizedValueBinding *binding = nullptr;
-        for (const BufferizedValueBinding &candidate : postBufferization.bufferized.values)
-          if (candidate.valueId == operation.operands[index]) {
-            binding = &candidate;
-            break;
-          }
+      const int definitionId =
+          analysis.definingOperationId(operation.operands[index]);
+      const GenericOperation *definition =
+          definitionId < 0
+              ? nullptr
+              : &postBufferization.bufferized.logicalModule.operations.at(
+                    static_cast<size_t>(definitionId));
+      if (definition && definition->name == "tensor.extract_slice") {
+        const std::string *binding = FindBufferizedValueBuffer(
+            postBufferization.bufferized, operation.operands[index]);
         if (binding) {
           const std::string rootIdentity = MappedBufferIdentity(
-              binding->bufferId, postBufferization.singlePoint.bufferMapping);
+              *binding, postBufferization.singlePoint.bufferMapping);
           const LocalBufferRecord *root =
-              FindSourceBuffer(buffers, rootIdentity);
+              bufferIndex.findSource(rootIdentity);
           const std::optional<MemRefTypeModel> rootType =
-              root ? ParseMemRefType(root->type) : std::nullopt;
+              root ? metadata.memRefType(root->type) : std::nullopt;
           if (rootType && rootType->shape.size() == type->shape.size()) {
             type->hasStridedLayout = true;
             type->strides = rootType->strides;
@@ -799,10 +803,10 @@ inline std::vector<AlignedOperand> OperationOperandTypes(
       auto marked = strideMarks->find(buffer);
       if (marked != strideMarks->end()) {
         std::vector<std::pair<int64_t, int64_t>> alignments;
-        const LocalBufferRecord *record = FindSourceBuffer(buffers, buffer);
+        const LocalBufferRecord *record = bufferIndex.findSource(buffer);
         for (size_t rootAxis : marked->second) {
           const std::optional<size_t> axis =
-              record ? RootDimToOperandDim(*record, *type, rootAxis)
+              record ? RootDimToOperandDim(*record, *type, rootAxis, metadata)
                      : std::nullopt;
           if (axis)
             alignments.push_back(
@@ -822,6 +826,12 @@ ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
                   std::vector<LocalBufferRecord> &buffers,
                   bool alignAllocSize = true,
                   bool enableStrideAlign = true) {
+  const GenericModuleAnalysisIndexes &analysis =
+      postBufferization.bufferized.logicalContext.analysis;
+  PipelineMetadataCache &metadata =
+      postBufferization.bufferized.logicalContext.metadata;
+  analysis.ensureCompatible(postBufferization.bufferized.logicalModule);
+  const LocalBufferIndex bufferIndex(buffers);
   std::map<std::string, std::map<size_t, uint64_t>> sizeMarks;
   if (alignAllocSize) {
     for (const GenericOperation &operation :
@@ -829,25 +839,31 @@ ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
       if (!IsHIVMStructuredOp(operation.name))
         continue;
       const std::vector<AlignedOperand> operands =
-          OperationOperandTypes(postBufferization, operation, buffers);
+          OperationOperandTypes(postBufferization, operation, bufferIndex,
+                                analysis, metadata);
       if (operation.name == "hivm.hir.vcast") {
-        const GenericOperation *function = EnclosingFunction(
-            postBufferization.bufferized.logicalModule, operation);
+        const int functionId = analysis.enclosingFunctionId(operation.id);
+        const GenericOperation *function =
+            functionId < 0
+                ? nullptr
+                : &postBufferization.bufferized.logicalModule.operations.at(
+                      static_cast<size_t>(functionId));
         if (function && !HasDictionaryEntry(
                             function->attributes,
                             "hivm.disable_size_align_for_cast"))
-          MarkVCastAllocSize(operation, operands, buffers, sizeMarks);
+          MarkVCastAllocSize(operation, operands, bufferIndex, sizeMarks);
       } else if (operation.name == "hivm.hir.vtranspose") {
-        MarkVTransposeAllocSize(operation, operands, buffers, sizeMarks);
+        MarkVTransposeAllocSize(operation, operands, bufferIndex, sizeMarks);
       } else if (operation.name == "hivm.hir.vsort") {
-        MarkVSortAllocSize(operands, buffers, sizeMarks);
+        MarkVSortAllocSize(operands, bufferIndex, sizeMarks);
       }
     }
   }
 
   std::map<std::string, std::set<size_t>> marks;
   if (enableStrideAlign)
-    MarkBufferizationConflictCopies(postBufferization, buffers, marks);
+    MarkBufferizationConflictCopies(postBufferization, bufferIndex, marks,
+                                    metadata);
   for (const GenericOperation &operation :
        postBufferization.bufferized.logicalModule.operations) {
       if (!enableStrideAlign)
@@ -855,7 +871,8 @@ ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
       if (!IsHIVMStructuredOp(operation.name))
         continue;
       const std::vector<AlignedOperand> operands =
-          OperationOperandTypes(postBufferization, operation, buffers, &marks);
+          OperationOperandTypes(postBufferization, operation, bufferIndex,
+                                analysis, metadata, &marks);
       if (operands.empty())
         continue;
       const size_t rank = operands.front().type.shape.size();
@@ -882,13 +899,13 @@ ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
             }
           }
           const LocalBufferRecord *record =
-              FindSourceBuffer(buffers, operand.buffer);
+              bufferIndex.findSource(operand.buffer);
           if (operandAlignDim && record &&
               record->addressSpace == AddressSpace::UB &&
               !AlreadyAligned(operand.type, *operandAlignDim)) {
             const std::optional<size_t> rootDimension =
                 OperandDimToRootDim(*record, operand.type,
-                                      *operandAlignDim);
+                                     *operandAlignDim, metadata);
             if (rootDimension)
               marks[record->sourceIdentity].insert(*rootDimension);
           }
@@ -938,7 +955,7 @@ ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
         continue;
       for (const AlignedOperand &operand : operands) {
         const LocalBufferRecord *record =
-            FindSourceBuffer(buffers, operand.buffer);
+            bufferIndex.findSource(operand.buffer);
         std::optional<size_t> adjustedAlignDim = alignDim;
         if (operation.name == "hivm.hir.vreduce") {
           const std::vector<int64_t> reduceDims =
@@ -971,7 +988,8 @@ ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
             AlreadyAligned(operand.type, *adjustedAlignDim))
           continue;
         const std::optional<size_t> rootDimension =
-            OperandDimToRootDim(*record, operand.type, *adjustedAlignDim);
+            OperandDimToRootDim(*record, operand.type, *adjustedAlignDim,
+                                metadata);
         if (rootDimension)
           marks[record->sourceIdentity].insert(*rootDimension);
       }
@@ -987,11 +1005,12 @@ ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
           operation.name == "hivm.hir.store")
         continue;
       const std::vector<AlignedOperand> operands =
-          OperationOperandTypes(postBufferization, operation, buffers);
+          OperationOperandTypes(postBufferization, operation, bufferIndex,
+                                analysis, metadata);
       std::set<size_t> unionDimensions;
       for (const AlignedOperand &operand : operands) {
         const LocalBufferRecord *record =
-            FindSourceBuffer(buffers, operand.buffer);
+            bufferIndex.findSource(operand.buffer);
         if (!record)
           continue;
         auto found = marks.find(record->sourceIdentity);
@@ -999,14 +1018,14 @@ ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
           for (size_t rootDimension : found->second)
             if (const std::optional<size_t> dimension =
                     RootDimToOperandDim(*record, operand.type,
-                                          rootDimension))
+                                        rootDimension, metadata))
               unionDimensions.insert(*dimension);
       }
       if (unionDimensions.empty())
         continue;
       for (const AlignedOperand &operand : operands) {
         const LocalBufferRecord *record =
-            FindSourceBuffer(buffers, operand.buffer);
+            bufferIndex.findSource(operand.buffer);
         if (!record || record->addressSpace != AddressSpace::UB)
           continue;
         for (size_t dimension : unionDimensions) {
@@ -1014,7 +1033,8 @@ ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
               AlreadyAligned(operand.type, dimension))
             continue;
           const std::optional<size_t> rootDimension =
-              OperandDimToRootDim(*record, operand.type, dimension);
+              OperandDimToRootDim(*record, operand.type, dimension,
+                                  metadata);
           if (!rootDimension)
             continue;
           propagated |=
@@ -1024,7 +1044,8 @@ ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
     }
   }
   for (LocalBufferRecord &buffer : buffers) {
-    const std::optional<MemRefTypeModel> type = ParseMemRefType(buffer.type);
+    const std::optional<MemRefTypeModel> type =
+        metadata.memRefType(buffer.type);
     auto size = sizeMarks.find(buffer.sourceIdentity);
     if (size != sizeMarks.end()) {
       if (!type)

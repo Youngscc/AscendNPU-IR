@@ -3,6 +3,7 @@
 #define CVPIPELINE_UB_MODEL_CPP_MEM_PLAN_HPP
 
 #include "storage_entry.hpp"
+#include "../../support/debug_trace.hpp"
 
 namespace cvub {
 
@@ -46,10 +47,122 @@ struct MemPlanStateModel {
   int nextStorageEntryId = 0;
   std::list<StorageEntryModel> relationStorageEntries;
   std::map<int, std::vector<int>> firstBufferEntry2RelationOtherBufferEntry;
+  // Storage-entry IDs are dense and stable during one planning attempt.
+  // Speculation queried them from nested conflict loops through repeated
+  // linear scans; retain direct pointers instead.  The root vector is not
+  // resized after this table is built and std::list keeps synthetic-entry
+  // addresses stable.
+  std::vector<StorageEntryModel *> entryById;
+  std::unordered_map<std::string, int> conflictProfileByBuffer;
+  size_t conflictProfileCount = 0;
+  std::vector<uint8_t> lifeConflict;
+  std::vector<uint8_t> pipeConflict;
+  std::vector<uint8_t> inplacableConflict;
 };
+
+inline void RegisterStorageEntry(MemPlanStateModel &state,
+                                 StorageEntryModel &entry) {
+  if (entry.id < 0)
+    return;
+  const size_t id = static_cast<size_t>(entry.id);
+  if (state.entryById.size() <= id)
+    state.entryById.resize(id + 1, nullptr);
+  state.entryById[id] = &entry;
+}
+
+inline void RebuildStorageEntryLookup(
+    std::vector<StorageEntryModel> &entries, MemPlanStateModel &state) {
+  state.entryById.clear();
+  for (StorageEntryModel &entry : entries)
+    RegisterStorageEntry(state, entry);
+  for (StorageEntryModel &entry : state.relationStorageEntries)
+    RegisterStorageEntry(state, entry);
+}
+
+inline bool BufferPipeConflict(const StorageEntryModel &lhs,
+                               const StorageEntryModel &rhs);
+
+inline void BuildStorageEntryConflictTables(
+    std::vector<StorageEntryModel> &entries, MemPlanStateModel &state,
+    const std::vector<std::pair<std::string, std::string>>
+        &inplacableBufferPairs) {
+  state.conflictProfileByBuffer.reserve(entries.size() * 2);
+  int maximumProfile = -1;
+  for (StorageEntryModel &entry : entries) {
+    if (entry.conflictProfileId < 0)
+      entry.conflictProfileId = entry.id;
+    maximumProfile = std::max(maximumProfile, entry.conflictProfileId);
+    for (const std::string &buffer : entry.inplaceBuffers)
+      state.conflictProfileByBuffer[buffer] = entry.conflictProfileId;
+  }
+  const size_t count = maximumProfile < 0
+                           ? 0
+                           : static_cast<size_t>(maximumProfile) + 1;
+  state.conflictProfileCount = count;
+  const size_t tableSize = count * count;
+  state.lifeConflict.assign(tableSize, uint8_t{0});
+  state.pipeConflict.assign(tableSize, uint8_t{0});
+  state.inplacableConflict.assign(tableSize, uint8_t{0});
+  std::unordered_map<std::string, std::unordered_set<std::string>>
+      inplacableByBuffer;
+  inplacableByBuffer.reserve(inplacableBufferPairs.size() * 2);
+  for (const auto &[left, right] : inplacableBufferPairs) {
+    inplacableByBuffer[left].insert(right);
+    inplacableByBuffer[right].insert(left);
+  }
+  const auto isInplacable = [&](const StorageEntryModel &left,
+                                const StorageEntryModel &right) {
+    for (const std::string &leftBuffer : left.inplaceBuffers) {
+      auto candidates = inplacableByBuffer.find(leftBuffer);
+      if (candidates == inplacableByBuffer.end())
+        continue;
+      for (const std::string &rightBuffer : right.inplaceBuffers)
+        if (candidates->second.count(rightBuffer) != 0)
+          return true;
+    }
+    return false;
+  };
+  for (size_t leftIndex = 0; leftIndex < entries.size(); ++leftIndex) {
+    const StorageEntryModel &left = entries[leftIndex];
+    const size_t leftProfile =
+        static_cast<size_t>(left.conflictProfileId);
+    for (size_t rightIndex = leftIndex; rightIndex < entries.size();
+         ++rightIndex) {
+      const StorageEntryModel &right = entries[rightIndex];
+      const size_t rightProfile =
+          static_cast<size_t>(right.conflictProfileId);
+      const size_t forward = leftProfile * count + rightProfile;
+      const size_t reverse = rightProfile * count + leftProfile;
+      const uint8_t life =
+          IsBufferLifeVecConflict(left.bufferLifeVec, right.bufferLifeVec);
+      const uint8_t pipe = BufferPipeConflict(left, right);
+      const uint8_t inplacable = isInplacable(left, right);
+      state.lifeConflict[forward] = state.lifeConflict[reverse] = life;
+      state.pipeConflict[forward] = state.pipeConflict[reverse] = pipe;
+      state.inplacableConflict[forward] =
+          state.inplacableConflict[reverse] = inplacable;
+    }
+  }
+}
+
+inline bool CachedConflict(
+    const std::vector<uint8_t> &table, size_t profileCount,
+    const StorageEntryModel &left, const StorageEntryModel &right) {
+  if (left.conflictProfileId < 0 || right.conflictProfileId < 0)
+    return false;
+  const size_t lhs = static_cast<size_t>(left.conflictProfileId);
+  const size_t rhs = static_cast<size_t>(right.conflictProfileId);
+  return lhs < profileCount && rhs < profileCount &&
+         table[lhs * profileCount + rhs] != 0;
+}
 
 inline StorageEntryModel *FindStorageEntry(
     std::vector<StorageEntryModel> &entries, MemPlanStateModel &state, int id) {
+  if (id >= 0 && static_cast<size_t>(id) < state.entryById.size()) {
+    StorageEntryModel *entry = state.entryById[static_cast<size_t>(id)];
+    if (entry)
+      return entry;
+  }
   for (StorageEntryModel &entry : entries)
     if (entry.id == id)
       return &entry;
@@ -62,6 +175,11 @@ inline StorageEntryModel *FindStorageEntry(
 inline const StorageEntryModel *FindStorageEntry(
     const std::vector<StorageEntryModel> &entries,
     const MemPlanStateModel &state, int id) {
+  if (id >= 0 && static_cast<size_t>(id) < state.entryById.size()) {
+    const StorageEntryModel *entry = state.entryById[static_cast<size_t>(id)];
+    if (entry)
+      return entry;
+  }
   for (const StorageEntryModel &entry : entries)
     if (entry.id == id)
       return &entry;
@@ -78,6 +196,9 @@ inline void ClearSyntheticRelationEntries(MemPlanStateModel &state,
   if (relation == state.firstBufferEntry2RelationOtherBufferEntry.end())
     return;
   const std::set<int> ids(relation->second.begin(), relation->second.end());
+  for (int id : relation->second)
+    if (id >= 0 && static_cast<size_t>(id) < state.entryById.size())
+      state.entryById[static_cast<size_t>(id)] = nullptr;
   state.relationStorageEntries.remove_if(
       [&](const StorageEntryModel &entry) { return ids.count(entry.id) != 0; });
   state.firstBufferEntry2RelationOtherBufferEntry.erase(relation);
@@ -180,6 +301,7 @@ inline bool IsInplacableBufferPairMatched(
 inline bool VerifyConflictStage0(
     const StorageEntryModel &entry, const MemoryBoundModel &last,
     const std::vector<StorageEntryModel> &entries,
+    const MemPlanStateModel &state,
     const std::vector<std::pair<std::string, std::string>>
         &inplacableBufferPairs) {
   size_t i = 0;
@@ -191,9 +313,23 @@ inline bool VerifyConflictStage0(
     int lo = std::max(lhs.allocTime, rhs.allocTime);
     int hi = std::min(lhs.freeTime, rhs.freeTime);
     if (lo <= hi) {
-      if (lo != hi ||
-          !IsInplacableBufferPairMatched(lhs.buffer, rhs.buffer, entries,
-                                         inplacableBufferPairs))
+      bool inplacable = false;
+      auto leftProfile = state.conflictProfileByBuffer.find(lhs.buffer);
+      auto rightProfile = state.conflictProfileByBuffer.find(rhs.buffer);
+      if (leftProfile != state.conflictProfileByBuffer.end() &&
+          rightProfile != state.conflictProfileByBuffer.end() &&
+          leftProfile->second >= 0 && rightProfile->second >= 0) {
+        const size_t left = static_cast<size_t>(leftProfile->second);
+        const size_t right = static_cast<size_t>(rightProfile->second);
+        inplacable = left < state.conflictProfileCount &&
+                     right < state.conflictProfileCount &&
+                     state.inplacableConflict[
+                         left * state.conflictProfileCount + right] != 0;
+      } else {
+        inplacable = IsInplacableBufferPairMatched(
+            lhs.buffer, rhs.buffer, entries, inplacableBufferPairs);
+      }
+      if (lo != hi || !inplacable)
         return true;
     }
     if (lhs.freeTime < rhs.freeTime)
@@ -238,9 +374,9 @@ inline bool IsBufferLifeVecConflict(const PlanRecordModel &record,
     return false;
   const StorageEntryModel *planned =
       FindStorageEntry(entries, state, record.entry);
-  return planned &&
-         IsBufferLifeVecConflict(planned->bufferLifeVec,
-                                 entry.bufferLifeVec);
+  return planned && CachedConflict(state.lifeConflict,
+                                   state.conflictProfileCount, *planned,
+                                   entry);
 }
 
 inline bool VerifyConflictStageCommon(
@@ -309,8 +445,9 @@ inline bool VerifyConflictStage3(
     return false;
   return VerifyConflictStageCommon(
       history, entry, start, outline, entries, state,
-      [](const StorageEntryModel &lhs, const StorageEntryModel &rhs) {
-        return BufferPipeConflict(lhs, rhs);
+      [&state](const StorageEntryModel &lhs, const StorageEntryModel &rhs) {
+        return CachedConflict(state.pipeConflict,
+                              state.conflictProfileCount, lhs, rhs);
       });
 }
 
@@ -409,6 +546,7 @@ inline void PlanRelationOtherBufferEntryAddress(
     relation.bitsOffset = offsets[i];
     relation.otherBufferRelationEntries.clear();
     state.relationStorageEntries.push_back(std::move(relation));
+    RegisterStorageEntry(state, state.relationStorageEntries.back());
     relations.push_back(state.relationStorageEntries.back().id);
   }
 }
@@ -485,7 +623,7 @@ inline bool SpecAlloc(
       size = CheckedAdd(size, (*end)->extent,
                         "storage candidate extent");
       if (IsSamePlanAsLastRollBack(allocOffset, entry.childIdx, specInfo) ||
-          VerifyConflictStage0(entry, **end, entries,
+          VerifyConflictStage0(entry, **end, entries, state,
                                inplacableBufferPairs)) {
         start = end;
         break;
@@ -638,6 +776,8 @@ inline uint64_t PlanMemAddressForLevel0(
   for (const StorageEntryModel &entry : entries)
     state.nextStorageEntryId =
         std::max(state.nextStorageEntryId, entry.id + 1);
+  RebuildStorageEntryLookup(entries, state);
+  BuildStorageEntryConflictTables(entries, state, inplacableBufferPairs);
   MemBoundListModel outline;
   outline.push_back(std::make_shared<MemoryBoundModel>(MemoryBoundModel{
       {}, 0, std::numeric_limits<uint64_t>::max(), -1}));
@@ -679,6 +819,8 @@ inline bool PlanMemAddressOfWholeLocalBuffer(
   for (const StorageEntryModel &entry : entries)
     state.nextStorageEntryId =
         std::max(state.nextStorageEntryId, entry.id + 1);
+  RebuildStorageEntryLookup(entries, state);
+  BuildStorageEntryConflictTables(entries, state, inplacableBufferPairs);
   MemBoundListModel outline;
   outline.push_back(std::make_shared<MemoryBoundModel>(
       MemoryBoundModel{{}, 0, maxBits, -1}));
@@ -732,80 +874,123 @@ inline std::map<std::string, std::vector<uint64_t>> UpdateBuffer2Offsets(
 
 inline PlanMemoryModelResult PlanLocalMemoryImpl(
     const PlanMemoryInput &input, bool restrictInplaceAsISA,
-    std::optional<uint32_t> randomSeed) {
-  std::vector<BufferInfoRecord> bufferInfos = BuildBufferInfos(input);
+    std::optional<uint32_t> randomSeed, DebugTrace *trace = nullptr) {
+  std::vector<BufferInfoRecord> bufferInfos = MeasureStage(
+      trace, "PlanMemory.PrepareBufferInfos",
+      [&] { return BuildBufferInfos(input); });
   PlanMemoryModelResult finalResult;
   if (randomSeed && *randomSeed >= 20)
     throw std::runtime_error("PlanMemory random seed must be in [0, 19]");
   const uint32_t firstAttempt = randomSeed.value_or(0);
   const uint32_t attemptEnd = randomSeed ? firstAttempt + 1 : 20;
+  std::unique_ptr<PreparedMemLivenessAnalysis> preparedLiveness =
+      MeasureStage(trace, "PlanMemory.PrepareLiveness", [&] {
+        return std::make_unique<PreparedMemLivenessAnalysis>(input, trace);
+      });
+  std::unique_ptr<PreparedStorageEntryAnalysis> preparedStorage;
   for (uint32_t attempt = firstAttempt; attempt < attemptEnd; ++attempt) {
-    LifetimeAnalysis liveness =
-        analyzeLifetimes(input, attempt, restrictInplaceAsISA);
-    std::vector<StorageEntryModel> entries =
-        GenerateStorageEntry(bufferInfos, liveness);
-    MergeInplaceSE(entries, liveness.inplacePairList);
-    ExpandMultiBufferStorageEntry(entries);
-    uint64_t noReuseBits = 0;
-    for (const StorageEntryModel &entry : entries)
-      noReuseBits = CheckedAdd(noReuseBits, AlignUp(entry.constBits, 256),
-                               "total non-reuse UB size");
+    LifetimeAnalysis liveness = MeasureStage(
+        trace, "PlanMemory.AnalyzeLifetimes", [&] {
+          return analyzeLifetimes(input, *preparedLiveness, attempt,
+                                  restrictInplaceAsISA, !preparedStorage);
+        });
+    if (!preparedStorage)
+      preparedStorage = MeasureStage(
+          trace, "PlanMemory.PrepareStorage", [&] {
+            return std::make_unique<PreparedStorageEntryAnalysis>(bufferInfos,
+                                                                   liveness);
+          });
+    std::vector<StorageEntryModel> entries = MeasureStage(
+        trace, "PlanMemory.GenerateStorageEntry", [&] {
+          return GenerateStorageEntry(*preparedStorage, liveness);
+        });
+    MeasureStage(trace, "PlanMemory.MergeInplace", [&] {
+      MergeInplaceSE(entries, liveness.inplacePairList);
+    });
+    MeasureStage(trace, "PlanMemory.ExpandMultiBuffer", [&] {
+      ExpandMultiBufferStorageEntry(entries);
+    });
+    const uint64_t noReuseBits = MeasureStage(
+        trace, "PlanMemory.CalculateNoReuse", [&] {
+          uint64_t bits = 0;
+          for (const StorageEntryModel &entry : entries)
+            bits = CheckedAdd(bits, AlignUp(entry.constBits, 256),
+                              "total non-reuse UB size");
+          return bits;
+        });
     uint64_t requiredBits = 0;
     bool success = false;
     MemPlanStateModel planState;
-    if (noReuseBits <= kUBCapacityBits) {
-      requiredBits = PlanBuffersWithoutReuse(entries, 256);
-      success = true;
-    } else {
-      success = PlanMemAddressOfWholeLocalBuffer(
-          entries, kUBCapacityBits, 256, requiredBits, planState,
-          liveness.inplacableBufferPairs);
-    }
-
-    PlanMemoryModelResult result;
-    result.success = success;
-    result.overflow = !success;
-    result.selectedSeed = attempt;
-    result.requiredBits = requiredBits;
-    result.peakBits = requiredBits;
-    result.capacityBits = kUBCapacityBits;
-    result.inplacePairs = liveness.inplacePairList;
-    result.multiBufferNums = liveness.buffer2MultiNum;
-    std::map<std::string, LifetimeRecord> lifeByName;
-    for (const LifetimeRecord &life : liveness.records)
-      lifeByName[life.name] = life;
-    std::map<std::string, BufferInfoRecord> infoByName;
-    for (const BufferInfoRecord &info : bufferInfos)
-      infoByName[info.name] = info;
-    std::map<std::string, PlannedBufferRecord> plannedByName;
-    std::map<std::string, std::vector<uint64_t>> buffer2Offsets =
-        UpdateBuffer2Offsets(entries, planState);
-    for (auto &item : buffer2Offsets) {
-      const std::string &name = item.first;
-      const BufferInfoRecord &info = infoByName.at(name);
-      const LifetimeRecord &life = lifeByName.at(name);
-      plannedByName.emplace(
-          name, PlannedBufferRecord{name, info.constBits, info.constBits,
-                                    std::move(item.second), life.directAllocTime,
-                                    life.directFreeTime});
-    }
-    for (auto &item : plannedByName)
-      result.buffers.push_back(std::move(item.second));
-    // PlanMemory.cpp::DumpDebugState reports PLANMEM_PEAK from each buffer's
-    // byte offset plus its original byte-aligned extent for both successful
-    // and level-0 fallback plans. The 256-bit aligned StorageEntry size is
-    // reported separately as the required capacity when planning overflows.
-    result.peakBits = 0;
-    for (const PlannedBufferRecord &buffer : result.buffers) {
-      const uint64_t extentBits = AlignUp(buffer.extentBits, kBitsPerByte);
-      for (uint64_t offsetBytes : buffer.offsetsBytes) {
-        const uint64_t offsetBits =
-            CheckedMul(offsetBytes, kBitsPerByte, "planned UB offset");
-        result.peakBits =
-            std::max(result.peakBits,
-                     CheckedAdd(offsetBits, extentBits, "planned UB peak"));
+    MeasureStage(trace, "PlanMemory.PlanAddress", [&] {
+      if (noReuseBits <= kUBCapacityBits) {
+        requiredBits = PlanBuffersWithoutReuse(entries, 256);
+        success = true;
+      } else {
+        success = PlanMemAddressOfWholeLocalBuffer(
+            entries, kUBCapacityBits, 256, requiredBits, planState,
+            liveness.inplacableBufferPairs);
       }
-    }
+    });
+
+    // A failed non-final retry contributes no externally observable state:
+    // the next seed rebuilds liveness/storage state from the immutable input,
+    // and only a successful attempt or the final failed attempt is returned.
+    // Avoid constructing name-keyed lookup maps, planned-buffer records and
+    // peak statistics that would immediately be discarded. This mirrors the
+    // compiler pass, which only commits GetBuffer2Offsets() on success.
+    if (!success && attempt + 1 < attemptEnd)
+      continue;
+
+    PlanMemoryModelResult result = MeasureStage(
+        trace, "PlanMemory.MaterializeResult", [&] {
+          PlanMemoryModelResult materialized;
+          materialized.success = success;
+          materialized.overflow = !success;
+          materialized.selectedSeed = attempt;
+          materialized.requiredBits = requiredBits;
+          materialized.peakBits = requiredBits;
+          materialized.capacityBits = kUBCapacityBits;
+          materialized.inplacePairs = liveness.inplacePairList;
+          materialized.multiBufferNums = liveness.buffer2MultiNum;
+          std::unordered_map<std::string, LifetimeRecord> lifeByName;
+          lifeByName.reserve(liveness.records.size());
+          for (const LifetimeRecord &life : liveness.records)
+            lifeByName[life.name] = life;
+          std::unordered_map<std::string, BufferInfoRecord> infoByName;
+          infoByName.reserve(bufferInfos.size());
+          for (const BufferInfoRecord &info : bufferInfos)
+            infoByName[info.name] = info;
+          std::map<std::string, PlannedBufferRecord> plannedByName;
+          std::map<std::string, std::vector<uint64_t>> buffer2Offsets =
+              UpdateBuffer2Offsets(entries, planState);
+          for (auto &item : buffer2Offsets) {
+            const std::string &name = item.first;
+            const BufferInfoRecord &info = infoByName.at(name);
+            const LifetimeRecord &life = lifeByName.at(name);
+            plannedByName.emplace(
+                name, PlannedBufferRecord{name, info.constBits, info.constBits,
+                                          std::move(item.second),
+                                          life.directAllocTime,
+                                          life.directFreeTime});
+          }
+          for (auto &item : plannedByName)
+            materialized.buffers.push_back(std::move(item.second));
+          // PlanMemory.cpp::DumpDebugState reports PLANMEM_PEAK from each
+          // buffer's byte offset plus its original byte-aligned extent.
+          materialized.peakBits = 0;
+          for (const PlannedBufferRecord &buffer : materialized.buffers) {
+            const uint64_t extentBits =
+                AlignUp(buffer.extentBits, kBitsPerByte);
+            for (uint64_t offsetBytes : buffer.offsetsBytes) {
+              const uint64_t offsetBits = CheckedMul(
+                  offsetBytes, kBitsPerByte, "planned UB offset");
+              materialized.peakBits = std::max(
+                  materialized.peakBits,
+                  CheckedAdd(offsetBits, extentBits, "planned UB peak"));
+            }
+          }
+          return materialized;
+        });
     finalResult = std::move(result);
     if (success)
       return finalResult;
@@ -815,35 +1000,42 @@ inline PlanMemoryModelResult PlanLocalMemoryImpl(
 
 inline PlanMemoryModelResult PlanLocalMemoryImpl(
     const fs::path &beforeIR, bool restrictInplaceAsISA,
-    std::optional<uint32_t> randomSeed) {
+    std::optional<uint32_t> randomSeed, DebugTrace *trace = nullptr) {
   if (!fs::exists(beforeIR) || !fs::is_regular_file(beforeIR))
     throw std::runtime_error("PlanMemory-before IR does not exist: " +
                              beforeIR.string());
   return PlanLocalMemoryImpl(ParsePlanMemoryInput(beforeIR, "AIV"),
-                             restrictInplaceAsISA, randomSeed);
+                             restrictInplaceAsISA, randomSeed, trace);
 }
 
 inline PlanMemoryModelResult
-PlanLocalMemory(const fs::path &beforeIR, bool restrictInplaceAsISA = false) {
-  return PlanLocalMemoryImpl(beforeIR, restrictInplaceAsISA, std::nullopt);
+PlanLocalMemory(const fs::path &beforeIR, bool restrictInplaceAsISA = false,
+                DebugTrace *trace = nullptr) {
+  return PlanLocalMemoryImpl(beforeIR, restrictInplaceAsISA, std::nullopt,
+                             trace);
 }
 
 inline PlanMemoryModelResult
 PlanLocalMemoryForSeed(const fs::path &beforeIR, uint32_t randomSeed,
-                       bool restrictInplaceAsISA = false) {
-  return PlanLocalMemoryImpl(beforeIR, restrictInplaceAsISA, randomSeed);
+                       bool restrictInplaceAsISA = false,
+                       DebugTrace *trace = nullptr) {
+  return PlanLocalMemoryImpl(beforeIR, restrictInplaceAsISA, randomSeed,
+                             trace);
 }
 
 inline PlanMemoryModelResult
 PlanLocalMemory(const PlanMemoryInput &input,
-                bool restrictInplaceAsISA = false) {
-  return PlanLocalMemoryImpl(input, restrictInplaceAsISA, std::nullopt);
+                bool restrictInplaceAsISA = false,
+                DebugTrace *trace = nullptr) {
+  return PlanLocalMemoryImpl(input, restrictInplaceAsISA, std::nullopt,
+                             trace);
 }
 
 inline PlanMemoryModelResult
 PlanLocalMemoryForSeed(const PlanMemoryInput &input, uint32_t randomSeed,
-                       bool restrictInplaceAsISA = false) {
-  return PlanLocalMemoryImpl(input, restrictInplaceAsISA, randomSeed);
+                       bool restrictInplaceAsISA = false,
+                       DebugTrace *trace = nullptr) {
+  return PlanLocalMemoryImpl(input, restrictInplaceAsISA, randomSeed, trace);
 }
 
 

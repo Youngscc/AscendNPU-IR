@@ -1,6 +1,7 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_ALLOC_EXTRA_BUFFER_HPP
 #define CVPIPELINE_UB_MODEL_CPP_ALLOC_EXTRA_BUFFER_HPP
 
+#include "../ir/generic_analysis.hpp"
 #include "one_shot_bufferize.hpp"
 
 namespace cvub {
@@ -68,14 +69,16 @@ class AllocExtraBufferModel {
 public:
   explicit AllocExtraBufferModel(const GenericModule &inputModule,
                                  std::string functionName = "")
-      : module(inputModule), valueTypes(ValueTypes(inputModule)),
-        definitions(DefiningOperations(inputModule)),
+      : module(inputModule),
+        analysis(inputModule, kGenericAnalysisDefinitions |
+                                  kGenericAnalysisValueTypes |
+                                  kGenericAnalysisEnclosingFunctions),
         function(std::move(functionName)) {}
 
   std::vector<ExtraBufferAllocation> Run() const {
     std::vector<ExtraBufferAllocation> result;
     for (const GenericOperation &operation : module.operations) {
-      const GenericOperation *owner = enclosingFunction(operation);
+      const GenericOperation *owner = analysis.enclosingFunction(operation);
       if (!owner || (!function.empty() && functionName(*owner) != function) ||
           ParseEnumValue(FindDictionaryValue(owner->attributes,
                                              "hacc.function_kind")) == "HOST")
@@ -92,17 +95,6 @@ public:
   }
 
 private:
-  const GenericOperation *
-  enclosingFunction(const GenericOperation &operation) const {
-    const GenericOperation *current = &operation;
-    while (current && current->name != "func.func") {
-      if (current->parentId < 0)
-        return nullptr;
-      current = &module.operations.at(static_cast<size_t>(current->parentId));
-    }
-    return current;
-  }
-
   std::string functionName(const GenericOperation &operation) const {
     std::string name = FindDictionaryValue(operation.properties, "sym_name");
     if (name.size() >= 2 && name.front() == '"' && name.back() == '"')
@@ -138,15 +130,15 @@ private:
     int value = operation.operands[operand];
     std::set<int> seen;
     while (seen.insert(value).second) {
-      auto found = definitions.find(value);
-      if (found == definitions.end())
+      const GenericOperation *found = analysis.definingOperation(value);
+      if (!found)
         break;
-      const GenericOperation &definition = *found->second;
+      const GenericOperation &definition = *found;
       if (definition.name == "memref.alloc") {
-        auto type = valueTypes.find(value);
-        if (type == valueTypes.end())
+        const std::string *type = analysis.valueType(value);
+        if (!type)
           break;
-        std::optional<MemRefTypeModel> parsed = ParseMemRefType(type->second);
+        std::optional<MemRefTypeModel> parsed = ParseMemRefType(*type);
         if (parsed)
           return StaticElementCount(*parsed);
       }
@@ -555,8 +547,7 @@ private:
   }
 
   const GenericModule &module;
-  std::map<int, std::string> valueTypes;
-  std::map<int, const GenericOperation *> definitions;
+  GenericModuleAnalysisSnapshot analysis;
   std::string function;
 };
 

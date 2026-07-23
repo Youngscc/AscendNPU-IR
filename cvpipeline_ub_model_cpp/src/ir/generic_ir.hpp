@@ -11,6 +11,10 @@ namespace cvub {
 
 struct GenericOperation {
   int id = -1;
+  // Optional identity retained while a pass projects/clones an operation and
+  // later needs to relate surviving records to the source module.  This is
+  // analysis-only metadata; it is never serialized as an IR attribute.
+  int projectionSourceId = -1;
   int parentId = -1;
   int regionId = -1;
   int blockId = -1;
@@ -49,6 +53,20 @@ struct GenericModule {
   std::vector<GenericOperation> operations;
   std::vector<GenericRegion> regions;
   std::vector<GenericBlock> blocks;
+};
+
+// Optional observer used by GenericRewriter-backed passes to keep derived
+// analysis state synchronized without coupling the rewriter to a concrete
+// analysis implementation.
+class GenericMutationListener {
+public:
+  virtual ~GenericMutationListener() = default;
+  virtual void operationCreated(const GenericOperation &) {}
+  virtual void operationWillModify(const GenericOperation &) {}
+  virtual void operandReplaced(int, size_t, int, int) {}
+  virtual void operationMoved(int, int, int) {}
+  virtual void regionCreated(const GenericRegion &) {}
+  virtual void blockCreated(const GenericBlock &) {}
 };
 
 inline std::string HexEncode(const std::string &value) {

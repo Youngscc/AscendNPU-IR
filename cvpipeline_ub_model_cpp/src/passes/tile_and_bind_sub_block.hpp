@@ -2,7 +2,10 @@
 #define CVPIPELINE_UB_MODEL_CPP_TILE_AND_BIND_SUB_BLOCK_HPP
 
 #include "../analysis/hivm_dimension_analyzer.hpp"
+#include "../analysis/generic_pipeline_context.hpp"
+#include "../ir/generic_analysis.hpp"
 #include "../ir/operation_folder.hpp"
+#include "../support/debug_trace.hpp"
 #include "canonicalization_hivm_pipeline.hpp"
 #include "split_mix_kernel.hpp"
 
@@ -13,27 +16,58 @@ namespace cvub {
 // collecting MIX functions and before every TileAndBindSubBlock early exit.
 inline GenericModule RunTileAndBindSubBlockEarlyPatterns(
     GenericModule module) {
-  std::map<int, std::vector<int>> users;
-  for (const GenericOperation &operation : module.operations)
-    for (int operand : operation.operands)
-      users[operand].push_back(operation.id);
+  struct AllocationUse {
+    int operation = -1;
+    int user = -1;
+    bool multipleUsers = false;
+  };
+  std::unordered_map<int, AllocationUse> allocationUses;
+  std::vector<int> allocationValues;
+  allocationUses.reserve(module.operations.size() / 8 + 1);
+  for (const GenericOperation &operation : module.operations) {
+    if (operation.name == "memref.alloc" && operation.results.size() == 1 &&
+        operation.blockId >= 0) {
+      allocationUses.emplace(operation.results.front(),
+                             AllocationUse{operation.id, -1, false});
+      allocationValues.push_back(operation.results.front());
+    }
+  }
+  if (allocationUses.empty())
+    return module;
+
+  // CanonicalizeAllocToTensor only queries uses of memref.alloc results.
+  // Indexing every operand in the module created a much larger ordered map
+  // that was immediately discarded on the common no-match path.
+  for (const GenericOperation &operation : module.operations) {
+    for (int operand : operation.operands) {
+      auto allocation = allocationUses.find(operand);
+      if (allocation == allocationUses.end())
+        continue;
+      AllocationUse &use = allocation->second;
+      if (use.user < 0)
+        use.user = operation.id;
+      else if (use.user != operation.id)
+        use.multipleUsers = true;
+    }
+  }
 
   GenericRewriter rewriter(module);
-  for (const GenericOperation &allocationSnapshot : module.operations) {
-    if (allocationSnapshot.name != "memref.alloc" ||
-        allocationSnapshot.results.size() != 1 ||
-        allocationSnapshot.blockId < 0)
+  bool changed = false;
+  for (int allocationValue : allocationValues) {
+    const AllocationUse &use = allocationUses.at(allocationValue);
+    if (use.user < 0 || use.multipleUsers)
       continue;
-    const int allocationValue = allocationSnapshot.results.front();
-    auto uses = users.find(allocationValue);
-    if (uses == users.end() || uses->second.size() != 1)
-      continue;
-    GenericOperation &toTensor =
-        module.operations.at(static_cast<size_t>(uses->second.front()));
-    if (toTensor.name != "bufferization.to_tensor" ||
-        toTensor.operands.size() != 1 || toTensor.results.size() != 1)
+    const GenericOperation &allocationSnapshot =
+        module.operations.at(static_cast<size_t>(use.operation));
+    const GenericOperation &toTensorCandidate =
+        module.operations.at(static_cast<size_t>(use.user));
+    if (toTensorCandidate.name != "bufferization.to_tensor" ||
+        toTensorCandidate.operands.size() != 1 ||
+        toTensorCandidate.results.size() != 1)
       continue;
 
+    GenericOperation &toTensor =
+        rewriter.modifyOperation(toTensorCandidate.id);
     toTensor.name = "tensor.empty";
     toTensor.operands.clear();
     toTensor.operandTypes.clear();
@@ -44,8 +78,11 @@ inline GenericModule RunTileAndBindSubBlockEarlyPatterns(
     toTensor.dpsInits.clear();
     rewriter.removeFromBlock(allocationSnapshot.blockId,
                              allocationSnapshot.id);
+    changed = true;
   }
-  ApplyOperationSemanticsToAll(module.operations);
+  if (!changed)
+    return module;
+  rewriter.applyDirtyOperationSemantics();
   return CompactGenericModule(std::move(module));
 }
 
@@ -142,11 +179,39 @@ inline std::vector<int> GetTileAndBindGreedyRewriteOrder(
   return worklist;
 }
 
-inline bool HasBatchMatmulLoopInAICFunctions(const GenericModule &module) {
+inline std::vector<int> GetTileAndBindAffineGreedyRewriteOrder(
+    const GenericModule &module, const GenericOperation &function) {
+  std::vector<int> worklist;
+  std::function<void(int)> collectPostOrder = [&](int operationId) {
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(operationId));
+    for (int regionId : operation.regions)
+      for (int blockId :
+           module.regions.at(static_cast<size_t>(regionId)).blocks)
+        for (int child :
+             module.blocks.at(static_cast<size_t>(blockId)).operations)
+          collectPostOrder(child);
+    if (operation.name == "affine.apply" || operation.name == "affine.min" ||
+        operation.name == "affine.max")
+      worklist.push_back(operationId);
+  };
+  for (int regionId : function.regions)
+    for (int blockId :
+         module.regions.at(static_cast<size_t>(regionId)).blocks)
+      for (int operationId :
+           module.blocks.at(static_cast<size_t>(blockId)).operations)
+        collectPostOrder(operationId);
+  std::reverse(worklist.begin(), worklist.end());
+  return worklist;
+}
+
+inline bool HasBatchMatmulLoopInAICFunctions(
+    const GenericModule &module,
+    const GenericModuleAnalysisSnapshot &analysis) {
   for (const GenericOperation &function : module.operations) {
     if (!IsMixAICFunction(function))
       continue;
-    for (int operationId : GetTileAndBindDescendants(module, function)) {
+    for (int operationId : analysis.descendants(function)) {
       const GenericOperation &operation =
           module.operations.at(static_cast<size_t>(operationId));
       if (operation.name == "hivm.hir.mmadL1" &&
@@ -158,11 +223,12 @@ inline bool HasBatchMatmulLoopInAICFunctions(const GenericModule &module) {
 }
 
 inline bool HasImplicitTransposeWithLastAxisInAIVFunctions(
-    const GenericModule &module) {
+    const GenericModule &module,
+    const GenericModuleAnalysisSnapshot &analysis) {
   for (const GenericOperation &function : module.operations) {
     if (!IsMixAIVFunction(function))
       continue;
-    for (int operationId : GetTileAndBindDescendants(module, function)) {
+    for (int operationId : analysis.descendants(function)) {
       const GenericOperation &operation =
           module.operations.at(static_cast<size_t>(operationId));
       if (operation.name == "annotation.mark" &&
@@ -176,14 +242,12 @@ inline bool HasImplicitTransposeWithLastAxisInAIVFunctions(
 }
 
 inline const GenericOperation *TraceTileAndBindReinterpretCast(
-    int value,
-    const std::map<int, const GenericOperation *> &definitions) {
+    int value, const GenericModuleAnalysisSnapshot &analysis) {
   std::set<int> visited;
   while (visited.insert(value).second) {
-    auto definition = definitions.find(value);
-    if (definition == definitions.end())
+    const GenericOperation *operation = analysis.definingOperation(value);
+    if (!operation)
       return nullptr;
-    const GenericOperation *operation = definition->second;
     if (operation->name == "memref.reinterpret_cast")
       return operation;
     if ((operation->name != "memref.subview" &&
@@ -196,8 +260,9 @@ inline const GenericOperation *TraceTileAndBindReinterpretCast(
   return nullptr;
 }
 
-inline bool AreLoadAndStoreSameAddress(const GenericModule &module) {
-  const auto definitions = DefiningOperations(module);
+inline bool AreLoadAndStoreSameAddress(
+    const GenericModule &module,
+    const GenericModuleAnalysisSnapshot &analysis) {
   for (const GenericOperation &function : module.operations) {
     if (!IsMixAIVFunction(function) || function.regions.size() != 1)
       continue;
@@ -209,25 +274,26 @@ inline bool AreLoadAndStoreSameAddress(const GenericModule &module) {
         module.blocks.at(static_cast<size_t>(region.blocks.front()));
     const std::set<int> arguments(entry.arguments.begin(), entry.arguments.end());
     std::set<int> loadedArguments;
-    for (int operationId : GetTileAndBindDescendants(module, function)) {
+    const std::vector<int> &descendants = analysis.descendants(function);
+    for (int operationId : descendants) {
       const GenericOperation &operation =
           module.operations.at(static_cast<size_t>(operationId));
       if (operation.name != "hivm.hir.load" || operation.operands.empty())
         continue;
       const GenericOperation *reinterpret = TraceTileAndBindReinterpretCast(
-          operation.operands.front(), definitions);
+          operation.operands.front(), analysis);
       if (reinterpret && !reinterpret->operands.empty() &&
           arguments.count(reinterpret->operands.front()) != 0)
         loadedArguments.insert(reinterpret->operands.front());
     }
-    for (int operationId : GetTileAndBindDescendants(module, function)) {
+    for (int operationId : descendants) {
       const GenericOperation &operation =
           module.operations.at(static_cast<size_t>(operationId));
       if (operation.name != "hivm.hir.store" ||
           operation.operands.size() < 2)
         continue;
       const GenericOperation *reinterpret = TraceTileAndBindReinterpretCast(
-          operation.operands[1], definitions);
+          operation.operands[1], analysis);
       if (reinterpret && !reinterpret->operands.empty() &&
           loadedArguments.count(reinterpret->operands.front()) != 0)
         return true;
@@ -490,18 +556,19 @@ inline bool IsTileAndBindStoreCopyStartPoint(
 inline std::map<int, size_t> CollectTileAndBindBubbleDims(
     const GenericModule &module, const GenericOperation &function,
     const DimensionAnalyzer &analyzer) {
-  const std::map<int, const GenericOperation *> definitions =
-      DefiningOperations(module);
+  const GenericModuleAnalysisSnapshot analysis(
+      module, kGenericAnalysisDefinitions | kGenericAnalysisUsers |
+                  kGenericAnalysisFunctionDescendants);
   const std::map<int, std::string> valueTypes = ValueTypes(module);
   std::map<int, size_t> dimensions;
   std::function<void(int, size_t)> collect = [&](int value, size_t axis) {
     auto inserted = dimensions.emplace(value, axis);
     if (!inserted.second)
       return;
-    auto definition = definitions.find(value);
-    if (definition == definitions.end())
+    const GenericOperation *definition = analysis.definingOperation(value);
+    if (!definition)
       return;
-    const GenericOperation &operation = *definition->second;
+    const GenericOperation &operation = *definition;
 
     // LoopBubbleUpStrategy rewrites one scf.for result at a time. The marked
     // slice is moved to the corresponding yielded value and init, while the
@@ -575,7 +642,8 @@ inline std::map<int, size_t> CollectTileAndBindBubbleDims(
     }
   };
 
-  for (int operationId : GetTileAndBindDescendants(module, function)) {
+  const std::vector<int> &descendants = analysis.descendants(function);
+  for (int operationId : descendants) {
     const GenericOperation &operation =
         module.operations.at(static_cast<size_t>(operationId));
     if (IsTileAndBindStoreCopyStartPoint(module, operation, analyzer,
@@ -588,7 +656,7 @@ inline std::map<int, size_t> CollectTileAndBindBubbleDims(
 
   // Mirrors TileAndSliceLeaf<scf::ForOp>. A result is a leaf only when it has
   // no users before the temporary extract_slice/annotation pair is inserted.
-  for (int operationId : GetTileAndBindDescendants(module, function)) {
+  for (int operationId : descendants) {
     const GenericOperation &operation =
         module.operations.at(static_cast<size_t>(operationId));
     if (operation.name != "scf.for")
@@ -598,14 +666,7 @@ inline std::map<int, size_t> CollectTileAndBindBubbleDims(
          resultIndex < operation.resultTypes.size();
          ++resultIndex) {
       const int result = operation.results[resultIndex];
-      bool hasUser = false;
-      for (const GenericOperation &user : module.operations)
-        if (std::find(user.operands.begin(), user.operands.end(), result) !=
-            user.operands.end()) {
-          hasUser = true;
-          break;
-        }
-      if (hasUser)
+      if (!analysis.users(result).empty())
         continue;
       const auto type = ParseShapedTypeForDimensionAnalysis(
           operation.resultTypes[resultIndex]);
@@ -635,31 +696,42 @@ inline std::vector<int> TileAndBindValueUsers(const GenericModule &module,
 // destination-style init uses are cloned; non-init uses do not participate in
 // the rewrite's threshold or replacement set.
 inline void RunReplicateOutEmptyTensor(GenericModule &module,
-                                       int functionId) {
+                                       int functionId,
+                                       GenericPipelineContext &context) {
   ApplyOperationSemanticsToAll(module.operations);
   const GenericOperation function =
       module.operations.at(static_cast<size_t>(functionId));
   const std::vector<int> descendants =
       GetTileAndBindDescendants(module, function);
-  GenericRewriter rewriter(module);
+  PipelineAnalysisContext &analysis = context.analysis();
+  GenericRewriter rewriter(module, context.listener());
   for (int operationId : descendants) {
     const GenericOperation empty =
         module.operations.at(static_cast<size_t>(operationId));
-    if (empty.name != "tensor.empty" || empty.results.size() != 1 ||
+    if (analysis.operationKind(operationId) !=
+            GenericOperationKind::TensorEmpty ||
+        empty.results.size() != 1 ||
         empty.blockId < 0)
       continue;
     const int value = empty.results.front();
-    size_t totalUses = 0;
+    const size_t totalUses = analysis.useCount(value);
     std::vector<std::pair<int, size_t>> initUses;
-    for (const GenericOperation &user : module.operations) {
-      const std::vector<size_t> initIndices = DpsInitOperandIndices(
-          user.name, user.operands.size(), user.properties);
+    const std::vector<int> users = analysis.users(value);
+    int previousUser = -1;
+    for (int userId : users) {
+      if (userId == previousUser)
+        continue;
+      previousUser = userId;
+      const GenericOperation &user =
+          module.operations.at(static_cast<size_t>(userId));
+      const std::vector<size_t> &initIndices =
+          context.metadata().dpsInitOperandIndices(
+              user.name, user.operands.size(), user.properties);
       const std::set<size_t> initSet(initIndices.begin(), initIndices.end());
       for (size_t operandIndex = 0; operandIndex < user.operands.size();
            ++operandIndex) {
         if (user.operands[operandIndex] != value)
           continue;
-        ++totalUses;
         if (initSet.count(operandIndex) != 0)
           initUses.emplace_back(user.id, operandIndex);
       }
@@ -674,11 +746,10 @@ inline void RunReplicateOutEmptyTensor(GenericModule &module,
       rewriter.insertToBlock(empty.blockId, insertion++, clone);
       const int clonedValue =
           module.operations.at(static_cast<size_t>(clone)).results.front();
-      module.operations.at(static_cast<size_t>(userId))
-          .operands[operandIndex] = clonedValue;
+      rewriter.replaceOperand(userId, operandIndex, clonedValue);
     }
   }
-  ApplyOperationSemanticsToAll(module.operations);
+  rewriter.applyDirtyOperationSemantics();
 }
 
 inline void MoveTiledEmptyToDpsInitUser(GenericModule &module,
@@ -891,12 +962,16 @@ inline void SetTileAndBindMixedSlice(GenericOperation &operation,
 }
 
 inline std::set<size_t> GetTileAndBindExtractOrInsertDims(
-    const GenericModule &module, const GenericOperation &operation) {
+    const GenericModule &module, const GenericOperation &operation,
+    const std::map<int, std::string> *indexedValueTypes = nullptr) {
   const std::optional<TileAndBindMixedSlice> slice =
       ParseTileAndBindMixedSlice(operation);
   if (!slice || slice->prefixOperands.empty())
     return {};
-  const std::map<int, std::string> valueTypes = ValueTypes(module);
+  const std::map<int, std::string> ownedValueTypes =
+      indexedValueTypes ? std::map<int, std::string>{} : ValueTypes(module);
+  const std::map<int, std::string> &valueTypes =
+      indexedValueTypes ? *indexedValueTypes : ownedValueTypes;
   auto sourceType = valueTypes.find(slice->prefixOperands.front());
   const std::optional<ShapedTypeModel> source =
       sourceType == valueTypes.end()
@@ -917,11 +992,19 @@ inline std::set<size_t> GetTileAndBindExtractOrInsertDims(
 // Projection of TileAndBindSubBlock/Helper.cpp::createdByTiling for the
 // normalized 1:2 loop used by TileAndBindSubBlock.
 inline bool CreatedByTileAndBindTiling(const GenericModule &module,
-                                       const GenericOperation &sliceOperation) {
+                                       const GenericOperation &sliceOperation,
+                                       const std::map<int, std::string>
+                                           *indexedValueTypes = nullptr,
+                                       const std::map<int,
+                                           const GenericOperation *>
+                                           *indexedDefinitions = nullptr,
+                                       const std::vector<int>
+                                           *indexedDefinitionIds = nullptr) {
   const std::optional<TileAndBindMixedSlice> slice =
       ParseTileAndBindMixedSlice(sliceOperation);
   const std::set<size_t> dimensions =
-      GetTileAndBindExtractOrInsertDims(module, sliceOperation);
+      GetTileAndBindExtractOrInsertDims(module, sliceOperation,
+                                        indexedValueTypes);
   if (!slice || slice->prefixOperands.empty() || dimensions.size() != 1)
     return false;
   const size_t tilingDimension = *dimensions.begin();
@@ -933,7 +1016,10 @@ inline bool CreatedByTileAndBindTiling(const GenericModule &module,
                   }))
     return false;
 
-  const std::map<int, std::string> valueTypes = ValueTypes(module);
+  const std::map<int, std::string> ownedValueTypes =
+      indexedValueTypes ? std::map<int, std::string>{} : ValueTypes(module);
+  const std::map<int, std::string> &valueTypes =
+      indexedValueTypes ? *indexedValueTypes : ownedValueTypes;
   auto sourceType = valueTypes.find(slice->prefixOperands.front());
   const std::optional<ShapedTypeModel> source =
       sourceType == valueTypes.end()
@@ -965,17 +1051,34 @@ inline bool CreatedByTileAndBindTiling(const GenericModule &module,
       tilingLoop->regions.empty())
     return false;
 
-  const std::map<int, const GenericOperation *> definitions =
-      DefiningOperations(module);
-  const auto constant = [&](int value) -> std::optional<int64_t> {
+  const std::map<int, const GenericOperation *> ownedDefinitions =
+      (indexedDefinitions || indexedDefinitionIds)
+          ? std::map<int, const GenericOperation *>{}
+          : DefiningOperations(module);
+  const std::map<int, const GenericOperation *> &definitions =
+      indexedDefinitions ? *indexedDefinitions : ownedDefinitions;
+  const auto definitionFor = [&](int value) -> const GenericOperation * {
+    if (indexedDefinitionIds) {
+      if (value < 0 ||
+          static_cast<size_t>(value) >= indexedDefinitionIds->size())
+        return nullptr;
+      const int operation =
+          indexedDefinitionIds->at(static_cast<size_t>(value));
+      return operation < 0
+                 ? nullptr
+                 : &module.operations.at(static_cast<size_t>(operation));
+    }
     auto definition = definitions.find(value);
-    if (definition == definitions.end() ||
-        definition->second->name != "arith.constant")
+    return definition == definitions.end() ? nullptr : definition->second;
+  };
+  const auto constant = [&](int value) -> std::optional<int64_t> {
+    const GenericOperation *definition = definitionFor(value);
+    if (!definition || definition->name != "arith.constant")
       return std::nullopt;
     std::string text =
-        FindDictionaryValue(definition->second->properties, "value");
+        FindDictionaryValue(definition->properties, "value");
     if (text.empty())
-      text = FindDictionaryValue(definition->second->attributes, "value");
+      text = FindDictionaryValue(definition->attributes, "value");
     const size_t suffix = text.find(" : ");
     if (suffix != std::string::npos)
       text = trim(text.substr(0, suffix));
@@ -1346,22 +1449,75 @@ inline bool RunBufferizationBubbleUpStrategy(
 // HoistAffinePattern from BubbleUpExtractSlice/HoistAffine.cpp, applied to a
 // single operation. The combined greedy driver calls this immediately for
 // newly inserted affine operations because its worklist is LIFO.
-inline bool ApplyHoistAffinePattern(GenericModule &module, int operationId) {
-  const GenericOperation snapshot =
+inline bool ApplyHoistAffinePattern(
+    GenericModule &module, int operationId,
+    const std::map<int, const GenericOperation *> *indexedDefinitions =
+        nullptr,
+    const std::map<int, int> *indexedBlockArguments = nullptr,
+    const std::vector<int> *indexedDefinitionIds = nullptr,
+    const std::vector<int> *indexedBlockArgumentIds = nullptr,
+    const std::vector<std::vector<uint8_t>> *indexedBlockDominance =
+        nullptr) {
+  const GenericOperation &currentOperation =
       module.operations.at(static_cast<size_t>(operationId));
-  if ((snapshot.name != "affine.apply" && snapshot.name != "affine.min" &&
-       snapshot.name != "affine.max") ||
-      snapshot.blockId < 0)
+  if ((currentOperation.name != "affine.apply" &&
+       currentOperation.name != "affine.min" &&
+       currentOperation.name != "affine.max") ||
+      currentOperation.blockId < 0)
     return false;
+  // Moving an operation never reallocates the operation table. Keep a stable
+  // reference instead of copying strings and operand/result vectors for every
+  // affine candidate in every fixed-point iteration.
+  const GenericOperation &snapshot = currentOperation;
 
-  const std::map<int, const GenericOperation *> definitions =
-      DefiningOperations(module);
-  std::map<int, int> blockArguments;
-  for (const GenericBlock &block : module.blocks)
-    for (int argument : block.arguments)
-      blockArguments[argument] = block.id;
+  std::optional<std::map<int, const GenericOperation *>> ownedDefinitions;
+  if (!indexedDefinitions && !indexedDefinitionIds)
+    ownedDefinitions = DefiningOperations(module);
+  const auto definitionFor = [&](int value) -> const GenericOperation * {
+    if (indexedDefinitionIds) {
+      if (value < 0 ||
+          static_cast<size_t>(value) >= indexedDefinitionIds->size())
+        return nullptr;
+      const int operation =
+          indexedDefinitionIds->at(static_cast<size_t>(value));
+      return operation < 0
+                 ? nullptr
+                 : &module.operations.at(static_cast<size_t>(operation));
+    }
+    const std::map<int, const GenericOperation *> &definitions =
+        indexedDefinitions ? *indexedDefinitions : *ownedDefinitions;
+    auto definition = definitions.find(value);
+    return definition == definitions.end() ? nullptr : definition->second;
+  };
+  std::optional<std::map<int, int>> ownedBlockArguments;
+  if (!indexedBlockArguments && !indexedBlockArgumentIds) {
+    ownedBlockArguments.emplace();
+    for (const GenericBlock &block : module.blocks)
+      for (int argument : block.arguments)
+        (*ownedBlockArguments)[argument] = block.id;
+  }
+  const auto blockFor = [&](int value) -> int {
+    if (indexedBlockArgumentIds)
+      return value < 0 ||
+                     static_cast<size_t>(value) >=
+                         indexedBlockArgumentIds->size()
+                 ? -1
+                 : indexedBlockArgumentIds->at(static_cast<size_t>(value));
+    const std::map<int, int> &blockArguments =
+        indexedBlockArguments ? *indexedBlockArguments
+                              : *ownedBlockArguments;
+    auto block = blockArguments.find(value);
+    return block == blockArguments.end() ? -1 : block->second;
+  };
 
   auto blockDominates = [&](int candidateBlock, int operationBlock) {
+    if (indexedBlockDominance && candidateBlock >= 0 && operationBlock >= 0 &&
+        static_cast<size_t>(candidateBlock) < indexedBlockDominance->size() &&
+        static_cast<size_t>(operationBlock) <
+            indexedBlockDominance->at(static_cast<size_t>(candidateBlock))
+                .size())
+      return indexedBlockDominance->at(static_cast<size_t>(candidateBlock))
+                 [static_cast<size_t>(operationBlock)] != 0;
     if (candidateBlock == operationBlock)
       return true;
     int cursorBlock = operationBlock;
@@ -1382,26 +1538,45 @@ inline bool ApplyHoistAffinePattern(GenericModule &module, int operationId) {
     }
     return false;
   };
+  // These are live definitions from the current block lists. The rewriter
+  // updates ordinals after every move, so same-block dominance can use the
+  // ordinal directly instead of searching the complete block twice for every
+  // affine operand.
+  const auto operationDominates = [&](const GenericOperation &candidate,
+                                      const GenericOperation &operation) {
+    const GenericOperation *cursor = &operation;
+    while (cursor) {
+      if (candidate.blockId == cursor->blockId &&
+          candidate.ordinal < cursor->ordinal)
+        return true;
+      if (cursor->regionId < 0)
+        break;
+      const int parent = module.regions.at(
+          static_cast<size_t>(cursor->regionId)).parentOperation;
+      if (parent < 0)
+        break;
+      cursor = &module.operations.at(static_cast<size_t>(parent));
+    }
+    return false;
+  };
 
   const GenericOperation *lastDefiningOperation = nullptr;
   int lastDefiningValue = -1;
   int lastBlockArgument = -1;
   for (int operand : snapshot.operands) {
-    auto blockArgument = blockArguments.find(operand);
-    if (blockArgument != blockArguments.end()) {
+    const int blockArgument = blockFor(operand);
+    if (blockArgument >= 0) {
       if (lastBlockArgument < 0 ||
-          blockDominates(blockArguments.at(lastBlockArgument),
-                         blockArgument->second))
+          blockDominates(blockFor(lastBlockArgument), blockArgument))
         lastBlockArgument = operand;
       continue;
     }
-    auto definition = definitions.find(operand);
-    if (definition == definitions.end())
+    const GenericOperation *definition = definitionFor(operand);
+    if (!definition)
       continue;
     if (!lastDefiningOperation ||
-        GenericOperationDominates(module, *lastDefiningOperation,
-                                  *definition->second)) {
-      lastDefiningOperation = definition->second;
+        operationDominates(*lastDefiningOperation, *definition)) {
+      lastDefiningOperation = definition;
       lastDefiningValue = operand;
     }
   }
@@ -1413,10 +1588,10 @@ inline bool ApplyHoistAffinePattern(GenericModule &module, int operationId) {
     insertionPosition =
         static_cast<size_t>(lastDefiningOperation->ordinal + 1);
   } else if (!lastDefiningOperation && lastBlockArgument >= 0) {
-    insertionBlock = blockArguments.at(lastBlockArgument);
+    insertionBlock = blockFor(lastBlockArgument);
     lastDefiningValue = lastBlockArgument;
   } else if (lastDefiningOperation && lastBlockArgument >= 0) {
-    const int argumentBlock = blockArguments.at(lastBlockArgument);
+    const int argumentBlock = blockFor(lastBlockArgument);
     if (blockDominates(argumentBlock, lastDefiningOperation->blockId)) {
       insertionBlock = lastDefiningOperation->blockId;
       insertionPosition =
@@ -1429,21 +1604,24 @@ inline bool ApplyHoistAffinePattern(GenericModule &module, int operationId) {
     return false;
   }
 
-  GenericRewriter rewriter(module);
+  // Hoisting only moves existing operations. Avoid rescanning every value in
+  // the module merely to initialize the id allocator used by createOperation.
+  GenericRewriter rewriter(
+      module, nullptr,
+      GenericRewriter::ValueInitialization::SkipExistingValues);
   if (insertionBlock != snapshot.blockId) {
     rewriter.removeFromBlock(snapshot.blockId, operationId);
     rewriter.insertToBlock(insertionBlock, insertionPosition, operationId);
     return true;
   }
 
-  const std::vector<int> operations =
+  const std::vector<int> &operations =
       module.blocks.at(static_cast<size_t>(snapshot.blockId)).operations;
-  const auto current =
-      std::find(operations.begin(), operations.end(), operationId);
-  if (current == operations.end())
+  if (snapshot.ordinal < 0 ||
+      static_cast<size_t>(snapshot.ordinal) >= operations.size() ||
+      operations[static_cast<size_t>(snapshot.ordinal)] != operationId)
     return false;
-  const size_t currentPosition =
-      static_cast<size_t>(std::distance(operations.begin(), current));
+  const size_t currentPosition = static_cast<size_t>(snapshot.ordinal);
   while (insertionPosition < operations.size()) {
     const GenericOperation &candidate = module.operations.at(
         static_cast<size_t>(operations[insertionPosition]));
@@ -1457,7 +1635,8 @@ inline bool ApplyHoistAffinePattern(GenericModule &module, int operationId) {
 
   const bool allAffineBetween = std::all_of(
       operations.begin() + static_cast<std::ptrdiff_t>(insertionPosition),
-      current, [&](int betweenId) {
+      operations.begin() + static_cast<std::ptrdiff_t>(currentPosition),
+      [&](int betweenId) {
         const std::string &name =
             module.operations.at(static_cast<size_t>(betweenId)).name;
         return name == "affine.apply" || name == "affine.min" ||
@@ -1472,7 +1651,9 @@ inline bool ApplyHoistAffinePattern(GenericModule &module, int operationId) {
 }
 
 inline bool ApplyCSEAffineApplyPattern(GenericModule &module,
-                                       int operationId);
+                                       int operationId,
+                                       GenericMutableOperandUseIndex *uses =
+                                           nullptr);
 
 // Mirrors TileAndBindSubBlock.cpp::tileAndSliceOp's dynamic-shape store
 // precondition. The real pass rejects the cloned 1:2 candidate before adding
@@ -1548,13 +1729,24 @@ inline bool TileAndSliceOpHasUnsupportedStore(
   return false;
 }
 
-inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
-  RunReplicateOutEmptyTensor(module, functionId);
+inline bool AttemptBindSubBlock(GenericModule &module, int functionId,
+                                DebugTrace *trace = nullptr) {
+  GenericPipelineContext context(module, 0);
+  MeasureStage(trace, "TileAndBind.Attempt.ReplicateOutEmpty", [&] {
+    RunReplicateOutEmptyTensor(module, functionId, context);
+  });
+  PipelineMetadataCache &metadata = context.metadata();
   DimensionAnalyzer tiledAnalyzer(module);
-  if (!tiledAnalyzer.initialize())
+  const bool analyzed =
+      MeasureStage(trace, "TileAndBind.Attempt.Analyze", [&] {
+        if (!tiledAnalyzer.initialize())
+          return false;
+        tiledAnalyzer.computeTilingDim(
+            module.operations.at(static_cast<size_t>(functionId)));
+        return true;
+      });
+  if (!analyzed)
     return false;
-  tiledAnalyzer.computeTilingDim(
-      module.operations.at(static_cast<size_t>(functionId)));
   const GenericOperation function =
       module.operations.at(static_cast<size_t>(functionId));
   if (TileAndSliceOpHasUnsupportedStore(module, function))
@@ -1647,13 +1839,20 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
   std::map<int, int> storeCopyStartValues;
   const std::map<int, const GenericOperation *> tileAndSliceDefinitions =
       DefiningOperations(module);
+  int maximumUsedValue = -1;
+  for (const GenericOperation &operation : module.operations)
+    for (int operand : operation.operands)
+      maximumUsedValue = std::max(maximumUsedValue, operand);
+  std::vector<bool> valuesWithUsers(
+      maximumUsedValue < 0 ? 0 : static_cast<size_t>(maximumUsedValue) + 1,
+      false);
+  for (const GenericOperation &operation : module.operations)
+    for (int operand : operation.operands)
+      if (operand >= 0)
+        valuesWithUsers[static_cast<size_t>(operand)] = true;
   auto valueHasUser = [&](int value) {
-    return std::any_of(module.operations.begin(), module.operations.end(),
-                       [&](const GenericOperation &user) {
-                         return std::find(user.operands.begin(),
-                                          user.operands.end(), value) !=
-                                user.operands.end();
-                       });
+    return value >= 0 && static_cast<size_t>(value) < valuesWithUsers.size() &&
+           valuesWithUsers[static_cast<size_t>(value)];
   };
   for (int operationId :
        GetTileAndBindGreedyRewriteOrder(module, function)) {
@@ -1668,7 +1867,7 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
       std::optional<ShapedTypeModel> source =
           sourceType == valueTypes.end()
               ? std::nullopt
-              : ParseShapedTypeForDimensionAnalysis(sourceType->second);
+              : metadata.shapedType(sourceType->second);
       if (source && axis >= 0 &&
           static_cast<size_t>(axis) < source->shape.size() &&
           !source->shape[static_cast<size_t>(axis)] &&
@@ -1694,13 +1893,11 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
           const std::optional<ShapedTypeModel> sourceParentShape =
               sourceParentType == valueTypes.end()
                   ? std::nullopt
-                  : ParseShapedTypeForDimensionAnalysis(
-                        sourceParentType->second);
+                  : metadata.shapedType(sourceParentType->second);
           const std::optional<ShapedTypeModel> destinationParentShape =
               destinationParentType == valueTypes.end()
                   ? std::nullopt
-                  : ParseShapedTypeForDimensionAnalysis(
-                        destinationParentType->second);
+                  : metadata.shapedType(destinationParentType->second);
           if (sourceParentShape && destinationParentShape &&
               sourceParentShape->shape == destinationParentShape->shape &&
               static_cast<size_t>(axis) < sourceParentShape->shape.size() &&
@@ -1732,8 +1929,7 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
          ++resultIndex) {
       const int value = operation.results[resultIndex];
       const int64_t axis = tiledAnalyzer.getTilingDim(value);
-      const auto type = ParseShapedTypeForDimensionAnalysis(
-          operation.resultTypes[resultIndex]);
+      const auto type = metadata.shapedType(operation.resultTypes[resultIndex]);
       if (axis < 0 || valueHasUser(value) || !type || !type->tensor ||
           static_cast<size_t>(axis) >= type->shape.size() ||
           !type->shape[static_cast<size_t>(axis)] ||
@@ -1853,7 +2049,7 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
       if (bubbleDim == bubbleDims.end())
         continue;
       const int64_t axis = static_cast<int64_t>(bubbleDim->second);
-      auto shaped = ParseShapedTypeForDimensionAnalysis(block.argumentTypes[index]);
+      auto shaped = metadata.shapedType(block.argumentTypes[index]);
       if (axis < 0 || !shaped || !shaped->tensor ||
           static_cast<size_t>(axis) >= shaped->shape.size() ||
           !shaped->shape[static_cast<size_t>(axis)] ||
@@ -1912,6 +2108,37 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
                      return lhs.initialOrder < rhs.initialOrder;
                    });
 
+  // Bubble-up only appends affine.apply operations. Keep the definition
+  // index in sync with those appends instead of rebuilding it for every
+  // recursive request.
+  int maximumDefinitionValue = -1;
+  for (const auto &[value, unused] : initialDefinitions) {
+    (void)unused;
+    maximumDefinitionValue = std::max(maximumDefinitionValue, value);
+  }
+  for (const GenericBlock &block : module.blocks)
+    for (int argument : block.arguments)
+      maximumDefinitionValue = std::max(maximumDefinitionValue, argument);
+  std::vector<int> bubbleDefinitionIds(
+      maximumDefinitionValue < 0
+          ? 0
+          : static_cast<size_t>(maximumDefinitionValue) + 1,
+      -1);
+  for (const auto &[value, operation] : initialDefinitions)
+    bubbleDefinitionIds[static_cast<size_t>(value)] = operation->id;
+  std::vector<int> bubbleBlockArgumentIds(bubbleDefinitionIds.size(), -1);
+  for (const GenericBlock &block : module.blocks)
+    for (int argument : block.arguments)
+      bubbleBlockArgumentIds[static_cast<size_t>(argument)] = block.id;
+  const auto bubbleDefinition = [&](int value) -> const GenericOperation * {
+    if (value < 0 || static_cast<size_t>(value) >= bubbleDefinitionIds.size())
+      return nullptr;
+    const int operationId = bubbleDefinitionIds[static_cast<size_t>(value)];
+    return operationId < 0
+               ? nullptr
+               : &module.operations.at(static_cast<size_t>(operationId));
+  };
+
   bool bubbleUpFailed = false;
   std::function<void(int, int, std::set<int>)> runBubbleUpRequest =
       [&](int value, int offset, std::set<int> path) {
@@ -1919,11 +2146,10 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
           return;
         if (!path.insert(value).second || bubbleDims.count(value) == 0)
           return;
-        const auto definitions = DefiningOperations(module);
-        auto definition = definitions.find(value);
-        if (definition == definitions.end())
+        const GenericOperation *definition = bubbleDefinition(value);
+        if (!definition)
           return;
-        const GenericOperation operationSnapshot = *definition->second;
+        const GenericOperation operationSnapshot = *definition;
         if (operationSnapshot.name == "tensor.empty" ||
             operationSnapshot.name == "bufferization.to_tensor")
           return;
@@ -1939,11 +2165,15 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
                             return size.constant.has_value();
                           });
           const std::set<size_t> parentDimensions =
-              GetTileAndBindExtractOrInsertDims(module, operationSnapshot);
+              GetTileAndBindExtractOrInsertDims(module, operationSnapshot,
+                                                &valueTypes);
           const size_t childDimension = bubbleDims.at(value);
           if (parentIsStatic &&
               parentDimensions.count(childDimension) != 0 &&
-              !CreatedByTileAndBindTiling(module, operationSnapshot)) {
+              !CreatedByTileAndBindTiling(module, operationSnapshot,
+                                          &valueTypes,
+                                          nullptr,
+                                          &bubbleDefinitionIds)) {
             bubbleUpFailed = true;
             return;
           }
@@ -1995,11 +2225,10 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
             operationSnapshot.name == "hivm.hir.store" ||
             operationSnapshot.name == "hivm.hir.copy";
         std::vector<std::pair<int, int>> insertedSlices;
-        const auto offsetDefinition = definitions.find(offset);
+        const GenericOperation *offsetDefinition = bubbleDefinition(offset);
         const std::optional<GenericOperation> sourceApply =
-            offsetDefinition != definitions.end() &&
-                    offsetDefinition->second->name == "affine.apply"
-                ? std::optional<GenericOperation>(*offsetDefinition->second)
+            offsetDefinition && offsetDefinition->name == "affine.apply"
+                ? std::optional<GenericOperation>(*offsetDefinition)
                 : std::nullopt;
         for (int operand : operationSnapshot.operands) {
           auto operandDim = bubbleDims.find(operand);
@@ -2008,7 +2237,7 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
               operandType == valueTypes.end())
             continue;
           const auto shaped =
-              ParseShapedTypeForDimensionAnalysis(operandType->second);
+              metadata.shapedType(operandType->second);
           if (!shaped || !shaped->tensor)
             continue;
           int composedOffset = offset;
@@ -2028,6 +2257,12 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
             composedOffset =
                 module.operations.at(static_cast<size_t>(composedApply))
                     .results.front();
+            if (static_cast<size_t>(composedOffset) >=
+                bubbleDefinitionIds.size())
+              bubbleDefinitionIds.resize(
+                  static_cast<size_t>(composedOffset) + 1, -1);
+            bubbleDefinitionIds[static_cast<size_t>(composedOffset)] =
+                composedApply;
           }
           bubbleOffsets.emplace(operand, composedOffset);
           insertedSlices.emplace_back(operand, composedApply);
@@ -2052,9 +2287,14 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
         for (auto inserted = insertedSlices.rbegin();
              inserted != insertedSlices.rend(); ++inserted)
           if (inserted->second >= 0) {
-            ApplyHoistAffinePattern(module, inserted->second);
-            ApplyCSEAffineApplyPattern(module, inserted->second);
+            ApplyHoistAffinePattern(
+                module, inserted->second, nullptr, nullptr,
+                &bubbleDefinitionIds, &bubbleBlockArgumentIds);
           }
+        // CSE is intentionally deferred to the pass-level greedy sweep after
+        // every recursive request has materialized its users. Running the
+        // whole-block CSE after each inserted affine.apply repeatedly scans
+        // the growing clone while producing the same final representative.
       };
   for (const BubbleUpRequest &request : initialRequests)
     runBubbleUpRequest(request.value, request.offset, {});
@@ -2072,6 +2312,24 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
   std::set<int> extractInsertExtractSources;
   const std::map<int, const GenericOperation *> bubbleDefinitions =
       DefiningOperations(module);
+  // The extract/insert eligibility test asks only whether a source has one
+  // user.  Build that immutable snapshot once; the old helper rescanned every
+  // operation for every insert_slice candidate.
+  size_t bubbleValueCount = 0;
+  for (const GenericOperation &operation : module.operations)
+    for (int operand : operation.operands)
+      if (operand >= 0)
+        bubbleValueCount =
+            std::max(bubbleValueCount, static_cast<size_t>(operand) + 1);
+  std::vector<size_t> bubbleUserCounts(bubbleValueCount, 0);
+  std::vector<int> bubbleUserLastSeen(bubbleValueCount, -1);
+  for (const GenericOperation &operation : module.operations)
+    for (int operand : operation.operands)
+      if (operand >= 0 &&
+          bubbleUserLastSeen[static_cast<size_t>(operand)] != operation.id) {
+        bubbleUserLastSeen[static_cast<size_t>(operand)] = operation.id;
+        ++bubbleUserCounts[static_cast<size_t>(operand)];
+      }
   for (int operationId : bubbleRewriteOrder) {
     const GenericOperation &insertSlice =
         module.operations.at(static_cast<size_t>(operationId));
@@ -2089,9 +2347,11 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
         sourceDefinition->second->name != "tensor.extract_slice" ||
         sourceDefinition->second->operands.empty() ||
         sourceDefinition->second->results.size() != 1 ||
-        TileAndBindValueUsers(module,
-                              sourceDefinition->second->results.front())
-                .size() != 1)
+        sourceDefinition->second->results.front() < 0 ||
+        static_cast<size_t>(sourceDefinition->second->results.front()) >=
+            bubbleUserCounts.size() ||
+        bubbleUserCounts[static_cast<size_t>(
+            sourceDefinition->second->results.front())] != 1)
       continue;
 
     const GenericOperation &sourceExtract = *sourceDefinition->second;
@@ -2127,7 +2387,7 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
       continue;
 
     const std::optional<ShapedTypeModel> resultType =
-        ParseShapedTypeForDimensionAnalysis(insertSlice.resultTypes.front());
+        metadata.shapedType(insertSlice.resultTypes.front());
     if (!resultType || bubbleDim->second >= resultType->shape.size() ||
         !resultType->shape[bubbleDim->second] ||
         *resultType->shape[bubbleDim->second] < 2)
@@ -2142,11 +2402,10 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
   }
 
   auto isBubbleTerminal = [&](int value) {
-    const auto definitions = DefiningOperations(module);
-    auto definition = definitions.find(value);
-    if (definition == definitions.end())
+    const GenericOperation *definition = bubbleDefinition(value);
+    if (!definition)
       return false;
-    const GenericOperation &operation = *definition->second;
+    const GenericOperation &operation = *definition;
     return operation.name == "tensor.empty" ||
            (operation.name == "scf.for" &&
             HasSplitMixDictionaryEntry(operation.attributes,
@@ -2166,7 +2425,7 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
         sourceType == valueTypes.end() || !isBubbleTerminal(source))
       return false;
     const std::optional<ShapedTypeModel> shaped =
-        ParseShapedTypeForDimensionAnalysis(sourceType->second);
+        metadata.shapedType(sourceType->second);
     const size_t axis = dimension->second;
     if (!shaped || !shaped->tensor || axis >= shaped->shape.size() ||
         !shaped->shape[axis] || *shaped->shape[axis] < 2)
@@ -2181,17 +2440,15 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
     int insertionBlock = consumerSnapshot.blockId;
     size_t insertionPosition =
         static_cast<size_t>(consumerSnapshot.ordinal);
-    const auto definitions = DefiningOperations(module);
-    auto sourceDefinition = definitions.find(source);
-    if (sourceDefinition != definitions.end() &&
-        sourceDefinition->second->name == "scf.for" &&
-        HasSplitMixDictionaryEntry(sourceDefinition->second->attributes,
+    const GenericOperation *sourceDefinition = bubbleDefinition(source);
+    if (sourceDefinition && sourceDefinition->name == "scf.for" &&
+        HasSplitMixDictionaryEntry(sourceDefinition->attributes,
                                    "ExtractedLoadOrStore")) {
-      insertionParent = sourceDefinition->second->parentId;
-      insertionRegion = sourceDefinition->second->regionId;
-      insertionBlock = sourceDefinition->second->blockId;
+      insertionParent = sourceDefinition->parentId;
+      insertionRegion = sourceDefinition->regionId;
+      insertionBlock = sourceDefinition->blockId;
       insertionPosition =
-          static_cast<size_t>(sourceDefinition->second->ordinal + 1);
+          static_cast<size_t>(sourceDefinition->ordinal + 1);
     }
     const int slice = rewriter.createOperation(
         insertionParent, insertionRegion, insertionBlock,
@@ -2255,7 +2512,7 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
       if (bubbleDim == bubbleDims.end())
         continue;
       const int64_t axis = static_cast<int64_t>(bubbleDim->second);
-      auto shaped = ParseShapedTypeForDimensionAnalysis(operation.resultTypes[index]);
+      auto shaped = metadata.shapedType(operation.resultTypes[index]);
       if (axis < 0 || !shaped || !shaped->tensor ||
           static_cast<size_t>(axis) >= shaped->shape.size() ||
           !shaped->shape[static_cast<size_t>(axis)] ||
@@ -2283,8 +2540,8 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
         SetTileAndBindProperty(operation, "static_sizes",
                                TileAndBindStaticShape(shape));
       } else if (operation.name == "tensor.expand_shape") {
-        const auto resultShape = ParseShapedTypeForDimensionAnalysis(
-            operation.resultTypes[index]);
+        const auto resultShape =
+            metadata.shapedType(operation.resultTypes[index]);
         if (resultShape)
           SetTileAndBindProperty(operation, "static_output_shape",
                                  TileAndBindStaticShape(resultShape->shape));
@@ -2335,8 +2592,7 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
         module.operations.at(static_cast<size_t>(operationId));
     const int sourceValue = toTensor.results.front();
     const size_t axis = bubbleDims.at(sourceValue);
-    const auto full = ParseShapedTypeForDimensionAnalysis(
-        toTensor.resultTypes.front());
+    const auto full = metadata.shapedType(toTensor.resultTypes.front());
     if (!full || axis >= full->shape.size() || !full->shape[axis])
       continue;
     const int64_t tileSize = (*full->shape[axis] + 1) / 2;
@@ -2408,8 +2664,7 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
         static_cast<size_t>(
             tiledAnalyzer.getTilingDim(store.operands.front()));
     const std::string destinationType = valueTypes.at(store.operands[1]);
-    const auto destination =
-        ParseShapedTypeForDimensionAnalysis(destinationType);
+    const auto destination = metadata.shapedType(destinationType);
     if (!destination || axis >= destination->shape.size())
       continue;
     const bool dynamicDestination = std::any_of(
@@ -2437,12 +2692,11 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId) {
       const std::optional<ShapedTypeModel> sourceParent =
           sourceParentType == valueTypes.end()
               ? std::nullopt
-              : ParseShapedTypeForDimensionAnalysis(sourceParentType->second);
+              : metadata.shapedType(sourceParentType->second);
       const std::optional<ShapedTypeModel> destinationParent =
           destinationParentType == valueTypes.end()
               ? std::nullopt
-              : ParseShapedTypeForDimensionAnalysis(
-                    destinationParentType->second);
+              : metadata.shapedType(destinationParentType->second);
       if (!sourceParent || !destinationParent ||
           sourceParent->shape.size() != destinationParent->shape.size() ||
           axis >= sourceParent->shape.size() || !sourceParent->shape[axis] ||
@@ -2664,7 +2918,7 @@ inline void RunTileAndBindOperationFolder(GenericModule &module,
   }
   size_t insertionPosition = 0;
   for (int operationId : constants) {
-    const GenericOperation operation =
+    const GenericOperation &operation =
         module.operations.at(static_cast<size_t>(operationId));
     if (operation.results.size() != 1 || operation.resultTypes.size() != 1)
       continue;
@@ -2682,25 +2936,101 @@ inline void RunTileAndBindOperationFolder(GenericModule &module,
   }
 }
 
-inline bool RunTileAndBindHoistAffineIteration(GenericModule &module,
-                                               int functionId) {
+struct TileAndBindStableValueIndexes {
+  std::vector<int> definitions;
+  std::vector<int> blockArguments;
+  // Region/block ancestry does not change while affine operations move
+  // between existing blocks. Cache the exact dominance predicate used by the
+  // hoist pattern instead of walking parent regions for every operand in each
+  // greedy iteration.
+  std::vector<std::vector<uint8_t>> blockDominance;
+};
+
+inline TileAndBindStableValueIndexes
+BuildTileAndBindStableValueIndexes(const GenericModule &module) {
+  int maximumValue = -1;
+  for (const GenericBlock &block : module.blocks)
+    for (int argument : block.arguments)
+      maximumValue = std::max(maximumValue, argument);
+  for (const GenericOperation &operation : module.operations)
+    for (int result : operation.results)
+      maximumValue = std::max(maximumValue, result);
+  const size_t valueCount = maximumValue < 0
+                                ? 0
+                                : static_cast<size_t>(maximumValue) + 1;
+  TileAndBindStableValueIndexes result;
+  result.definitions.assign(valueCount, -1);
+  result.blockArguments.assign(valueCount, -1);
+  result.blockDominance.assign(
+      module.blocks.size(),
+      std::vector<uint8_t>(module.blocks.size(), uint8_t{0}));
+  for (const GenericOperation &operation : module.operations)
+    for (int value : operation.results)
+      result.definitions[static_cast<size_t>(value)] = operation.id;
+  for (const GenericBlock &block : module.blocks)
+    for (int value : block.arguments)
+      result.blockArguments[static_cast<size_t>(value)] = block.id;
+  for (const GenericBlock &operationBlock : module.blocks) {
+    int cursorBlock = operationBlock.id;
+    result.blockDominance[static_cast<size_t>(cursorBlock)]
+                         [static_cast<size_t>(operationBlock.id)] = 1;
+    while (cursorBlock >= 0) {
+      const int regionId =
+          module.blocks.at(static_cast<size_t>(cursorBlock)).regionId;
+      if (regionId < 0)
+        break;
+      const int parent =
+          module.regions.at(static_cast<size_t>(regionId)).parentOperation;
+      if (parent < 0)
+        break;
+      cursorBlock =
+          module.operations.at(static_cast<size_t>(parent)).blockId;
+      if (cursorBlock >= 0)
+        result.blockDominance[static_cast<size_t>(cursorBlock)]
+                             [static_cast<size_t>(operationBlock.id)] = 1;
+    }
+  }
+  return result;
+}
+
+inline bool RunTileAndBindHoistAffineIteration(
+    GenericModule &module, int functionId,
+    const TileAndBindStableValueIndexes &indexes,
+    DebugTrace *trace = nullptr) {
   const GenericOperation &function =
       module.operations.at(static_cast<size_t>(functionId));
-  const std::vector<int> worklist =
-      GetTileAndBindGreedyRewriteOrder(module, function);
-  bool changed = false;
-  for (int operationId : worklist)
-    changed |= ApplyHoistAffinePattern(module, operationId);
-  return changed;
+  const std::vector<int> worklist = MeasureStage(
+      trace, "TileAndBind.Hoist.Worklist", [&] {
+        return GetTileAndBindAffineGreedyRewriteOrder(module, function);
+      });
+  return MeasureStage(trace, "TileAndBind.Hoist.Apply", [&] {
+    bool changed = false;
+    for (int operationId : worklist)
+      changed |= ApplyHoistAffinePattern(
+          module, operationId, nullptr, nullptr, &indexes.definitions,
+          &indexes.blockArguments, &indexes.blockDominance);
+    return changed;
+  });
+}
+
+inline void RunTileAndBindHoistAffine(GenericModule &module,
+                                      int functionId,
+                                      const TileAndBindStableValueIndexes
+                                          &indexes,
+                                      DebugTrace *trace = nullptr) {
+  for (size_t iteration = 0; iteration < 50; ++iteration)
+    if (!RunTileAndBindHoistAffineIteration(module, functionId, indexes,
+                                             trace))
+      return;
+  throw std::runtime_error(
+      "HIVMBubbleUpExtractSlice: HoistAffine exceeded max iterations");
 }
 
 inline void RunTileAndBindHoistAffine(GenericModule &module,
                                       int functionId) {
-  for (size_t iteration = 0; iteration < 50; ++iteration)
-    if (!RunTileAndBindHoistAffineIteration(module, functionId))
-      return;
-  throw std::runtime_error(
-      "HIVMBubbleUpExtractSlice: HoistAffine exceeded max iterations");
+  const TileAndBindStableValueIndexes indexes =
+      BuildTileAndBindStableValueIndexes(module);
+  RunTileAndBindHoistAffine(module, functionId, indexes);
 }
 
 inline bool IsHIVMBubbleUpEquivalentOperation(const GenericOperation &lhs,
@@ -2733,9 +3063,12 @@ inline std::vector<int> WalkHIVMBubbleUpBlock(const GenericModule &module,
 
 // populateCSEPattern::CSEAffineApplyPattern. The pattern replaces uses of all
 // siblings with siblingGroup[0], but deliberately does not erase any sibling;
-// GreedyPatternRewriteDriver owns the later trivially-dead removal.
+// GreedyPatternRewriteDriver owns the later trivially-dead removal. A caller
+// can still hold a not-yet-materialized use of the sibling result while the
+// recursive bubble-up worklist is being modeled.
 inline bool ApplyCSEAffineApplyPattern(GenericModule &module,
-                                       int operationId) {
+                                       int operationId,
+                                       GenericMutableOperandUseIndex *uses) {
   const GenericOperation base =
       module.operations.at(static_cast<size_t>(operationId));
   if (base.name != "affine.apply" || base.blockId < 0)
@@ -2758,6 +3091,7 @@ inline bool ApplyCSEAffineApplyPattern(GenericModule &module,
     return false;
   const GenericOperation representative =
       module.operations.at(static_cast<size_t>(siblingGroup.front()));
+  std::map<int, int> replacements;
   for (size_t index = 1; index < siblingGroup.size(); ++index) {
     const GenericOperation sibling =
         module.operations.at(static_cast<size_t>(siblingGroup[index]));
@@ -2765,30 +3099,66 @@ inline bool ApplyCSEAffineApplyPattern(GenericModule &module,
          result < sibling.results.size() &&
          result < representative.results.size();
          ++result)
-      ReplaceTileAndBindValueExcept(module, sibling.results[result],
-                                    representative.results[result], -1);
+      replacements[sibling.results[result]] = representative.results[result];
+  }
+  // Greedy CSE replaces every equivalent sibling with the same dominating
+  // representative.  Applying those one value at a time rescans the complete
+  // generic module for every sibling and becomes needlessly super-linear for
+  // TileAndBindSubBlock's cloned affine trees.  All replacements are
+  // independent, so perform the equivalent rewrite in one module walk.
+  for (GenericOperation &operation : module.operations) {
+    const auto replaceOperand = [&](int &operand) {
+      auto found = replacements.find(operand);
+      if (found != replacements.end()) {
+        if (uses)
+          uses->replaceUse(operand, found->second);
+        operand = found->second;
+      }
+    };
+    const auto replaceDerivedUse = [&](int &operand) {
+      auto found = replacements.find(operand);
+      if (found != replacements.end())
+        operand = found->second;
+    };
+    for (int &operand : operation.operands)
+      replaceOperand(operand);
+    for (int &operand : operation.dpsInputs)
+      replaceDerivedUse(operand);
+    for (int &operand : operation.dpsInits)
+      replaceDerivedUse(operand);
   }
   return true;
 }
 
 inline bool IsTriviallyDeadTileAndBindAffine(const GenericModule &module,
-                                             int operationId) {
+                                             int operationId,
+                                             const GenericMutableOperandUseIndex
+                                                 *uses = nullptr) {
   const GenericOperation &operation =
       module.operations.at(static_cast<size_t>(operationId));
   if (operation.name != "affine.apply" && operation.name != "affine.min" &&
       operation.name != "affine.max")
     return false;
-  for (int result : operation.results)
+  for (int result : operation.results) {
+    if (uses) {
+      if (uses->hasUsers(result))
+        return false;
+      continue;
+    }
     for (const GenericOperation &user : module.operations)
       if (std::find(user.operands.begin(), user.operands.end(), result) !=
           user.operands.end())
         return false;
+  }
   return true;
 }
 
-inline void RunCSEAffineApplyPattern(GenericModule &module, int functionId) {
+inline void RunCSEAffineApplyPattern(
+    GenericModule &module, int functionId,
+    const TileAndBindStableValueIndexes &indexes) {
   const GenericOperation &function =
       module.operations.at(static_cast<size_t>(functionId));
+  GenericMutableOperandUseIndex uses(module);
   for (size_t iteration = 0; iteration < 50; ++iteration) {
     bool changed = false;
     GenericRewriter rewriter(module);
@@ -2802,17 +3172,19 @@ inline void RunCSEAffineApplyPattern(GenericModule &module, int functionId) {
           module.blocks.at(static_cast<size_t>(operation.blockId)).operations;
       if (std::find(block.begin(), block.end(), operationId) == block.end())
         continue;
-      if (IsTriviallyDeadTileAndBindAffine(module, operationId)) {
+      if (IsTriviallyDeadTileAndBindAffine(module, operationId, &uses)) {
         rewriter.removeFromBlock(operation.blockId, operationId);
         changed = true;
         continue;
       }
-      if (ApplyHoistAffinePattern(module, operationId)) {
+      if (ApplyHoistAffinePattern(
+              module, operationId, nullptr, nullptr, &indexes.definitions,
+              &indexes.blockArguments, &indexes.blockDominance)) {
         changed = true;
-        ApplyCSEAffineApplyPattern(module, operationId);
+        ApplyCSEAffineApplyPattern(module, operationId, &uses);
         continue;
       }
-      changed |= ApplyCSEAffineApplyPattern(module, operationId);
+      changed |= ApplyCSEAffineApplyPattern(module, operationId, &uses);
     }
     if (!changed)
       return;
@@ -2820,6 +3192,12 @@ inline void RunCSEAffineApplyPattern(GenericModule &module, int functionId) {
   throw std::runtime_error(
       "HIVMBubbleUpExtractSlice: affine/CSE greedy rewrite exceeded max "
       "iterations");
+}
+
+inline void RunCSEAffineApplyPattern(GenericModule &module, int functionId) {
+  const TileAndBindStableValueIndexes indexes =
+      BuildTileAndBindStableValueIndexes(module);
+  RunCSEAffineApplyPattern(module, functionId, indexes);
 }
 
 // populateBindSubBlockBubbleUpPassManager runs CSE after the bubble-up
@@ -2830,16 +3208,13 @@ inline void RunTileAndBindBubbleUpCSE(GenericModule &module, int functionId) {
       module, module.operations.at(static_cast<size_t>(functionId)));
   std::map<std::string, std::vector<int>> available;
   GenericRewriter rewriter(module);
-  std::map<int, size_t> uses;
-  for (const GenericOperation &operation : module.operations)
-    for (int operand : operation.operands)
-      ++uses[operand];
+  const GenericMutableOperandUseIndex uses(module);
   for (int operationId : descendants) {
     const GenericOperation &operation =
         module.operations.at(static_cast<size_t>(operationId));
     if (operation.name != "tensor.empty" || operation.blockId < 0 ||
         std::any_of(operation.results.begin(), operation.results.end(),
-                    [&](int result) { return uses.count(result) != 0; }))
+                    [&](int result) { return uses.hasUsers(result); }))
       continue;
     rewriter.removeFromBlock(operation.blockId, operationId);
   }
@@ -2996,8 +3371,11 @@ inline GenericModule LimitUniqueSubBlockToStore(GenericModule module) {
   return CompactGenericModule(std::move(module));
 }
 
-inline GenericModule RunTileAndBindSubBlock(GenericModule module) {
-  module = RunTileAndBindSubBlockEarlyPatterns(std::move(module));
+inline GenericModule RunTileAndBindSubBlock(GenericModule module,
+                                             DebugTrace *trace = nullptr) {
+  module = MeasureStage(trace, "TileAndBind.EarlyPatterns", [&] {
+    return RunTileAndBindSubBlockEarlyPatterns(std::move(module));
+  });
   std::vector<int> aivFunctions;
   for (const GenericOperation &function : module.operations)
     if (IsMixAIVFunction(function))
@@ -3005,36 +3383,81 @@ inline GenericModule RunTileAndBindSubBlock(GenericModule module) {
   if (aivFunctions.empty())
     return module;
 
-  if (HasBatchMatmulLoopInAICFunctions(module) ||
-      HasImplicitTransposeWithLastAxisInAIVFunctions(module) ||
-      AreLoadAndStoreSameAddress(module))
-    return LimitUniqueSubBlockToStore(std::move(module));
+  const GenericModuleAnalysisSnapshot guardAnalysis(
+      module, kGenericAnalysisDefinitions |
+                  kGenericAnalysisFunctionDescendants);
+  const bool guarded = MeasureStage(trace, "TileAndBind.Guards", [&] {
+    return HasBatchMatmulLoopInAICFunctions(module, guardAnalysis) ||
+           HasImplicitTransposeWithLastAxisInAIVFunctions(module,
+                                                          guardAnalysis) ||
+           AreLoadAndStoreSameAddress(module, guardAnalysis);
+  });
+  if (guarded)
+    return MeasureStage(trace, "TileAndBind.LimitUniqueSubBlock", [&] {
+      return LimitUniqueSubBlockToStore(std::move(module));
+    });
 
   for (int functionId : aivFunctions) {
-    GenericModule candidate = module;
-    DimensionAnalyzer analyzer(candidate);
-    if (!analyzer.initialize())
+    // Dimension analysis is read-only.  Run it against the original module
+    // and clone only when a transactional bind attempt is actually needed.
+    DimensionAnalyzer analyzer(module);
+    const bool analyzed = MeasureStage(trace, "TileAndBind.Analyze", [&] {
+      if (!analyzer.initialize())
+        return false;
+      analyzer.computeTilingDim(
+          module.operations.at(static_cast<size_t>(functionId)));
+      return analyzer.hasSelectedTilingDim();
+    });
+    if (!analyzed)
       return LimitUniqueSubBlockToStore(std::move(module));
-    analyzer.computeTilingDim(
-        candidate.operations.at(static_cast<size_t>(functionId)));
-    if (!analyzer.hasSelectedTilingDim() ||
-        !AttemptBindSubBlock(candidate, functionId) ||
-        !VerifyTileAndBindReshapeTypes(candidate) ||
-        !VerifyTileAndBindSliceTypes(candidate))
+    GenericModule candidate = MeasureStage(
+        trace, "TileAndBind.CloneCandidate", [&] { return module; });
+    if (!MeasureStage(trace, "TileAndBind.AttemptBindSubBlock", [&] {
+          return AttemptBindSubBlock(candidate, functionId, trace);
+        }) ||
+        !MeasureStage(trace, "TileAndBind.Verify", [&] {
+          return VerifyTileAndBindReshapeTypes(candidate) &&
+                 VerifyTileAndBindSliceTypes(candidate);
+        }))
       return LimitUniqueSubBlockToStore(std::move(module));
-    RunTileAndBindHoistAffine(candidate, functionId);
-    RunCSEAffineApplyPattern(candidate, functionId);
-    RunTileAndBindOperationFolder(candidate, functionId);
-    RunTileAndBindBubbleUpCSE(candidate, functionId);
-    RunTileAndBindHoistAffine(candidate, functionId);
-    RunCSEAffineApplyPattern(candidate, functionId);
+    const TileAndBindStableValueIndexes firstAffineIndexes =
+        BuildTileAndBindStableValueIndexes(candidate);
+    MeasureStage(trace, "TileAndBind.HoistAndCSE1", [&] {
+      MeasureStage(trace, "TileAndBind.Hoist1", [&] {
+        RunTileAndBindHoistAffine(candidate, functionId, firstAffineIndexes,
+                                  trace);
+      });
+      MeasureStage(trace, "TileAndBind.CSE1", [&] {
+        RunCSEAffineApplyPattern(candidate, functionId, firstAffineIndexes);
+      });
+    });
+    MeasureStage(trace, "TileAndBind.OperationFolder", [&] {
+      RunTileAndBindOperationFolder(candidate, functionId);
+    });
+    MeasureStage(trace, "TileAndBind.BubbleUpCSE", [&] {
+      RunTileAndBindBubbleUpCSE(candidate, functionId);
+    });
+    const TileAndBindStableValueIndexes secondAffineIndexes =
+        BuildTileAndBindStableValueIndexes(candidate);
+    MeasureStage(trace, "TileAndBind.HoistAndCSE2", [&] {
+      MeasureStage(trace, "TileAndBind.Hoist2", [&] {
+        RunTileAndBindHoistAffine(candidate, functionId,
+                                  secondAffineIndexes, trace);
+      });
+      MeasureStage(trace, "TileAndBind.CSE2", [&] {
+        RunCSEAffineApplyPattern(candidate, functionId,
+                                 secondAffineIndexes);
+      });
+    });
     module = std::move(candidate);
   }
   // The real pass applies limitUniqueSubBlockToStore to the successfully
   // tiled AIV functions as well.  It guards only operations that could not be
   // sliced (for example, a scalar workspace store), while operations marked
   // tiled_op continue to run independently on both sub-blocks.
-  module = LimitUniqueSubBlockToStore(std::move(module));
+  module = MeasureStage(trace, "TileAndBind.LimitUniqueSubBlock", [&] {
+    return LimitUniqueSubBlockToStore(std::move(module));
+  });
   ApplyOperationSemanticsToAll(module.operations);
   return CompactGenericModule(std::move(module));
 }

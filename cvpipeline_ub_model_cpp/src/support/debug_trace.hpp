@@ -22,9 +22,11 @@ class DebugTrace {
 public:
   DebugTrace(std::ostream &output,
              std::filesystem::path artifactDirectory = {},
-             bool emitDebug = true, bool emitRuntimeTiming = false)
+             bool emitDebug = true, bool emitRuntimeTiming = false,
+             bool verifyEachPass = false)
       : output_(output), artifactDirectory_(std::move(artifactDirectory)),
-        emitDebug_(emitDebug), emitRuntimeTiming_(emitRuntimeTiming) {
+        emitDebug_(emitDebug), emitRuntimeTiming_(emitRuntimeTiming),
+        verifyEachPass_(verifyEachPass) {
     if (emitDebug_ && !artifactDirectory_.empty())
       std::filesystem::create_directories(artifactDirectory_);
   }
@@ -71,6 +73,7 @@ public:
   }
 
   bool RuntimeTimingEnabled() const { return emitRuntimeTiming_; }
+  bool VerifyEachPass() const { return verifyEachPass_; }
 
   template <typename Duration>
   void PrintRuntimeTiming(Duration total) {
@@ -143,6 +146,7 @@ private:
   std::filesystem::path artifactDirectory_;
   bool emitDebug_ = true;
   bool emitRuntimeTiming_ = false;
+  bool verifyEachPass_ = false;
   std::vector<RuntimeTimingRecord> runtimeTimings_;
   std::map<std::string, size_t> timingOccurrences_;
   size_t sequence_ = 0;

@@ -31,18 +31,37 @@ struct PostBufferizationRewriteState {
 inline std::vector<std::string> OperationBufferOperands(
     const BufferizedSemanticIR &module, int operation,
     const std::map<std::string, std::string> *mapping = nullptr) {
+  if (module.indexedAccessCount == module.accesses.size() && operation >= 0 &&
+      static_cast<size_t>(operation) < module.buffersByOperation.size()) {
+    const std::vector<std::string> &indexed =
+        module.buffersByOperation[static_cast<size_t>(operation)];
+    std::vector<std::string> result;
+    result.reserve(indexed.size());
+    for (const std::string &sourceBuffer : indexed) {
+      if (sourceBuffer.empty())
+        continue;
+      const std::string *buffer = &sourceBuffer;
+      if (mapping) {
+        auto found = mapping->find(sourceBuffer);
+        if (found != mapping->end())
+          buffer = &found->second;
+      }
+      result.push_back(*buffer);
+    }
+    return result;
+  }
   std::vector<std::pair<int, std::string>> ordered;
-  for (const BufferizedOperandAccess &access : module.accesses) {
-    if (access.operationId == operation) {
-      std::string buffer = access.bufferId;
+  ForEachBufferizedOperationBuffer(
+      module, operation,
+      [&](size_t operand, const std::string &sourceBuffer) {
+      std::string buffer = sourceBuffer;
       if (mapping) {
         auto found = mapping->find(buffer);
         if (found != mapping->end())
           buffer = found->second;
       }
-      ordered.push_back({access.operandNumber, std::move(buffer)});
-    }
-  }
+      ordered.push_back({static_cast<int>(operand), std::move(buffer)});
+      });
   std::sort(ordered.begin(), ordered.end());
   std::vector<std::string> result;
   for (const auto &[operand, buffer] : ordered) {
@@ -71,7 +90,11 @@ inline std::vector<OperationRewriteDelta> BuildOperationRewriteDeltas(
       continue;
     const std::vector<std::string> buffers =
         OperationBufferOperands(module, operation.id, &mapping);
-    const std::vector<std::string> temporary = generatedBuffers[operation.id];
+    static const std::vector<std::string> noTemporaryBuffers;
+    auto generated = generatedBuffers.find(operation.id);
+    const std::vector<std::string> &temporary =
+        generated == generatedBuffers.end() ? noTemporaryBuffers
+                                            : generated->second;
     OperationRewriteDelta rewrite{operation.id, operation.name, {}};
     if (operation.name == "hivm.hir.vcast" && !temporary.empty() &&
         buffers.size() >= 2) {
@@ -141,10 +164,10 @@ inline std::vector<OperationRewriteDelta> BuildOperationRewriteDeltas(
 inline PostBufferizationRewriteState BuildPostBufferizationRewriteState(BufferizedSemanticIR bufferized) {
   PostBufferizationRewriteState result;
   result.singlePoint = ModelHIVMOptSinglePoint(bufferized);
-  result.decomposeAllocations =
-      ModelHIVMDecomposeOp(bufferized.logicalModule);
-  result.decomposeOperationDelta =
-      ModelHIVMDecomposeOperationDelta(bufferized.logicalModule);
+  HIVMDecomposeResult decompose =
+      ModelHIVMDecompose(bufferized.logicalModule);
+  result.decomposeAllocations = std::move(decompose.allocations);
+  result.decomposeOperationDelta = std::move(decompose.operationDelta);
   result.nonContiguousReshapeCopies =
       ModelConvertNonContiguousReshapeToCopy(bufferized.logicalModule);
   result.operationRewrites =

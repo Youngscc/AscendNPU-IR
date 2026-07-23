@@ -6,11 +6,8 @@
 
 namespace cvub {
 
-constexpr const char *kMarkRealCoreTypeInstructionMarker =
-    "instruction-marker";
-
 inline bool IsMarkRealCoreTypeOperation(const GenericOperation &operation) {
-  static const std::set<std::string> scalarPipeOperations = {
+  static const std::unordered_set<std::string> scalarPipeOperations = {
       "memref.load",          "memref.store",
       "affine.load",          "affine.store",
       "tensor.extract",       "tensor.insert",
@@ -21,7 +18,7 @@ inline bool IsMarkRealCoreTypeOperation(const GenericOperation &operation) {
       operation.name == "hivm.hir.custom_macro")
     return false;
 
-  static const std::set<std::string> inferCoreTypeOperations = {
+  static const std::unordered_set<std::string> inferCoreTypeOperations = {
       "hivm.hir.load",          "hivm.hir.store",
       "hivm.hir.copy",          "hivm.hir.atomic_rmw",
       "hivm.hir.vbrc",          "hivm.hir.convert_layout",
@@ -34,6 +31,11 @@ inline bool IsMarkRealCoreTypeOperation(const GenericOperation &operation) {
 
 inline std::string RemoveMarkRealCoreTypeDictionaryValue(
     const std::string &dictionary, const std::string &name) {
+  // The cleanup MarkRealCoreType pass visits every potentially annotated
+  // operation, while only a small subset normally carries tcore_type.  Avoid
+  // tokenizing and reconstructing an unchanged attribute dictionary.
+  if (dictionary.find(name) == std::string::npos)
+    return dictionary;
   if (dictionary.size() < 2 || dictionary.front() != '{' ||
       dictionary.back() != '}')
     return dictionary;
@@ -51,52 +53,49 @@ inline std::string RemoveMarkRealCoreTypeDictionaryValue(
   return output.str() + '}';
 }
 
-inline std::optional<int> MarkRealCoreTypeInstructionMarker(
-    const GenericOperation &operation) {
-  const std::string value = FindDictionaryValue(
-      operation.attributes, kMarkRealCoreTypeInstructionMarker);
-  if (value.empty())
-    return std::nullopt;
-  const size_t end = value.find_first_not_of("0123456789");
-  try {
-    return std::stoi(value.substr(0, end));
-  } catch (const std::exception &) {
-    throw std::runtime_error(
-        "MarkRealCoreType: malformed instruction-marker attribute");
-  }
-}
-
 inline GenericModule AddMarkRealCoreTypeInstructionMarkers(
     GenericModule module) {
   for (GenericOperation &operation : module.operations) {
     if (operation.name == "builtin.module")
       continue;
-    operation.attributes = SetCanonicalizationDictionaryValue(
-        operation.attributes, kMarkRealCoreTypeInstructionMarker,
-        std::to_string(operation.id) + " : index");
+    // The suffix uses a temporary IR attribute because MLIR operations do not
+    // have model-side provenance.  Carry the same identity in analysis-only
+    // metadata instead: projection copies and compaction preserve it without
+    // rebuilding and reparsing every attribute dictionary twice.
+    operation.projectionSourceId = operation.id;
   }
   return module;
 }
 
-inline std::set<int> CollectMarkRealCoreTypeProjection(
-    const GenericModule &module, SplitMixCoreType retainedCore) {
-  GenericModule projection = AddMarkRealCoreTypeInstructionMarkers(module);
+inline std::vector<uint8_t> CollectMarkedRealCoreTypeProjection(
+    GenericModule projection, SplitMixCoreType retainedCore,
+    size_t sourceOperationCount) {
   projection =
       RunSplitMixKernelProjection(std::move(projection), retainedCore);
   projection = RunCanonicalizationHIVMPipeline(std::move(projection));
 
-  std::set<int> retained;
+  std::vector<uint8_t> retained(sourceOperationCount, uint8_t{0});
   for (const GenericOperation &operation : projection.operations)
-    if (const std::optional<int> marker =
-            MarkRealCoreTypeInstructionMarker(operation))
-      retained.insert(*marker);
+    if (operation.projectionSourceId >= 0 &&
+        static_cast<size_t>(operation.projectionSourceId) < retained.size())
+      retained[static_cast<size_t>(operation.projectionSourceId)] = 1;
   return retained;
 }
 
+inline std::vector<uint8_t> CollectMarkRealCoreTypeProjection(
+    const GenericModule &module, SplitMixCoreType retainedCore) {
+  return CollectMarkedRealCoreTypeProjection(
+      AddMarkRealCoreTypeInstructionMarkers(module), retainedCore,
+      module.operations.size());
+}
+
 inline GenericModule RunMarkRealCoreType(GenericModule module,
-                                         bool removeCoreTypeAttrs = false) {
+                                         bool removeCoreTypeAttrs = false,
+                                         bool inputCanonicalized = false) {
   if (removeCoreTypeAttrs) {
     for (GenericOperation &operation : module.operations) {
+      if (operation.attributes.find("hivm.tcore_type") == std::string::npos)
+        continue;
       if (!IsMarkRealCoreTypeOperation(operation))
         continue;
       operation.attributes = RemoveMarkRealCoreTypeDictionaryValue(
@@ -105,16 +104,49 @@ inline GenericModule RunMarkRealCoreType(GenericModule module,
     return module;
   }
 
-  const std::set<int> cubeOperations = CollectMarkRealCoreTypeProjection(
-      module, SplitMixCoreType::Cube);
-  const std::set<int> vectorOperations = CollectMarkRealCoreTypeProjection(
-      module, SplitMixCoreType::Vector);
+  // MIX inputs still require independent Cube and Vector projections.  Both
+  // start from the same instruction-marked snapshot so marker construction is
+  // shared while their projection/canonicalization semantics remain exact.
+  const size_t sourceOperationCount = module.operations.size();
+  const bool hasMixFunction = std::any_of(
+      module.operations.begin(), module.operations.end(),
+      [](const GenericOperation &operation) {
+        return IsSplitMixFunction(operation);
+      });
+  std::vector<uint8_t> cubeOperations;
+  std::vector<uint8_t> vectorOperations;
+  const bool allOperationsInBothProjections =
+      !hasMixFunction && inputCanonicalized;
+  // The enclosing suffix/model pipeline has just reached the fixed point of
+  // this same canonicalizer.  With no MIX function the SplitMix projection is
+  // the identity for both cores, so every current operation survives both
+  // projections.  Standalone callers stay conservative through the explicit
+  // inputCanonicalized contract.
+  if (!allOperationsInBothProjections) {
+    GenericModule marked = AddMarkRealCoreTypeInstructionMarkers(module);
+    if (!hasMixFunction) {
+      cubeOperations = CollectMarkedRealCoreTypeProjection(
+          std::move(marked), SplitMixCoreType::Vector, sourceOperationCount);
+      vectorOperations = cubeOperations;
+    } else {
+      cubeOperations = CollectMarkedRealCoreTypeProjection(
+          marked, SplitMixCoreType::Cube, sourceOperationCount);
+      vectorOperations = CollectMarkedRealCoreTypeProjection(
+          std::move(marked), SplitMixCoreType::Vector, sourceOperationCount);
+    }
+  }
 
   for (GenericOperation &operation : module.operations) {
     if (!IsMarkRealCoreTypeOperation(operation))
       continue;
-    const bool inCube = cubeOperations.count(operation.id) != 0;
-    const bool inVector = vectorOperations.count(operation.id) != 0;
+    const size_t operationId = static_cast<size_t>(operation.id);
+    const bool inCube =
+        allOperationsInBothProjections ||
+        (operationId < cubeOperations.size() && cubeOperations[operationId]);
+    const bool inVector =
+        allOperationsInBothProjections ||
+        (operationId < vectorOperations.size() &&
+         vectorOperations[operationId]);
     if (!inCube && !inVector)
       continue;
     const char *coreType = inCube && inVector

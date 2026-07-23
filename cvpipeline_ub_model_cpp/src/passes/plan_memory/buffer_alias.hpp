@@ -7,7 +7,10 @@
 namespace cvub {
 
 struct OpInfo {
-  OperationRecord operation;
+  // The finalized PlanMemory operation stream is immutable and owned by the
+  // prepared analysis for the complete retry loop. Keep identity by pointer
+  // instead of copying text, attributes and CFG vectors into every attempt.
+  const OperationRecord *operation = nullptr;
   int index = 0;
   std::vector<std::string> gen;
   std::vector<std::string> kill;
@@ -20,6 +23,11 @@ class BufferAliasMap {
 public:
   using AliasPair = std::pair<std::string, bool>;
 
+  explicit BufferAliasMap(size_t expectedValues = 0) {
+    if (expectedValues)
+      buffer2AliasVec.reserve(expectedValues);
+  }
+
   const std::vector<AliasPair> &GetAliasBufferCondPairs(
       const std::string &value) const {
     static const std::vector<AliasPair> empty;
@@ -29,7 +37,9 @@ public:
 
   std::vector<std::string> GetAliasBuffers(const std::string &value) const {
     std::vector<std::string> result;
-    for (const AliasPair &pair : GetAliasBufferCondPairs(value))
+    const std::vector<AliasPair> &pairs = GetAliasBufferCondPairs(value);
+    result.reserve(pairs.size());
+    for (const AliasPair &pair : pairs)
       result.push_back(pair.first);
     return result;
   }
@@ -85,7 +95,7 @@ private:
     }
   }
 
-  std::map<std::string, std::vector<AliasPair>> buffer2AliasVec;
+  std::unordered_map<std::string, std::vector<AliasPair>> buffer2AliasVec;
 };
 
 

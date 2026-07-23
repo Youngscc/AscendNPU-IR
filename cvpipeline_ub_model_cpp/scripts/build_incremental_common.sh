@@ -29,7 +29,7 @@ compile_if_needed() {
 
   mkdir -p "$(dirname "${output}")"
   if needs_rebuild "${output}" "${module_dir}"; then
-    "${compiler}" -std=c++17 -O2 -Wall -Wextra -Wpedantic -Wconversion \
+    "${compiler}" -std=c++17 -O3 -Wall -Wextra -Wpedantic -Wconversion \
       -Wshadow -Werror \
       "${source}" -o "${output}"
   fi

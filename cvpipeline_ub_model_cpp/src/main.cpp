@@ -43,6 +43,7 @@ struct Options {
       cvub::MultiBufferStrategy::OnlyCube;
   std::string format = "text";
   bool showRuntimeTiming = false;
+  bool verifyEachPass = false;
   bool debug = false;
   DebugEntry debugEntry = DebugEntry::BeforeCVPipelining;
   std::filesystem::path debugDirectory;
@@ -101,6 +102,8 @@ void PrintHelp() {
       << "  --format=<text|json>\n"
       << "  --show-runtime-timing[=<bool>]\n"
       << "      Emit total and per-stage runtime records to stderr.\n"
+      << "  --verify-each[=<bool>]\n"
+      << "      Validate Generic IR after every modeled pass.\n"
       << "\nDebug options:\n"
       << "  --debug\n"
       << "  --debug-dir=<path>\n"
@@ -193,6 +196,10 @@ Options ParseOptions(int argc, char **argv) {
       options.showRuntimeTiming = true;
     else if (auto showTiming = readValue("--show-runtime-timing"))
       options.showRuntimeTiming = ParseBool(*showTiming);
+    else if (argument == "--verify-each")
+      options.verifyEachPass = true;
+    else if (auto verifyEach = readValue("--verify-each"))
+      options.verifyEachPass = ParseBool(*verifyEach);
     else if (argument == "--debug")
       options.debug = true;
     else if (auto debugDirectory = readValue("--debug-dir"))
@@ -271,11 +278,12 @@ cvub::UBAffectingPassOptions UBAffectingPassOptions(const Options &options) {
 }
 
 cvub::PlanMemoryModelResult PlanMemory(const cvub::PlanMemoryInput &input,
-                                       const Options &options) {
+                                       const Options &options,
+                                       cvub::DebugTrace *trace = nullptr) {
   if (options.randomSeed)
     return cvub::PlanLocalMemoryForSeed(
-        input, *options.randomSeed, options.restrictInplaceAsISA);
-  return cvub::PlanLocalMemory(input, options.restrictInplaceAsISA);
+        input, *options.randomSeed, options.restrictInplaceAsISA, trace);
+  return cvub::PlanLocalMemory(input, options.restrictInplaceAsISA, trace);
 }
 
 cvub::ModulePlanResult RunModel(const Options &options,
@@ -313,7 +321,7 @@ cvub::ModulePlanResult RunModel(const Options &options,
     });
   }
   cvub::PlanMemoryModelResult result = cvub::MeasureStage(
-      trace, "PlanMemory", [&] { return PlanMemory(input, options); });
+      trace, "PlanMemory", [&] { return PlanMemory(input, options, trace); });
   cvub::TracePlanMemoryResult(trace, result);
   return cvub::ModulePlanFromSingle("debug_aiv", std::move(result));
 }
@@ -534,9 +542,10 @@ int main(int argc, char **argv) {
   try {
     options = ParseOptions(argc, argv);
     ValidateOptions(options);
-    if (options.debug || options.showRuntimeTiming)
+    if (options.debug || options.showRuntimeTiming || options.verifyEachPass)
       debugTrace.emplace(std::cerr, options.debugDirectory, options.debug,
-                         options.showRuntimeTiming);
+                         options.showRuntimeTiming,
+                         options.debug || options.verifyEachPass);
     if (options.showRuntimeTiming)
       runtimeStarted = std::chrono::steady_clock::now();
     const cvub::ModulePlanResult result =

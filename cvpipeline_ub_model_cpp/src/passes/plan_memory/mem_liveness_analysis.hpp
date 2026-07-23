@@ -380,9 +380,10 @@ inline bool shouldVReduceOpLowerToScalarLoops(
     return false;
   const std::vector<int64_t> reduceDims =
       getDenseI64Array(op.text, "reduce_dims");
+  static const std::regex vreduceKindRegex(
+      R"(vreduce\s*<([a-z_]+)>)");
   std::smatch arithmetic;
-  if (!std::regex_search(op.text, arithmetic,
-                         std::regex("vreduce\\s*<([a-z_]+)>")))
+  if (!std::regex_search(op.text, arithmetic, vreduceKindRegex))
     return false;
   const std::string kind = arithmetic[1].str();
   if (kind == "min" || kind == "max" || kind == "sum" ||
@@ -456,7 +457,7 @@ inline bool shouldLowerToScalarLoops(
 inline bool IsReuseHIVMOp(
     const OperationRecord &op, const std::string &genBuffer,
     const std::string &killBuffer,
-    const std::map<std::string, std::string> &alias,
+    const std::unordered_map<std::string, std::string> &alias,
     const std::set<std::string> &allocNames,
     bool restrictInplaceAsISA = false) {
   if (!IsElementwiseNaryOp(op.opName) ||
@@ -584,6 +585,124 @@ struct PlanMemoryInput {
   std::vector<IRAllocRecord> allocations;
   std::vector<OperationRecord> operations;
   std::vector<std::string> functionArguments;
+  std::shared_ptr<const PlanMemoryOperationIndexStorage> operationIndex;
+};
+
+// Everything below is a pure function of the finalized PlanMemory input.  A
+// retry changes only the random order in which simultaneously-live values are
+// considered; rebuilding these indexes for every seed is therefore redundant.
+// Keep the context non-movable because Liveness holds a reference to the
+// operation index, which in turn holds a reference to the input operation
+// stream.
+class PreparedMemLivenessAnalysis {
+public:
+  explicit PreparedMemLivenessAnalysis(const PlanMemoryInput &input,
+                                       DebugTrace *trace = nullptr)
+      : operations(input.operations),
+        operationIndex(operations, input.operationIndex),
+        liveness(operations, input.functionArguments, operationIndex, trace) {
+    // Bridge-generated operation ids intentionally live in a high numeric
+    // range.  A dense cache indexed by that id initialized roughly one
+    // million optional vectors for every input even though only O(operations)
+    // entries can ever be queried.
+    orderedLiveValues.reserve(operations.size());
+    for (const IRAllocRecord &record : input.allocations) {
+      allocNames.insert(record.name);
+      allocOrder.push_back(record.name);
+      allocExtentBits[record.name] = record.constBits;
+    }
+    // Region topology and branch block arguments are immutable across retry
+    // seeds. Build the same ordered relationships once instead of repeatedly
+    // scanning the complete operation stream from every control-flow op in
+    // every attempt.
+    for (const OperationRecord &operation : operations)
+      blockArguments[{operation.regionPath, operation.blockLabel}] =
+          operation.blockArguments;
+  }
+
+  PreparedMemLivenessAnalysis(const PreparedMemLivenessAnalysis &) = delete;
+  PreparedMemLivenessAnalysis &
+  operator=(const PreparedMemLivenessAnalysis &) = delete;
+  PreparedMemLivenessAnalysis(PreparedMemLivenessAnalysis &&) = delete;
+  PreparedMemLivenessAnalysis &
+  operator=(PreparedMemLivenessAnalysis &&) = delete;
+
+  const std::vector<std::string> &
+  currentlyLiveValuesOrdered(int operationId) const {
+    static const std::vector<std::string> empty;
+    if (operationId < 0)
+      return empty;
+    auto cached = orderedLiveValues.find(operationId);
+    if (cached != orderedLiveValues.end())
+      return cached->second;
+    return orderedLiveValues
+        .emplace(operationId,
+                 liveness.currentlyLiveValuesOrdered(operationId))
+        .first->second;
+  }
+
+  const std::vector<int> &childRegions(int operationId) const {
+    auto found = childRegionsByOperation.find(operationId);
+    if (found != childRegionsByOperation.end())
+      return found->second;
+    const OperationRecord &parent = operationIndex.operation(operationId);
+    std::vector<int> regions;
+    for (const OperationRecord &candidate : operations) {
+      if (candidate.index <= parent.index)
+        continue;
+      if (candidate.regionPath.size() == parent.regionPath.size() + 1 &&
+          pathPrefix(parent.regionPath, candidate.regionPath)) {
+        const int region = candidate.regionPath.back();
+        if (std::find(regions.begin(), regions.end(), region) == regions.end())
+          regions.push_back(region);
+        continue;
+      }
+      if (candidate.regionPath.size() <= parent.regionPath.size())
+        break;
+    }
+    return childRegionsByOperation.emplace(operationId, std::move(regions))
+        .first->second;
+  }
+
+  int parentOperation(const std::vector<int> &parentPath, int region) const {
+    const auto key = std::make_pair(parentPath, region);
+    auto found = parentOperationByRegionPath.find(key);
+    if (found != parentOperationByRegionPath.end())
+      return found->second;
+    int parent = -1;
+    for (const OperationRecord &candidate : operations) {
+      if (candidate.regionPath != parentPath)
+        continue;
+      const std::vector<int> &regions = childRegions(candidate.operationId);
+      if (std::find(regions.begin(), regions.end(), region) != regions.end()) {
+        parent = candidate.operationId;
+        break;
+      }
+    }
+    parentOperationByRegionPath.emplace(key, parent);
+    return parent;
+  }
+
+  const std::vector<std::string> *
+  argumentsForBlock(const std::vector<int> &regionPath,
+                    const std::string &blockLabel) const {
+    auto found = blockArguments.find({regionPath, blockLabel});
+    return found == blockArguments.end() ? nullptr : &found->second;
+  }
+
+  const std::vector<OperationRecord> &operations;
+  std::set<std::string> allocNames;
+  std::vector<std::string> allocOrder;
+  std::map<std::string, uint64_t> allocExtentBits;
+  PlanMemoryOperationIndex operationIndex;
+  Liveness liveness;
+  mutable std::unordered_map<int, std::vector<std::string>> orderedLiveValues;
+  mutable std::map<int, std::vector<int>> childRegionsByOperation;
+  mutable std::map<std::pair<std::vector<int>, int>, int>
+      parentOperationByRegionPath;
+  std::map<std::pair<std::vector<int>, std::string>,
+           std::vector<std::string>>
+      blockArguments;
 };
 
 inline PlanMemoryInput ParsePlanMemoryInput(const fs::path &beforeIR,
@@ -601,45 +720,59 @@ inline PlanMemoryInput ParsePlanMemoryInput(const fs::path &beforeIR,
       NormalizeIterUseAfterYieldInit(
           qualifyScopedSSAValues(parseFunctionOperations(beforeIR, coreType)),
           allocNames, allocTypes));
+  MaterializeOperationValueLists(result.operations);
+  result.operationIndex =
+      BuildPlanMemoryOperationIndexStorage(result.operations);
   result.functionArguments = parseFunctionArgumentNames(beforeIR, coreType);
   return result;
 }
 
 inline LifetimeAnalysis
 buildMemLivenessAnalysis(const PlanMemoryInput &input,
+                         const PreparedMemLivenessAnalysis &prepared,
                          uint32_t randomSeed = 0,
-                         bool restrictInplaceAsISA = false) {
-  const std::vector<IRAllocRecord> &irRecords = input.allocations;
-  std::set<std::string> allocNames;
-  std::vector<std::string> allocOrder;
-  std::map<std::string, uint64_t> allocExtentBits;
-  std::map<std::string, std::string> allocTypes;
-  for (const IRAllocRecord &record : irRecords) {
-    allocNames.insert(record.name);
-    allocOrder.push_back(record.name);
-    allocExtentBits[record.name] = record.constBits;
-    allocTypes[record.name] = record.memrefType;
-  }
-
-  const std::vector<OperationRecord> &operations = input.operations;
-  Liveness liveness(operations, input.functionArguments);
-  BufferAliasMap buffer2AliasVec;
-  std::map<std::string, std::string> traceback;
+                         bool restrictInplaceAsISA = false,
+                         bool materializeStaticStorageFacts = true) {
+  (void)input;
+  const std::set<std::string> &allocNames = prepared.allocNames;
+  const std::vector<std::string> &allocOrder = prepared.allocOrder;
+  const std::map<std::string, uint64_t> &allocExtentBits =
+      prepared.allocExtentBits;
+  const std::vector<OperationRecord> &operations = prepared.operations;
+  const PlanMemoryOperationIndex &operationIndex = prepared.operationIndex;
+  const Liveness &liveness = prepared.liveness;
+  auto GetAllocExtentBits = [&](const std::string &name) {
+    auto found = allocExtentBits.find(name);
+    return found == allocExtentBits.end() ? uint64_t{0} : found->second;
+  };
+  BufferAliasMap buffer2AliasVec(operations.size());
+  std::unordered_map<std::string, std::string> traceback;
   for (const std::string &alloc : allocNames)
     traceback[alloc] = alloc;
 
   std::vector<OpInfo> linearOperation;
-  std::map<std::string, BufferStatus> buffer2status;
-  std::map<std::string, int> allocDefOperation;
-  std::map<std::string, int> buffer2LifeAllocTime;
-  std::map<std::string, int> buffer2LifeFreeTime;
+  std::unordered_map<std::string, BufferStatus> buffer2status;
+  std::unordered_map<std::string, int> allocDefOperation;
+  std::unordered_map<std::string, int> buffer2LifeAllocTime;
+  std::unordered_map<std::string, int> buffer2LifeFreeTime;
   std::map<std::string, uint32_t> buffer2MultiNum;
   // BufferInfo::ignoreInplace starts false. PlanMemory sets it only while
   // processing concrete extra-buffer/select/alloc-alias relationships.
-  std::set<std::string> ignoreInplaceBuffers;
+  std::unordered_set<std::string> ignoreInplaceBuffers;
+  traceback.reserve(operations.size() + allocNames.size());
+  buffer2status.reserve(operations.size());
+  allocDefOperation.reserve(allocNames.size());
+  buffer2LifeAllocTime.reserve(allocNames.size());
+  buffer2LifeFreeTime.reserve(allocNames.size());
+  ignoreInplaceBuffers.reserve(allocNames.size());
   std::mt19937 randomGenerator(randomSeed);
-  std::vector<LiveShuffleRecord> liveShuffleTrace;
   std::vector<std::string> preloadBuffers;
+  std::unordered_set<std::string> preloadBufferSet;
+  std::vector<std::string> shuffledLiveValues;
+  linearOperation.reserve(operations.size());
+  preloadBuffers.reserve(allocNames.size());
+  preloadBufferSet.reserve(allocNames.size());
+  shuffledLiveValues.reserve(allocNames.size());
 
   struct LoopContext {
     std::vector<std::pair<std::string, std::string>> iterArgs;
@@ -694,12 +827,29 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
       aliases.push_back(value);
     return aliases;
   };
+  // Most gen/preload walks only consume aliases once. Iterate the stable
+  // alias order in place instead of allocating and copying a temporary vector
+  // for every operand of every attempt.
+  auto ForEachAlias = [&](const std::string &value, auto &&visitor) {
+    bool includesValue = false;
+    for (const BufferAliasMap::AliasPair &pair :
+         buffer2AliasVec.GetAliasBufferCondPairs(value)) {
+      includesValue |= pair.first == value;
+      if (!visitor(pair.first))
+        return;
+    }
+    if (!includesValue)
+      (void)visitor(value);
+  };
   auto IsPreloadBuffer = [&](const std::string &value) {
-    for (const std::string &alias : GetAliasBuffers(value))
-      if (std::find(preloadBuffers.begin(), preloadBuffers.end(), alias) !=
-          preloadBuffers.end())
-        return true;
-    return false;
+    if (preloadBufferSet.empty())
+      return false;
+    bool found = false;
+    ForEachAlias(value, [&](const std::string &alias) {
+      found = preloadBufferSet.count(alias) != 0;
+      return !found;
+    });
+    return found;
   };
   auto UpdateOperandGenInfo = [&](OpInfo &info, const std::string &value) {
     auto it = buffer2status.find(value);
@@ -717,8 +867,10 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
     }
   };
   auto UpdateOpGenInfo = [&](OpInfo &info, const std::string &value) {
-    for (const std::string &alias : GetAliasBuffers(value))
+    ForEachAlias(value, [&](const std::string &alias) {
       UpdateOperandGenInfo(info, alias);
+      return true;
+    });
   };
   auto AllDeadAfter = [&](const std::vector<std::string> &aliases,
                           int operationId) {
@@ -739,111 +891,66 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
       auto def = allocDefOperation.find(alias);
       if (def == allocDefOperation.end() ||
           !liveness.definingParentDominatedBy(def->second,
-                                              info.operation.operationId) ||
-          !AllDeadAfter(aliases, info.operation.operationId))
+                                              info.operation->operationId) ||
+          !AllDeadAfter(aliases, info.operation->operationId))
         continue;
       info.kill.push_back(alias);
       it->second = BufferStatus::KILLED;
     }
   };
   auto OpKillHandle = [&](OpInfo &info) {
-    std::vector<std::string> live =
-        liveness.currentlyLiveValuesOrdered(info.operation.operationId);
-    if (live.empty())
+    const std::vector<std::string> &orderedLive =
+        prepared.currentlyLiveValuesOrdered(info.operation->operationId);
+    if (orderedLive.empty())
       return;
-    LiveShuffleRecord trace;
-    trace.operationIndex = info.index;
-    trace.before = live;
-    std::shuffle(live.begin(), live.end(), randomGenerator);
-    trace.after = live;
-    liveShuffleTrace.push_back(std::move(trace));
-    for (const std::string &value : live)
+    shuffledLiveValues.assign(orderedLive.begin(), orderedLive.end());
+    std::shuffle(shuffledLiveValues.begin(), shuffledLiveValues.end(),
+                 randomGenerator);
+    for (const std::string &value : shuffledLiveValues)
       UpdateOpKillInfo(info, value);
   };
   auto GetLiveBuffersInLoop = [&](const OperationRecord &op) {
     std::vector<std::string> result;
-    std::vector<std::string> live =
-        liveness.currentlyLiveValuesOrdered(op.operationId);
-    if (live.empty())
+    const std::vector<std::string> &orderedLive =
+        prepared.currentlyLiveValuesOrdered(op.operationId);
+    if (orderedLive.empty())
       return result;
-    std::shuffle(live.begin(), live.end(), randomGenerator);
-    for (const std::string &value : live)
-      for (const std::string &alias : GetAliasBuffers(value))
+    shuffledLiveValues.assign(orderedLive.begin(), orderedLive.end());
+    std::shuffle(shuffledLiveValues.begin(), shuffledLiveValues.end(),
+                 randomGenerator);
+    for (const std::string &value : shuffledLiveValues)
+      ForEachAlias(value, [&](const std::string &alias) {
         if (buffer2status.count(alias))
           result.push_back(alias);
+        return true;
+      });
     return result;
   };
   auto UpdateLinearOperation = [&](const OperationRecord &op) -> OpInfo & {
     linearOperation.push_back(
-        {op, static_cast<int>(linearOperation.size()), {}, {}});
+        {&op, static_cast<int>(linearOperation.size()), {}, {}});
     return linearOperation.back();
   };
   auto GetChildRegion = [&](const OperationRecord &parent) {
-    for (const OperationRecord &candidate : operations) {
-      if (candidate.index <= parent.index)
-        continue;
-      if (candidate.regionPath.size() == parent.regionPath.size() + 1 &&
-          pathPrefix(parent.regionPath, candidate.regionPath))
-        return candidate.regionPath.back();
-      if (candidate.regionPath.size() <= parent.regionPath.size())
-        break;
-    }
-    return -1;
+    const std::vector<int> &regions =
+        prepared.childRegions(parent.operationId);
+    return regions.empty() ? -1 : regions.front();
   };
   auto GetChildRegions = [&](const OperationRecord &parent) {
-    std::vector<int> regions;
-    for (const OperationRecord &candidate : operations) {
-      if (candidate.index <= parent.index)
-        continue;
-      if (candidate.regionPath.size() == parent.regionPath.size() + 1 &&
-          pathPrefix(parent.regionPath, candidate.regionPath)) {
-        int region = candidate.regionPath.back();
-        if (std::find(regions.begin(), regions.end(), region) == regions.end())
-          regions.push_back(region);
-        continue;
-      }
-      if (candidate.regionPath.size() <= parent.regionPath.size())
-        break;
-    }
-    return regions;
+    return prepared.childRegions(parent.operationId);
   };
   auto GetRegionArguments = [&](int region) {
-    for (const OperationRecord &candidate : operations)
-      if (!candidate.regionPath.empty() &&
-          candidate.regionPath.back() == region)
-        return candidate.blockArguments;
-    return std::vector<std::string>{};
+    return operationIndex.argumentsForRegion(region);
   };
   auto GetRegionYieldedValues = [&](int region) {
-    for (const OperationRecord &candidate : operations) {
-      if (candidate.regionPath.empty() ||
-          candidate.regionPath.back() != region ||
-          candidate.opName != "scf.yield")
-        continue;
-      return operationOperandNames(candidate);
-    }
-    return std::vector<std::string>{};
+    return operationIndex.yieldedValuesForRegion(region);
   };
-  std::map<std::pair<std::vector<int>, std::string>,
-           std::vector<std::string>>
-      blockArguments;
-  for (const OperationRecord &candidate : operations)
-    blockArguments[{candidate.regionPath, candidate.blockLabel}] =
-        candidate.blockArguments;
   auto GetParentOperationId = [&](const OperationRecord &child) {
     if (child.regionPath.empty())
       return -1;
     std::vector<int> parentPath(child.regionPath.begin(),
                                 child.regionPath.end() - 1);
-    int childRegion = child.regionPath.back();
-    for (const OperationRecord &candidate : operations) {
-      if (candidate.regionPath != parentPath)
-        continue;
-      for (int region : GetChildRegions(candidate))
-        if (region == childRegion)
-          return candidate.operationId;
-    }
-    return -1;
+    return prepared.parentOperation(parentPath, child.regionPath.back());
   };
   auto IsInRegion = [](const OperationRecord &op, int region) {
     return region >= 0 && !op.regionPath.empty() &&
@@ -855,10 +962,10 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
         "hivm.hir.dcci", "scope.return"};
     if (skippableOps.count(op.opName))
       return false;
-    for (const std::string &operand : operationOperandNames(op))
+    for (const std::string &operand : operationIndex.operands(op))
       if (resolveAlloc(operand))
         return true;
-    for (const std::string &resultValue : operationResultNames(op))
+    for (const std::string &resultValue : operationIndex.results(op))
       if (resolveAlloc(resultValue))
         return true;
     return op.text.find("#hivm.address_space<ub>") != std::string::npos;
@@ -867,7 +974,7 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
   for (const OperationRecord &op : operations) {
     const std::string &line = op.text;
     std::string result = resultNameBeforeEqual(line);
-    std::vector<std::string> opResults = operationResultNames(op);
+    const std::vector<std::string> &opResults = operationIndex.results(op);
     if (!opResults.empty())
       result = opResults.front();
     if (op.opName == "scf.while") {
@@ -876,7 +983,7 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
         UpdateOpGenInfo(info, live);
       WhileContext context;
       context.iterArgs = extractWhileInitArgPairs(line);
-      context.results = resultNamesBeforeEqual(line);
+      context.results = opResults;
       std::vector<int> regions = GetChildRegions(op);
       if (!regions.empty())
         context.beforeRegion = regions[0];
@@ -894,7 +1001,7 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
     if (op.opName == "scope.scope") {
       (void)UpdateLinearOperation(op);
       scopeStack.push_back(
-          {resultNamesBeforeEqual(line), {}, GetChildRegion(op)});
+          {opResults, {}, GetChildRegion(op)});
       continue;
     }
     if (op.opName == "scf.for") {
@@ -903,7 +1010,7 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
         UpdateOpGenInfo(info, live);
       LoopContext context;
       context.iterArgs = extractIterArgPairs(line);
-      context.results = resultNamesBeforeEqual(line);
+      context.results = opResults;
       context.region = GetChildRegion(op);
       context.yielded = GetRegionYieldedValues(context.region);
       for (const auto &pair : context.iterArgs) {
@@ -939,22 +1046,22 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
     }
     if (op.opName == "scope.return" && !scopeStack.empty() &&
         IsInRegion(op, scopeStack.back().region)) {
-      scopeStack.back().returned = operationOperandNames(op);
+      scopeStack.back().returned = operationIndex.operands(op);
       (void)UpdateLinearOperation(op);
       continue;
     }
     if ((op.opName == "scf.yield" ||
          op.opName == "scf.if.implicit_yield") &&
         !ifStack.empty() && IsInRegion(op, ifStack.back().region)) {
-      ifStack.back().yielded =
-          op.opName == "scf.yield" ? extractSSAs(line)
+      ifStack.back().yielded = op.opName == "scf.yield"
+                                   ? operationIndex.operands(op)
                                    : std::vector<std::string>{};
       (void)UpdateLinearOperation(op);
       continue;
     }
     if (op.opName == "scf.yield" && !whileStack.empty() &&
         IsInRegion(op, whileStack.back().afterRegion)) {
-      whileStack.back().yielded = extractSSAs(line);
+      whileStack.back().yielded = operationIndex.operands(op);
       (void)UpdateLinearOperation(op);
       continue;
     }
@@ -1009,7 +1116,7 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
     if (op.opName == "scf.if") {
       (void)UpdateLinearOperation(op);
       ifStack.push_back(
-          {resultNamesBeforeEqual(line), {}, GetChildRegion(op)});
+          {opResults, {}, GetChildRegion(op)});
       continue;
     }
     if (op.opName == "scf.if.else") {
@@ -1044,7 +1151,7 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
       continue;
     }
     if (isViewLikeMemrefOp(op.opName)) {
-      for (const std::string &operand : operationOperandNames(op)) {
+      for (const std::string &operand : operationIndex.operands(op)) {
         if (!resolveAlloc(operand))
           continue;
         traceback[result] = operand;
@@ -1054,7 +1161,7 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
       continue;
     }
     if (op.opName == "arith.select") {
-      std::vector<std::string> operands = operationOperandNames(op);
+      const std::vector<std::string> &operands = operationIndex.operands(op);
       if (operands.size() >= 3) {
         UpdateBufferAlias(result, operands[1], true, true);
         UpdateBufferAlias(result, operands[2], true, true);
@@ -1063,7 +1170,7 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
       continue;
     }
     if (op.opName == "memref.store") {
-      std::vector<std::string> operands = operationOperandNames(op);
+      const std::vector<std::string> &operands = operationIndex.operands(op);
       if (operands.size() >= 2)
         UpdateOpGenInfo(info, operands[1]);
       OpKillHandle(info);
@@ -1083,13 +1190,13 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
       continue;
     }
     if (op.opName == "annotation.mark") {
-      std::vector<std::string> operands = operationOperandNames(op);
+      const std::vector<std::string> &operands = operationIndex.operands(op);
       if (!operands.empty()) {
         if (auto alloc = resolveAlloc(operands.front())) {
+          static const std::regex multiBufferRegex(
+              R"(hivm\.multi_buffer\s*=\s*([0-9]+))");
           std::smatch multiBuffer;
-          if (std::regex_search(
-                  line, multiBuffer,
-                  std::regex(R"(hivm\.multi_buffer\s*=\s*([0-9]+))"))) {
+          if (std::regex_search(line, multiBuffer, multiBufferRegex)) {
             uint32_t count =
                 static_cast<uint32_t>(std::stoul(multiBuffer[1].str()));
             if (count > 1)
@@ -1097,8 +1204,7 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
           }
           if (line.find("hivm.preload_local_buffer") !=
                   std::string::npos &&
-              std::find(preloadBuffers.begin(), preloadBuffers.end(),
-                        *alloc) == preloadBuffers.end())
+              preloadBufferSet.insert(*alloc).second)
             preloadBuffers.push_back(*alloc);
           UpdateOpKillInfo(info, *alloc);
         }
@@ -1107,17 +1213,17 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
     }
     if (op.opName == "cf.br" || op.opName == "cf.cond_br") {
       for (const BranchDestination &destination : op.branchDestinations) {
-        auto arguments =
-            blockArguments.find({op.regionPath, destination.label});
-        if (arguments == blockArguments.end())
+        const std::vector<std::string> *arguments =
+            prepared.argumentsForBlock(op.regionPath, destination.label);
+        if (!arguments)
           throw std::runtime_error("PlanMemory: branch destination not found: " +
                                    destination.label);
-        if (arguments->second.size() != destination.operands.size())
+        if (arguments->size() != destination.operands.size())
           throw std::runtime_error(
               "PlanMemory: branch destination operand count mismatch: " +
               destination.label);
         for (size_t i = 0; i < destination.operands.size(); ++i)
-          UpdateBufferAlias(arguments->second[i], destination.operands[i],
+          UpdateBufferAlias(arguments->at(i), destination.operands[i],
                             true);
       }
       continue;
@@ -1135,31 +1241,33 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
 
   auto UpdatePreloadBuffersGenInfo = [&](OpInfo &info) {
     for (const std::string &preloadBuffer : preloadBuffers)
-      for (const std::string &buffer : GetAliasBuffers(preloadBuffer)) {
+      ForEachAlias(preloadBuffer, [&](const std::string &buffer) {
         auto status = buffer2status.find(buffer);
         if (status == buffer2status.end() ||
             status->second != BufferStatus::DEFFINED)
-          continue;
+          return true;
         info.gen.push_back(buffer);
         status->second = BufferStatus::GENED;
-      }
+        return true;
+      });
   };
   auto UpdatePreloadBuffersKillInfo = [&](OpInfo &info) {
     for (const std::string &preloadBuffer : preloadBuffers)
-      for (const std::string &buffer : GetAliasBuffers(preloadBuffer)) {
+      ForEachAlias(preloadBuffer, [&](const std::string &buffer) {
         auto status = buffer2status.find(buffer);
         if (status == buffer2status.end() ||
             status->second != BufferStatus::GENED)
-          continue;
+          return true;
         info.kill.push_back(buffer);
         status->second = BufferStatus::KILLED;
-      }
+        return true;
+      });
   };
   auto UpdatePreloadBuffersGenKillMap = [&]() {
     int parentForOperationId = -1;
     for (const OpInfo &info : linearOperation) {
-      if (info.operation.opName == "scope.scope") {
-        parentForOperationId = GetParentOperationId(info.operation);
+      if (info.operation->opName == "scope.scope") {
+        parentForOperationId = GetParentOperationId(*info.operation);
         break;
       }
     }
@@ -1167,7 +1275,7 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
       return;
     size_t count = 0;
     for (OpInfo &info : linearOperation) {
-      if (info.operation.operationId != parentForOperationId)
+      if (info.operation->operationId != parentForOperationId)
         continue;
       if (count == 0) {
         UpdatePreloadBuffersGenInfo(info);
@@ -1211,8 +1319,6 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
     }
   };
   InitializeInplacePairList();
-  std::vector<std::pair<std::string, std::string>> initialInplacePairList =
-      inplacePairList;
 
   std::set<int> inplaceOpSet;
   std::vector<std::pair<std::string, std::string>> inplacableBufferPairs;
@@ -1241,7 +1347,8 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
     return false;
   };
 
-  auto VisitDstOpTypeReachable = [&resolveAlloc, &operations](
+  auto VisitDstOpTypeReachable = [&resolveAlloc, &operations,
+                                  &operationIndex](
                                      const std::string &src,
                                      const std::string &dstOpName,
                                      const std::vector<std::pair<std::string,
@@ -1257,18 +1364,13 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
           // PlanMemory deliberately returns after the first view-like user,
           // even when that branch does not reach dst, so this order affects
           // whether a later view branch is considered.
-          for (auto operation = operations.begin();
-               operation != operations.end(); ++operation) {
-            const std::vector<std::string> operands =
-                operationOperandNames(*operation);
-            if (std::find(operands.begin(), operands.end(), current) ==
-                operands.end())
-              continue;
-            if (operation->opName == dstOpName)
+          for (size_t position : operationIndex.users(current)) {
+            const OperationRecord &operation = operations[position];
+            if (operation.opName == dstOpName)
               return true;
-            if (isViewLikeMemrefOp(operation->opName)) {
-              const std::vector<std::string> results =
-                  operationResultNames(*operation);
+            if (isViewLikeMemrefOp(operation.opName)) {
+              const std::vector<std::string> &results =
+                  operationIndex.results(operation);
               return !results.empty() && visit(results.front());
             }
           }
@@ -1315,16 +1417,16 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
   auto GenerateInplaceList = [&]() {
     for (const OpInfo &info : linearOperation) {
       if ((info.gen.empty() && info.kill.empty()) ||
-          inplaceOpSet.count(info.operation.operationId))
+          inplaceOpSet.count(info.operation->operationId))
         continue;
       for (const std::string &gen : info.gen) {
         if (ignoreInplaceBuffers.count(gen))
           continue;
         for (const std::string &kill : info.kill) {
           if (ignoreInplaceBuffers.count(kill) ||
-              allocExtentBits[kill] < allocExtentBits[gen])
+              GetAllocExtentBits(kill) < GetAllocExtentBits(gen))
             continue;
-          if (!IsReuseHIVMOp(info.operation, gen, kill, traceback,
+          if (!IsReuseHIVMOp(*info.operation, gen, kill, traceback,
                              allocNames, restrictInplaceAsISA))
             continue;
           if (InplaceStallPipeline(gen, kill, inplacePairList))
@@ -1333,7 +1435,7 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
           break;
         }
       }
-      inplaceOpSet.insert(info.operation.operationId);
+      inplaceOpSet.insert(info.operation->operationId);
     }
   };
   GenerateInplaceList();
@@ -1349,27 +1451,24 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
 
   LifetimeAnalysis analysis;
   for (const OpInfo &info : linearOperation) {
-    analysis.operations.push_back(info.operation);
-    if (!info.gen.empty() || !info.kill.empty())
-      analysis.genKillMap.push_back({info.index, info.gen, info.kill});
+    if (materializeStaticStorageFacts)
+      analysis.operations.push_back(*info.operation);
     for (const std::string &gen : info.gen)
       analysis.bufferGenOrder.push_back(gen);
   }
-  analysis.initialInplacePairList = initialInplacePairList;
   analysis.inplacePairList = inplacePairList;
   analysis.inplacableBufferPairs = inplacableBufferPairs;
   analysis.buffer2MultiNum = buffer2MultiNum;
-  for (const std::string &name : allocNames)
-    analysis.bufferIgnoreInplace[name] = ignoreInplaceBuffers.count(name) != 0;
-  analysis.liveShuffleTrace = std::move(liveShuffleTrace);
-  for (const OperationRecord &operation : operations) {
-    std::vector<std::string> values = operationOperandNames(operation);
-    std::vector<std::string> results = operationResultNames(operation);
-    values.insert(values.end(), results.begin(), results.end());
-    for (const std::string &value : values)
-      if (auto alloc = resolveAlloc(value))
-        analysis.canonicalAllocByValue[value] = *alloc;
-  }
+  if (materializeStaticStorageFacts)
+    for (const OperationRecord &operation : operations) {
+      std::vector<std::string> values = operationIndex.operands(operation);
+      const std::vector<std::string> &results =
+          operationIndex.results(operation);
+      values.insert(values.end(), results.begin(), results.end());
+      for (const std::string &value : values)
+        if (auto alloc = resolveAlloc(value))
+          analysis.canonicalAllocByValue[value] = *alloc;
+    }
   std::vector<std::string> sortedNames = allocOrder;
   std::sort(sortedNames.begin(), sortedNames.end(), ssaLess);
   for (const std::string &name : sortedNames) {
@@ -1403,6 +1502,15 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
   return analysis;
 }
 
+inline LifetimeAnalysis
+buildMemLivenessAnalysis(const PlanMemoryInput &input,
+                         uint32_t randomSeed = 0,
+                         bool restrictInplaceAsISA = false) {
+  PreparedMemLivenessAnalysis prepared(input);
+  return buildMemLivenessAnalysis(input, prepared, randomSeed,
+                                  restrictInplaceAsISA);
+}
+
 inline LifetimeAnalysis analyzeLifetimes(const fs::path &beforeIR,
                                          const std::string &coreType = "AIV",
                                          uint32_t randomSeed = 0,
@@ -1415,6 +1523,17 @@ inline LifetimeAnalysis analyzeLifetimes(const PlanMemoryInput &input,
                                          uint32_t randomSeed = 0,
                                          bool restrictInplaceAsISA = false) {
   return buildMemLivenessAnalysis(input, randomSeed, restrictInplaceAsISA);
+}
+
+inline LifetimeAnalysis
+analyzeLifetimes(const PlanMemoryInput &input,
+                 const PreparedMemLivenessAnalysis &prepared,
+                 uint32_t randomSeed = 0,
+                 bool restrictInplaceAsISA = false,
+                 bool materializeStaticStorageFacts = true) {
+  return buildMemLivenessAnalysis(input, prepared, randomSeed,
+                                  restrictInplaceAsISA,
+                                  materializeStaticStorageFacts);
 }
 
 inline std::vector<BufferInfoRecord>

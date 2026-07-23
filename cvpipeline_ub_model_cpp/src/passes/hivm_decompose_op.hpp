@@ -13,6 +13,11 @@ struct DecomposeBufferAllocation {
 
 using DecomposeOperationDelta = std::map<std::string, int64_t>;
 
+struct HIVMDecomposeResult {
+  std::vector<DecomposeBufferAllocation> allocations;
+  DecomposeOperationDelta operationDelta;
+};
+
 inline std::string DecomposeEnumValue(const std::string &text) {
   const size_t open = text.rfind('<');
   const size_t close = text.rfind('>');
@@ -60,13 +65,18 @@ public:
       : module(inputModule), function(std::move(functionName)) {}
 
   std::vector<DecomposeBufferAllocation> Run() const {
-    std::vector<DecomposeBufferAllocation> result;
+    return RunCombined().allocations;
+  }
+
+  HIVMDecomposeResult RunCombined() const {
+    HIVMDecomposeResult result;
     for (const GenericOperation &operation : module.operations) {
       const GenericOperation *owner = enclosingFunction(operation);
       if (!owner || (!function.empty() && functionName(*owner) != function) ||
           isHost(*owner))
         continue;
-      appendAllocations(operation, result);
+      appendAllocations(operation, result.allocations);
+      appendOperationDelta(operation, result.operationDelta);
     }
     return result;
   }
@@ -371,6 +381,12 @@ inline DecomposeOperationDelta
 ModelHIVMDecomposeOperationDelta(const GenericModule &module,
                                  const std::string &function = "") {
   return HIVMDecomposeOpModel(module, function).OperationDelta();
+}
+
+inline HIVMDecomposeResult
+ModelHIVMDecompose(const GenericModule &module,
+                   const std::string &function = "") {
+  return HIVMDecomposeOpModel(module, function).RunCombined();
 }
 
 inline std::string SerializeDecomposeBufferAllocations(

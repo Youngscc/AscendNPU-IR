@@ -7,7 +7,15 @@ namespace cvub {
 
 class GenericRewriter {
 public:
-  explicit GenericRewriter(GenericModule &inputModule) : module(inputModule) {
+  enum class ValueInitialization { ScanExistingValues, SkipExistingValues };
+
+  explicit GenericRewriter(GenericModule &inputModule,
+                           GenericMutationListener *mutationListener = nullptr,
+                           ValueInitialization valueInitialization =
+                               ValueInitialization::ScanExistingValues)
+      : module(inputModule), listener(mutationListener) {
+    if (valueInitialization == ValueInitialization::SkipExistingValues)
+      return;
     for (const GenericBlock &block : inputModule.blocks)
       for (int argument : block.arguments)
         nextValue = std::max(nextValue, argument + 1);
@@ -37,7 +45,12 @@ public:
     for (size_t index = 0; index < resultTypes.size(); ++index)
       operation.results.push_back(nextValue++);
     module.operations.push_back(std::move(operation));
-    return static_cast<int>(module.operations.size() - 1);
+    const int operationId = static_cast<int>(module.operations.size() - 1);
+    markDirty(operationId);
+    if (listener)
+      listener->operationCreated(
+          module.operations.at(static_cast<size_t>(operationId)));
+    return operationId;
   }
 
   int createRegion(int parentOperation) {
@@ -50,6 +63,8 @@ public:
     module.regions.push_back(std::move(region));
     module.operations.at(static_cast<size_t>(parentOperation))
         .regions.push_back(static_cast<int>(module.regions.size() - 1));
+    if (listener)
+      listener->regionCreated(module.regions.back());
     return static_cast<int>(module.regions.size() - 1);
   }
 
@@ -65,6 +80,8 @@ public:
     module.blocks.push_back(std::move(block));
     module.regions.at(static_cast<size_t>(region))
         .blocks.push_back(static_cast<int>(module.blocks.size() - 1));
+    if (listener)
+      listener->blockCreated(module.blocks.back());
     return static_cast<int>(module.blocks.size() - 1);
   }
 
@@ -72,8 +89,11 @@ public:
     GenericBlock &record = module.blocks.at(static_cast<size_t>(block));
     GenericOperation &op =
         module.operations.at(static_cast<size_t>(operation));
+    const int oldBlock = op.blockId;
     op.ordinal = static_cast<int>(record.operations.size());
     record.operations.push_back(operation);
+    if (listener)
+      listener->operationMoved(operation, oldBlock, block);
   }
 
   void insertToBlock(int block, size_t position, int operation) {
@@ -82,6 +102,7 @@ public:
       position = record.operations.size();
     GenericOperation &op =
         module.operations.at(static_cast<size_t>(operation));
+    const int oldBlock = op.blockId;
     op.blockId = block;
     op.regionId = record.regionId;
     op.parentId = module.regions.at(static_cast<size_t>(record.regionId))
@@ -89,25 +110,43 @@ public:
     record.operations.insert(record.operations.begin() +
                                  static_cast<std::ptrdiff_t>(position),
                              operation);
-    for (size_t index = 0; index < record.operations.size(); ++index)
+    for (size_t index = position; index < record.operations.size(); ++index)
       module.operations.at(static_cast<size_t>(record.operations[index]))
           .ordinal = static_cast<int>(index);
+    if (listener)
+      listener->operationMoved(operation, oldBlock, block);
   }
 
   void removeFromBlock(int block, int operation) {
     GenericBlock &record = module.blocks.at(static_cast<size_t>(block));
-    record.operations.erase(
-        std::remove(record.operations.begin(), record.operations.end(),
-                    operation),
-        record.operations.end());
-    for (size_t index = 0; index < record.operations.size(); ++index)
+    const GenericOperation &target =
+        module.operations.at(static_cast<size_t>(operation));
+    auto first = record.operations.end();
+    if (target.ordinal >= 0 &&
+        static_cast<size_t>(target.ordinal) < record.operations.size() &&
+        record.operations[static_cast<size_t>(target.ordinal)] == operation)
+      first = record.operations.begin() + target.ordinal;
+    else
+      first = std::find(record.operations.begin(), record.operations.end(),
+                        operation);
+    const size_t firstAffected =
+        first == record.operations.end()
+            ? record.operations.size()
+            : static_cast<size_t>(
+                  std::distance(record.operations.begin(), first));
+    if (first != record.operations.end())
+      record.operations.erase(first);
+    for (size_t index = firstAffected; index < record.operations.size();
+         ++index)
       module.operations.at(static_cast<size_t>(record.operations[index]))
           .ordinal = static_cast<int>(index);
+    if (listener)
+      listener->operationMoved(operation, block, -1);
   }
 
   int cloneOperation(int sourceId, int parent, int region, int block,
                      const std::map<int, int> &values) {
-    const GenericOperation source =
+    const GenericOperation &source =
         module.operations.at(static_cast<size_t>(sourceId));
     std::vector<int> operands = source.operands;
     for (int &operand : operands) {
@@ -115,13 +154,23 @@ public:
       if (mapped != values.end())
         operand = mapped->second;
     }
+    // Preserve only the supplemental fields needed after createOperation.
+    // Copying the complete source also copied large textual/CFG payloads for
+    // every clone even though createOperation intentionally rebuilds the
+    // structural fields.
+    const std::string effects = source.effects;
+    const int projectionSourceId = source.projectionSourceId;
+    std::vector<int> dpsInputs = source.dpsInputs;
+    std::vector<int> dpsInits = source.dpsInits;
+    const std::vector<int> successors = source.successors;
     const int clone = createOperation(
         parent, region, block, source.name, source.resultTypes, operands,
         source.operandTypes, source.properties, source.attributes);
     GenericOperation &result = module.operations.at(static_cast<size_t>(clone));
-    result.effects = source.effects;
-    result.dpsInputs = source.dpsInputs;
-    result.dpsInits = source.dpsInits;
+    result.projectionSourceId = projectionSourceId;
+    result.effects = effects;
+    result.dpsInputs = std::move(dpsInputs);
+    result.dpsInits = std::move(dpsInits);
     for (int &value : result.dpsInputs) {
       auto mapped = values.find(value);
       if (mapped != values.end())
@@ -132,7 +181,7 @@ public:
       if (mapped != values.end())
         value = mapped->second;
     }
-    result.successors = source.successors;
+    result.successors = successors;
     return clone;
   }
 
@@ -171,9 +220,53 @@ public:
 
   int newValue() { return nextValue++; }
 
+  GenericOperation &modifyOperation(int operation) {
+    if (listener)
+      listener->operationWillModify(
+          module.operations.at(static_cast<size_t>(operation)));
+    markDirty(operation);
+    return module.operations.at(static_cast<size_t>(operation));
+  }
+
+  void replaceOperand(int operation, size_t operand, int value) {
+    GenericOperation &record =
+        module.operations.at(static_cast<size_t>(operation));
+    if (operand >= record.operands.size())
+      throw std::runtime_error("GenericRewriter: invalid operand replacement");
+    const int oldValue = record.operands[operand];
+    markDirty(operation);
+    record.operands[operand] = value;
+    if (listener)
+      listener->operandReplaced(operation, operand, oldValue, value);
+  }
+
+  void markDirty(int operation) {
+    if (operation < 0 ||
+        static_cast<size_t>(operation) >= module.operations.size())
+      throw std::runtime_error("GenericRewriter: invalid dirty operation");
+    if (dirtyFlags.size() < module.operations.size())
+      dirtyFlags.resize(module.operations.size(), false);
+    if (dirtyFlags[static_cast<size_t>(operation)])
+      return;
+    dirtyFlags[static_cast<size_t>(operation)] = true;
+    dirtyOperations.push_back(operation);
+  }
+
+  void applyDirtyOperationSemantics() {
+    for (int operation : dirtyOperations)
+      ApplyOperationSemantics(
+          module.operations.at(static_cast<size_t>(operation)));
+    for (int operation : dirtyOperations)
+      dirtyFlags[static_cast<size_t>(operation)] = false;
+    dirtyOperations.clear();
+  }
+
 private:
   GenericModule &module;
+  GenericMutationListener *listener = nullptr;
   int nextValue = 0;
+  std::vector<int> dirtyOperations;
+  std::vector<bool> dirtyFlags;
 };
 
 inline bool GenericOperationDominates(const GenericModule &module,

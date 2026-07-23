@@ -44,11 +44,30 @@ inline std::set<std::string> BufferAlternatives(const std::string &buffer) {
 class HIVMOptSinglePointModel {
 public:
   explicit HIVMOptSinglePointModel(const BufferizedSemanticIR &inputModule)
-      : module(inputModule) {
+      : module(inputModule),
+        useSharedAnalysis(inputModule.logicalContext.analysis.provides(
+            kGenericAnalysisDefinitions | kGenericAnalysisUsers |
+            kGenericAnalysisValueTypes)) {
     for (size_t index = 0; index < module.allocations.size(); ++index)
       allocationTypes[LocalBufferId(index)] = module.allocations[index].type;
-    for (const BufferizedOperandAccess &access : module.accesses)
-      operationBuffers[access.operationId].push_back(access.bufferId);
+    int maximumArgument = -1;
+    for (const GenericBlock &block : module.logicalModule.blocks)
+      for (int value : block.arguments)
+        maximumArgument = std::max(maximumArgument, value);
+    const size_t argumentIndexSize =
+        maximumArgument < 0 ? 0 : static_cast<size_t>(maximumArgument) + 1;
+    argumentBlockIds.assign(argumentIndexSize, -1);
+    argumentNumbers.assign(argumentIndexSize, -1);
+    for (const GenericBlock &block : module.logicalModule.blocks)
+      for (size_t index = 0; index < block.arguments.size(); ++index) {
+        const int value = block.arguments[index];
+        if (value < 0 ||
+            static_cast<size_t>(value) >= argumentBlockIds.size())
+          continue;
+        argumentBlockIds[static_cast<size_t>(value)] = block.id;
+        argumentNumbers[static_cast<size_t>(value)] =
+            static_cast<int>(index);
+      }
     indexCanonicalizedIterArgs();
   }
 
@@ -119,10 +138,8 @@ public:
 
 private:
   std::string valueBuffer(int value) const {
-    for (const BufferizedValueBinding &binding : module.values)
-      if (binding.valueId == value)
-        return binding.bufferId;
-    return "";
+    const std::string *buffer = FindBufferizedValueBuffer(module, value);
+    return buffer ? *buffer : std::string();
   }
 
   std::map<std::string, size_t> collectCanonicalizedIterArgResults(
@@ -199,6 +216,8 @@ private:
   }
 
   size_t valueUseCount(int value) const {
+    if (useSharedAnalysis)
+      return module.logicalContext.analysis.users(value).size();
     size_t count = 0;
     for (const GenericOperation &operation : module.logicalModule.operations)
       count += static_cast<size_t>(
@@ -246,7 +265,25 @@ private:
     while (!worklist.empty()) {
       const int value = worklist.back();
       worklist.pop_back();
-      for (const GenericOperation &user : module.logicalModule.operations) {
+      std::vector<int> fallbackUsers;
+      const std::vector<int> *users = nullptr;
+      if (useSharedAnalysis) {
+        users = &module.logicalContext.analysis.users(value);
+      } else {
+        for (const GenericOperation &candidate :
+             module.logicalModule.operations)
+          if (std::find(candidate.operands.begin(), candidate.operands.end(),
+                        value) != candidate.operands.end())
+            fallbackUsers.push_back(candidate.id);
+        users = &fallbackUsers;
+      }
+      int previousUser = -1;
+      for (int userId : *users) {
+        if (userId == previousUser)
+          continue;
+        previousUser = userId;
+        const GenericOperation &user = module.logicalModule.operations.at(
+            static_cast<size_t>(userId));
         for (size_t operandNumber = 0;
              operandNumber < user.operands.size(); ++operandNumber) {
           if (user.operands[operandNumber] != value)
@@ -283,6 +320,22 @@ private:
 
   const GenericOperation *definingOperation(int value,
                                              size_t &resultNumber) const {
+    if (useSharedAnalysis) {
+      const int operationId =
+          module.logicalContext.analysis.definingOperationId(value);
+      if (operationId < 0)
+        return nullptr;
+      const GenericOperation &operation = module.logicalModule.operations.at(
+          static_cast<size_t>(operationId));
+      auto result =
+          std::find(operation.results.begin(), operation.results.end(), value);
+      if (result != operation.results.end()) {
+        resultNumber =
+            static_cast<size_t>(result - operation.results.begin());
+        return &operation;
+      }
+      return nullptr;
+    }
     for (const GenericOperation &operation : module.logicalModule.operations)
       for (size_t index = 0; index < operation.results.size(); ++index)
         if (operation.results[index] == value) {
@@ -293,12 +346,14 @@ private:
   }
 
   const GenericBlock *argumentBlock(int value, size_t &argumentNumber) const {
-    for (const GenericBlock &block : module.logicalModule.blocks)
-      for (size_t index = 0; index < block.arguments.size(); ++index)
-        if (block.arguments[index] == value) {
-          argumentNumber = index;
-          return &block;
-        }
+    if (value < 0 || static_cast<size_t>(value) >= argumentBlockIds.size())
+      return nullptr;
+    const int block = argumentBlockIds[static_cast<size_t>(value)];
+    const int argument = argumentNumbers[static_cast<size_t>(value)];
+    if (block >= 0 && argument >= 0) {
+      argumentNumber = static_cast<size_t>(argument);
+      return &module.logicalModule.blocks.at(static_cast<size_t>(block));
+    }
     return nullptr;
   }
 
@@ -486,6 +541,19 @@ private:
   std::vector<std::string> buffersForOperation(
       int operation,
       const std::set<std::pair<int, int>> *ignored = nullptr) const {
+    if (module.indexedAccessCount == module.accesses.size() && operation >= 0 &&
+        static_cast<size_t>(operation) < module.buffersByOperation.size()) {
+      std::vector<std::string> result;
+      const std::vector<std::string> &buffers =
+          module.buffersByOperation[static_cast<size_t>(operation)];
+      result.reserve(buffers.size());
+      for (size_t operand = 0; operand < buffers.size(); ++operand)
+        if (!buffers[operand].empty() &&
+            (!ignored ||
+             ignored->count({operation, static_cast<int>(operand)}) == 0))
+          result.push_back(buffers[operand]);
+      return result;
+    }
     std::vector<std::pair<int, std::string>> ordered;
     for (const BufferizedOperandAccess &access : module.accesses) {
       if (access.operationId != operation ||
@@ -542,25 +610,27 @@ private:
   }
 
   bool isScalarized(const GenericOperation &operation) const {
-    auto buffers = operationBuffers.find(operation.id);
-    if (buffers == operationBuffers.end() || buffers->second.empty())
+    const std::vector<std::string> buffers = buffersForOperation(operation.id);
+    if (buffers.empty())
       return false;
     if (operation.name == "tensor.insert" ||
         operation.name == "tensor.extract")
-      return bufferHasSinglePointType(buffers->second.back(), false);
+      return bufferHasSinglePointType(buffers.back(), false);
     if (operation.name == "hivm.hir.vbrc")
-      return bufferHasSinglePointType(buffers->second.back(), false);
+      return bufferHasSinglePointType(buffers.back(), false);
     static const std::set<std::string> elementwise = {
         "hivm.hir.vadd", "hivm.hir.vsub", "hivm.hir.vmul",
         "hivm.hir.vdiv", "hivm.hir.vabs", "hivm.hir.vsqrt",
         "hivm.hir.vmax", "hivm.hir.vmin"};
     return elementwise.count(operation.name) != 0 &&
-           bufferHasSinglePointType(buffers->second.back(), true);
+           bufferHasSinglePointType(buffers.back(), true);
   }
 
   const BufferizedSemanticIR &module;
+  bool useSharedAnalysis = false;
   std::map<std::string, std::string> allocationTypes;
-  std::map<int, std::vector<std::string>> operationBuffers;
+  std::vector<int> argumentBlockIds;
+  std::vector<int> argumentNumbers;
   std::set<std::pair<int, int>> ignoredIterArgAccesses;
 };
 

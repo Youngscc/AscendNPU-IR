@@ -1,6 +1,7 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_SPLIT_MIX_KERNEL_HPP
 #define CVPIPELINE_UB_MODEL_CPP_SPLIT_MIX_KERNEL_HPP
 
+#include "../ir/generic_analysis.hpp"
 #include "../ir/generic_rewriter.hpp"
 #include "one_shot_bufferize.hpp"
 #include "../ir/operation_folder.hpp"
@@ -482,31 +483,30 @@ inline bool FoldSplitMixBooleanOperation(
 inline void AnnotateSplitMixOperand(
     GenericModule &module, int value, SplitMixCoreType retainedCore,
     GenericRewriter &rewriter, std::set<int> &activeOperations,
-    std::set<int> &visiting) {
+    std::set<int> &visiting,
+    const GenericModuleAnalysisIndexes &analysis) {
   if (!visiting.insert(value).second)
     return;
-  const std::map<int, const GenericOperation *> definitions =
-      DefiningOperations(module);
-  auto definition = definitions.find(value);
-  if (definition == definitions.end()) {
+  const int definition = analysis.definingOperationId(value);
+  if (definition < 0) {
     visiting.erase(value);
     return;
   }
-  const GenericOperation producer = *definition->second;
+  const GenericOperation producer =
+      module.operations.at(static_cast<size_t>(definition));
   const SplitMixCoreType producerCore = GetSplitMixCoreType(producer);
   if (producerCore == retainedCore) {
     if (producer.blockId < 0) {
       visiting.erase(value);
       return;
     }
-    const std::map<int, std::string> valueTypes = ValueTypes(module);
-    auto type = valueTypes.find(value);
-    if (type == valueTypes.end())
+    const std::string *type = analysis.valueType(value);
+    if (!type)
       throw std::runtime_error(
           "SplitMixKernel: annotated operand has no type");
     const int mark = rewriter.createOperation(
         producer.parentId, producer.regionId, producer.blockId,
-        "annotation.mark", {}, {value}, {type->second});
+        "annotation.mark", {}, {value}, {*type});
     rewriter.insertToBlock(producer.blockId,
                            static_cast<size_t>(producer.ordinal + 1), mark);
     activeOperations.insert(mark);
@@ -516,7 +516,7 @@ inline void AnnotateSplitMixOperand(
                                         : producer.dpsInputs;
     for (int operand : inputs)
       AnnotateSplitMixOperand(module, operand, retainedCore, rewriter,
-                              activeOperations, visiting);
+                              activeOperations, visiting, analysis);
   }
   visiting.erase(value);
 }
@@ -524,14 +524,15 @@ inline void AnnotateSplitMixOperand(
 inline void AnnotateSplitMixOperationInputs(
     GenericModule &module, const GenericOperation &operation,
     SplitMixCoreType retainedCore, GenericRewriter &rewriter,
-    std::set<int> &activeOperations) {
+    std::set<int> &activeOperations,
+    const GenericModuleAnalysisIndexes &analysis) {
   const std::vector<int> inputs = operation.dpsInputs.empty()
                                       ? operation.operands
                                       : operation.dpsInputs;
   std::set<int> visiting;
   for (int operand : inputs)
     AnnotateSplitMixOperand(module, operand, retainedCore, rewriter,
-                            activeOperations, visiting);
+                            activeOperations, visiting, analysis);
 
   // annotateOpOperand also propagates through LoopLikeOpInterface yielded
   // values and through both scf.if yields. Those values are not ordinary DPS
@@ -562,7 +563,7 @@ inline void AnnotateSplitMixOperationInputs(
       for (size_t index = first; index < terminator.operands.size(); ++index)
         AnnotateSplitMixOperand(module, terminator.operands[index],
                                 retainedCore, rewriter, activeOperations,
-                                visiting);
+                                visiting, analysis);
     }
   }
 }
@@ -576,16 +577,29 @@ inline GenericModule RunSplitMixKernelProjection(
   const SplitMixCoreType filteredCore =
       retainedCore == SplitMixCoreType::Vector ? SplitMixCoreType::Cube
                                                : SplitMixCoreType::Vector;
+  // The projection is meaningful only for functions that still carry the
+  // MIX core type.  Most corpus inputs are already AIV-only at this point.
+  // Detect that cheap no-op case before building the module-wide definition,
+  // type and active-operation indexes.
+  std::vector<int> mixFunctions;
+  for (const GenericOperation &operation : module.operations)
+    if (IsSplitMixFunction(operation))
+      mixFunctions.push_back(operation.id);
+  if (mixFunctions.empty())
+    return module;
+
+  // Projection inserts resultless annotation.mark operations and removes
+  // operations from blocks, but it does not redefine existing SSA values.
+  // Definitions and value types are therefore immutable throughout the
+  // projection and can be indexed once for every recursive annotation walk.
+  const GenericModuleAnalysisIndexes analysis(
+      module, kGenericAnalysisDefinitions | kGenericAnalysisValueTypes);
   std::set<int> activeOperations;
   for (const GenericBlock &block : module.blocks)
     activeOperations.insert(block.operations.begin(), block.operations.end());
 
   bool changed = false;
   std::vector<int> vectorFunctions;
-  std::vector<int> mixFunctions;
-  for (const GenericOperation &operation : module.operations)
-    if (IsSplitMixFunction(operation))
-      mixFunctions.push_back(operation.id);
   for (int functionId : mixFunctions) {
     GenericOperation &function =
         module.operations.at(static_cast<size_t>(functionId));
@@ -632,7 +646,7 @@ inline GenericModule RunSplitMixKernelProjection(
       }
       AnnotateSplitMixOperationInputs(
           module, operation, retainedCore, rewriter,
-          activeOperations);
+          activeOperations, analysis);
       if (operation.results.size() > operation.dpsInits.size())
         throw std::runtime_error(
             "SplitMixKernel: CUBE result has no DPS init replacement: " +

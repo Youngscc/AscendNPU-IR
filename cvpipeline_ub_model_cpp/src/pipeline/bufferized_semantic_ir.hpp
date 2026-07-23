@@ -2,6 +2,8 @@
 #define CVPIPELINE_UB_MODEL_CPP_BUFFERIZED_SEMANTIC_IR_HPP
 
 #include "../analysis/one_shot_analysis.hpp"
+#include "../analysis/generic_pipeline_context.hpp"
+#include "../ir/generic_analysis.hpp"
 
 namespace cvub {
 
@@ -20,11 +22,100 @@ struct BufferizedOperandAccess {
 
 struct BufferizedSemanticIR {
   GenericModule logicalModule;
+  GenericPipelineSnapshotContext logicalContext;
   PreBufferizationCSEState preBufferizationCSE;
   std::vector<BufferAllocation> allocations;
   std::vector<BufferizedValueBinding> values;
   std::vector<BufferizedOperandAccess> accesses;
+  // Read-only dense indexes derived from values/accesses. Generic value and
+  // operation IDs are non-negative dense integers, so tree maps add an
+  // allocation and string copy at every stage boundary for no semantic gain.
+  // Keep the ordered source records authoritative for serialization, while
+  // all normal pipeline queries share these O(1) indexes.
+  std::vector<std::string> bufferByValue;
+  std::vector<std::vector<std::string>> buffersByOperation;
+  size_t indexedValueCount = 0;
+  size_t indexedAccessCount = 0;
 };
+
+inline const std::string *
+FindBufferizedValueBuffer(const BufferizedSemanticIR &module, int valueId) {
+  if (module.indexedValueCount == module.values.size()) {
+    if (valueId < 0 ||
+        static_cast<size_t>(valueId) >= module.bufferByValue.size() ||
+        module.bufferByValue[static_cast<size_t>(valueId)].empty())
+      return nullptr;
+    return &module.bufferByValue[static_cast<size_t>(valueId)];
+  }
+  // Focused tests and embedding callers may assemble the public records
+  // directly. Preserve that construction path without penalizing the normal
+  // immutable pipeline state.
+  for (const BufferizedValueBinding &binding : module.values)
+    if (binding.valueId == valueId)
+      return &binding.bufferId;
+  return nullptr;
+}
+
+inline const std::string *FindBufferizedOperationBuffer(
+    const BufferizedSemanticIR &module, int operationId, size_t operand) {
+  if (module.indexedAccessCount == module.accesses.size()) {
+    if (operationId < 0 ||
+        static_cast<size_t>(operationId) >= module.buffersByOperation.size())
+      return nullptr;
+    const std::vector<std::string> &operation =
+        module.buffersByOperation[static_cast<size_t>(operationId)];
+    if (operand >= operation.size() || operation[operand].empty())
+      return nullptr;
+    return &operation[operand];
+  }
+  for (const BufferizedOperandAccess &access : module.accesses)
+    if (access.operationId == operationId && access.operandNumber >= 0 &&
+        static_cast<size_t>(access.operandNumber) == operand)
+      return &access.bufferId;
+  return nullptr;
+}
+
+template <typename Callback>
+inline void ForEachBufferizedOperationBuffer(
+    const BufferizedSemanticIR &module, int operationId, Callback &&callback) {
+  if (module.indexedAccessCount == module.accesses.size()) {
+    if (operationId < 0 ||
+        static_cast<size_t>(operationId) >= module.buffersByOperation.size())
+      return;
+    const std::vector<std::string> &operation =
+        module.buffersByOperation[static_cast<size_t>(operationId)];
+    for (size_t operand = 0; operand < operation.size(); ++operand)
+      if (!operation[operand].empty())
+        callback(operand, operation[operand]);
+    return;
+  }
+  for (const BufferizedOperandAccess &access : module.accesses)
+    if (access.operationId == operationId && access.operandNumber >= 0)
+      callback(static_cast<size_t>(access.operandNumber), access.bufferId);
+}
+
+inline std::map<size_t, std::string>
+BufferizedOperationBuffers(const BufferizedSemanticIR &module,
+                           int operationId) {
+  if (module.indexedAccessCount == module.accesses.size()) {
+    std::map<size_t, std::string> result;
+    ForEachBufferizedOperationBuffer(
+        module, operationId,
+        [&](size_t operand, const std::string &buffer) {
+          result.emplace(operand, buffer);
+        });
+    return result;
+  }
+
+  // Focused tests and embedding callers may assemble the public semantic
+  // state directly. Keep the ordered records authoritative for those mutable
+  // construction paths; normal pipeline states use the shared index above.
+  std::map<size_t, std::string> result;
+  for (const BufferizedOperandAccess &access : module.accesses)
+    if (access.operationId == operationId)
+      result[static_cast<size_t>(access.operandNumber)] = access.bufferId;
+  return result;
+}
 
 inline std::string LocalBufferId(size_t ordinal) {
   return "local:" + std::to_string(ordinal);
@@ -33,13 +124,26 @@ inline std::string LocalBufferId(size_t ordinal) {
 class BufferizedSemanticIRBuilder {
 public:
   BufferizedSemanticIRBuilder(
-      const GenericModule &inputModule,
+      GenericModule inputModule,
       std::vector<BufferAllocation> inputAllocations,
-      PreBufferizationCSEState inputPreBufferizationCSE)
-      : module(inputModule), allocations(std::move(inputAllocations)),
-        preBufferizationCSE(std::move(inputPreBufferizationCSE)),
-        valueTypes(ValueTypes(inputModule)),
-        definitions(DefiningOperations(inputModule)) {
+      PreBufferizationCSEState inputPreBufferizationCSE,
+      GenericModuleAnalysisIndexes inputAnalysis)
+      : module(std::move(inputModule)),
+        analysis(std::move(inputAnalysis)),
+        allocations(std::move(inputAllocations)),
+        preBufferizationCSE(std::move(inputPreBufferizationCSE)) {
+    constexpr unsigned requiredAnalysis =
+        kGenericAnalysisDefinitions | kGenericAnalysisUsers |
+        kGenericAnalysisValueTypes | kGenericAnalysisEnclosingFunctions;
+    // Preserve the public/manual construction path while the normal pipeline
+    // moves the already-built OneShot snapshot through without rescanning.
+    if (!analysis.provides(requiredAnalysis))
+      analysis.Build(module, requiredAnalysis);
+    else
+      analysis.ensureCompatible(module);
+    blockArguments.assign(analysis.valueCount(), {-1, -1});
+    buffers.resize(analysis.valueCount());
+    fixedBuffers.assign(analysis.valueCount(), false);
     indexBlockArguments();
     indexAllocationOwners();
   }
@@ -51,27 +155,58 @@ public:
     propagateTensorBuffers();
 
     BufferizedSemanticIR result;
-    result.logicalModule = module;
-    result.preBufferizationCSE = preBufferizationCSE;
-    result.allocations = allocations;
-    for (const auto &[value, type] : valueTypes) {
-      if (!IsTensorType(type) && !IsMemRefType(type))
+    for (size_t valueOrdinal = 0; valueOrdinal < analysis.valueCount();
+         ++valueOrdinal) {
+      const int value = static_cast<int>(valueOrdinal);
+      const std::string *type = analysis.valueType(value);
+      if (!type || (!IsTensorType(*type) && !IsMemRefType(*type)))
         continue;
-      auto definition = definitions.find(value);
-      if (definition != definitions.end() &&
+      const int definitionId = analysis.definingOperationId(value);
+      const GenericOperation *definition =
+          definitionId < 0
+              ? nullptr
+              : &module.operations.at(static_cast<size_t>(definitionId));
+      if (definition &&
           preBufferizationCSE.erasedOperations.count(
-              definition->second->id) != 0)
+              definition->id) != 0)
         continue;
       if (preBufferizationCSE.elidedTensorEmptyResults.count(value) != 0)
         continue;
       if (bufferForValue(value) == "dead")
         continue;
-      result.values.push_back(
-          {value, bufferForValue(value),
-           IsTensorType(type) ? ConvertTensorToMemRefType(type) : type,
-           ownerForValue(value)});
+      BufferizedValueBinding binding{
+          value, bufferForValue(value),
+          IsTensorType(*type) ? ConvertTensorToMemRefType(*type) : *type,
+          ownerForValue(value)};
+      if (binding.valueId >= 0) {
+        const size_t valueId = static_cast<size_t>(binding.valueId);
+        if (result.bufferByValue.size() <= valueId)
+          result.bufferByValue.resize(valueId + 1);
+        result.bufferByValue[valueId] = binding.bufferId;
+      }
+      result.values.push_back(std::move(binding));
     }
+    result.indexedValueCount = result.values.size();
     collectAccesses(result.accesses);
+    result.buffersByOperation.resize(module.operations.size());
+    for (const BufferizedOperandAccess &access : result.accesses) {
+      if (access.operationId < 0 || access.operandNumber < 0)
+        continue;
+      const size_t operationId = static_cast<size_t>(access.operationId);
+      if (result.buffersByOperation.size() <= operationId)
+        result.buffersByOperation.resize(operationId + 1);
+      std::vector<std::string> &operation =
+          result.buffersByOperation[operationId];
+      const size_t operand = static_cast<size_t>(access.operandNumber);
+      if (operation.size() <= operand)
+        operation.resize(operand + 1);
+      operation[operand] = access.bufferId;
+    }
+    result.indexedAccessCount = result.accesses.size();
+    result.logicalContext.analysis = std::move(analysis);
+    result.logicalModule = std::move(module);
+    result.preBufferizationCSE = std::move(preBufferizationCSE);
+    result.allocations = std::move(allocations);
     return result;
   }
 
@@ -79,7 +214,7 @@ private:
   void indexBlockArguments() {
     for (const GenericBlock &block : module.blocks)
       for (size_t index = 0; index < block.arguments.size(); ++index)
-        blockArguments[block.arguments[index]] =
+        blockArguments.at(static_cast<size_t>(block.arguments[index])) =
             {block.id, static_cast<int>(index)};
   }
 
@@ -99,10 +234,6 @@ private:
   }
 
   void initializeExternalBuffers() {
-    std::map<int, size_t> useCounts;
-    for (const GenericOperation &operation : module.operations)
-      for (int operand : operation.operands)
-        ++useCounts[operand];
     for (const GenericBlock &block : module.blocks) {
       const GenericRegion &region =
           module.regions.at(static_cast<size_t>(block.regionId));
@@ -113,7 +244,7 @@ private:
       for (size_t index = 0; index < block.arguments.size(); ++index) {
         const std::string &type = block.argumentTypes[index];
         if (IsTensorType(type) || IsMemRefType(type))
-          buffers[block.arguments[index]] =
+          buffers.at(static_cast<size_t>(block.arguments[index])) =
               "arg:" + std::to_string(owner.id) + ":" +
               std::to_string(index);
       }
@@ -121,14 +252,16 @@ private:
     for (const GenericOperation &operation : module.operations) {
       if (operation.name == "memref_ext.alloc_workspace")
         for (int result : operation.results)
-          buffers[result] = "workspace:" + std::to_string(operation.id);
+          buffers.at(static_cast<size_t>(result)) =
+              "workspace:" + std::to_string(operation.id);
       if (operation.name == "hivm.hir.pointer_cast")
         for (int result : operation.results)
-          buffers[result] = "pointer:" + std::to_string(operation.id);
+          buffers.at(static_cast<size_t>(result)) =
+              "pointer:" + std::to_string(operation.id);
       if (operation.name == "bufferization.alloc_tensor")
         for (int result : operation.results)
-          if (useCounts[result] == 0)
-            buffers[result] = "dead";
+          if (analysis.users(result).empty())
+            buffers.at(static_cast<size_t>(result)) = "dead";
     }
   }
 
@@ -138,10 +271,10 @@ private:
         auto allocation = allocationBySource.find(
             resultSource(operation.id, static_cast<int>(index)));
         if (allocation != allocationBySource.end())
-          buffers[operation.results[index]] =
+          buffers.at(static_cast<size_t>(operation.results[index])) =
               LocalBufferId(allocation->second);
         if (allocation != allocationBySource.end())
-          fixedBuffers.insert(operation.results[index]);
+          fixedBuffers.at(static_cast<size_t>(operation.results[index])) = true;
       }
     }
   }
@@ -159,11 +292,14 @@ private:
             "hivm.hir.pointer_cast"};
         if (aliases.count(operation.name) == 0)
           continue;
-        auto source = buffers.find(operation.operands.front());
-        if (source == buffers.end())
+        const int sourceValue = operation.operands.front();
+        if (sourceValue < 0 ||
+            static_cast<size_t>(sourceValue) >= buffers.size() ||
+            buffers[static_cast<size_t>(sourceValue)].empty())
           continue;
         for (int result : operation.results)
-          changed |= setBuffer(result, source->second);
+          changed |= setBuffer(
+              result, buffers[static_cast<size_t>(sourceValue)]);
       }
     }
   }
@@ -181,21 +317,23 @@ private:
   bool setBuffer(int value, const std::string &buffer) {
     if (buffer.empty() || startsWith(buffer, "unresolved:"))
       return false;
-    auto found = buffers.find(value);
-    if (found == buffers.end()) {
-      buffers[value] = buffer;
+    if (value < 0 || static_cast<size_t>(value) >= buffers.size())
+      throw std::runtime_error("OneShotBufferize: invalid value ID");
+    std::string &found = buffers[static_cast<size_t>(value)];
+    if (found.empty()) {
+      found = buffer;
       return true;
     }
-    if (found->second == buffer)
+    if (found == buffer)
       return false;
-    if (fixedBuffers.count(value) != 0)
+    if (fixedBuffers[static_cast<size_t>(value)])
       return false;
-    if (startsWith(found->second, "unresolved:")) {
-      found->second = buffer;
+    if (startsWith(found, "unresolved:")) {
+      found = buffer;
       return true;
     }
     std::set<std::string> alternatives;
-    collectAlternatives(found->second, alternatives);
+    collectAlternatives(found, alternatives);
     collectAlternatives(buffer, alternatives);
     std::string choice = "choice(";
     for (const std::string &alternative : alternatives) {
@@ -204,9 +342,9 @@ private:
       choice += alternative;
     }
     choice += ')';
-    if (found->second == choice)
+    if (found == choice)
       return false;
-    found->second = choice;
+    found = choice;
     return true;
   }
 
@@ -325,38 +463,46 @@ private:
     auto alias = preBufferizationCSE.valueAliases.find(value);
     if (alias != preBufferizationCSE.valueAliases.end())
       value = alias->second;
-    auto found = buffers.find(value);
-    return found == buffers.end() ? "unresolved:" + std::to_string(value)
-                                  : found->second;
+    if (value < 0 || static_cast<size_t>(value) >= buffers.size() ||
+        buffers[static_cast<size_t>(value)].empty())
+      return "unresolved:" + std::to_string(value);
+    return buffers[static_cast<size_t>(value)];
   }
 
   std::string ownerForValue(int value) const {
-    auto definition = definitions.find(value);
-    if (definition != definitions.end())
-      return "result:" + std::to_string(definition->second->id);
-    auto argument = blockArguments.find(value);
-    if (argument != blockArguments.end())
-      return "block:" + std::to_string(argument->second.first) + ":" +
-             std::to_string(argument->second.second);
+    const int definitionId = analysis.definingOperationId(value);
+    const GenericOperation *definition =
+        definitionId < 0
+            ? nullptr
+            : &module.operations.at(static_cast<size_t>(definitionId));
+    if (definition)
+      return "result:" + std::to_string(definition->id);
+    if (value >= 0 && static_cast<size_t>(value) < blockArguments.size()) {
+      const std::pair<int, int> &argument =
+          blockArguments[static_cast<size_t>(value)];
+      if (argument.first >= 0)
+        return "block:" + std::to_string(argument.first) + ":" +
+               std::to_string(argument.second);
+    }
     return "unknown";
   }
 
-  const GenericModule &module;
+  GenericModule module;
+  GenericModuleAnalysisIndexes analysis;
   std::vector<BufferAllocation> allocations;
   PreBufferizationCSEState preBufferizationCSE;
-  std::map<int, std::string> valueTypes;
-  std::map<int, const GenericOperation *> definitions;
-  std::map<int, std::pair<int, int>> blockArguments;
+  std::vector<std::pair<int, int>> blockArguments;
   std::map<std::string, size_t> allocationBySource;
-  std::map<int, std::string> buffers;
-  std::set<int> fixedBuffers;
+  std::vector<std::string> buffers;
+  std::vector<bool> fixedBuffers;
 };
 
 inline BufferizedSemanticIR BuildBufferizedSemanticIR(
-    const GenericModule &module,
-    const OneShotBufferizationResult &bufferization) {
-  return BufferizedSemanticIRBuilder(module, bufferization.allocations,
-                                     bufferization.preBufferizationCSE)
+    GenericModule module, OneShotBufferizationResult bufferization) {
+  return BufferizedSemanticIRBuilder(
+             std::move(module), std::move(bufferization.allocations),
+             std::move(bufferization.preBufferizationCSE),
+             std::move(bufferization.analysis))
       .Build();
 }
 
