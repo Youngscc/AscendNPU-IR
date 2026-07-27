@@ -1,154 +1,180 @@
 # UB 溢出判定模型
 
-这个工具在真实编译前读取 `CVPipelining` 前的 Generic MLIR，精确模拟所有会影响
-PlanMemory 的变换和默认 seed-retry，判断当前 kernel 的 UB 规划是否会 overflow。
-`CVPipelining` 和 `MultiBuffer` 是必须建模的内部阶段，不是产品的最终结果。
+本模型在真实编译的 `CVPipelining` 前读取 Generic MLIR，复刻从
+`CVPipelining` 到本地 `PlanMemory` 之间会影响 UB 规划的逻辑，并在真实编译前快速判断
+kernel 是否发生 UB overflow。
 
-对外名称为 **UB Overflow Model（UB 溢出判定模型）**，主可执行文件为
-`bishengir-ub-overflow-model`。源码目录名为 `ub_overflow_model_cpp`；构建
-同时生成兼容入口 `cvpipeline_ub_model`，避免一次重命名破坏已有调用方。
+生产方应直接使用 `precision`、`status` 和 `overflow`。`ub_peak_bits`、
+`required_bits`、`capacity_bits` 与 `selected_seed` 用于解释结果；完整 buffer plan 主要用于
+开发验证和可视化。
 
-生产调用最重要的结果是 `precision/status/overflow`。`ub_peak_bits`、
-`required_bits` 和 `selected_seed` 用于解释判定；完整 buffer、offset、lifetime、inplace
-结果主要服务于开发定位、可视化和 suffix 一致性验证。
+未固定 seed 时，模型按真实 PlanMemory 语义依次尝试 seed 0～19：任一 attempt 得到合法
+plan 即为 `success`，20 次全部失败才是 `overflow`。无法精确建模时返回 `blocker`，调用方
+必须继续执行真实编译，不能把它当作未溢出。
 
-## 结果语义
-
-overflow 不是简单判断 `ub_peak_bits > capacity_bits`。当前精确语义是：
-
-1. PlanMemory 按与 suffix 一致的规则计算 lifetime、inplace、multi-buffer 和地址；
-2. 未固定 seed 时依次尝试 seed 0～19，并在第一次成功时停止；
-3. 任一 attempt 能在 UB 容量内得到合法 plan，结果就是 `success`；
-4. 20 个 attempt 全部失败，结果才是 `overflow`；
-5. 模型无法精确覆盖输入时返回 `blocker`，不能把 blocker 当作未溢出。
-
-| 字段 | 含义 |
-|---|---|
-| `precision` | `exact` 表示可以用于判定；`incomplete` 表示必须 fail closed |
-| `status` | `success`、`overflow` 或 `blocker` |
-| `overflow` | 精确规划是否在全部 retry 后仍失败 |
-| `ub_peak_bits` | 最终选中 plan 中实际 buffer 末端的最大值，主要用于诊断 |
-| `required_bits` | PlanMemory 按 256-bit 分配对齐得到的规划空间，是容量判定的重要依据 |
-| `capacity_bits` | 当前目标 UB 容量，默认 192 KB |
-| `selected_seed` | 默认 retry 最终选中的 seed；固定 seed 时就是指定值 |
-
-由于分配对齐，`ub_peak_bits` 与 `required_bits` 不保证相等。因此生产方应直接消费
-`status/overflow`，不要在外部重新实现 `ub_peak_bits > capacity_bits` 判定。
-
-下面所有命令都在仓库根目录执行。
+下面的命令均在仓库根目录执行。
 
 ## 1. 构建
 
-### 构建模型
+构建独立可执行文件和进程内静态库：
 
 ```bash
 bash ub_overflow_model_cpp/build.sh
 ```
 
-生成文件：
+输出为：
 
 ```text
 ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model
+ub_overflow_model_cpp/output/lib/libub_overflow_model.a
 ```
 
-### 构建 suffix 对照工具
+构建带轻量模型的真实 BiSheng 编译器：
 
 ```bash
-cmake --build build --target bishengir-cvpipeline-suffix-compile -j8
+cmake --build build --target bishengir-compile -j8
 ```
 
-生成文件：
+## 2. 单独使用轻量模型
 
-```text
-build/bin/bishengir-cvpipeline-suffix-compile
-```
-
-单个输入对比脚本也会增量构建模型和 suffix。如果两个程序已经构建好，可以给脚本
-传入 `--skip-suffix-build`，避免再次调用 CMake。
-
-## 2. 单独使用 UB 溢出判定模型
-
-UB 溢出判定模型是本目录的主要产品。它不需要运行 suffix，也不依赖 Python 完成核心
-计算。当前兼容接口仍会输出完整 plan；生产集成只需要读取顶层
-`precision/status/overflow/ub_peak_bits/required_bits/capacity_bits`。
-
-最简单的运行方式：
+直接读取一个 before-CVPipelining MLIR：
 
 ```bash
 ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
-  --before-cvpipelining-ir=ub_overflow_model_cpp/data/before_cvpipelining/vector_add_2x_bench.ttadapter/before_cvpipelining_func_func_add_kernel_32.mlir \
+  ub_overflow_model_cpp/data/before_cvpipelining/vector_add_2x_bench.ttadapter/before_cvpipelining_func_func_add_kernel_32.mlir \
   --format=json
 ```
 
-结果写到 stdout。需要保存时直接重定向：
+也可以通过标准输入传入 MLIR：
+
+```bash
+ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
+  --before-cvpipelining-ir=- \
+  --format=json < INPUT.mlir
+```
+
+默认执行 seed-retry。只有在定位单个 PlanMemory attempt 时才固定 seed：
 
 ```bash
 ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
   --before-cvpipelining-ir=INPUT.mlir \
-  --format=json > /tmp/ub-plan.json
-```
-
-默认不固定 seed，PlanMemory 会执行正常的 seed-retry 并返回最终选择的 plan。只在定位
-某个 attempt 时固定 seed：
-
-```bash
-ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
-  --before-cvpipelining-ir=INPUT.mlir \
-  --random-seed=5 \
+  --plan-memory-seed=5 \
   --format=json
 ```
 
-### 模型参数
+常用参数如下；所有布尔参数均接受 `true/false` 或 `1/0`。
 
-| 参数 | 说明 |
+| 参数 | 含义 |
 |---|---|
-| `--before-cvpipelining-ir=PATH` | 输入的 CVPipelining 前 Generic MLIR |
-| `--format=json\|text` | 输出 JSON 或文本结果 |
-| `--random-seed=0..19` | 固定 seed；省略时运行默认 retry |
-| `--disable-cv-pipelining=BOOL` | CVPipelining 开关 |
-| `--cv-pipeline-depth=N` | pipeline depth；`-1` 表示自动选择 |
-| `--enable-preload=BOOL` | preload 开关 |
-| `--enable-cv-lazy-loading=BOOL` | lazy loading 开关 |
-| `--enable-code-motion=BOOL` | code motion 开关 |
-| `--tile-mix-cube-loop=N` | MIX CUBE loop tile factor |
-| `--tile-mix-vector-loop=N` | MIX VECTOR loop tile factor |
-| `--enable-ubuf-saving=BOOL` | UB-saving 开关 |
-| `--enable-auto-multi-buffer=BOOL` | auto multi-buffer 开关 |
-| `--enable-triton-kernel-compile=BOOL` | Triton kernel 路径开关 |
-| `--disable-align-alloc-size=BOOL` | 是否关闭 AlignAllocSize |
-| `--disable-enable-stride-align=BOOL` | 是否关闭 EnableStrideAlign |
-| `--disable-infer-hivm-data-layout=BOOL` | 是否关闭 data-layout 推断 |
-| `--limit-auto-multi-buffer-of-local-buffer=STRATEGY` | local buffer 策略 |
-| `--limit-auto-multi-buffer-buffer=STRATEGY` | MIX buffer 策略 |
-| `--restrict-inplace-as-isa` | 使用严格 inplace 规则 |
-| `--verify-each` | 每个建模 pass 后校验 Generic IR |
-| `--show-runtime-timing` | 将总时间和各阶段时间写到 stderr |
+| `--before-cvpipelining-ir=PATH` | 输入 Generic MLIR，`-` 表示 stdin |
+| `--format=json\|text` | 输出格式 |
+| `--plan-memory-seed=-1\|0..19` | `-1` 为真实 retry，0～19 为固定 seed |
+| `--disable-auto-cv-work-space-manage=BOOL` | 关闭自动 CV workspace 管理 |
+| `--cv-pipeline-depth=N` | CV pipeline depth，`-1` 表示自动 |
+| `--enable-preload=BOOL` | preload |
+| `--enable-lazy-loading=BOOL` | CV lazy loading |
+| `--enable-code-motion=BOOL` | code motion |
+| `--enable-auto-bind-sub-block=BOOL` | 自动 sub-block bind |
+| `--tile-mix-cube-loop=N` | MIX Cube loop tile factor |
+| `--tile-mix-vector-loop=N` | MIX Vector loop tile factor |
+| `--enable-ubuf-saving=BOOL` | UB-saving |
+| `--enable-auto-multi-buffer=BOOL` | auto multi-buffer |
+| `--enable-hivm-auto-storage-align=BOOL` | storage alignment |
+| `--enable-hivm-cross-core-gss=BOOL` | cross-core GSS |
+| `--enable-hivm-inject-block-all-sync=BOOL` | InjectBlockSync block-all 分支 |
+| `--disable-auto-inject-block-sync=BOOL` | 关闭自动 block sync |
+| `--limit-auto-multi-buffer-of-local-buffer=STRATEGY` | local buffer multi-buffer 策略 |
+| `--limit-auto-multi-buffer-buffer=STRATEGY` | MIX buffer multi-buffer 策略 |
+| `--show-runtime-timing` | 输出总耗时和逐阶段耗时 |
+| `--verify-each` | 每个建模阶段后校验 IR |
 
 multi-buffer strategy 可取 `no-limit`、`only-cube`、`only-vector` 或 `no-l0c`。
-
-例如开启 auto multi-buffer：
-
-```bash
-ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
-  --before-cvpipelining-ir=INPUT.mlir \
-  --enable-auto-multi-buffer=true \
-  --limit-auto-multi-buffer-of-local-buffer=no-limit \
-  --limit-auto-multi-buffer-buffer=only-cube \
-  --format=json
-```
-
-需要保存逐阶段调试快照时：
+完整参数以以下命令为准：
 
 ```bash
-ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
-  --before-cvpipelining-ir=INPUT.mlir \
-  --format=json \
-  --debug --debug-dir=/tmp/cvub-debug
+ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model --help
 ```
 
-## 3. 使用可视化 demo
+### 进程内 C++ 接口
 
-demo 使用轻量模型生成 UB plan JSON 和可视化 HTML。只运行模型、不执行 suffix：
+生产热路径应链接 `libub_overflow_model.a`，避免为每个 candidate 启动子进程。公共头文件为
+`ub_overflow_model_cpp/include/ub_overflow_model/api.hpp`。
+
+```cpp
+#include "ub_overflow_model/api.hpp"
+
+cvub::Request request;
+request.compilerProfile = cvub::CompilerProfile::TritonMembaseA2A3;
+request.compilerPipelineFingerprint = cvub::kA3MembasePipelineFingerprint;
+request.target = "Ascend910_9382";
+request.beforeCVPipeliningGenericMLIR = beforeCVPipeliningText;
+
+// 必须传入真实 HIVMPipelineOptions 解析默认值和别名后的最终有效值。
+request.options.disableAutoCVWorkSpaceManage = disableAutoCVWorkspaceManage;
+request.options.cvPipelineDepth = cvPipelineDepth;
+request.options.enableCVLazyLoading = enableCVLazyLoading;
+request.options.enablePreload = enablePreload;
+request.options.enableCodeMotion = enableCodeMotion;
+request.options.enableAutoBindSubBlock = enableAutoBindSubBlock;
+request.options.enableUbufSaving = enableUbufSaving;
+request.options.enableAutoMultiBuffer = enableAutoMultiBuffer;
+request.options.enableHIVMAutoStorageAlign = enableHIVMAutoStorageAlign;
+request.options.enableHIVMCrossCoreGSS = enableHIVMCrossCoreGSS;
+request.options.enableHIVMInjectBlockAllSync = enableHIVMInjectBlockAllSync;
+request.options.disableAutoInjectBlockSync = disableAutoInjectBlockSync;
+request.options.tileMixVectorLoop = tileMixVectorLoop;
+request.options.tileMixCubeLoop = tileMixCubeLoop;
+request.options.localMultiBufferStrategy =
+    cvub::MultiBufferStrategy::CubeNoL0C;
+request.options.mixMultiBufferStrategy =
+    cvub::MultiBufferStrategy::OnlyCube;
+
+const cvub::Result result = cvub::evaluate(request);
+if (result.precision == cvub::Precision::Exact &&
+    result.status == cvub::Status::Overflow) {
+  // 淘汰当前 candidate。
+}
+// Blocker/InternalError 必须继续真实编译。
+```
+
+`evaluate()` 不抛异常、不写临时文件，也不修改真实编译器的 `ModuleOp`。接口和参数合同详见
+[AUTOTUNE_INTERFACE_DESIGN.md](AUTOTUNE_INTERFACE_DESIGN.md)。
+
+## 3. 在真实 BiSheng 中使用
+
+A2/A3 Triton membase 路径默认在 `CVPipelining` 前运行轻量模型。模型返回
+`Exact + Overflow` 时，当前 compile attempt 不再执行真实 CVPipelining；BiSheng 自己的
+fallback 会先关闭 code motion，仍失败时再关闭 auto multi-buffer。模型返回 success、
+blocker 或 internal error 时，真实 pipeline 继续运行。
+
+普通编译不打印模型中间日志。需要手工观察控制流时设置：
+
+```bash
+BISHENGIR_UB_FLOW_TRACE=1 \
+build/bin/bishengir-compile INPUT.ttadapter \
+  --enable-hfusion-compile=true \
+  --enable-triton-kernel-compile=true \
+  -o /tmp/output.o
+```
+
+输出按以下层次区分轻量模型、真实 CVPipelining 和 BiSheng fallback：
+
+```text
+[UB-FLOW][ATTEMPT N][LIGHTWEIGHT_MODEL][RESULT]
+[UB-FLOW][ATTEMPT N][LIGHTWEIGHT_MODEL][OPTIONS]
+[UB-FLOW][ATTEMPT N][LIGHTWEIGHT_MODEL][DECISION]
+[UB-FLOW][ATTEMPT N][BISHENG_CVPIPELINE][DONE]
+[BISHENG][FALLBACK][RETRY]
+[BISHENG][FALLBACK][SUMMARY]
+```
+
+机器可读摘要使用 `BISHENGIR_UB_MODEL_EMIT_RESULT=1` 显式开启。完全关闭模型可传入
+`--enable-ub-overflow-prediction=false`；只运行 shadow、但不提前结束 overflow attempt，
+可传入 `--prune-predicted-ub-overflow=false`。
+
+## 4. 可视化 demo
+
+只运行轻量模型并生成 plan JSON 与 HTML：
 
 ```bash
 bash ub_overflow_model_cpp/run_demo_ub_plan.sh \
@@ -156,225 +182,68 @@ bash ub_overflow_model_cpp/run_demo_ub_plan.sh \
   --skip-oracle --skip-suffix-build
 ```
 
-默认输出到：
+默认输出到 `ub_overflow_model_cpp/output/demo/<kernel>/`。打开其中的
+`ub_plan_visualizer.html` 可查看 buffer lifetime、offset 和 UB peak。
 
-```text
-ub_overflow_model_cpp/output/demo/<kernel>/ub_plan.json
-ub_overflow_model_cpp/output/demo/<kernel>/ub_plan_visualizer.html
-ub_overflow_model_cpp/output/demo/<kernel>/model_stdout.log
-```
+## 5. 单个输入对比
 
-使用 `--output-root DIR` 修改输出根目录，也可以分别使用 `--json PATH` 和
-`--html PATH` 指定文件。打开生成的 HTML 即可查看 buffer lifetime、offset 和 UB peak。
-
-## 4. 单个输入与 suffix 对比
-
-去掉 `--skip-oracle` 后，demo 脚本会同时运行轻量模型和 suffix，并比较两边的 UB
-结果：
+当前正确性标准是同一个真实 `bishengir-compile` 进程中的轻量模型与真实本地
+PlanMemory，不是历史 suffix 或 cv2pm。单输入、单配置、固定 seed 的命令为：
 
 ```bash
-bash ub_overflow_model_cpp/run_demo_ub_plan.sh \
-  --before-cvpipelining-ir=ub_overflow_model_cpp/data/before_cvpipelining/vector_add_2x_bench.ttadapter/before_cvpipelining_func_func_add_kernel_32.mlir \
-  --skip-suffix-build
+python3 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py \
+  --config production_default \
+  --input python_tutorial_06-fused-attention.ttadapter \
+  --seeds 13 \
+  --jobs 1 \
+  --report /tmp/ub-model-single.tsv
 ```
 
-默认比较正常 seed-retry 的最终结果。固定 seed 对比：
+报告比较 status、required、peak、buffer plan、lifetime、multi-buffer 和 inplace。
+
+## 6. 矩阵对比
+
+查看经过选择的参数配置：
 
 ```bash
-bash ub_overflow_model_cpp/run_demo_ub_plan.sh \
+python3 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py --list
+```
+
+运行部分输入和全部 20 个固定 seed：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py \
+  --config production_default \
+  --max-inputs 10 \
+  --seeds 0-19 \
+  --jobs 8 \
+  --report /tmp/ub-model-subset.tsv
+```
+
+完整矩阵去掉 `--config` 和 `--max-inputs`。长任务可以加 `--resume` 继续已有报告。
+
+## 7. 时间测量
+
+模型的真实 retry 总时间和各阶段时间：
+
+```bash
+ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
   --before-cvpipelining-ir=INPUT.mlir \
-  --random-seed=5 \
-  --skip-suffix-build
+  --plan-memory-seed=-1 \
+  --show-runtime-timing \
+  --format=json >/tmp/model.json 2>/tmp/model-timing.tsv
 ```
 
-脚本参数与模型参数一一对应，但为避免与 demo 自身选项冲突，CVPipelining 参数使用
-`--cv-*` 前缀，其余编译参数使用 `--suffix-*` 前缀。例如：
+测量集成后的真实编译时，不要开启 validation、PlanMemory dump 或阶段快照；模型自身耗时
+可通过机器摘要中的 `model_ns` 获取：
 
 ```bash
-bash ub_overflow_model_cpp/run_demo_ub_plan.sh \
-  --before-cvpipelining-ir=INPUT.mlir \
-  --cv-pipeline-depth=4 \
-  --suffix-enable-auto-multi-buffer=true \
-  --suffix-local-multi-buffer-strategy=no-limit \
-  --suffix-mix-multi-buffer-strategy=only-cube \
-  --skip-suffix-build
+BISHENGIR_UB_MODEL_EMIT_RESULT=1 \
+/usr/bin/time -p build/bin/bishengir-compile INPUT.ttadapter \
+  --enable-hfusion-compile=true \
+  --enable-triton-kernel-compile=true \
+  -o /tmp/output.o 2>/tmp/bisheng-timing.log
 ```
 
-完整 wrapper 参数使用：
-
-```bash
-bash ub_overflow_model_cpp/run_demo_ub_plan.sh --help
-```
-
-suffix 输出和比较现场保存在：
-
-```text
-ub_overflow_model_cpp/output/demo/<kernel>/suffix_oracle/
-```
-
-## 5. 矩阵对比
-
-测试输入位于：
-
-```text
-ub_overflow_model_cpp/data/before_cvpipelining/
-```
-
-当前 corpus 包含 160 个去重输入。25 组常用参数配置保存在：
-
-```text
-ub_overflow_model_cpp/config/corpus_test_matrix.tsv
-```
-
-查看配置名称：
-
-```bash
-python3 ub_overflow_model_cpp/scripts/run_corpus_matrix.py --list
-```
-
-### 固定一个 seed
-
-下面的命令运行 `25 × 160 = 4000` 项对比，不运行 retry：
-
-```bash
-python3 ub_overflow_model_cpp/scripts/run_corpus_matrix.py \
-  --corpus-root ub_overflow_model_cpp/data/before_cvpipelining \
-  --model ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
-  --compiler build/bin/bishengir-cvpipeline-suffix-compile \
-  --seed 0 --quiet
-```
-
-### 固定 20 个 seeds
-
-完整正确性对比使用 seed 0～19，共运行 `25 × 160 × 20 = 80,000` 项：
-
-```bash
-python3 ub_overflow_model_cpp/scripts/run_corpus_matrix.py \
-  --corpus-root ub_overflow_model_cpp/data/before_cvpipelining \
-  --model ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
-  --compiler build/bin/bishengir-cvpipeline-suffix-compile \
-  --seeds 0-19 --quiet
-```
-
-### 只运行部分配置或输入
-
-```bash
-python3 ub_overflow_model_cpp/scripts/run_corpus_matrix.py \
-  --corpus-root ub_overflow_model_cpp/data/before_cvpipelining \
-  --model ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
-  --compiler build/bin/bishengir-cvpipeline-suffix-compile \
-  --config default \
-  --config auto_multi_buffer \
-  --seeds 0-19 \
-  --case-start 0 \
-  --max-cases 32 --quiet
-```
-
-常用选择参数：
-
-| 参数 | 说明 |
-|---|---|
-| `--config NAME` | 只运行指定配置，可重复 |
-| `--seed N` | 固定一个 seed |
-| `--seeds RANGE` | 固定多个 seeds，例如 `0-19` |
-| `--retry-only` | 不运行固定 seed，只运行默认 retry |
-| `--case-start N` | 跳过前 N 个输入 |
-| `--max-cases N` | 最多运行 N 个输入 |
-| `--dry-run` | 只打印展开后的命令 |
-| `--stop-on-failure` | 第一次失败后停止 |
-| `--no-progress` | 不显示进度条 |
-| `--quiet` | 只打印汇总和失败 |
-
-### 使用 suffix 缓存
-
-第一次运行使用 `read-write`，未命中时执行 suffix 并写入缓存：
-
-```bash
-python3 ub_overflow_model_cpp/scripts/run_corpus_matrix.py \
-  --corpus-root ub_overflow_model_cpp/data/before_cvpipelining \
-  --model ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
-  --compiler build/bin/bishengir-cvpipeline-suffix-compile \
-  --seeds 0-19 \
-  --suffix-cache-dir ub_overflow_model_cpp/output/suffix_oracle_cache \
-  --suffix-cache-mode read-write --quiet
-```
-
-缓存填满后使用 `read-only`，只运行模型并与缓存对比：
-
-```bash
-python3 ub_overflow_model_cpp/scripts/run_corpus_matrix.py \
-  --corpus-root ub_overflow_model_cpp/data/before_cvpipelining \
-  --model ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
-  --compiler build/bin/bishengir-cvpipeline-suffix-compile \
-  --seeds 0-19 \
-  --suffix-cache-dir ub_overflow_model_cpp/output/suffix_oracle_cache \
-  --suffix-cache-mode read-only --quiet
-```
-
-重新编译 suffix、修改输入或参数后会自动使用新的缓存键。需要强制重新生成时使用
-`--suffix-cache-mode refresh`。
-
-## 6. 时间对比
-
-时间对比使用真实应用场景的 PlanMemory retry，不固定 seed。默认不把 suffix 的
-oracle/debug dump 开销计入编译时间。
-
-### 测量全部 160 个输入
-
-```bash
-python3 ub_overflow_model_cpp/scripts/run_corpus_oracle.py \
-  --corpus-root ub_overflow_model_cpp/data/before_cvpipelining \
-  --model ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
-  --compiler build/bin/bishengir-cvpipeline-suffix-compile \
-  --retry-only \
-  --runtime-timing-output /tmp/cvub-runtime.tsv --quiet
-```
-
-### 只测指定 kernel
-
-`--input` 可以重复传入。相对路径按 `--corpus-root` 解析：
-
-```bash
-python3 ub_overflow_model_cpp/scripts/run_corpus_oracle.py \
-  --corpus-root ub_overflow_model_cpp/data/before_cvpipelining \
-  --model ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
-  --compiler build/bin/bishengir-cvpipeline-suffix-compile \
-  --input python_tutorial_06-fused-attention.ttadapter/before_cvpipelining_func_func_attn_fwd_32.mlir \
-  --input python_tutorial_09-persistent-matmul.ttadapter/before_cvpipelining_func_func_matmul_kernel_32.mlir \
-  --retry-only \
-  --runtime-timing-output /tmp/cvub-selected-runtime.tsv
-```
-
-### 测量全部 25 组配置
-
-```bash
-python3 ub_overflow_model_cpp/scripts/run_corpus_matrix.py \
-  --corpus-root ub_overflow_model_cpp/data/before_cvpipelining \
-  --model ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
-  --compiler build/bin/bishengir-cvpipeline-suffix-compile \
-  --retry-only \
-  --runtime-timing-output /tmp/cvub-matrix-runtime.tsv --quiet
-```
-
-runner 会在终端输出每个 kernel 的横向对照表，并在 TSV 中保存：
-
-- model 和 suffix 的总时间；
-- model 每个 stage 的时间；
-- suffix 每个 pass 的时间；
-- 同名 stage/pass 的耗时差和倍数；
-- 矩阵运行时对应的配置名称。
-
-需要把 suffix dump 开销也计入时，追加：
-
-```text
---runtime-timing-include-dumps
-```
-
-查看所有参数：
-
-```bash
-bash ub_overflow_model_cpp/run_demo_ub_plan.sh --help
-ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model --help
-python3 ub_overflow_model_cpp/scripts/run_corpus_oracle.py --help
-python3 ub_overflow_model_cpp/scripts/run_corpus_matrix.py --help
-```
+开发期的 cv2pm、缓存、差异定位和历史验证方法保留在 `.agent/validation.md`；它们不是产品
+使用入口。
