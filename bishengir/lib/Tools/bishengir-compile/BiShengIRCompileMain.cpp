@@ -36,6 +36,7 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/VersionTuple.h"
+#include <cstdlib>
 #include <functional>
 #include <regex>
 #include <set>
@@ -49,6 +50,18 @@ using namespace llvm;
 using namespace mlir;
 
 namespace {
+
+bool stopBeforeLocalPlanMemoryRequested() {
+  const char *value =
+      std::getenv("BISHENGIR_STOP_BEFORE_LOCAL_PLAN_MEMORY");
+  return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
+}
+
+bool stopAfterLocalPlanMemoryRequested() {
+  const char *value =
+      std::getenv("BISHENGIR_STOP_AFTER_LOCAL_PLAN_MEMORY");
+  return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
+}
 
 /// Get the lib directory path (../lib relative to bishengir-compile
 /// executable). Returns canonical absolute path without ".." or ".".
@@ -319,6 +332,10 @@ bishengir::runBiShengIRPipeline(ModuleOp mod,
 
   RetriablePassManager::emitFallbackSummary(retriablePipelineFallbacks,
                                             /*compilationSucceeded=*/true);
+
+  if (stopBeforeLocalPlanMemoryRequested() ||
+      stopAfterLocalPlanMemoryRequested())
+    return OwningModuleRef(mod);
 
   if (config.shouldEnableCPURunner()) {
     auto outputFile = config.getOutputFile();

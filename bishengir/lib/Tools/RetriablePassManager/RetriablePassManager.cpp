@@ -47,7 +47,8 @@ void RetriablePassManager::addPolicy(std::unique_ptr<RetryPolicy> policy) {
 void RetriablePassManager::emitFallbackNote(llvm::StringRef retryCause,
                                             llvm::StringRef retryOption,
                                             llvm::StringRef retryValue) {
-  llvm::errs() << "[NOTE] " << retryCause << " detected; automatically ";
+  llvm::errs() << "[BISHENG][FALLBACK][RETRY] " << retryCause
+               << " detected; automatically ";
   printSetOptionAction(llvm::errs(), retryOption, retryValue);
   llvm::errs() << " and retrying compilation.\n";
 }
@@ -63,7 +64,7 @@ void RetriablePassManager::emitFallbackSummary(
     return fb.retryCause == first.retryCause;
   });
 
-  llvm::errs() << "[NOTE] ";
+  llvm::errs() << "[BISHENG][FALLBACK][SUMMARY] ";
   if (allSameCause) {
     llvm::errs() << "Due to " << first.retryCause << ", automatically ";
     for (size_t i = 0, e = appliedFallbacks.size(); i != e; ++i) {

@@ -21,6 +21,7 @@
 #include "bishengir/Dialect/HFusion/IR/HFusion.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Dialect/HIVM/Pipelines/Passes.h"
+#include "UBOverflowPrediction.h"
 #include "bishengir/Dialect/HIVM/Transforms/Passes.h"
 #include "bishengir/Dialect/MemRef/Transforms/Passes.h"
 #include "bishengir/Dialect/SCF/Transforms/Passes.h"
@@ -31,10 +32,225 @@
 #include "mlir/Dialect/Bufferization/Transforms/OneShotAnalysis.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/SCF/Transforms/Passes.h"
+#include "mlir/Bytecode/BytecodeWriter.h"
 #include "mlir/Pass/PassManager.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include <atomic>
+#include <cstdlib>
 
 namespace mlir {
 namespace hivm {
+
+namespace {
+
+static cvub::MultiBufferStrategy
+toModelMultiBufferStrategy(::MultiBufferStrategy strategy) {
+  switch (strategy) {
+  case ::MultiBufferStrategy::NO_LIMIT:
+    return cvub::MultiBufferStrategy::NoLimit;
+  case ::MultiBufferStrategy::ONLY_CUBE:
+    return cvub::MultiBufferStrategy::OnlyCube;
+  case ::MultiBufferStrategy::ONLY_VECTOR:
+    return cvub::MultiBufferStrategy::OnlyVector;
+  case ::MultiBufferStrategy::CUBE_NO_L0C:
+    return cvub::MultiBufferStrategy::CubeNoL0C;
+  }
+  return cvub::MultiBufferStrategy::NoLimit;
+}
+
+static UBOverflowPredictionConfig predictionConfig(
+    const HIVMPipelineOptions &options,
+    const CVPipeliningOptions &cvPipeliningOptions, uint64_t traceAttempt) {
+  UBOverflowPredictionConfig config;
+  config.target = options.compilationTarget;
+  config.pruneOnOverflow = options.prunePredictedUBOverflow;
+  config.traceAttempt = traceAttempt;
+  config.modelOptions.disableAutoCVWorkSpaceManage =
+      options.disableAutoCVWorkSpaceManage;
+  // Read the effective values from the exact option object passed to the real
+  // CVPipelining pass.  Do not independently reconstruct defaults here: that
+  // would let prediction and compilation silently diverge when the production
+  // pipeline changes its option wiring.
+  config.modelOptions.cvPipelineDepth =
+      cvPipeliningOptions.setDepthInUnrollMode;
+  config.modelOptions.enableCVLazyLoading =
+      cvPipeliningOptions.enableLazyLoading;
+  config.modelOptions.enablePreload =
+      cvPipeliningOptions.enableSkewMode;
+  config.modelOptions.enableCodeMotion = options.enableCodeMotion;
+  config.modelOptions.enableAutoBindSubBlock = options.enableAutoBindSubBlock;
+  config.modelOptions.enableUbufSaving = options.enableUbufSaving;
+  config.modelOptions.enableAutoMultiBuffer = options.enableAutoMultiBuffer;
+  config.modelOptions.enableHIVMAutoStorageAlign =
+      options.enableHIVMAutoStorageAlign;
+  config.modelOptions.enableHIVMCrossCoreGSS =
+      options.enableHIVMCrossCoreGSS;
+  config.modelOptions.enableHIVMInjectBlockAllSync =
+      options.enableHIVMInjectBlockAllSync;
+  config.modelOptions.disableAutoInjectBlockSync =
+      options.disableAutoInjectBlockSync;
+  config.modelOptions.tileMixVectorLoop = options.tileMixVectorLoop;
+  config.modelOptions.tileMixCubeLoop = options.tileMixCubeLoop;
+  config.modelOptions.localMultiBufferStrategy =
+      toModelMultiBufferStrategy(options.limitAutoMultiBufferOfLocalBuffer);
+  config.modelOptions.mixMultiBufferStrategy =
+      toModelMultiBufferStrategy(options.limitAutoMultiBufferBuffer);
+  return config;
+}
+
+static bool stopBeforeLocalPlanMemoryRequested() {
+  const char *value =
+      std::getenv("BISHENGIR_STOP_BEFORE_LOCAL_PLAN_MEMORY");
+  return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
+}
+
+static bool stopAfterLocalPlanMemoryRequested() {
+  const char *value =
+      std::getenv("BISHENGIR_STOP_AFTER_LOCAL_PLAN_MEMORY");
+  return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
+}
+
+struct DumpIRBeforeLocalPlanMemoryPass
+    : public PassWrapper<DumpIRBeforeLocalPlanMemoryPass,
+                         OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(
+      DumpIRBeforeLocalPlanMemoryPass)
+
+  StringRef getArgument() const override {
+    return "hivm-dump-ir-before-local-plan-memory-validation";
+  }
+
+  void runOnOperation() override {
+    const char *path = std::getenv("BISHENGIR_DUMP_BEFORE_PLAN_MEMORY");
+    if (path == nullptr || path[0] == '\0') {
+      markAllAnalysesPreserved();
+      return;
+    }
+    std::error_code error;
+    StringRef outputPath(path);
+    bool emitBytecode = outputPath.ends_with(".mlirbc");
+    llvm::raw_fd_ostream output(
+        path, error,
+        emitBytecode ? llvm::sys::fs::OF_None : llvm::sys::fs::OF_Text);
+    if (error) {
+      getOperation().emitError()
+          << "cannot dump IR before local PlanMemory to " << path << ": "
+          << error.message();
+      signalPassFailure();
+      return;
+    }
+    if (emitBytecode) {
+      if (failed(writeBytecodeToFile(getOperation(), output))) {
+        getOperation().emitError()
+            << "cannot encode IR before local PlanMemory to " << path;
+        signalPassFailure();
+        return;
+      }
+    } else {
+      getOperation().print(
+          output, OpPrintingFlags().printGenericOpForm());
+      output << '\n';
+    }
+    markAllAnalysesPreserved();
+  }
+};
+
+static std::unique_ptr<Pass> createDumpIRBeforeLocalPlanMemoryPass() {
+  return std::make_unique<DumpIRBeforeLocalPlanMemoryPass>();
+}
+
+struct DumpIRBeforeCVPipeliningPass
+    : public PassWrapper<DumpIRBeforeCVPipeliningPass,
+                         OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(
+      DumpIRBeforeCVPipeliningPass)
+
+  StringRef getArgument() const override {
+    return "hivm-dump-ir-before-cvpipelining-validation";
+  }
+
+  void runOnOperation() override {
+    const char *path = std::getenv("BISHENGIR_DUMP_BEFORE_CVPIPELINING");
+    if (path == nullptr || path[0] == '\0') {
+      markAllAnalysesPreserved();
+      return;
+    }
+    std::error_code error;
+    StringRef outputPath(path);
+    bool emitBytecode = outputPath.ends_with(".mlirbc");
+    llvm::raw_fd_ostream output(
+        path, error,
+        emitBytecode ? llvm::sys::fs::OF_None : llvm::sys::fs::OF_Text);
+    if (error) {
+      getOperation().emitError()
+          << "cannot dump IR before CVPipelining to " << path << ": "
+          << error.message();
+      signalPassFailure();
+      return;
+    }
+    if (emitBytecode) {
+      if (failed(writeBytecodeToFile(getOperation(), output))) {
+        getOperation().emitError()
+            << "cannot encode IR before CVPipelining to " << path;
+        signalPassFailure();
+        return;
+      }
+    } else {
+      getOperation().print(output,
+                           OpPrintingFlags().printGenericOpForm());
+      output << '\n';
+    }
+    markAllAnalysesPreserved();
+  }
+};
+
+static std::unique_ptr<Pass> createDumpIRBeforeCVPipeliningPass() {
+  return std::make_unique<DumpIRBeforeCVPipeliningPass>();
+}
+
+static bool isUBFlowTraceEnabled() {
+  const char *value = std::getenv("BISHENGIR_UB_FLOW_TRACE");
+  return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
+}
+
+struct TraceAfterCVPipeliningPass
+    : public PassWrapper<TraceAfterCVPipeliningPass,
+                         OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TraceAfterCVPipeliningPass)
+
+  explicit TraceAfterCVPipeliningPass(uint64_t traceAttempt)
+      : traceAttempt(traceAttempt) {}
+
+  TraceAfterCVPipeliningPass(const TraceAfterCVPipeliningPass &other)
+      : PassWrapper(other), traceAttempt(other.traceAttempt) {}
+
+  StringRef getArgument() const override {
+    return "hivm-trace-after-cvpipelining";
+  }
+
+  void runOnOperation() override {
+    llvm::errs() << "[UB-FLOW][ATTEMPT " << traceAttempt
+                 << "][BISHENG_CVPIPELINE][DONE] real CVPipelining completed\n";
+    markAllAnalysesPreserved();
+  }
+
+private:
+  uint64_t traceAttempt;
+};
+
+static std::unique_ptr<Pass>
+createTraceAfterCVPipeliningPass(uint64_t traceAttempt) {
+  return std::make_unique<TraceAfterCVPipeliningPass>(traceAttempt);
+}
+
+static uint64_t nextUBFlowTraceAttempt() {
+  static std::atomic<uint64_t> next{1};
+  return next.fetch_add(1, std::memory_order_relaxed);
+}
+
+} // namespace
 
 void canonicalizationHIVMPipeline(OpPassManager &pm) {
   pm.addPass(createArithToAffineConversionPass());
@@ -251,12 +467,30 @@ static void hivmPreBufferizationOptimizationPipeline(
   pm.addPass(bishengir::createExtendedCanonicalizerPass());
   canonicalizationHIVMPipeline(pm);
   pm.nest<func::FuncOp>().addPass(createInlineOTFBroadcastPass());
+  if (std::getenv("BISHENGIR_DUMP_BEFORE_CVPIPELINING") != nullptr)
+    pm.addPass(createDumpIRBeforeCVPipeliningPass());
+
+  // Construct this once and share it with prediction and the production pass.
+  // This makes the pre-CVPipelining API consume the same resolved values that
+  // will drive the real compiler rather than a parallel set of inferred
+  // defaults.
+  CVPipeliningOptions pipelineOptions;
+  pipelineOptions.enableSkewMode = hivmPipelineOptions.enablePreload;
+  const bool traceEnabled = isUBFlowTraceEnabled();
+  const uint64_t traceAttempt =
+      traceEnabled ? nextUBFlowTraceAttempt() : 0;
+  if (hivmPipelineOptions.enableUBOverflowPrediction &&
+      hivmPipelineOptions.enableTritonKernelCompile &&
+      !hivmPipelineOptions.disableAutoCVWorkSpaceManage) {
+    pm.addPass(createUBOverflowPredictionPass(
+        predictionConfig(hivmPipelineOptions, pipelineOptions,
+                         traceAttempt)));
+  }
   if (!hivmPipelineOptions.disableAutoCVWorkSpaceManage) {
     // Software pipelining Cube and Vector operations
-    CVPipeliningOptions pipelineOptions;
-    pipelineOptions.enableSkewMode =
-        hivmPipelineOptions.enablePreload;
     pm.nest<func::FuncOp>().addPass(createCVPipeliningPass(pipelineOptions));
+    if (traceEnabled)
+      pm.addPass(createTraceAfterCVPipeliningPass(traceAttempt));
   }
 
   if (hivmPipelineOptions.enableUbufSaving) {
@@ -424,10 +658,16 @@ static void hivmPostBufferizationOptimizationPipeline(
       hivmPipelineOptions.limitAutoMultiBufferBuffer;
   pm.nest<func::FuncOp>().addPass(
       createMarkMultiBufferPass(multiBufferOptions));
+  if (std::getenv("BISHENGIR_DUMP_BEFORE_PLAN_MEMORY") != nullptr)
+    pm.addPass(createDumpIRBeforeLocalPlanMemoryPass());
+  if (stopBeforeLocalPlanMemoryRequested())
+    return;
   PlanMemoryOptions planMemoryOption;
   planMemoryOption.enableMemoryDisplay =
       hivmPipelineOptions.enableMemoryDisplay;
   pm.nest<func::FuncOp>().addPass(createPlanMemoryPass(planMemoryOption));
+  if (stopAfterLocalPlanMemoryRequested())
+    return;
 
   // Lower hivm ops to loops
   pm.nest<func::FuncOp>().addPass(createHIVMLowerToLoopsPass());
@@ -455,6 +695,9 @@ void buildOptimizeHIVMPipeline(OpPassManager &pm,
     bufferizationPipeline(pm, options);
   }
   hivmPostBufferizationOptimizationPipeline(pm, options);
+  if (stopBeforeLocalPlanMemoryRequested() ||
+      stopAfterLocalPlanMemoryRequested())
+    return;
   // Optimizations that relies on scope should be done after this point. Inline
   // all `scope.scope` ops.
   pm.addPass(

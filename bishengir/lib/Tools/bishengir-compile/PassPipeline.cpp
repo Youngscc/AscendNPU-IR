@@ -18,6 +18,7 @@
 #include "bishengir/Tools/bishengir-compile/PassPipeline.h"
 #include "bishengir/Config/bishengir-config.h"
 #include "bishengir/Dialect/HACC/Transforms/Passes.h"
+#include "bishengir/Dialect/HACC/Utils/Utils.h"
 #include "bishengir/Dialect/HFusion/Pipelines/Passes.h"
 #include "bishengir/Dialect/HIVM/Pipelines/ConvertToHIVMPipeline.h"
 #include "bishengir/Dialect/HIVM/Pipelines/Passes.h"
@@ -47,6 +48,8 @@ void setupHIVMPipelineOptions(hivm::HIVMPipelineOptions &options,
                               const BiShengIRCompileMainConfig &config) {
 #define GEN_HIVM_OPTION_SETUP
 #include "bishengir/Tools/bishengir-compile/ConfigUtils.cpp.inc"
+  options.compilationTarget =
+      hacc::stringifyTargetDeviceEnum(config.getTarget()).str();
 }
 
 void buildBiShengHIRPipeline(OpPassManager &pm,

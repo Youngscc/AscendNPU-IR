@@ -219,6 +219,24 @@ def DisableAutoCVWorkSpaceManage : FeatureControlOptions<
   let passGroup = ["HFUSION", "HIVM"];
 }
 
+def EnableUBOverflowPrediction : FeatureControlOptions<
+  "Run the in-process local UB model immediately before CVPipelining.",
+  "bool",
+  "true"
+> {
+  let optionScope = ["A3_ONLY"];
+  let passGroup = ["HIVM"];
+}
+
+def PrunePredictedUBOverflow : FeatureControlOptions<
+  "Fail the current compile attempt when the UB model predicts exact overflow.",
+  "bool",
+  "true"
+> {
+  let optionScope = ["A3_ONLY"];
+  let passGroup = ["HIVM"];
+}
+
 def EnableHIVMCrossCoreGSS : FeatureControlOptions<
   "Use hivm cross-core graph-sync-solver instead of inject-block-sync.",
   "bool",

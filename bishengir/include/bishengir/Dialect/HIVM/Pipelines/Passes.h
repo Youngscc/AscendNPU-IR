@@ -24,6 +24,8 @@
 #include "bishengir/Dialect/HIVM/Transforms/Passes.h"
 #include "mlir/Pass/PassOptions.h"
 
+#include <string>
+
 namespace mlir {
 namespace hivm {
 
@@ -31,6 +33,7 @@ struct HIVMPipelineOptions
     : public mlir::PassPipelineOptions<HIVMPipelineOptions> {
 #define GEN_HIVM_OPTION_REGISTRATION
 #include "bishengir/Tools/bishengir-compile/PassPipelineOptions.cpp.inc"
+  std::string compilationTarget = "Unknown";
 };
 
 //===----------------------------------------------------------------------===//
