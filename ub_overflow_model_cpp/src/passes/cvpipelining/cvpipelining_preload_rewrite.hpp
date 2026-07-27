@@ -1,6 +1,7 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_CVPIPELINING_PRELOAD_REWRITE_HPP
 #define CVPIPELINE_UB_MODEL_CPP_CVPIPELINING_PRELOAD_REWRITE_HPP
 
+#include "../../ir/post_pipeline_ir_utils.hpp"
 #include "cvpipelining_rewrite.hpp"
 
 namespace cvub {
@@ -31,7 +32,20 @@ public:
       if (!createScopeForWorkItem(itemIndex, preloadNum, body))
         return false;
     }
-    removeOriginalOps(body);
+    migrateWorkspaceOutputs();
+    // Workspace migration rewrites Load operands after cloning.  Refresh the
+    // cached destination-style projections before dependency-driven erasure;
+    // MLIR has a single operand list, while GenericOperation keeps these
+    // projections explicitly for later passes.
+    rewriter.applyDirtyOperationSemantics();
+    if (!removeOriginalOps(body)) {
+      // CVPipeliningPass intentionally ignores a failed loop rewrite.  The
+      // production implementation may already have erased use-free members
+      // of toErase at that point, so preserve that valid partial state for
+      // the following passes instead of manufacturing dangling SSA values.
+      module = CompactGenericModule(std::move(module));
+      return false;
+    }
     module = CompactGenericModule(std::move(module));
     return true;
   }
@@ -206,19 +220,11 @@ private:
     std::map<int, int> scopeMap = globalValues;
     std::set<int> workspaceSet(item.workspaceOutputs.begin(),
                                item.workspaceOutputs.end());
-    std::vector<int> clonedWorkspaceOutputs;
+    WorkspaceMigration migration;
+    migration.scope = scope;
     for (int operationId : sourceOperations) {
       if (operationId == scope || item.ops.count(operationId) == 0)
         continue;
-      if (workspaceSet.count(operationId) != 0) {
-        const int cloned =
-            cloneWorkspaceOutput(operationId, scope, scopeRegion, scopeBlock,
-                                 scopeMap);
-        if (cloned >= 0)
-          clonedWorkspaceOutputs.push_back(cloned);
-        toErase.insert(operationId);
-        continue;
-      }
       materializeWorkspaceTensorSlices(operationId, scope, scopeRegion,
                                        scopeBlock, scopeMap);
       const int cloned =
@@ -226,8 +232,16 @@ private:
                                       scopeBlock, scopeMap);
       rewriter.appendToBlock(scopeBlock, cloned);
       indexOperationTree(cloned);
+      if (workspaceSet.count(operationId) != 0)
+        migration.outputs.push_back({operationId, cloned});
       toErase.insert(operationId);
     }
+
+    // Production assigns globalIRMap = scopeMap after cloning every work-item
+    // scope.  Keep all mappings here as well; later work items may consume a
+    // value cloned by an earlier item even when that value is not returned by
+    // the scope.
+    globalValues = scopeMap;
 
     std::vector<int> returned;
     std::vector<std::string> returnTypes;
@@ -246,7 +260,7 @@ private:
         globalValues[value] = scopeOp.results[ordinal];
     }
     updateLoopYieldOperands(returns, scopeOp);
-    createWorkspaceTensorsAfterScope(item, scope, clonedWorkspaceOutputs);
+    workspaceMigrations.push_back(std::move(migration));
     return true;
   }
 
@@ -273,48 +287,6 @@ private:
                                    ? operation.operands.front()
                                    : operation.dpsInits.front());
     return -1;
-  }
-
-  int cloneWorkspaceOutput(int operationId, int scope, int scopeRegion,
-                           int scopeBlock, std::map<int, int> &scopeMap) {
-    const GenericOperation &source =
-        module.operations.at(static_cast<size_t>(operationId));
-    const int allocation = workspaceAllocationForOutput(operationId);
-    auto expanded = expandedWorkspaceValue.find(allocation);
-    if (expanded == expandedWorkspaceValue.end())
-      return -1;
-    const int c0 = createInBlock(scope, scopeRegion, scopeBlock,
-                                 "arith.constant", {"index"}, {}, {},
-                                 "", "{value = 0 : index}");
-    const std::string expandedType = valueType(expanded->second, "workspace");
-    const std::string subviewType = CVPipelineSubviewType(expandedType);
-    const int subview = createInBlock(
-        scope, scopeRegion, scopeBlock, "memref.subview", {subviewType},
-        {expanded->second, result(c0)}, {expandedType, "index"}, "",
-        addPreloadWorkspaceAttr(CVPipelineWorkspaceSubviewAttributes(
-            expandedType)));
-    const std::string collapsedType =
-        CVPipelineCollapsedWorkspaceType(expandedType);
-    const int collapsed = createInBlock(
-        scope, scopeRegion, scopeBlock, "memref.collapse_shape",
-        {collapsedType}, {result(subview)}, {subviewType}, "",
-        CVPipelineWorkspaceCollapseReassociation(expandedType));
-
-    std::vector<int> operands = source.operands;
-    for (int &operand : operands)
-      if (scopeMap.count(operand))
-        operand = scopeMap.at(operand);
-    if (!operands.empty())
-      operands.back() = result(collapsed);
-    std::vector<std::string> operandTypes = source.operandTypes;
-    if (!operandTypes.empty())
-      operandTypes.back() = collapsedType;
-    const int store = createInBlock(scope, scopeRegion, scopeBlock, source.name,
-                                    {}, operands, operandTypes,
-                                    source.properties, source.attributes);
-    for (int oldResult : source.results)
-      scopeMap[oldResult] = -1;
-    return store;
   }
 
   void indexOperationTree(int operationId) {
@@ -423,41 +395,189 @@ private:
     }
   }
 
-  void createWorkspaceTensorsAfterScope(
-      const CVPipelineWorkItem &item, int scope,
-      const std::vector<int> &clonedWorkspaceOutputs) {
-    (void)clonedWorkspaceOutputs;
-    const GenericOperation &scopeOp =
-        module.operations.at(static_cast<size_t>(scope));
-    const int body = scopeOp.blockId;
-    GenericBlock &block = module.blocks.at(static_cast<size_t>(body));
-    auto position = std::find(block.operations.begin(), block.operations.end(),
-                              scope);
-    size_t insertion = position == block.operations.end()
-                           ? block.operations.size()
-                           : static_cast<size_t>(position - block.operations.begin()) + 1;
-    for (int output : item.workspaceOutputs) {
-      const int allocation = workspaceAllocationForOutput(output);
-      auto expanded = expandedWorkspaceValue.find(allocation);
-      if (expanded == expandedWorkspaceValue.end())
+  struct WorkspaceMigration {
+    int scope = -1;
+    std::vector<std::pair<int, int>> outputs;
+  };
+
+  void migrateWorkspaceOutputs() {
+    // Match CVPipelineImpl::migrateOpsForPreload: first every scope contains a
+    // normal clone of the result-bearing Store/Fixpipe; only afterwards is
+    // that clone replaced by a zero-result workspace store and its Load users
+    // redirected through a to_tensor/extract_slice pair.
+    for (const WorkspaceMigration &migration : workspaceMigrations) {
+      if (migration.scope < 0)
         continue;
-      const std::string expandedType = valueType(expanded->second, "workspace");
-      const std::string tensorType = "tensor<" + expandedType.substr(7);
-      const int toTensor = rewriter.createOperation(
-          analysis.loop, scopeOp.regionId, body, "bufferization.to_tensor",
-          {tensorType}, {expanded->second}, {expandedType}, "",
-          "{restrict}");
-      rewriter.insertToBlock(body, insertion++, toTensor);
-      if (!module.operations.at(static_cast<size_t>(output)).results.empty())
-        globalValues[module.operations.at(static_cast<size_t>(output))
-                         .results.front()] = result(toTensor);
-      valueTypes[result(toTensor)] = tensorType;
+      const GenericOperation scopeSnapshot =
+          module.operations.at(static_cast<size_t>(migration.scope));
+      const int body = scopeSnapshot.blockId;
+      GenericBlock &block = module.blocks.at(static_cast<size_t>(body));
+      auto scopePosition =
+          std::find(block.operations.begin(), block.operations.end(),
+                    migration.scope);
+      size_t insertion =
+          scopePosition == block.operations.end()
+              ? block.operations.size()
+              : static_cast<size_t>(
+                    std::distance(block.operations.begin(), scopePosition)) +
+                    1;
+
+      for (const auto &[originalOutput, clonedOutput] : migration.outputs) {
+        const int allocation = workspaceAllocationForOutput(originalOutput);
+        const auto expanded = expandedWorkspaceValue.find(allocation);
+        if (expanded == expandedWorkspaceValue.end())
+          continue;
+
+        const GenericOperation storeSnapshot =
+            module.operations.at(static_cast<size_t>(clonedOutput));
+        if (storeSnapshot.operands.empty())
+          continue;
+        const int scopeBlock = storeSnapshot.blockId;
+        const int scopeRegion = storeSnapshot.regionId;
+        const int scopeParent = storeSnapshot.parentId;
+        const std::string expandedType =
+            valueType(expanded->second, "workspace");
+        const std::string subviewType = CVPipelineSubviewType(expandedType);
+        const std::string collapsedType =
+            CVPipelineCollapsedWorkspaceType(expandedType);
+
+        const int c0 = createInBlock(scopeParent, scopeRegion, scopeBlock,
+                                     "arith.constant", {"index"}, {}, {}, "",
+                                     "{value = 0 : index}");
+        MoveOperationBefore(module, c0, clonedOutput);
+        const int subview = createInBlock(
+            scopeParent, scopeRegion, scopeBlock, "memref.subview",
+            {subviewType}, {expanded->second, result(c0)},
+            {expandedType, "index"}, "",
+            addPreloadWorkspaceAttr(
+                CVPipelineWorkspaceSubviewAttributes(expandedType)));
+        MoveOperationBefore(module, subview, clonedOutput);
+        const int collapsed = createInBlock(
+            scopeParent, scopeRegion, scopeBlock, "memref.collapse_shape",
+            {collapsedType}, {result(subview)}, {subviewType}, "",
+            CVPipelineWorkspaceCollapseReassociation(expandedType));
+        MoveOperationBefore(module, collapsed, clonedOutput);
+
+        std::vector<int> storeOperands = storeSnapshot.operands;
+        std::vector<std::string> storeOperandTypes = storeSnapshot.operandTypes;
+        storeOperands.back() = result(collapsed);
+        if (!storeOperandTypes.empty())
+          storeOperandTypes.back() = collapsedType;
+        const int replacementStore = createInBlock(
+            scopeParent, scopeRegion, scopeBlock, storeSnapshot.name, {},
+            storeOperands, storeOperandTypes, storeSnapshot.properties,
+            storeSnapshot.attributes);
+        MoveOperationBefore(module, replacementStore, clonedOutput);
+
+        const std::string tensorType = "tensor<" + expandedType.substr(7);
+        const int toTensor = rewriter.createOperation(
+            analysis.loop, scopeSnapshot.regionId, body,
+            "bufferization.to_tensor", {tensorType}, {expanded->second},
+            {expandedType}, "", "{restrict}");
+        rewriter.insertToBlock(body, insertion++, toTensor);
+        valueTypes[result(toTensor)] = tensorType;
+
+        for (size_t resultIndex = 0;
+             resultIndex < storeSnapshot.results.size() &&
+             resultIndex < storeSnapshot.resultTypes.size();
+             ++resultIndex) {
+          const int oldValue = storeSnapshot.results[resultIndex];
+          const std::string &oldType = storeSnapshot.resultTypes[resultIndex];
+          std::vector<std::pair<int, size_t>> loadUses;
+          for (const GenericOperation &candidate : module.operations) {
+            if (candidate.name != "hivm.hir.load")
+              continue;
+            for (size_t operandIndex = 0;
+                 operandIndex < candidate.operands.size(); ++operandIndex) {
+              if (candidate.operands[operandIndex] != oldValue)
+                continue;
+              loadUses.push_back({candidate.id, operandIndex});
+            }
+          }
+          for (const auto &[loadId, operandIndex] : loadUses) {
+            const GenericOperation loadSnapshot =
+                module.operations.at(static_cast<size_t>(loadId));
+            const int sliceIndex = createInBlock(
+                loadSnapshot.parentId, loadSnapshot.regionId,
+                loadSnapshot.blockId, "arith.constant", {"index"}, {}, {},
+                "", "{value = 0 : index}");
+            MoveOperationBefore(module, sliceIndex, loadId);
+            const int slice = createTensorExtract(
+                loadSnapshot.parentId, loadSnapshot.regionId,
+                loadSnapshot.blockId, result(toTensor), oldType,
+                result(sliceIndex));
+            MoveOperationBefore(module, slice, loadId);
+            rewriter.replaceOperand(loadId, operandIndex, result(slice));
+          }
+        }
+        rewriter.removeFromBlock(scopeBlock, clonedOutput);
+      }
     }
   }
 
-  void removeOriginalOps(int body) {
-    for (int operation : toErase)
-      rewriter.removeFromBlock(body, operation);
+  bool isAttached(int operationId) const {
+    if (operationId < 0 ||
+        static_cast<size_t>(operationId) >= module.operations.size())
+      return false;
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(operationId));
+    if (operation.blockId < 0 ||
+        static_cast<size_t>(operation.blockId) >= module.blocks.size())
+      return false;
+    const GenericBlock &block =
+        module.blocks.at(static_cast<size_t>(operation.blockId));
+    return std::find(block.operations.begin(), block.operations.end(),
+                     operationId) != block.operations.end();
+  }
+
+  int eraseOwnerForUser(int user) const {
+    int current = user;
+    while (current >= 0 && current != analysis.loop) {
+      if (toErase.count(current) != 0)
+        return current;
+      current = module.operations.at(static_cast<size_t>(current)).parentId;
+    }
+    return -1;
+  }
+
+  int firstAttachedUser(int operationId) const {
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(operationId));
+    for (int value : operation.results)
+      for (const GenericOperation &candidate : module.operations) {
+        if (!isAttached(candidate.id))
+          continue;
+        if (std::find(candidate.operands.begin(), candidate.operands.end(),
+                      value) != candidate.operands.end())
+          return candidate.id;
+      }
+    return -1;
+  }
+
+  bool removeOriginalOps(int body) {
+    (void)body;
+    // This is the same dependency-driven erase performed by
+    // CVPipelineImpl::markScopesForPreload.  A rewrite that still has a user
+    // outside toErase fails without deleting its producer; the pass driver
+    // deliberately ignores that per-loop failure and continues.
+    while (!toErase.empty()) {
+      int eraseOp = *toErase.begin();
+      while (true) {
+        const int user = firstAttachedUser(eraseOp);
+        if (user < 0) {
+          const int block =
+              module.operations.at(static_cast<size_t>(eraseOp)).blockId;
+          rewriter.removeFromBlock(block, eraseOp);
+          toErase.erase(eraseOp);
+          break;
+        }
+        const int owner = eraseOwnerForUser(user);
+        if (owner < 0)
+          return false;
+        eraseOp = owner;
+      }
+    }
+    return true;
   }
 
   GenericModule &module;
@@ -468,6 +588,7 @@ private:
   std::map<int, std::vector<int>> users;
   std::map<int, int> expandedWorkspaceValue;
   std::map<int, int> globalValues;
+  std::vector<WorkspaceMigration> workspaceMigrations;
   std::set<int> toErase;
 };
 

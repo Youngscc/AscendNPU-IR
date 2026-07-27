@@ -236,9 +236,125 @@ inline void EraseDeadLocalFunctions(GenericModule &module,
   }
 }
 
+// Mirrors scf::ForOp's ForOpIterArgsFolder, which is registered in the
+// canonicalizer run by createInlinerPass.  Forwarded loop channels are
+// removed when the yielded value is the tied iter argument, or when the iter
+// argument is unused and either the init is yielded or the result is unused.
+inline bool FoldForIterArgs(GenericModule &module) {
+  const std::map<int, size_t> useCounts =
+      CanonicalizationValueUseCounts(module);
+  bool changed = false;
+  for (GenericOperation &loop : module.operations) {
+    if (loop.name != "scf.for" || loop.regions.size() != 1 ||
+        loop.operands.size() < loop.results.size() + 3 ||
+        loop.resultTypes.size() != loop.results.size())
+      continue;
+    const GenericRegion &region =
+        module.regions.at(static_cast<size_t>(loop.regions.front()));
+    if (region.blocks.size() != 1)
+      continue;
+    GenericBlock &body =
+        module.blocks.at(static_cast<size_t>(region.blocks.front()));
+    if (body.arguments.size() < loop.results.size() + 1 ||
+        body.argumentTypes.size() < loop.results.size() + 1 ||
+        body.operations.empty())
+      continue;
+    GenericOperation &yield = module.operations.at(
+        static_cast<size_t>(body.operations.back()));
+    if (yield.name != "scf.yield" ||
+        yield.operands.size() < loop.results.size())
+      continue;
+
+    std::vector<size_t> forwarded;
+    for (size_t index = 0; index < loop.results.size(); ++index) {
+      const int init = loop.operands[index + 3];
+      const int iterArg = body.arguments[index + 1];
+      const int result = loop.results[index];
+      const int yielded = yield.operands[index];
+      const auto iterUses = useCounts.find(iterArg);
+      const auto resultUses = useCounts.find(result);
+      const bool iterArgUnused =
+          iterUses == useCounts.end() || iterUses->second == 0;
+      const bool resultUnused =
+          resultUses == useCounts.end() || resultUses->second == 0;
+      if (yielded != iterArg &&
+          !(iterArgUnused && (yielded == init || resultUnused)))
+        continue;
+      ReplaceAllUses(module, result, init);
+      ReplaceAllUses(module, iterArg, init);
+      forwarded.push_back(index);
+    }
+
+    for (auto iterator = forwarded.rbegin(); iterator != forwarded.rend();
+         ++iterator) {
+      const size_t index = *iterator;
+      loop.results.erase(loop.results.begin() +
+                         static_cast<std::ptrdiff_t>(index));
+      loop.resultTypes.erase(loop.resultTypes.begin() +
+                             static_cast<std::ptrdiff_t>(index));
+      loop.operands.erase(loop.operands.begin() +
+                          static_cast<std::ptrdiff_t>(index + 3));
+      if (index + 3 < loop.operandTypes.size())
+        loop.operandTypes.erase(loop.operandTypes.begin() +
+                                static_cast<std::ptrdiff_t>(index + 3));
+      body.arguments.erase(body.arguments.begin() +
+                           static_cast<std::ptrdiff_t>(index + 1));
+      body.argumentTypes.erase(body.argumentTypes.begin() +
+                               static_cast<std::ptrdiff_t>(index + 1));
+      yield.operands.erase(yield.operands.begin() +
+                           static_cast<std::ptrdiff_t>(index));
+      if (index < yield.operandTypes.size())
+        yield.operandTypes.erase(yield.operandTypes.begin() +
+                                 static_cast<std::ptrdiff_t>(index));
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 // InlineScopePass runs createInlinerPass after extracting scope bodies.  The
 // inliner's default callable optimization pipeline is createCanonicalizerPass.
 inline void RunInlinerCanonicalizer(GenericModule &module) {
+  // scf::ForOp's canonicalization replaces a provably zero-trip loop with its
+  // init arguments. SplitMixKernel deliberately creates this form for the
+  // filtered half by setting upperBound == lowerBound; the canonicalizer
+  // nested under createInlinerPass is what removes it in the real pipeline.
+  bool removedZeroTripLoop = true;
+  while (removedZeroTripLoop) {
+    removedZeroTripLoop = false;
+    for (const GenericOperation &operation : module.operations) {
+      if (operation.name != "scf.for" || operation.blockId < 0 ||
+          operation.operands.size() < 3 ||
+          operation.operands[0] != operation.operands[1] ||
+          operation.results.size() + 3 > operation.operands.size())
+        continue;
+      for (size_t index = 0; index < operation.results.size(); ++index)
+        ReplaceAllUses(module, operation.results[index],
+                       operation.operands[index + 3]);
+
+      std::vector<int> tree;
+      std::function<void(int)> collect = [&](int operationId) {
+        const GenericOperation &current =
+            module.operations.at(static_cast<size_t>(operationId));
+        for (int regionId : current.regions)
+          for (int blockId :
+               module.regions.at(static_cast<size_t>(regionId)).blocks)
+            for (int child :
+                 module.blocks.at(static_cast<size_t>(blockId)).operations)
+              collect(child);
+        tree.push_back(operationId);
+      };
+      collect(operation.id);
+      GenericRewriter(module).removeManyFromBlocks(tree);
+      module = CompactGenericModule(std::move(module));
+      removedZeroTripLoop = true;
+      break;
+    }
+  }
+
+  while (FoldForIterArgs(module)) {
+  }
+
   PipelineAnalysisContext useLists(module, kGenericAnalysisUsers);
   while (FoldCanonicalizationBooleanOps(module, useLists)) {
   }

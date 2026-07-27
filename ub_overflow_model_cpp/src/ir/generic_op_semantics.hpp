@@ -17,6 +17,7 @@ inline bool HasModeledOperationSemantics(const std::string &name) {
       "hivm.hir.bitcast", "hivm.hir.debug", "hivm.hir.fixpipe",
       "hivm.hir.get_block_idx", "hivm.hir.get_sub_block_idx",
       "hivm.hir.load", "hivm.hir.mmadL1",
+      "hivm.hir.multi_buffer_counter",
       "hivm.hir.pipe_barrier", "hivm.hir.pointer_cast",
       "hivm.hir.set_ffts_base_addr", "hivm.hir.set_mask_norm",
       "hivm.hir.store", "hivm.hir.sync_block",
@@ -29,7 +30,7 @@ inline bool HasModeledOperationSemantics(const std::string &name) {
       "hivm.hir.vmax", "hivm.hir.vmin", "hivm.hir.vmod", "hivm.hir.vmul",
       "hivm.hir.vmulextui", "hivm.hir.vnot", "hivm.hir.vor",
       "hivm.hir.vpow", "hivm.hir.vrec", "hivm.hir.vreduce",
-      "hivm.hir.vsel", "hivm.hir.vshr", "hivm.hir.vsort",
+      "hivm.hir.vsel", "hivm.hir.vshl", "hivm.hir.vshr", "hivm.hir.vsort",
       "hivm.hir.vsqrt", "hivm.hir.vsub", "hivm.hir.vtranspose",
       "hivm.hir.vxor",
       "llvm.inline_asm", "llvm.intr.assume", "memref.alloc",
@@ -80,7 +81,7 @@ inline bool HasNoMemoryEffect(const std::string &name) {
       "tensor.expand_shape", "tensor.extract", "tensor.extract_slice",
       "tensor.from_elements", "tensor.insert", "tensor.insert_slice",
       "hivm.hir.bitcast", "hivm.hir.get_block_idx",
-      "hivm.hir.get_sub_block_idx"};
+      "hivm.hir.get_sub_block_idx", "hivm.hir.multi_buffer_counter"};
   if (operations.count(name) != 0)
     return true;
   return startsWith(name, "arith.");

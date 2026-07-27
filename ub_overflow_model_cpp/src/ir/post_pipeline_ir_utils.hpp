@@ -505,12 +505,23 @@ inline void ValidateGenericModule(const GenericModule &module) {
         const bool sameBlock = definition->second.blockId == operation.blockId;
         throw std::runtime_error(
             std::string("generic IR validation: operand ") +
-            (sameBlock ? "does not dominate use" : "not visible at use"));
+            std::to_string(operation.operands[index]) + " of operation " +
+            std::to_string(operation.id) + " (" + operation.name + ") " +
+            (sameBlock ? "does not dominate use" : "not visible at use") +
+            "; definition_op=" +
+            std::to_string(definition->second.operationId) +
+            " definition_block=" +
+            std::to_string(definition->second.blockId) + " use_block=" +
+            std::to_string(operation.blockId));
       }
       if (operation.operandTypes[index] != definition->second.type)
         throw std::runtime_error(
             "generic IR validation: operand type mismatch at " +
-            std::to_string(operation.id));
+            std::to_string(operation.id) + " (" + operation.name +
+            "), operand " + std::to_string(index) + " value " +
+            std::to_string(operation.operands[index]) + ": recorded " +
+            operation.operandTypes[index] + ", defined " +
+            definition->second.type);
     }
 
     const auto validateDps = [&](const std::vector<int> &values) {
@@ -518,7 +529,10 @@ inline void ValidateGenericModule(const GenericModule &module) {
         const auto operand =
             std::find(operation.operands.begin(), operation.operands.end(), value);
         if (operand == operation.operands.end())
-          throw std::runtime_error("generic IR validation: DPS value is not an operand");
+          throw std::runtime_error(
+              "generic IR validation: DPS value " + std::to_string(value) +
+              " is not an operand of operation " +
+              std::to_string(operation.id) + " (" + operation.name + ")");
         const size_t operandIndex = static_cast<size_t>(
             std::distance(operation.operands.begin(), operand));
         const auto type = definitions.find(value);

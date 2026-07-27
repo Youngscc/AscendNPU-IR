@@ -177,8 +177,19 @@ private:
       return std::pair<int64_t, std::string>{traceToAllocMaxSize(operation, 0),
                                              source.elementType};
     }
-    if (operation.name == "hivm.hir.vdiv")
-      return getVDivExtraBuffer(operation);
+    static const std::set<std::string> binaryOperations = {
+        "hivm.hir.vmul", "hivm.hir.vadd", "hivm.hir.vmax",
+        "hivm.hir.vmin", "hivm.hir.vand", "hivm.hir.vor",
+        "hivm.hir.vsub", "hivm.hir.vdiv", "hivm.hir.vshl",
+        "hivm.hir.vshr"};
+    if (binaryOperations.count(operation.name) != 0)
+      return getBinaryExtraBuffer(operation);
+    static const std::set<std::string> unaryOperations = {
+        "hivm.hir.vnot", "hivm.hir.vabs", "hivm.hir.vln",
+        "hivm.hir.vrelu", "hivm.hir.vexp", "hivm.hir.vrsqrt",
+        "hivm.hir.vsqrt", "hivm.hir.vrec"};
+    if (unaryOperations.count(operation.name) != 0)
+      return getUnaryExtraBuffer(operation);
     if (operation.name == "hivm.hir.vbrc")
       return getVBrcExtraBuffer(operation);
     if (operation.name == "hivm.hir.vreduce")
@@ -295,18 +306,120 @@ private:
                                            source.elementType};
   }
 
+  size_t destinationOperandIndex(const GenericOperation &operation) const {
+    if (!operation.dpsInits.empty()) {
+      const int destination = operation.dpsInits.front();
+      for (size_t index = operation.operands.size(); index > 0; --index)
+        if (operation.operands[index - 1] == destination)
+          return index - 1;
+    }
+    if (operation.operandTypes.empty())
+      throw std::runtime_error("AllocExtraBuffer: missing destination operand");
+    return operation.operandTypes.size() - 1;
+  }
+
+  bool isLastAxisInlineBroadcast(const MemRefTypeModel &source,
+                                 const MemRefTypeModel &destination) const {
+    const size_t rank = destination.shape.size();
+    if (rank == 0 || source.shape.size() < rank)
+      throw std::runtime_error(
+          "AllocExtraBuffer: incompatible inline-broadcast ranks");
+    const std::optional<int64_t> sourceLast = source.shape[rank - 1];
+    if (!sourceLast)
+      return false;
+    const std::optional<int64_t> destinationLast =
+        destination.shape[rank - 1];
+    return *sourceLast == 1 &&
+           (!destinationLast || *sourceLast != *destinationLast);
+  }
+
+  int64_t lastAxisInlineBroadcastBufferSize(
+      const MemRefTypeModel &source, int64_t upperLimit) const {
+    const int64_t perBlock =
+        static_cast<int64_t>(256U / GetElementBitWidth(source));
+    if (source.shape.empty())
+      throw std::runtime_error("AllocExtraBuffer: broadcast source rank is 0");
+    if (source.shape.size() == 1)
+      return perBlock;
+    const std::optional<int64_t> penultimate =
+        source.shape[source.shape.size() - 2];
+    if (!penultimate)
+      return upperLimit;
+    if (*penultimate == 1)
+      return perBlock;
+    return perBlock * CeilFactor(*penultimate, 8);
+  }
+
   std::optional<std::pair<int64_t, std::string>>
-  getVDivExtraBuffer(const GenericOperation &operation) const {
+  getBinaryExtraBuffer(const GenericOperation &operation) const {
     if (operation.operandTypes.size() < 3)
-      throw std::runtime_error("AllocExtraBuffer: malformed vdiv");
+      throw std::runtime_error("AllocExtraBuffer: malformed binary operation");
     const bool src0Scalar = !IsMemRefType(operation.operandTypes[0]);
     const bool src1Scalar = !IsMemRefType(operation.operandTypes[1]);
+    if (src0Scalar && src1Scalar)
+      throw std::runtime_error(
+          "AllocExtraBuffer: binary vector operation has two scalar sources");
+    const size_t destinationIndex = destinationOperandIndex(operation);
     MemRefTypeModel destination;
-    memrefOperand(operation, 2, destination);
-    if (!src0Scalar && !src1Scalar)
+    memrefOperand(operation, destinationIndex, destination);
+    const int64_t perBlock =
+        static_cast<int64_t>(256U / GetElementBitWidth(destination));
+    const bool hardwareDoesNotSupportVS =
+        operation.name == "hivm.hir.vdiv" ||
+        operation.name == "hivm.hir.vsub";
+    int64_t size = hardwareDoesNotSupportVS && (src0Scalar || src1Scalar)
+                       ? perBlock
+                       : 0;
+    bool src0Inline = false;
+    bool src1Inline = false;
+    const int64_t upperLimit =
+        traceToAllocMaxSize(operation, destinationIndex);
+    if (!src0Scalar) {
+      MemRefTypeModel source;
+      memrefOperand(operation, 0, source);
+      if (source.shape.size() < destination.shape.size())
+        throw std::runtime_error("AllocExtraBuffer: " + operation.name +
+                                 " source 0 rank is smaller than destination (" +
+                                 operation.operandTypes[0] + " versus " +
+                                 operation.operandTypes[destinationIndex] + ")");
+      src0Inline = isLastAxisInlineBroadcast(source, destination);
+      if (src0Inline)
+        size += lastAxisInlineBroadcastBufferSize(source, upperLimit);
+    }
+    if (!src1Scalar) {
+      MemRefTypeModel source;
+      memrefOperand(operation, 1, source);
+      if (source.shape.size() < destination.shape.size())
+        throw std::runtime_error("AllocExtraBuffer: " + operation.name +
+                                 " source 1 rank is smaller than destination (" +
+                                 operation.operandTypes[1] + " versus " +
+                                 operation.operandTypes[destinationIndex] + ")");
+      src1Inline = isLastAxisInlineBroadcast(source, destination);
+      if (src1Inline)
+        size += lastAxisInlineBroadcastBufferSize(source, upperLimit);
+    }
+    if ((!src0Scalar && !src1Scalar && !src0Inline && !src1Inline) ||
+        (!src0Scalar && src1Scalar && !hardwareDoesNotSupportVS &&
+         !src0Inline))
+      return std::nullopt;
+    return std::pair<int64_t, std::string>{size, destination.elementType};
+  }
+
+  std::optional<std::pair<int64_t, std::string>>
+  getUnaryExtraBuffer(const GenericOperation &operation) const {
+    if (operation.operandTypes.size() < 2 ||
+        !IsMemRefType(operation.operandTypes[0]))
+      throw std::runtime_error("AllocExtraBuffer: malformed unary operation");
+    const size_t destinationIndex = destinationOperandIndex(operation);
+    MemRefTypeModel source, destination;
+    memrefOperand(operation, 0, source);
+    memrefOperand(operation, destinationIndex, destination);
+    if (source.shape.empty() || !source.shape.back() ||
+        !isLastAxisInlineBroadcast(source, destination))
       return std::nullopt;
     return std::pair<int64_t, std::string>{
-        static_cast<int64_t>(32U * 8U / GetElementBitWidth(destination)),
+        lastAxisInlineBroadcastBufferSize(
+            source, traceToAllocMaxSize(operation, destinationIndex)),
         destination.elementType};
   }
 
@@ -392,7 +505,8 @@ private:
     while (parent >= 0) {
       const GenericOperation &owner =
           module.operations.at(static_cast<size_t>(parent));
-      if (!FindDictionaryValue(owner.attributes, name).empty())
+      if (HasUnitAttribute(owner.attributes, name) ||
+          !FindDictionaryValue(owner.attributes, name).empty())
         return true;
       parent = owner.parentId;
     }
@@ -418,7 +532,8 @@ private:
     const int64_t width = static_cast<int64_t>(GetElementBitWidth(source));
     const int64_t perBlock = 256 / width;
     const int64_t perRepeat = 2048 / width;
-    const bool saveUb = functionHasAttribute(operation, "enable_saving_ub");
+    const bool saveUb =
+        functionHasAttribute(operation, "hivm.enable_saving_ub");
     std::optional<int64_t> maximum;
     for (int64_t dimension : dimensions) {
       if (dimension < 0 || dimension >= rank)

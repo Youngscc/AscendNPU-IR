@@ -1,6 +1,7 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_CVPIPELINING_ANALYSIS_HPP
 #define CVPIPELINE_UB_MODEL_CPP_CVPIPELINING_ANALYSIS_HPP
 
+#include "../../ir/generic_analysis.hpp"
 #include "cvpipelining.hpp"
 
 namespace cvub {
@@ -37,7 +38,10 @@ public:
   CVPipelineImplAnalysis(GenericModule &inputModule, int loop,
                          int multibuffer, bool shouldEnableLazyLoading)
       : module(inputModule), pipelineLoop(loop), numMultibuffer(multibuffer),
-        enableLazyLoading(shouldEnableLazyLoading) {
+        enableLazyLoading(shouldEnableLazyLoading),
+        analysisIndexes(inputModule,
+                        kGenericAnalysisDefinitions | kGenericAnalysisUsers |
+                            kGenericAnalysisValueTypes) {
     index();
   }
 
@@ -61,21 +65,15 @@ public:
 
 private:
   void index() {
+    blockArguments.assign(analysisIndexes.valueCount(), {-1, -1});
     for (const GenericBlock &block : module.blocks)
       for (size_t index = 0; index < block.arguments.size(); ++index) {
-        valueTypes[block.arguments[index]] = block.argumentTypes[index];
-        blockArguments[block.arguments[index]] =
-            {block.id, static_cast<int>(index)};
+        const int argument = block.arguments[index];
+        if (argument >= 0 &&
+            static_cast<size_t>(argument) < blockArguments.size())
+          blockArguments[static_cast<size_t>(argument)] =
+              {block.id, static_cast<int>(index)};
       }
-    for (const GenericOperation &operation : module.operations) {
-      for (size_t index = 0; index < operation.results.size(); ++index) {
-        definitions[operation.results[index]] = operation.id;
-        if (index < operation.resultTypes.size())
-          valueTypes[operation.results[index]] = operation.resultTypes[index];
-      }
-      for (int operand : operation.operands)
-        users[operand].push_back(operation.id);
-    }
     const GenericOperation &loop = module.operations.at(
         static_cast<size_t>(pipelineLoop));
     if (loop.regions.empty())
@@ -84,46 +82,159 @@ private:
         static_cast<size_t>(loop.regions.front()));
     if (!region.blocks.empty())
       body = region.blocks.front();
+
+    containedParents.assign(module.operations.size(), -1);
+    coreAttributeFlags.assign(module.operations.size(), uint8_t{0});
+    destinationStyleFlags.assign(module.operations.size(), uint8_t{0});
+    traversalMarks.assign(module.operations.size(), uint32_t{0});
+    for (const GenericOperation &operation : module.operations) {
+      refreshCoreAttributeFlags(operation.id);
+      destinationStyleFlags[static_cast<size_t>(operation.id)] =
+          IsDestinationStyleOp(operation.name) ? uint8_t{1} : uint8_t{0};
+      int current = operation.id;
+      int parent = operation.parentId;
+      while (parent >= 0 && parent != pipelineLoop) {
+        current = parent;
+        parent = module.operations.at(static_cast<size_t>(current)).parentId;
+      }
+      if (parent == pipelineLoop)
+        containedParents[static_cast<size_t>(operation.id)] = current;
+    }
+
+    descendantsByOperation.resize(module.operations.size());
+    if (body < 0)
+      return;
+    for (int operationId :
+         module.blocks.at(static_cast<size_t>(body)).operations) {
+      std::vector<int> &descendants =
+          descendantsByOperation[static_cast<size_t>(operationId)];
+      collectDescendants(operationId, descendants);
+      // The former implementation filtered module.operations, whose order is
+      // numeric operation ID order. Preserve that observable dependency-stack
+      // order even though descendants are now reached through the region tree.
+      std::sort(descendants.begin(), descendants.end());
+    }
   }
 
   int getContainedParent(int inner) const {
-    int current = inner;
-    int parent = module.operations.at(static_cast<size_t>(current)).parentId;
-    while (parent >= 0 && parent != pipelineLoop) {
-      current = parent;
-      parent = module.operations.at(static_cast<size_t>(current)).parentId;
+    return inner >= 0 && static_cast<size_t>(inner) < containedParents.size()
+               ? containedParents[static_cast<size_t>(inner)]
+               : -1;
+  }
+
+  void collectDescendants(int operationId, std::vector<int> &result) const {
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(operationId));
+    for (int regionId : operation.regions)
+      for (int blockId :
+           module.regions.at(static_cast<size_t>(regionId)).blocks)
+        for (int nestedId :
+             module.blocks.at(static_cast<size_t>(blockId)).operations) {
+          result.push_back(nestedId);
+          collectDescendants(nestedId, result);
+        }
+  }
+
+  int definingOperation(int value) const {
+    return analysisIndexes.definingOperationId(value);
+  }
+
+  const std::vector<int> &valueUsers(int value) const {
+    return analysisIndexes.users(value);
+  }
+
+  const std::string *valueType(int value) const {
+    return analysisIndexes.valueType(value);
+  }
+
+  const std::pair<int, int> *blockArgument(int value) const {
+    if (value < 0 || static_cast<size_t>(value) >= blockArguments.size() ||
+        blockArguments[static_cast<size_t>(value)].first < 0)
+      return nullptr;
+    return &blockArguments[static_cast<size_t>(value)];
+  }
+
+  void refreshCoreAttributeFlags(int operationId) {
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(operationId));
+    uint8_t flags = 0;
+    if (CVPipelineHasAttribute(operation, "pipeline.cubeonly"))
+      flags |= uint8_t{1};
+    if (CVPipelineHasAttribute(operation, "pipeline.veconly"))
+      flags |= uint8_t{2};
+    coreAttributeFlags.at(static_cast<size_t>(operationId)) = flags;
+  }
+
+  bool hasCubeOnlyAttribute(int operationId) const {
+    return (coreAttributeFlags.at(static_cast<size_t>(operationId)) &
+            uint8_t{1}) != 0;
+  }
+
+  bool hasVectorOnlyAttribute(int operationId) const {
+    return (coreAttributeFlags.at(static_cast<size_t>(operationId)) &
+            uint8_t{2}) != 0;
+  }
+
+  CVPipelineCoreType queryCoreType(const GenericOperation &operation) const {
+    if (hasCubeOnlyAttribute(operation.id))
+      return CVPipelineCoreType::Cube;
+    if (hasVectorOnlyAttribute(operation.id))
+      return CVPipelineCoreType::Vector;
+    return CVPipelineQueryCoreTypeFromSemantics(operation);
+  }
+
+  bool isDestinationStyle(int operationId) const {
+    return operationId >= 0 &&
+           static_cast<size_t>(operationId) < destinationStyleFlags.size() &&
+           destinationStyleFlags[static_cast<size_t>(operationId)] != 0;
+  }
+
+  uint32_t nextTraversalGeneration() {
+    ++traversalGeneration;
+    if (traversalGeneration == 0) {
+      std::fill(traversalMarks.begin(), traversalMarks.end(), uint32_t{0});
+      traversalGeneration = 1;
     }
-    return parent == pipelineLoop ? current : -1;
+    return traversalGeneration;
+  }
+
+  bool markTraversalVisited(int operationId, uint32_t generation) {
+    if (operationId < 0 ||
+        static_cast<size_t>(operationId) >= traversalMarks.size())
+      return false;
+    uint32_t &mark = traversalMarks[static_cast<size_t>(operationId)];
+    if (mark == generation)
+      return false;
+    mark = generation;
+    return true;
   }
 
   int definingContainedParent(int value) const {
-    auto definition = definitions.find(value);
-    return definition == definitions.end() ? -1
-                                           : getContainedParent(definition->second);
+    const int definition = definingOperation(value);
+    return definition < 0 ? -1 : getContainedParent(definition);
   }
 
   bool isShaped(int value) const {
-    auto type = valueTypes.find(value);
-    return type != valueTypes.end() &&
-           (startsWith(type->second, "tensor<") ||
-            startsWith(type->second, "memref<"));
+    const std::string *type = valueType(value);
+    return type &&
+           (startsWith(*type, "tensor<") || startsWith(*type, "memref<"));
   }
 
   bool isMemRef(int value) const {
-    auto type = valueTypes.find(value);
-    return type != valueTypes.end() && startsWith(type->second, "memref<");
+    const std::string *type = valueType(value);
+    return type && startsWith(*type, "memref<");
   }
 
   bool isTensor(int value) const {
-    auto type = valueTypes.find(value);
-    return type != valueTypes.end() && startsWith(type->second, "tensor<");
+    const std::string *type = valueType(value);
+    return type && startsWith(*type, "tensor<");
   }
 
   int traceValueDef(int value) const {
-    auto definition = definitions.find(value);
-    if (definition != definitions.end()) {
+    const int definition = definingOperation(value);
+    if (definition >= 0) {
       const GenericOperation &operation = module.operations.at(
-          static_cast<size_t>(definition->second));
+          static_cast<size_t>(definition));
       if (operation.name == "tensor.reshape" ||
           operation.name == "tensor.extract_slice" ||
           operation.name == "tensor.collapse_shape" ||
@@ -159,11 +270,11 @@ private:
       return value;
     }
 
-    auto argument = blockArguments.find(value);
-    if (argument == blockArguments.end())
+    const std::pair<int, int> *argument = blockArgument(value);
+    if (!argument)
       return value;
     const GenericBlock &block =
-        module.blocks.at(static_cast<size_t>(argument->second.first));
+        module.blocks.at(static_cast<size_t>(argument->first));
     const int region = block.regionId;
     if (region < 0)
       return value;
@@ -173,9 +284,9 @@ private:
       return value;
     const GenericOperation &parentOp =
         module.operations.at(static_cast<size_t>(parent));
-    if (parentOp.name != "scf.for" || argument->second.second == 0)
+    if (parentOp.name != "scf.for" || argument->second == 0)
       return value;
-    const size_t initIndex = static_cast<size_t>(argument->second.second + 2);
+    const size_t initIndex = static_cast<size_t>(argument->second + 2);
     if (initIndex < parentOp.operands.size())
       return traceValueDef(parentOp.operands[initIndex]);
     return value;
@@ -183,11 +294,11 @@ private:
 
   int traceAlloc(int value) const {
     const int root = traceValueDef(value);
-    auto definition = definitions.find(root);
-    if (definition == definitions.end())
+    const int definition = definingOperation(root);
+    if (definition < 0)
       return -1;
     const GenericOperation &operation = module.operations.at(
-        static_cast<size_t>(definition->second));
+        static_cast<size_t>(definition));
     return operation.name == "memref.alloc" ? operation.id : -1;
   }
 
@@ -205,10 +316,10 @@ private:
   }
 
   bool isCoreOp(const GenericOperation &operation) const {
-    return CVPipelineHasAttribute(operation, "pipeline.cubeonly") ||
-           CVPipelineHasAttribute(operation, "pipeline.veconly") ||
+    return hasCubeOnlyAttribute(operation.id) ||
+           hasVectorOnlyAttribute(operation.id) ||
            (startsWith(operation.name, "hivm.hir.") &&
-            IsDestinationStyleOp(operation.name));
+            isDestinationStyle(operation.id));
   }
 
   bool isSeparator(const GenericOperation &operation) const {
@@ -233,17 +344,19 @@ private:
   }
 
   void mapOpToItem(int operation, size_t item) {
+    if (worklist[item].ops.count(operation) != 0)
+      return;
     opToWorkItemMap[operation].push_back(item);
     worklist[item].ops.insert(operation);
   }
 
   void populateDependencies(int separator) {
     std::vector<int> stack = {separator};
-    std::set<int> visited;
+    const uint32_t generation = nextTraversalGeneration();
     while (!stack.empty()) {
       const int operationId = stack.back();
       stack.pop_back();
-      if (!visited.insert(operationId).second ||
+      if (!markTraversalVisited(operationId, generation) ||
           !CVPipelineIsDescendant(module, operationId, pipelineLoop))
         continue;
       const GenericOperation &operation = module.operations.at(
@@ -251,7 +364,7 @@ private:
       for (int result : operation.results) {
         if (!isShaped(result))
           continue;
-        for (int rawUser : users[result]) {
+        for (int rawUser : valueUsers(result)) {
           const int user = getContainedParent(rawUser);
           if (user < 0 || user == separator)
             continue;
@@ -278,28 +391,29 @@ private:
     for (size_t index = 0;
          index < yield.operands.size() && index + 1 < block.arguments.size();
          ++index) {
-      if (!isShaped(yield.operands[index]) ||
-          !startsWith(valueTypes[yield.operands[index]], "tensor<"))
+      const std::string *yieldType = valueType(yield.operands[index]);
+      if (!isShaped(yield.operands[index]) || !yieldType ||
+          !startsWith(*yieldType, "tensor<"))
         continue;
       const int defining = definingContainedParent(yield.operands[index]);
       if (defining < 0)
         continue;
-      std::vector<int> stack = users[block.arguments[index + 1]];
-      std::set<int> visited;
+      std::vector<int> stack = valueUsers(block.arguments[index + 1]);
+      const uint32_t generation = nextTraversalGeneration();
       while (!stack.empty()) {
         const int operation = getContainedParent(stack.back());
         stack.pop_back();
         if (operation < 0 || operation == defining ||
-            !visited.insert(operation).second)
+            !markTraversalVisited(operation, generation))
           continue;
         const GenericOperation &record = module.operations.at(
             static_cast<size_t>(operation));
-        if (IsDestinationStyleOp(record.name)) {
+        if (isDestinationStyle(record.id)) {
           loopCarriedDependenceMap[operation].insert(defining);
           continue;
         }
         for (int result : record.results)
-          for (int user : users[result])
+          for (int user : valueUsers(result))
             if (module.operations.at(static_cast<size_t>(user)).name !=
                 "scf.yield")
               stack.push_back(user);
@@ -314,11 +428,10 @@ private:
     if (defining >= 0 && worklist[item].ops.count(defining) != 0)
       return true;
     if (defining < 0) {
-      auto argument = blockArguments.find(operand);
-      if (argument == blockArguments.end() ||
-          argument->second.first != body || argument->second.second == 0)
+      const std::pair<int, int> *argument = blockArgument(operand);
+      if (!argument || argument->first != body || argument->second == 0)
         return true;
-      for (int user : users[operand]) {
+      for (int user : valueUsers(operand)) {
         const int contained = getContainedParent(user);
         if (contained >= 0 &&
             module.operations.at(static_cast<size_t>(contained)).name ==
@@ -326,12 +439,13 @@ private:
             worklist[item].ops.count(contained) == 0)
           stack.push_back(contained);
       }
-      if (startsWith(valueTypes[operand], "tensor<"))
+      const std::string *operandType = valueType(operand);
+      if (operandType && startsWith(*operandType, "tensor<"))
         return true;
       const GenericBlock &block = module.blocks.at(static_cast<size_t>(body));
       const GenericOperation &yield = module.operations.at(
           static_cast<size_t>(block.operations.back()));
-      const size_t yielded = static_cast<size_t>(argument->second.second - 1);
+      const size_t yielded = static_cast<size_t>(argument->second - 1);
       if (yielded < yield.operands.size())
         defining = definingContainedParent(yield.operands[yielded]);
     }
@@ -342,17 +456,14 @@ private:
     return true;
   }
 
-  void memrefDFS(int memref, std::vector<int> &stack) const {
+  void memrefDFS(int memref, std::vector<int> &stack) {
     const int root = traceValueDef(memref);
-    std::vector<int> trace;
-    auto found = users.find(root);
-    if (found != users.end())
-      trace = found->second;
-    std::set<int> visited;
+    std::vector<int> trace = valueUsers(root);
+    const uint32_t generation = nextTraversalGeneration();
     while (!trace.empty()) {
       const int operationId = trace.back();
       trace.pop_back();
-      if (!visited.insert(operationId).second)
+      if (!markTraversalVisited(operationId, generation))
         continue;
       stack.push_back(operationId);
       const GenericOperation &operation =
@@ -360,10 +471,8 @@ private:
       if (operation.results.size() == 1 && !isMemRef(operation.results.front()))
         continue;
       for (int result : operation.results) {
-        auto resultUsers = users.find(result);
-        if (resultUsers != users.end())
-          trace.insert(trace.end(), resultUsers->second.begin(),
-                       resultUsers->second.end());
+        const std::vector<int> &resultUsers = valueUsers(result);
+        trace.insert(trace.end(), resultUsers.begin(), resultUsers.end());
       }
     }
   }
@@ -376,13 +485,13 @@ private:
       return true;
     int current = start;
     int targetOperand = initial.operands.size() > 1 ? initial.operands[1] : -1;
-    int writer = isTensor(targetOperand) && IsDestinationStyleOp(initial.name)
+    int writer = isTensor(targetOperand) && isDestinationStyle(initial.id)
                      ? start
                      : -1;
-    auto defining = definitions.find(targetOperand);
-    while (defining != definitions.end()) {
-      const int definingOp = defining->second;
-      if (!CVPipelineIsDescendant(module, definingOp, pipelineLoop))
+    int defining = definingOperation(targetOperand);
+    while (defining >= 0) {
+      const int definingOp = defining;
+      if (definingOp != pipelineLoop && getContainedParent(definingOp) < 0)
         break;
       current = definingOp;
       const std::string &name =
@@ -399,7 +508,7 @@ private:
             module.operations.at(static_cast<size_t>(definingOp));
         if (operation.operands.empty())
           break;
-        defining = definitions.find(operation.operands.front());
+        defining = definingOperation(operation.operands.front());
         continue;
       }
       return fail("unexpected memref op in chain: " + name);
@@ -407,18 +516,18 @@ private:
 
     std::vector<int> trace = {current};
     int toTensor = -1;
-    std::set<int> visited;
+    const uint32_t generation = nextTraversalGeneration();
     while (!trace.empty()) {
       const int definition = trace.back();
       trace.pop_back();
-      if (!visited.insert(definition).second)
+      if (!markTraversalVisited(definition, generation))
         continue;
       stack.push_back(definition);
       for (int result : module.operations.at(static_cast<size_t>(definition)).results) {
-        for (int user : users[result]) {
+        for (int user : valueUsers(result)) {
           const GenericOperation &use =
               module.operations.at(static_cast<size_t>(user));
-          if (IsDestinationStyleOp(use.name)) {
+          if (isDestinationStyle(use.id)) {
             if (writer >= 0)
               return fail("multiple writers for defined memref");
             writer = user;
@@ -449,6 +558,7 @@ private:
 
   bool traceDependentOps(size_t item) {
     std::vector<int> stack(worklist[item].ops.begin(), worklist[item].ops.end());
+    std::vector<uint8_t> expanded(module.operations.size(), uint8_t{0});
     while (!stack.empty()) {
       const int operationId = stack.back();
       stack.pop_back();
@@ -470,16 +580,19 @@ private:
         continue;
       if (operation.name == "bufferization.to_tensor" &&
           !operation.operands.empty()) {
-        auto definition = definitions.find(operation.operands.front());
-        if (definition != definitions.end() &&
-            module.operations.at(static_cast<size_t>(definition->second)).name ==
+        const int definition = definingOperation(operation.operands.front());
+        if (definition >= 0 &&
+            module.operations.at(static_cast<size_t>(definition)).name ==
                 "memref_ext.alloc_workspace")
           continue;
       }
+      if (expanded[static_cast<size_t>(operationId)] != 0)
+        continue;
+      expanded[static_cast<size_t>(operationId)] = 1;
       mapOpToItem(operationId, item);
       toBePipelined.erase(operationId);
       for (int result : operation.results)
-        for (int user : users[result]) {
+        for (int user : valueUsers(result)) {
           const GenericOperation &use =
               module.operations.at(static_cast<size_t>(user));
           if (use.name == "annotation.mark" || use.name == "hivm.hir.debug")
@@ -496,25 +609,27 @@ private:
       }
       if (operation.name == "bufferization.to_tensor" &&
           !operation.operands.empty()) {
-        for (int user : users[operation.operands.front()]) {
+        for (int user : valueUsers(operation.operands.front())) {
           const int contained = getContainedParent(user);
           if (contained < 0 || contained == operationId)
             continue;
           const GenericOperation &writer = module.operations.at(
               static_cast<size_t>(contained));
-          if (IsDestinationStyleOp(writer.name))
+          if (isDestinationStyle(writer.id))
             stack.push_back(contained);
         }
       }
       for (int operand : operation.operands)
         if (!traceOperands(operand, item, stack))
           return false;
-      for (const GenericOperation &nested : module.operations)
-        if (nested.id != operationId &&
-            CVPipelineIsDescendant(module, nested.id, operationId))
-          for (int operand : nested.operands)
-            if (!traceOperands(operand, item, stack))
-              return false;
+      for (int nestedId :
+           descendantsByOperation[static_cast<size_t>(operationId)]) {
+        const GenericOperation &nested =
+            module.operations.at(static_cast<size_t>(nestedId));
+        for (int operand : nested.operands)
+          if (!traceOperands(operand, item, stack))
+            return false;
+      }
     }
     return true;
   }
@@ -528,15 +643,15 @@ private:
       if (opToWorkItemMap.count(operationId))
         continue;
       CVPipelineCoreType maybeCore =
-          CVPipelineHasAttribute(operation, "pipeline.cubeonly")
+          hasCubeOnlyAttribute(operationId)
               ? CVPipelineCoreType::Cube
-              : CVPipelineHasAttribute(operation, "pipeline.veconly")
+              : hasVectorOnlyAttribute(operationId)
                     ? CVPipelineCoreType::Vector
                     : CVPipelineCoreType::Unknown;
       if (maybeCore == CVPipelineCoreType::Unknown) {
         if (!isCoreOp(operation) || operation.name == "hivm.hir.load")
           continue;
-        maybeCore = CVPipelineQueryCoreType(operation);
+        maybeCore = queryCoreType(operation);
         if (maybeCore != CVPipelineCoreType::Vector &&
             isCrossCoreCopy(operation))
           maybeCore = CVPipelineCoreType::Vector;
@@ -571,10 +686,10 @@ private:
       stack.pop_back();
       if (candidates.count(operation) != 0)
         deferred.insert(operation);
-      for (int result : module.operations.at(static_cast<size_t>(operation)).results) {
-        auto found = users.find(result);
-        if (found != users.end())
-          stack.insert(stack.end(), found->second.begin(), found->second.end());
+      for (int result :
+           module.operations.at(static_cast<size_t>(operation)).results) {
+        const std::vector<int> &resultUsers = valueUsers(result);
+        stack.insert(stack.end(), resultUsers.begin(), resultUsers.end());
       }
     }
     available.erase(std::remove_if(available.begin(), available.end(),
@@ -617,9 +732,12 @@ private:
         if (!markWorkspaceOps(operationId, static_cast<unsigned>(multibuffer)))
           return false;
       }
-      else if (!operation.regions.empty() &&
-               CVPipelineIllegalRegionedOp(module, operation))
-        return fail("illegal regioned operation: " + operation.name);
+      else if (!operation.regions.empty()) {
+        const bool illegal = CVPipelineIllegalRegionedOp(module, operation);
+        refreshCoreAttributeFlags(operationId);
+        if (illegal)
+          return fail("illegal regioned operation: " + operation.name);
+      }
     }
     if (multibuffer < 2)
       return fail("multibuffer count is less than two");
@@ -708,9 +826,10 @@ private:
                 {result, static_cast<size_t>(yielded - yield.operands.begin())});
             continue;
           }
-          if (!startsWith(valueTypes[result], "tensor<"))
+          const std::string *resultType = valueType(result);
+          if (!resultType || !startsWith(*resultType, "tensor<"))
             continue;
-          for (int user : users[result]) {
+          for (int user : valueUsers(result)) {
             const int contained = getContainedParent(user);
             auto mapped = opToWorkItemMap.find(contained);
             if (mapped != opToWorkItemMap.end() &&
@@ -722,10 +841,12 @@ private:
           }
         }
       }
-      std::sort(item.yieldedOutputs.begin(), item.yieldedOutputs.end(),
-                [](const auto &lhs, const auto &rhs) {
-                  return lhs.second < rhs.second;
-                });
+      // CVPipelining.cpp::markOutputs preserves the iteration order of the
+      // work item's SetVector of operations.  The recorded yield ordinal is
+      // used later to update the enclosing loop yield, but it does not sort
+      // the scope's result list.  Keeping discovery order is observable when
+      // one work item produces several loop-carried values (for example the
+      // preload fused-attention vector scope).
     }
   }
 
@@ -752,15 +873,15 @@ private:
   }
 
   int getAllocWorkspace(int value) const {
-    auto definition = definitions.find(value);
-    if (definition == definitions.end())
+    const int definition = definingOperation(value);
+    if (definition < 0)
       return -1;
     const GenericOperation &operation =
-        module.operations.at(static_cast<size_t>(definition->second));
+        module.operations.at(static_cast<size_t>(definition));
     if (operation.name == "memref_ext.alloc_workspace")
       return operation.id;
     if ((operation.name == "bufferization.to_tensor" ||
-         (IsDestinationStyleOp(operation.name) && !operation.dpsInits.empty())) &&
+         (isDestinationStyle(operation.id) && !operation.dpsInits.empty())) &&
         !operation.operands.empty())
       return getAllocWorkspace(operation.name == "bufferization.to_tensor"
                                    ? operation.operands.front()
@@ -774,29 +895,29 @@ private:
     if (operation.name == "annotation.mark") {
       if (operation.operands.empty())
         return true;
-      auto allocation = definitions.find(operation.operands.front());
-      if (allocation == definitions.end() ||
-          module.operations.at(static_cast<size_t>(allocation->second)).name !=
+      const int allocation = definingOperation(operation.operands.front());
+      if (allocation < 0 ||
+          module.operations.at(static_cast<size_t>(allocation)).name !=
               "memref_ext.alloc_workspace")
         return true;
       CVPipelineWorkspaceAllocParams &params =
-          workspaceAllocs[allocation->second];
+          workspaceAllocs[allocation];
       params.multibuffer = multibuffer;
       params.marker = operationId;
       return true;
     }
     if (operation.name != "bufferization.to_tensor" || operation.operands.empty())
       return true;
-    auto allocation = definitions.find(operation.operands.front());
-    if (allocation == definitions.end() ||
-        module.operations.at(static_cast<size_t>(allocation->second)).name !=
+    const int allocation = definingOperation(operation.operands.front());
+    if (allocation < 0 ||
+        module.operations.at(static_cast<size_t>(allocation)).name !=
             "memref_ext.alloc_workspace")
       return true;
-    if (users[operation.results.front()].size() != 1 ||
-        users[operation.operands.front()].size() != 2)
+    if (valueUsers(operation.results.front()).size() != 1 ||
+        valueUsers(operation.operands.front()).size() != 2)
       return fail("workspace alloc/to_tensor has unexpected users");
     CVPipelineWorkspaceAllocParams &params =
-        workspaceAllocs[allocation->second];
+        workspaceAllocs[allocation];
     params.toTensor = operationId;
     return true;
   }
@@ -829,10 +950,10 @@ private:
     const GenericOperation &terminator =
         module.operations.at(static_cast<size_t>(block.operations.back()));
     for (int yieldOperand : terminator.operands) {
-      auto rootDefinition = definitions.find(yieldOperand);
-      if (rootDefinition == definitions.end())
+      const int rootDefinition = definingOperation(yieldOperand);
+      if (rootDefinition < 0)
         continue;
-      const int root = getContainedParent(rootDefinition->second);
+      const int root = getContainedParent(rootDefinition);
       if (root < 0 || opToWorkItemMap.count(root))
         continue;
       std::set<int> chain;
@@ -846,10 +967,10 @@ private:
         const GenericOperation &operation =
             module.operations.at(static_cast<size_t>(current));
         for (int operand : operation.operands) {
-          auto definition = definitions.find(operand);
-          if (definition == definitions.end())
+          const int definition = definingOperation(operand);
+          if (definition < 0)
             continue;
-          const int contained = getContainedParent(definition->second);
+          const int contained = getContainedParent(definition);
           if (contained < 0)
             continue;
           auto mapped = opToWorkItemMap.find(contained);
@@ -876,11 +997,12 @@ private:
           continue;
         if (operation.operands.empty())
           continue;
-        auto definition = definitions.find(traceValueDef(operation.operands.front()));
-        if (definition == definitions.end())
+        const int definition =
+            definingOperation(traceValueDef(operation.operands.front()));
+        if (definition < 0)
           continue;
         const GenericOperation &alloc =
-            module.operations.at(static_cast<size_t>(definition->second));
+            module.operations.at(static_cast<size_t>(definition));
         if (alloc.name == "memref.alloca" &&
             (alloc.properties + alloc.attributes)
                     .find("normalize_matmul_counter") != std::string::npos)
@@ -893,12 +1015,12 @@ private:
             loadedCounters.count(operation.operands[1]) == 0 ||
             opToWorkItemMap.count(operationId))
           continue;
-        auto inc = definitions.find(operation.operands.front());
-        if (inc != definitions.end() &&
-            module.operations.at(static_cast<size_t>(inc->second)).name ==
+        const int inc = definingOperation(operation.operands.front());
+        if (inc >= 0 &&
+            module.operations.at(static_cast<size_t>(inc)).name ==
                 "arith.addi" &&
-            opToWorkItemMap.count(inc->second) == 0)
-          mapOpToItem(inc->second, itemIndex);
+            opToWorkItemMap.count(inc) == 0)
+          mapOpToItem(inc, itemIndex);
         mapOpToItem(operationId, itemIndex);
       }
     }
@@ -909,11 +1031,15 @@ private:
   int pipelineLoop = -1;
   int numMultibuffer = -1;
   bool enableLazyLoading = false;
+  GenericModuleAnalysisIndexes analysisIndexes;
   int body = -1;
-  std::map<int, std::string> valueTypes;
-  std::map<int, int> definitions;
-  std::map<int, std::pair<int, int>> blockArguments;
-  std::map<int, std::vector<int>> users;
+  std::vector<std::pair<int, int>> blockArguments;
+  std::vector<int> containedParents;
+  std::vector<std::vector<int>> descendantsByOperation;
+  std::vector<uint8_t> coreAttributeFlags;
+  std::vector<uint8_t> destinationStyleFlags;
+  std::vector<uint32_t> traversalMarks;
+  uint32_t traversalGeneration = 0;
   std::vector<int> separators;
   std::set<int> toBePipelined;
   std::map<int, std::set<int>> dependenceMap;

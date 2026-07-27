@@ -408,6 +408,53 @@ private:
       joinSameRank(operation.operands[index], parent.results[index]);
   }
 
+  void processSlicing(const GenericOperation &operation, bool insert) {
+    if (operation.operands.empty() || operation.results.empty())
+      return;
+    const int source = operation.operands.front();
+    const int result = operation.results.front();
+    if (insert) {
+      if (operation.operands.size() < 2)
+        return;
+      joinSameRank(operation.operands[1], result);
+    }
+    const int superview = insert ? result : source;
+    const int subview = insert ? source : result;
+    auto superType = shapedTypes.find(superview);
+    auto subType = shapedTypes.find(subview);
+    if (superType == shapedTypes.end() || subType == shapedTypes.end())
+      return;
+    std::vector<int64_t> sizes =
+        ParseDimensionI64Array(operation.properties, "static_sizes");
+    if (sizes.empty())
+      sizes = ParseDimensionI64Array(operation.attributes, "static_sizes");
+    if (sizes.size() != superType->second.shape.size())
+      return;
+
+    // OffsetSizeAndStrideOpInterface::getDroppedDims maps every retained
+    // subview axis to its superview axis; rank-reduced unit dimensions are
+    // skipped. This is the mapping used by BiSheng's
+    // DimensionAnalyzerBase::processSlicingOp.
+    size_t subAxis = 0;
+    for (size_t superAxis = 0; superAxis < sizes.size(); ++superAxis) {
+      const size_t superAxesLeft = sizes.size() - superAxis;
+      const size_t subAxesLeft = subType->second.shape.size() - subAxis;
+      const bool mustKeep = superAxesLeft == subAxesLeft;
+      const bool compatible =
+          subAxis < subType->second.shape.size() &&
+          (sizes[superAxis] == std::numeric_limits<int64_t>::min() ||
+           !subType->second.shape[subAxis] ||
+           sizes[superAxis] == *subType->second.shape[subAxis]);
+      if (mustKeep || compatible) {
+        if (subAxis < subType->second.shape.size())
+          joinDimensions(superview, superAxis, subview, subAxis++);
+        continue;
+      }
+      if (sizes[superAxis] != 1)
+        return;
+    }
+  }
+
   void processOperations() {
     for (const GenericOperation &operation : module.operations) {
       if (operation.name == "tensor.expand_shape" ||
@@ -421,6 +468,14 @@ private:
       }
       if (operation.name == "scf.yield") {
         processYield(operation);
+        continue;
+      }
+      if (operation.name == "tensor.extract_slice") {
+        processSlicing(operation, false);
+        continue;
+      }
+      if (operation.name == "tensor.insert_slice") {
+        processSlicing(operation, true);
         continue;
       }
 

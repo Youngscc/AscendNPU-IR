@@ -211,6 +211,76 @@ inline void ReplaceOperationFolderValue(GenericModule &module, int from,
   }
 }
 
+// arith::MulIOp::fold and arith::IndexCastOp::fold run through the
+// OperationFolder used by applyPatternsGreedily.  Keep these folds here rather
+// than teaching an individual pass about a particular loop bound: both are
+// ordinary constant folds performed by the real canonicalizer.
+inline void FoldOperationFolderIntegerConstants(
+    GenericModule &module, const std::vector<int> &operationOrder) {
+  std::map<int, ArithIntegerConstant> constants;
+  for (const GenericOperation &operation : module.operations)
+    if (const std::optional<ArithIntegerConstant> value =
+            ParseArithIntegerConstant(operation);
+        value && operation.results.size() == 1)
+      constants[operation.results.front()] = *value;
+
+  const auto replaceWithConstant = [&](GenericOperation &operation,
+                                       ArithIntegerConstant value) {
+    if (operation.resultTypes.size() != 1)
+      return;
+    const std::string literal =
+        std::to_string(SignedArithInteger(value));
+    operation.name = "arith.constant";
+    operation.operands.clear();
+    operation.operandTypes.clear();
+    operation.properties =
+        "{value = " + literal + " : " + operation.resultTypes.front() + "}";
+    operation.attributes = operation.properties;
+    operation.effects.clear();
+    operation.dpsInputs.clear();
+    operation.dpsInits.clear();
+    constants[operation.results.front()] = value;
+  };
+
+  for (int operationId : operationOrder) {
+    GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(operationId));
+    if (operation.results.size() != 1 || operation.resultTypes.size() != 1)
+      continue;
+    const std::optional<unsigned> resultWidth =
+        ArithIntegerBitWidth(operation.resultTypes.front());
+    if (!resultWidth)
+      continue;
+
+    if (operation.name == "arith.muli" && operation.operands.size() == 2) {
+      const auto lhs = constants.find(operation.operands.front());
+      const auto rhs = constants.find(operation.operands.back());
+      if (lhs == constants.end() || rhs == constants.end() ||
+          lhs->second.width != rhs->second.width ||
+          lhs->second.width != *resultWidth)
+        continue;
+      uint64_t bits = lhs->second.bits * rhs->second.bits;
+      if (*resultWidth < 64)
+        bits &= (uint64_t{1} << *resultWidth) - 1;
+      replaceWithConstant(operation,
+                          ArithIntegerConstant{bits, *resultWidth});
+      continue;
+    }
+
+    if (operation.name != "arith.index_cast" ||
+        operation.operands.size() != 1)
+      continue;
+    const auto source = constants.find(operation.operands.front());
+    if (source == constants.end())
+      continue;
+    uint64_t bits =
+        static_cast<uint64_t>(SignedArithInteger(source->second));
+    if (*resultWidth < 64)
+      bits &= (uint64_t{1} << *resultWidth) - 1;
+    replaceWithConstant(operation, ArithIntegerConstant{bits, *resultWidth});
+  }
+}
+
 // Mirrors the constant CSE/hoisting performed by OperationFolder while
 // applyPatternsGreedily walks a function in postorder.
 inline void RunGreedyOperationFolder(GenericModule &module, int functionId) {
@@ -238,6 +308,8 @@ inline void RunGreedyOperationFolder(GenericModule &module, int functionId) {
         }
   };
   collect(functionId);
+
+  FoldOperationFolderIntegerConstants(module, postOrder);
 
   GenericRewriter rewriter(module);
   std::set<int> folderOwnedConstants;

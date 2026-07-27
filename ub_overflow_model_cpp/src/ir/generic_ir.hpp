@@ -5,6 +5,8 @@
 #include "generic_op_semantics.hpp"
 
 #include <iomanip>
+#include <istream>
+#include <string_view>
 #include <unordered_map>
 
 namespace cvub {
@@ -325,6 +327,10 @@ public:
     std::ifstream input(path);
     if (!input)
       throw std::runtime_error("generic IR parser: cannot open " + path.string());
+    return Parse(input);
+  }
+
+  GenericModule Parse(std::istream &input) {
     std::string line;
     while (std::getline(input, line))
       parseLine(trim(line));
@@ -593,6 +599,13 @@ private:
 inline GenericModule ParseGenericIR(const fs::path &path,
                                          bool applyOperationSemantics = true) {
   return GenericIRParser(applyOperationSemantics).Parse(path);
+}
+
+inline GenericModule
+ParseGenericIRText(std::string_view text,
+                   bool applyOperationSemantics = true) {
+  std::istringstream input{std::string(text)};
+  return GenericIRParser(applyOperationSemantics).Parse(input);
 }
 
 inline std::string SerializeGenericModule(

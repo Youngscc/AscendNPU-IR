@@ -8,7 +8,9 @@
 #include "../passes/fold_tensor_empty.hpp"
 #include "../passes/global_workspace_plan.hpp"
 #include "../passes/hivm_inline_otf_load_store.hpp"
+#include "../passes/infer_hivm_data_layout.hpp"
 #include "../passes/infer_and_set_buffer_size.hpp"
+#include "../passes/inject_block_sync.hpp"
 #include "../passes/inline_scope.hpp"
 #include "../passes/inline_scope_strict.hpp"
 #include "../passes/loop_invariant_code_motion.hpp"
@@ -33,8 +35,14 @@ struct UBAffectingPassOptions {
   unsigned tileMixVectorLoop = 2;
   unsigned tileMixCubeLoop = 2;
   bool enableCodeMotion = true;
+  bool enableAutoBindSubBlock = true;
   bool enableUbufSaving = false;
   bool enableTritonKernelCompile = false;
+  bool enableHIVMAutoStorageAlign = true;
+  bool enableHIVMCrossCoreGSS = true;
+  bool enableHIVMInjectBlockAllSync = false;
+  bool disableAutoInjectBlockSync = false;
+  bool disableAutoCVWorkSpaceManage = false;
   bool disableAlignAllocSize = false;
   bool disableEnableStrideAlign = false;
   bool disableInferHIVMDataLayout = false;
@@ -44,6 +52,12 @@ struct UBAffectingPassOptions {
   MultiBufferStrategy limitMixAutoMultiBufferBuffer =
       MultiBufferStrategy::OnlyCube;
 };
+
+inline void ValidateDiscardedAICBufferizedCopies(
+    const GenericModule &module, const UBAffectingPassOptions &options);
+
+inline void ValidateDiscardedAICBufferizedCopiesOnProjection(
+    GenericModule aicProjection, const UBAffectingPassOptions &options);
 
 inline GenericModule RequireExactStage(StageResult stage) {
   if (stage.precision == Precision::Exact)
@@ -128,62 +142,16 @@ inline void TracePlanMemoryResult(DebugTrace *trace,
                   [&] { return SerializeDebugPlanMemoryResult(result); });
 }
 
-inline GenericModule RunPassesBeforeLoopInvariantCodeMotion(
-    GenericModule module, const UBAffectingPassOptions &options = {},
-    DebugTrace *trace = nullptr) {
-  MeasureStage(trace, "ApplyOperationSemantics",
-               [&] { ApplyOperationSemanticsToAll(module.operations); });
-  module = MeasureStage(trace, "TileCubeVectorLoop", [&] {
-    return RequireExactStage(RunTileCubeVectorLoop(
-        std::move(module), options.tileMixVectorLoop,
-        options.tileMixCubeLoop));
-  });
-  TraceGenericPass(trace, "TileCubeVectorLoop", module);
-  module = MeasureStage(trace, "InferAndSetBufferSize", [&] {
-    return RunInferAndSetBufferSizePipeline(std::move(module));
-  });
-  TraceGenericPass(trace, "InferAndSetBufferSize", module);
-  module = MeasureStage(trace, "GlobalWorkspacePlan", [&] {
-    return RunGlobalWorkspacePlan(std::move(module));
-  });
-  TraceGenericPass(trace, "GlobalWorkspacePlan", module);
-  module = MeasureStage(trace, "FoldTensorEmpty", [&] {
-    return RunFoldTensorEmpty(std::move(module));
-  });
-  TraceGenericPass(trace, "FoldTensorEmpty", module);
-  module = MeasureStage(trace, "CanonicalizationHIVMPipeline", [&] {
-    return RunCanonicalizationHIVMPipeline(std::move(module));
-  });
-  TraceGenericPass(trace, "CanonicalizationHIVMPipeline", module);
-  module = MeasureStage(trace, "MarkRealCoreType", [&] {
-    return RunMarkRealCoreType(std::move(module), false,
-                               /*inputCanonicalized=*/true);
-  });
-  TraceGenericPass(trace, "MarkRealCoreType", module);
-  module = MeasureStage(trace, "CrossCoreGSS", [&] {
-    return RunCrossCoreGSS(std::move(module));
-  });
-  TraceGenericPass(trace, "CrossCoreGSS", module);
-  module = MeasureStage(trace, "MarkRealCoreType", [&] {
-    return RunMarkRealCoreType(std::move(module), true);
-  });
-  TraceGenericPass(trace, "MarkRealCoreType", module);
-  // Temporarily disabled together with the corresponding suffix passes.
-  // module = RequireExactStage(
-  //     GuardTightlyCoupledBufferPasses(std::move(module)));
-  // TraceGenericPass(trace,
-  //                  "MarkTightlyCoupledBuffer;HoistTightlyCoupledAlloc",
-  //                  module);
-  module = MeasureStage(trace, "SplitMixKernel", [&] {
-    return RunSplitMixKernel(std::move(module));
-  });
-  TraceGenericPass(trace, "SplitMixKernel", module);
+inline GenericModule RunPassesAfterSplitMixKernel(
+    GenericModule module, const UBAffectingPassOptions &options,
+    DebugTrace *trace) {
   module = MeasureStage(trace, "InlineScope", [&] {
     return RequireExactStage(RunStrictInlineScope(std::move(module)));
   });
   TraceGenericPass(trace, "InlineScope", module);
   module = MeasureStage(trace, "TileAndBindSubBlock", [&] {
-    return RunTileAndBindSubBlock(std::move(module), trace);
+    return RunTileAndBindSubBlock(std::move(module), trace,
+                                  options.enableAutoBindSubBlock);
   });
   TraceGenericPass(trace, "TileAndBindSubBlock", module);
   module = MeasureStage(trace, "FoldTensorEmpty", [&] {
@@ -204,11 +172,9 @@ inline GenericModule RunPassesBeforeLoopInvariantCodeMotion(
   return module;
 }
 
-inline GenericModule RunPassesBeforeOneShotBufferize(
-    GenericModule module, const UBAffectingPassOptions &options = {},
-    DebugTrace *trace = nullptr) {
-  module =
-      RunPassesBeforeLoopInvariantCodeMotion(std::move(module), options, trace);
+inline GenericModule RunPassesAfterPostSplitCanonicalization(
+    GenericModule module, const UBAffectingPassOptions &options,
+    DebugTrace *trace) {
   if (options.enableCodeMotion) {
     MeasureStage(trace, "LoopInvariantCodeMotion",
                  [&] { RunLoopInvariantCodeMotion(module); });
@@ -244,15 +210,179 @@ inline GenericModule RunPassesBeforeOneShotBufferize(
     trace->Pass("CloneTensorEmptyBeforeBufferize", {{"executed", 0}});
   }
   if (options.enableUbufSaving) {
+    // cv2pm's production bufferizationPipeline clones again immediately
+    // before sinking.  This is distinct from the unconditional post-split
+    // clone and the Triton DPS clone above.
+    module = MeasureStage(trace,
+                          "CloneTensorEmptyBeforeUbufSavingSink", [&] {
+      return RunCloneTensorEmpty(std::move(module), trace);
+    });
+    TraceGenericPass(trace, "CloneTensorEmptyBeforeUbufSavingSink", module);
     module = MeasureStage(trace, "SinkOpToConsumerInLoop", [&] {
       return RunSinkOpToConsumerInLoop(std::move(module));
     });
     TraceGenericPass(trace, "SinkOpToConsumerInLoop", module);
   } else if (trace) {
+    trace->Pass("CloneTensorEmptyBeforeUbufSavingSink", {{"executed", 0}});
     trace->Pass("SinkOpToConsumerInLoop", {{"executed", 0}});
   }
   ValidateGenericModule(module);
   return module;
+}
+
+inline GenericModule RunPassesBeforeLoopInvariantCodeMotion(
+    GenericModule module, const UBAffectingPassOptions &options = {},
+    DebugTrace *trace = nullptr) {
+  MeasureStage(trace, "ApplyOperationSemantics",
+               [&] { ApplyOperationSemanticsToAll(module.operations); });
+  // The production HIVM pipeline runs an additional CloneTensorEmpty/Sink
+  // pair immediately after CVPipelining when UB-saving is enabled.  This is
+  // distinct from the unconditional clone and UB-saving sink immediately
+  // before OneShotBufferize below: the early pair changes the tensor SSA seen
+  // by tiling, MIX projection, and the later bufferization passes.
+  if (options.enableUbufSaving) {
+    module = MeasureStage(trace, "CloneTensorEmptyAfterCVPipelining", [&] {
+      return RunCloneTensorEmpty(std::move(module), trace);
+    });
+    TraceGenericPass(trace, "CloneTensorEmptyAfterCVPipelining", module);
+    module = MeasureStage(trace, "SinkOpToConsumerInLoopAfterCVPipelining", [&] {
+      return RunSinkOpToConsumerInLoop(std::move(module));
+    });
+    TraceGenericPass(trace, "SinkOpToConsumerInLoopAfterCVPipelining", module);
+  } else if (trace) {
+    trace->Pass("CloneTensorEmptyAfterCVPipelining", {{"executed", 0}});
+    trace->Pass("SinkOpToConsumerInLoopAfterCVPipelining",
+                {{"executed", 0}});
+  }
+  module = MeasureStage(trace, "TileCubeVectorLoop", [&] {
+    return RequireExactStage(RunTileCubeVectorLoop(
+        std::move(module), options.tileMixVectorLoop,
+        options.tileMixCubeLoop));
+  });
+  TraceGenericPass(trace, "TileCubeVectorLoop", module);
+  if (!options.disableAutoCVWorkSpaceManage) {
+    module = MeasureStage(trace, "InferAndSetBufferSize", [&] {
+      return RunInferAndSetBufferSizePipeline(std::move(module));
+    });
+    TraceGenericPass(trace, "InferAndSetBufferSize", module);
+    module = MeasureStage(trace, "GlobalWorkspacePlan", [&] {
+      return RunGlobalWorkspacePlan(std::move(module));
+    });
+    TraceGenericPass(trace, "GlobalWorkspacePlan", module);
+  } else if (trace) {
+    trace->Pass("InferAndSetBufferSize", {{"executed", 0}});
+    trace->Pass("GlobalWorkspacePlan", {{"executed", 0}});
+  }
+  module = MeasureStage(trace, "CanonicalizationHIVMPipeline", [&] {
+    return RunCanonicalizationHIVMPipeline(std::move(module));
+  });
+  TraceGenericPass(trace, "CanonicalizationHIVMPipeline", module);
+  module = MeasureStage(trace, "MarkRealCoreType", [&] {
+    return RunMarkRealCoreType(std::move(module), false,
+                               /*inputCanonicalized=*/true);
+  });
+  TraceGenericPass(trace, "MarkRealCoreType", module);
+  if (options.enableHIVMCrossCoreGSS &&
+      !options.enableHIVMInjectBlockAllSync &&
+      !options.disableAutoInjectBlockSync) {
+    module = MeasureStage(trace, "CrossCoreGSS", [&] {
+      return RunCrossCoreGSS(std::move(module));
+    });
+    TraceGenericPass(trace, "CrossCoreGSS", module);
+  } else {
+    module = MeasureStage(trace, "InjectBlockSync", [&] {
+      return RunInjectBlockSync(std::move(module),
+                                options.enableHIVMInjectBlockAllSync,
+                                options.disableAutoInjectBlockSync);
+    });
+    TraceGenericPass(trace, "InjectBlockSync", module);
+  }
+  module = MeasureStage(trace, "MarkRealCoreType", [&] {
+    return RunMarkRealCoreType(std::move(module), true);
+  });
+  TraceGenericPass(trace, "MarkRealCoreType", module);
+  // cv2pm runs these two passes before SplitMixKernel.  They are proven
+  // no-ops for the supported A2/A3 profile; the guard keeps that path exact
+  // while failing closed if an Ascend950 UB/L1 allocation reaches the model.
+  module = RequireExactStage(
+      GuardTightlyCoupledBufferPasses(std::move(module)));
+  TraceGenericPass(trace,
+                   "MarkTightlyCoupledBuffer;HoistTightlyCoupledAlloc",
+                   module);
+  const bool mayContainAICProjection =
+      MayContainAICProjection(module);
+  std::optional<GenericModule> aicProjection;
+  if (!options.disableInferHIVMDataLayout)
+    MeasureStage(trace, "InferHIVMDataLayout.AICProjection", [&] {
+      if (!mayContainAICProjection)
+        return;
+      aicProjection =
+          RunSplitMixKernelProjection(module, SplitMixCoreType::Cube);
+      ValidateInferHIVMDataLayoutOnAICProjection(*aicProjection);
+    });
+  MeasureStage(trace, "CopyOpVerifier.AICProjection", [&] {
+    if (!mayContainAICProjection)
+      return;
+    if (!aicProjection)
+      aicProjection =
+          RunSplitMixKernelProjection(module, SplitMixCoreType::Cube);
+    ValidateDiscardedAICBufferizedCopiesOnProjection(
+        std::move(*aicProjection), options);
+  });
+  module = MeasureStage(trace, "SplitMixKernel", [&] {
+    return RunSplitMixKernel(std::move(module));
+  });
+  TraceGenericPass(trace, "SplitMixKernel", module);
+  return RunPassesAfterSplitMixKernel(std::move(module), options, trace);
+}
+
+inline GenericModule RunPassesBeforeOneShotBufferize(
+    GenericModule module, const UBAffectingPassOptions &options = {},
+    DebugTrace *trace = nullptr) {
+  module =
+      RunPassesBeforeLoopInvariantCodeMotion(std::move(module), options, trace);
+  return RunPassesAfterPostSplitCanonicalization(std::move(module), options,
+                                                  trace);
+}
+
+// SplitMixKernel keeps only the AIV projection in the lightweight pipeline,
+// but cv2pm later bufferizes both projections.  Reproduce the verifier-visible
+// CopyOp failures of the discarded AIC projection before dropping it.  This
+// follows the same projection preflight already used for
+// InferHIVMDataLayout's AIC-only failures.
+inline void ValidateDiscardedAICBufferizedCopies(
+    const GenericModule &module, const UBAffectingPassOptions &options) {
+  const bool mayContainCubeProjection = std::any_of(
+      module.operations.begin(), module.operations.end(),
+      [](const GenericOperation &operation) {
+        return IsSplitMixFunction(operation) ||
+               (operation.name == "func.func" &&
+                SplitMixEnumValue(FindDictionaryValue(
+                    operation.attributes, "hivm.func_core_type")) == "AIC");
+      });
+  if (!mayContainCubeProjection)
+    return;
+
+  GenericModule aicProjection =
+      RunSplitMixKernelProjection(module, SplitMixCoreType::Cube);
+  ValidateDiscardedAICBufferizedCopiesOnProjection(
+      std::move(aicProjection), options);
+}
+
+inline void ValidateDiscardedAICBufferizedCopiesOnProjection(
+    GenericModule aicProjection, const UBAffectingPassOptions &options) {
+  aicProjection = RunPassesAfterSplitMixKernel(
+      std::move(aicProjection), options, nullptr);
+  aicProjection = RunPassesAfterPostSplitCanonicalization(
+      std::move(aicProjection), options, nullptr);
+  OneShotBufferizationResult oneShot = RunOneShotBufferize(aicProjection);
+  BufferizedSemanticIR bufferized =
+      BuildBufferizedSemanticIR(std::move(aicProjection), std::move(oneShot));
+  PostBufferizationRewriteState postBufferization =
+      BuildPostBufferizationRewriteState(std::move(bufferized));
+  const std::map<std::string, AddressSpace> scopes =
+      InferHIVMMemScope(postBufferization);
+  ValidateBufferizedCopyAddressSpaces(postBufferization, scopes);
 }
 
 inline PlanMemoryInput BuildPlanMemoryInputFromBeforeOneShotBufferize(
@@ -261,10 +391,15 @@ inline PlanMemoryInput BuildPlanMemoryInputFromBeforeOneShotBufferize(
     const std::string &targetFunction = {}) {
   BufferizedSemanticIR oneShotBufferizeOutput =
       MeasureStage(trace, "OneShotBufferize", [&] {
+        module = RunPostOneShotScalarCSEProjection(std::move(module));
         OneShotBufferizationResult bufferization =
             MeasureStage(trace, "OneShotBufferize.Analysis", [&] {
               return RunOneShotBufferize(module);
             });
+        if (trace)
+          trace->Artifact("OneShotBufferize.Analysis", [&] {
+            return SerializeOneShotAnalysis(bufferization.decisions);
+          });
         return MeasureStage(trace, "OneShotBufferize.BuildSemanticIR", [&] {
           return BuildBufferizedSemanticIR(std::move(module),
                                            std::move(bufferization));
@@ -304,10 +439,16 @@ inline PlanMemoryInput BuildPlanMemoryInputFromBeforeOneShotBufferize(
   }
   AfterAllocExtraBufferState allocExtraBufferOutput =
       MeasureStage(trace, "AlignStorageAndAllocExtraBuffer", [&] {
+        // MarkStrideAlign only creates annotations; EnableStrideAlign is what
+        // materializes them into physical layouts consumed by PlanMemory.  At
+        // this modeled boundary their UB effect is therefore the conjunction,
+        // while the two effective compiler options remain separate in the
+        // public request and its digest.
         return BuildAfterAllocExtraBufferState(
             std::move(hivmDecomposeOpOutput),
             !options.disableAlignAllocSize,
-            !options.disableEnableStrideAlign);
+            options.enableHIVMAutoStorageAlign &&
+                !options.disableEnableStrideAlign);
       });
   if (trace) {
     const uint64_t extraBuffers = static_cast<uint64_t>(std::count_if(
@@ -433,11 +574,13 @@ inline ModulePlanResult RunUBModuleFromAfterCVPipelining(
     GenericModule module,
     const UBAffectingPassOptions &options = {},
     std::optional<uint32_t> planMemorySeed = std::nullopt,
-    bool restrictInplaceAsISA = false, DebugTrace *trace = nullptr) {
+    bool restrictInplaceAsISA = false, DebugTrace *trace = nullptr,
+    uint64_t capacityBits = kUBCapacityBits) {
   GenericModule projected =
       RunPassesBeforeOneShotBufferize(std::move(module), options, trace);
   const std::vector<std::string> functions = AIVFunctionNames(projected);
   ModulePlanResult result;
+  result.capacityBits = capacityBits;
   for (size_t functionIndex = 0; functionIndex < functions.size();
        ++functionIndex) {
     const std::string &function = functions[functionIndex];
@@ -448,8 +591,10 @@ inline ModulePlanResult RunUBModuleFromAfterCVPipelining(
     PlanMemoryModelResult plan = MeasureStage(trace, "PlanMemory", [&] {
       return planMemorySeed
                  ? PlanLocalMemoryForSeed(input, *planMemorySeed,
-                                          restrictInplaceAsISA, trace)
-                 : PlanLocalMemory(input, restrictInplaceAsISA, trace);
+                                          restrictInplaceAsISA, trace,
+                                          capacityBits)
+                 : PlanLocalMemory(input, restrictInplaceAsISA, trace,
+                                   capacityBits);
     });
     TracePlanMemoryResult(trace, plan);
     result.success = result.success && plan.success;
@@ -478,6 +623,7 @@ struct CVPipeliningUBPipelineOptions {
   UBAffectingPassOptions ubAffectingPasses;
   std::optional<uint32_t> planMemorySeed;
   bool restrictInplaceAsISA = false;
+  uint64_t capacityBits = kUBCapacityBits;
   DebugTrace *debugTrace = nullptr;
 };
 
@@ -486,12 +632,16 @@ inline ModulePlanResult RunCVPipeliningUBModulePipeline(
   MeasureStage(options.debugTrace, "ApplyOperationSemantics",
                [&] { ApplyOperationSemanticsToAll(module.operations); });
   module = MeasureStage(options.debugTrace, "CVPipelining", [&] {
-    return RunCVPipeliningPass(std::move(module), options.cvPipelining);
+    CVPipeliningOptions cvOptions = options.cvPipelining;
+    cvOptions.disabled = cvOptions.disabled ||
+                         options.ubAffectingPasses.disableAutoCVWorkSpaceManage;
+    return RunCVPipeliningPass(std::move(module), cvOptions);
   });
   TraceCVPipelining(options.debugTrace, module);
   return RunUBModuleFromAfterCVPipelining(
       std::move(module), options.ubAffectingPasses, options.planMemorySeed,
-      options.restrictInplaceAsISA, options.debugTrace);
+      options.restrictInplaceAsISA, options.debugTrace,
+      options.capacityBits);
 }
 
 inline ModulePlanResult RunCVPipeliningUBModulePipeline(
@@ -508,7 +658,10 @@ inline PlanMemoryModelResult RunCVPipeliningUBPipeline(
   MeasureStage(options.debugTrace, "ApplyOperationSemantics",
                [&] { ApplyOperationSemanticsToAll(module.operations); });
   module = MeasureStage(options.debugTrace, "CVPipelining", [&] {
-    return RunCVPipeliningPass(std::move(module), options.cvPipelining);
+    CVPipeliningOptions cvOptions = options.cvPipelining;
+    cvOptions.disabled = cvOptions.disabled ||
+                         options.ubAffectingPasses.disableAutoCVWorkSpaceManage;
+    return RunCVPipeliningPass(std::move(module), cvOptions);
   });
   TraceCVPipelining(options.debugTrace, module);
   const PlanMemoryInput input = BuildPlanMemoryInputFromAfterCVPipelining(
@@ -518,9 +671,11 @@ inline PlanMemoryModelResult RunCVPipeliningUBPipeline(
         return options.planMemorySeed
                    ? PlanLocalMemoryForSeed(input, *options.planMemorySeed,
                                             options.restrictInplaceAsISA,
-                                            options.debugTrace)
+                                            options.debugTrace,
+                                            options.capacityBits)
                    : PlanLocalMemory(input, options.restrictInplaceAsISA,
-                                     options.debugTrace);
+                                     options.debugTrace,
+                                     options.capacityBits);
       });
   TracePlanMemoryResult(options.debugTrace, result);
   return result;

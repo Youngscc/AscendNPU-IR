@@ -1,9 +1,22 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_FOLD_TENSOR_EMPTY_HPP
 #define CVPIPELINE_UB_MODEL_CPP_FOLD_TENSOR_EMPTY_HPP
 
-#include "canonicalization_hivm_pipeline.hpp"
+#include "../ir/generic_rewriter.hpp"
 
 namespace cvub {
+
+inline bool IsFoldTensorEmptyTerminator(
+    const GenericOperation &operation) {
+  static const std::set<std::string> terminators = {
+      "affine.yield", "cf.br",       "cf.cond_br", "func.return",
+      "scf.condition", "scf.yield"};
+  return terminators.count(operation.name) != 0;
+}
+
+inline void ReplaceFoldTensorEmptyValue(GenericModule &module, int from,
+                                        int to) {
+  GenericRewriter(module).replaceAllUses(from, to);
+}
 
 inline std::unordered_map<int, const GenericOperation *>
 FoldTensorEmptyDefinitions(const GenericModule &module) {
@@ -54,10 +67,18 @@ inline bool EliminateFoldTensorEmptyDeadCode(GenericModule &module) {
     if (!active[static_cast<size_t>(operationId)] ||
         operation.blockId < 0 || operation.results.empty() ||
         !operation.regions.empty() ||
-        IsCanonicalizationTerminator(operation))
+        IsFoldTensorEmptyTerminator(operation))
       return false;
-    if (!operation.effects.empty() && operation.effects != "none" &&
-        operation.name != "tensor.empty")
+    // GenericOperation uses "none" as the serialized effect spelling for
+    // tensor.insert_slice even though the MLIR operation is Pure.  The greedy
+    // driver used by HIVMBubbleUpExtractSlice therefore erases an unused
+    // insert_slice (and can then erase its temporary loop iter_arg bridge).
+    // Keep this deliberately narrow: other dialect operations may carry the
+    // same conservative spelling without being trivially dead.
+    const bool knownPure = operation.name == "tensor.empty" ||
+                           operation.name == "tensor.insert_slice";
+    if (!operation.effects.empty() &&
+        !(operation.effects == "none" && knownPure))
       return false;
     return std::all_of(operation.results.begin(), operation.results.end(),
                        [&](int result) {
@@ -128,9 +149,12 @@ ExtractSliceDynamicSizes(const GenericOperation &operation) {
                               static_cast<std::ptrdiff_t>(begin + segments[2]));
 }
 
-// Mirrors tensor::populateFoldTensorEmptyPatterns. Only the SSA and shaped
-// type information observed by OneShotBufferize is retained.
-inline GenericModule RunFoldTensorEmpty(GenericModule module) {
+// Apply the tensor::populateFoldTensorEmptyPatterns projection without
+// compacting operation/value ids. HIVMBubbleUpExtractSlice registers these
+// patterns in its own greedy driver, so nested users (notably
+// TileAndBindSubBlock) need the in-place form before their verifier and
+// follow-up rewrites run.
+inline bool RunFoldTensorEmptyPatternsInPlace(GenericModule &module) {
   bool anyChange = false;
   bool changed = true;
   while (changed) {
@@ -173,7 +197,7 @@ inline GenericModule RunFoldTensorEmpty(GenericModule module) {
           IsDefinedByTensorEmpty(operation.operands.front(), definitions)) {
         const int destination = operation.operands[1];
         for (int result : operation.results)
-          ReplaceCanonicalizedValue(module, result, destination);
+          ReplaceFoldTensorEmptyValue(module, result, destination);
         GenericRewriter(module).removeFromBlock(operation.blockId,
                                                  operation.id);
         changed = anyChange = true;
@@ -182,7 +206,13 @@ inline GenericModule RunFoldTensorEmpty(GenericModule module) {
     }
   }
   anyChange |= EliminateFoldTensorEmptyDeadCode(module);
-  if (!anyChange)
+  return anyChange;
+}
+
+// Mirrors tensor::populateFoldTensorEmptyPatterns. Only the SSA and shaped
+// type information observed by OneShotBufferize is retained.
+inline GenericModule RunFoldTensorEmpty(GenericModule module) {
+  if (!RunFoldTensorEmptyPatternsInPlace(module))
     return module;
   return CompactGenericModule(std::move(module));
 }

@@ -11,10 +11,14 @@ namespace cvub {
 // stream: when a loop-carried input is read after the yielded allocation has
 // been initialized, copy the yielded value into the iter arg and yield the
 // iter arg itself.
+template <typename AllocationNameSet, typename AllocationTypeMap>
 inline std::vector<OperationRecord> NormalizeIterUseAfterYieldInit(
-    std::vector<OperationRecord> input,
-    const std::set<std::string> &allocNames,
-    const std::map<std::string, std::string> &allocTypes) {
+    std::vector<OperationRecord> input, const AllocationNameSet &allocNames,
+    const AllocationTypeMap &allocTypes) {
+  // Both normalization patterns repeatedly query the same SSA lists. Parse
+  // an untyped text input once up front; the production bridge reaches here
+  // with these lists already populated, so this is a no-op on the hot path.
+  MaterializeOperationValueLists(input);
   struct LoopContext {
     int begin = -1;
     int end = -1;
@@ -34,7 +38,7 @@ inline std::vector<OperationRecord> NormalizeIterUseAfterYieldInit(
       loopStack.push_back(loops.size() - 1);
     } else if (input[i].opName == "scf.yield" && !loopStack.empty()) {
       loops[loopStack.back()].yield = static_cast<int>(i);
-      loops[loopStack.back()].yieldedValues = extractSSAs(input[i].text);
+      loops[loopStack.back()].yieldedValues = input[i].materializedOperands;
     } else if (input[i].opName == "scf.for.end" && !loopStack.empty()) {
       loops[loopStack.back()].end = static_cast<int>(i);
       loopStack.pop_back();
@@ -68,12 +72,12 @@ inline std::vector<OperationRecord> NormalizeIterUseAfterYieldInit(
   for (size_t i = 0; i < input.size(); ++i) {
     const OperationRecord &operation = input[i];
     if (operation.opName == "scope.scope") {
-      scopeStack.push_back({operationResultNames(operation), -1, {}});
+      scopeStack.push_back({operation.materializedResults, -1, {}});
       continue;
     }
     if (operation.opName == "scope.return" && !scopeStack.empty()) {
       scopeStack.back().returnOperation = static_cast<int>(i);
-      scopeStack.back().returnedValues = operationOperandNames(operation);
+      scopeStack.back().returnedValues = operation.materializedOperands;
       continue;
     }
     if (operation.opName != "scope.scope.end" || scopeStack.empty())
@@ -136,11 +140,13 @@ inline std::vector<OperationRecord> NormalizeIterUseAfterYieldInit(
   for (const std::string &name : allocNames)
     recordAlias(0, name, name);
   for (size_t i = 0; i < input.size(); ++i) {
-    std::string result = resultNameBeforeEqual(input[i].text);
+    const std::string result = input[i].materializedResults.empty()
+                                   ? std::string()
+                                   : input[i].materializedResults.front();
     if (input[i].opName == "memref.alloc" && allocNames.count(result))
       allocDef[result] = static_cast<int>(i);
     if (isViewLikeMemrefOp(input[i].opName)) {
-      for (const std::string &operand : operationOperandNames(input[i])) {
+      for (const std::string &operand : input[i].materializedOperands) {
         if (operand == result)
           continue;
         recordAlias(i + 1, result, operand);
@@ -174,9 +180,8 @@ inline std::vector<OperationRecord> NormalizeIterUseAfterYieldInit(
         values.insert(values.end(), extra.begin(), extra.end());
       }
     } else if (operation.opName == "memref.store") {
-      std::vector<std::string> operands = operationOperandNames(operation);
-      if (operands.size() >= 2)
-        values.push_back(operands[1]);
+      if (operation.materializedOperands.size() >= 2)
+        values.push_back(operation.materializedOperands[1]);
     }
     return values;
   };
@@ -186,7 +191,7 @@ inline std::vector<OperationRecord> NormalizeIterUseAfterYieldInit(
     if (operation.opName == "memref.load" ||
         operation.opName == "hivm.hir.debug" ||
         operation.opName == "scf.yield")
-      return operationOperandNames(operation);
+      return operation.materializedOperands;
     return std::vector<std::string>{};
   };
   std::vector<std::vector<std::string>> writtenByOperation;
@@ -316,15 +321,74 @@ inline bool isCommonPureNormalizeOperation(
   return isKnownPureNormalizeOperation(operation);
 }
 
+// OperationRecord is the bridge's post-bufferization projection, so it no
+// longer carries GenericOperation::regions.  Recover the same direct region
+// ownership used by GenericOperationDominates from the pre-order stream: the
+// last operation in the parent path before the first child is the operation
+// owning that child region.
+inline std::vector<std::optional<size_t>> NormalizeParentOperations(
+    const std::vector<OperationRecord> &operations) {
+  using RegionKey = std::pair<std::vector<int>, int>;
+  std::map<std::vector<int>, size_t> lastOperationAtPath;
+  std::map<RegionKey, std::optional<size_t>> parentByRegion;
+  std::vector<std::optional<size_t>> parents(operations.size());
+  for (size_t index = 0; index < operations.size(); ++index) {
+    const OperationRecord &operation = operations[index];
+    if (!operation.regionPath.empty()) {
+      std::vector<int> parentPath(operation.regionPath.begin(),
+                                  std::prev(operation.regionPath.end()));
+      const RegionKey key{parentPath, operation.regionPath.back()};
+      auto parent = parentByRegion.find(key);
+      if (parent == parentByRegion.end()) {
+        const auto owner = lastOperationAtPath.find(parentPath);
+        parent = parentByRegion
+                     .emplace(key, owner == lastOperationAtPath.end()
+                                       ? std::nullopt
+                                       : std::optional<size_t>(owner->second))
+                     .first;
+      }
+      parents[index] = parent->second;
+    }
+    lastOperationAtPath[operation.regionPath] = index;
+  }
+  return parents;
+}
+
+// This is the OperationRecord counterpart of GenericOperationDominates used
+// by RunCanonicalizationHIVMAfterArithToAffine.  It intentionally remains
+// conservative for sibling CFG blocks: a definition is reusable only when it
+// precedes the use in the same block, or precedes an enclosing region owner.
+inline bool NormalizeOperationDominates(
+    const std::vector<OperationRecord> &operations,
+    const std::vector<std::optional<size_t>> &parents, size_t candidate,
+    size_t operation) {
+  size_t cursor = operation;
+  while (true) {
+    if (operations[candidate].blockId == operations[cursor].blockId &&
+        candidate < cursor)
+      return true;
+    if (!parents[cursor])
+      return false;
+    cursor = *parents[cursor];
+  }
+}
+
 inline void EliminateCommonPureOperations(
     std::vector<OperationRecord> &operations) {
-  using BlockKey = std::pair<std::vector<int>, int>;
-  std::map<std::pair<BlockKey, std::string>,
-           std::vector<std::string>> available;
+  // canonicalizationHIVMPipeline runs MLIR's CSE after FlattenOps.  CSE is not
+  // block-local: a collapse_shape before scf.for/scf.if dominates equivalent
+  // collapses in its nested regions.  OperationRecord does not retain the
+  // complete side-effect and region metadata needed to widen this rule safely
+  // for every MLIR operation, so all other pure bridge records keep the former
+  // exact-block rule.
+  const std::vector<std::optional<size_t>> parents =
+      NormalizeParentOperations(operations);
+  std::map<std::string, std::vector<size_t>> available;
   std::map<std::string, std::string> aliases;
-  std::vector<OperationRecord> retained;
-  retained.reserve(operations.size());
-  for (OperationRecord &operation : operations) {
+  std::vector<bool> erased(operations.size(), false);
+  for (size_t operationIndex = 0; operationIndex < operations.size();
+       ++operationIndex) {
+    OperationRecord &operation = operations[operationIndex];
     ReplaceOperationSSAUsesInMapOrder(operation, aliases);
     if (!operation.normalizationKey.empty())
       operation.normalizationKey =
@@ -332,33 +396,54 @@ inline void EliminateCommonPureOperations(
     for (BranchDestination &destination : operation.branchDestinations)
       for (std::string &operand : destination.operands)
         operand = resolveSSAUseInMapOrder(std::move(operand), aliases);
-    const std::vector<std::string> results = operationResultNames(operation);
+    const std::vector<std::string> &results = operation.materializedResults;
     const bool eligible = !results.empty() &&
                           operation.opName != "arith.constant" &&
                           isCommonPureNormalizeOperation(operation);
-    if (!eligible) {
-      retained.push_back(std::move(operation));
+    if (!eligible)
       continue;
-    }
     const size_t equal = operation.text.find('=');
     const std::string rhs =
         equal == std::string::npos ? operation.text
                                    : trim(operation.text.substr(equal + 1));
-    const BlockKey block{operation.regionPath, operation.blockId};
     const std::string &semanticRhs =
         operation.normalizationKey.empty() ? rhs : operation.normalizationKey;
-    const auto key =
-        std::make_pair(block, operation.opName + "\n" + semanticRhs);
+    const std::string key = operation.opName + "\n" + semanticRhs;
+    size_t dominating = operations.size();
     auto existing = available.find(key);
-    if (existing == available.end() ||
-        existing->second.size() != results.size()) {
-      available[key] = results;
-      retained.push_back(std::move(operation));
+    if (existing != available.end()) {
+      for (auto candidate = existing->second.rbegin();
+           candidate != existing->second.rend(); ++candidate) {
+        const OperationRecord &candidateOperation = operations[*candidate];
+        const bool visible =
+            operation.opName == "memref.collapse_shape"
+                ? NormalizeOperationDominates(operations, parents, *candidate,
+                                              operationIndex)
+                : candidateOperation.regionPath == operation.regionPath &&
+                      candidateOperation.blockId == operation.blockId &&
+                      *candidate < operationIndex;
+        if (candidateOperation.materializedResults.size() == results.size() &&
+            visible) {
+          dominating = *candidate;
+          break;
+        }
+      }
+    }
+    if (dominating == operations.size()) {
+      available[key].push_back(operationIndex);
       continue;
     }
+    const std::vector<std::string> &dominatingResults =
+        operations[dominating].materializedResults;
     for (size_t index = 0; index < results.size(); ++index)
-      aliases[results[index]] = existing->second[index];
+      aliases[results[index]] = dominatingResults[index];
+    erased[operationIndex] = true;
   }
+  std::vector<OperationRecord> retained;
+  retained.reserve(operations.size());
+  for (size_t index = 0; index < operations.size(); ++index)
+    if (!erased[index])
+      retained.push_back(std::move(operations[index]));
   operations = std::move(retained);
 }
 
@@ -463,30 +548,28 @@ inline void DropRedundantArguments(std::vector<OperationRecord> &operations) {
 
 inline std::vector<OperationRecord>
 ApplyPlanMemoryNormalizePatterns(std::vector<OperationRecord> operations) {
+  MaterializeOperationValueLists(operations);
   DropRedundantArguments(operations);
   EliminateCommonPureOperations(operations);
   // Greedy DCE reaches the same fixed point with a use-count worklist.  The
   // old round-based form reparsed every operation and rebuilt the complete
   // use map after each newly exposed dead layer, which was costly for long
   // affine/view chains emitted by the PlanMemory bridge.
-  std::vector<std::vector<std::string>> operandsByOperation;
-  std::vector<std::vector<std::string>> resultsByOperation;
-  operandsByOperation.reserve(operations.size());
-  resultsByOperation.reserve(operations.size());
   std::unordered_map<std::string, size_t> useCounts;
   std::unordered_map<std::string, size_t> definingOperations;
   useCounts.reserve(operations.size() * 2);
   definingOperations.reserve(operations.size() * 2);
   for (size_t index = 0; index < operations.size(); ++index) {
-    operandsByOperation.push_back(operationOperandNames(operations[index]));
-    resultsByOperation.push_back(operationResultNames(operations[index]));
-    for (const std::string &operand : operandsByOperation.back())
+    for (const std::string &operand :
+         operations[index].materializedOperands)
       ++useCounts[operand];
-    for (const std::string &result : resultsByOperation.back())
+    for (const std::string &result :
+         operations[index].materializedResults)
       definingOperations[result] = index;
   }
   const auto isDead = [&](size_t index) {
-    const std::vector<std::string> &results = resultsByOperation[index];
+    const std::vector<std::string> &results =
+        operations[index].materializedResults;
     return !results.empty() &&
            isKnownPureNormalizeOperation(operations[index]) &&
            std::all_of(results.begin(), results.end(),
@@ -506,7 +589,8 @@ ApplyPlanMemoryNormalizePatterns(std::vector<OperationRecord> operations) {
     if (erased[index] || !isDead(index))
       continue;
     erased[index] = true;
-    for (const std::string &operand : operandsByOperation[index]) {
+    for (const std::string &operand :
+         operations[index].materializedOperands) {
       auto count = useCounts.find(operand);
       if (count == useCounts.end() || count->second == 0)
         continue;

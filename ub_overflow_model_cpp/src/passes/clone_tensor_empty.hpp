@@ -148,8 +148,26 @@ inline GenericModule RunCloneTensorEmpty(GenericModule module,
       for (int operand :
            module.operations.at(static_cast<size_t>(cloneId)).operands)
         useCounts.addUse(operand);
-      rewriter.replaceOperand(consumerId, operandIndex, clonedValue);
-      useCounts.replaceUse(sourceValue, clonedValue);
+      // cloneNewTensorEmpty and CloneTensorInsert use
+      // Operation::replaceUsesOfWith, which replaces every occurrence of the
+      // destination value in that one consumer.  This matters for vector ops
+      // that intentionally use the same tensor.empty as both an input and the
+      // DPS init: production keeps one cloned empty for both operands.  Loop
+      // patterns instead assign only the selected init operand.
+      const bool replaceEveryConsumerOccurrence =
+          IsHIVMStructuredOp(consumer.name) ||
+          consumer.name == "tensor.insert";
+      if (replaceEveryConsumerOccurrence) {
+        for (size_t index = 0; index < consumer.operands.size(); ++index) {
+          if (consumer.operands[index] != sourceValue)
+            continue;
+          rewriter.replaceOperand(consumerId, index, clonedValue);
+          useCounts.replaceUse(sourceValue, clonedValue);
+        }
+      } else {
+        rewriter.replaceOperand(consumerId, operandIndex, clonedValue);
+        useCounts.replaceUse(sourceValue, clonedValue);
+      }
 
       for (int userId : users[static_cast<size_t>(sourceValue)]) {
         const GenericOperation &mark =

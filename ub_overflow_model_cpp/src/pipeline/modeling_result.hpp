@@ -1,6 +1,7 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_PIPELINE_MODELING_RESULT_HPP
 #define CVPIPELINE_UB_MODEL_CPP_PIPELINE_MODELING_RESULT_HPP
 
+#include "../../include/ub_overflow_model/api.hpp"
 #include "../ir/generic_ir.hpp"
 
 #include <string>
@@ -8,7 +9,6 @@
 
 namespace cvub {
 
-enum class Precision { Exact, Incomplete };
 // Stage-level evidence, separate from the per-input Precision result.  Partial
 // means exact paths exist but the stage also has explicit fail-closed paths;
 // OracleExact is reserved for a stage whose supported input contract has been

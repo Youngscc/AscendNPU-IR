@@ -4,6 +4,7 @@
 #include "../ir/generic_analysis.hpp"
 #include "../ir/generic_rewriter.hpp"
 #include "affine_min_max_canonicalization.hpp"
+#include "fold_tensor_empty.hpp"
 #include "../analysis/hivm_dimension_analyzer.hpp"
 #include "../ir/operation_folder.hpp"
 
@@ -151,21 +152,23 @@ inline std::optional<std::vector<size_t>> CanonicalizationKeptDimensions(
   return kept;
 }
 
-inline void ReplaceCanonicalizationResultType(GenericModule &module,
-                                              int value,
-                                              const std::string &type) {
-  for (GenericOperation &operation : module.operations)
+inline void ReplaceCanonicalizationResultType(
+    GenericModule &module, const GenericModuleAnalysisIndexes &indexes,
+    int value, const std::string &type) {
+  for (int userId : indexes.users(value)) {
+    GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(userId));
     for (size_t index = 0; index < operation.operands.size(); ++index)
       if (operation.operands[index] == value &&
           index < operation.operandTypes.size())
         operation.operandTypes[index] = type;
+  }
 }
 
 // Projection of OpWithOffsetSizesAndStridesConstantArgumentFolder used by
 // tensor.extract_slice and memref.subview canonicalization.
-inline bool FoldConstantOffsetSizeAndStrideOperands(GenericModule &module) {
-  const std::map<int, const GenericOperation *> definitions =
-      DefiningOperations(module);
+inline bool FoldConstantOffsetSizeAndStrideOperands(
+    GenericModule &module, const GenericModuleAnalysisIndexes &indexes) {
   bool changed = false;
   for (GenericOperation &operation : module.operations) {
     if ((operation.name != "tensor.extract_slice" &&
@@ -200,9 +203,10 @@ inline bool FoldConstantOffsetSizeAndStrideOperands(GenericModule &module) {
         const std::string &type = operation.operandTypes.at(dynamicIndex);
         ++dynamicIndex;
         std::optional<int64_t> constant;
-        auto definition = definitions.find(value);
-        if (definition != definitions.end())
-          constant = CanonicalizationIndexConstant(*definition->second);
+        const int definition = indexes.definingOperationId(value);
+        if (definition >= 0)
+          constant = CanonicalizationIndexConstant(
+              module.operations.at(static_cast<size_t>(definition)));
         if (constant && (!onlyNonNegative || *constant >= 0) &&
             (!onlyNonZero || *constant != 0)) {
           staticValue = *constant;
@@ -257,8 +261,8 @@ inline bool FoldConstantOffsetSizeAndStrideOperands(GenericModule &module) {
     const std::string resultType = ReplaceCanonicalizationShape(
         operation.resultTypes.front(), resultShape);
     operation.resultTypes.front() = resultType;
-    ReplaceCanonicalizationResultType(module, operation.results.front(),
-                                      resultType);
+    ReplaceCanonicalizationResultType(module, indexes,
+                                      operation.results.front(), resultType);
     changed = true;
   }
   return changed;
@@ -327,45 +331,75 @@ inline bool IsCanonicalizationTerminator(
   return terminators.count(operation.name) != 0;
 }
 
-inline bool IsCanonicalizationActiveOperation(
-    const GenericModule &module, const GenericOperation &operation) {
-  if (operation.blockId < 0)
-    return true;
-  const std::vector<int> &operations =
-      module.blocks.at(static_cast<size_t>(operation.blockId)).operations;
-  return std::find(operations.begin(), operations.end(), operation.id) !=
-         operations.end();
-}
-
-inline std::map<int, int>
-CanonicalizationValueDefinitions(const GenericModule &module) {
-  std::map<int, int> definitions;
-  for (const GenericOperation &operation : module.operations)
-    if (IsCanonicalizationActiveOperation(module, operation))
+// Dense, stage-local topology used by the fixed-point canonicalizer. The
+// Generic IR retains detached operation records, so operation.blockId alone
+// cannot distinguish a live operation from a tombstone. Building this once
+// per fixed-point iteration replaces the former repeated searches through
+// every block operation list and the per-channel std::map reconstruction.
+struct CanonicalizationTopology {
+  explicit CanonicalizationTopology(const GenericModule &module)
+      : activeOperations(module.operations.size(), uint8_t{0}),
+        operationOrdinals(module.operations.size(), -1) {
+    int maximumValue = -1;
+    for (const GenericOperation &operation : module.operations) {
+      if (operation.blockId < 0)
+        activeOperations[static_cast<size_t>(operation.id)] = 1;
       for (int result : operation.results)
-        definitions[result] = operation.id;
-  return definitions;
-}
+        maximumValue = std::max(maximumValue, result);
+      for (int operand : operation.operands)
+        maximumValue = std::max(maximumValue, operand);
+    }
+    for (const GenericBlock &block : module.blocks)
+      for (int argument : block.arguments)
+        maximumValue = std::max(maximumValue, argument);
+    blockArgumentOwners.assign(
+        maximumValue < 0 ? 0 : static_cast<size_t>(maximumValue) + 1, -1);
+    for (const GenericBlock &block : module.blocks) {
+      for (int argument : block.arguments)
+        blockArgumentOwners[static_cast<size_t>(argument)] = block.id;
+      for (size_t ordinal = 0; ordinal < block.operations.size(); ++ordinal) {
+        const int operationId = block.operations[ordinal];
+        activeOperations.at(static_cast<size_t>(operationId)) = 1;
+        operationOrdinals.at(static_cast<size_t>(operationId)) =
+            static_cast<int>(ordinal);
+      }
+    }
+  }
 
-inline std::map<int, int>
-CanonicalizationBlockArguments(const GenericModule &module) {
-  std::map<int, int> owners;
-  for (const GenericBlock &block : module.blocks)
-    for (int argument : block.arguments)
-      owners[argument] = block.id;
-  return owners;
-}
+  bool isActive(int operationId) const {
+    return operationId >= 0 &&
+           static_cast<size_t>(operationId) < activeOperations.size() &&
+           activeOperations[static_cast<size_t>(operationId)] != 0;
+  }
+
+  int blockArgumentOwner(int value) const {
+    return value < 0 || static_cast<size_t>(value) >= blockArgumentOwners.size()
+               ? -1
+               : blockArgumentOwners[static_cast<size_t>(value)];
+  }
+
+  void detach(int operationId) {
+    if (operationId >= 0 &&
+        static_cast<size_t>(operationId) < activeOperations.size())
+      activeOperations[static_cast<size_t>(operationId)] = 0;
+  }
+
+  size_t valueCount() const { return blockArgumentOwners.size(); }
+
+  std::vector<uint8_t> activeOperations;
+  std::vector<int> operationOrdinals;
+  std::vector<int> blockArgumentOwners;
+};
 
 inline bool IsCanonicalizationValueInBlock(
-    int value, int blockId, const std::map<int, int> &definitions,
-    const std::map<int, int> &blockArguments,
-    const GenericModule &module) {
-  const auto argument = blockArguments.find(value);
-  if (argument != blockArguments.end())
-    return argument->second == blockId;
-  const auto definition = definitions.find(value);
-  return definition != definitions.end() &&
-         module.operations.at(static_cast<size_t>(definition->second)).blockId ==
+    int value, int blockId, PipelineAnalysisContext &analysis,
+    const CanonicalizationTopology &topology, const GenericModule &module) {
+  const int argumentOwner = topology.blockArgumentOwner(value);
+  if (argumentOwner >= 0)
+    return argumentOwner == blockId;
+  const int definition = analysis.definingOperationId(value);
+  return topology.isActive(definition) &&
+         module.operations.at(static_cast<size_t>(definition)).blockId ==
              blockId;
 }
 
@@ -377,14 +411,18 @@ inline std::optional<std::set<int>>
 CanonicalizationIterationIndependentOps(const GenericModule &module,
                                          const GenericBlock &body,
                                          int allowedIterArg, int yielded,
-                                         size_t channelIndex) {
-  const std::map<int, int> definitions =
-      CanonicalizationValueDefinitions(module);
-  const std::map<int, int> blockArguments =
-      CanonicalizationBlockArguments(module);
+                                         size_t channelIndex,
+                                         PipelineAnalysisContext &analysis,
+                                         const CanonicalizationTopology
+                                             &topology) {
   std::vector<int> worklist = {yielded};
-  std::set<int> visitedValues = {yielded};
-  std::set<int> visitedOperations;
+  std::vector<uint8_t> visitedValues(topology.valueCount(), uint8_t{0});
+  if (yielded >= 0 && static_cast<size_t>(yielded) >= visitedValues.size())
+    visitedValues.resize(static_cast<size_t>(yielded) + 1, uint8_t{0});
+  if (yielded >= 0)
+    visitedValues[static_cast<size_t>(yielded)] = 1;
+  std::vector<uint8_t> visitedOperationFlags(module.operations.size(),
+                                             uint8_t{0});
 
   while (!worklist.empty()) {
     const int current = worklist.back();
@@ -392,33 +430,48 @@ CanonicalizationIterationIndependentOps(const GenericModule &module,
     if (current == allowedIterArg)
       continue;
 
-    const auto argument = blockArguments.find(current);
-    if (argument != blockArguments.end()) {
-      if (argument->second == body.id)
+    const int argumentOwner = topology.blockArgumentOwner(current);
+    if (argumentOwner >= 0) {
+      if (argumentOwner == body.id)
         continue;
       return std::nullopt;
     }
 
-    const auto definition = definitions.find(current);
-    if (definition == definitions.end())
+    const int definition = analysis.definingOperationId(current);
+    if (!topology.isActive(definition))
       return std::nullopt;
     const GenericOperation &operation =
-        module.operations.at(static_cast<size_t>(definition->second));
-    if (operation.blockId != body.id ||
-        (!operation.effects.empty() && operation.effects != "none"))
+        module.operations.at(static_cast<size_t>(definition));
+    // CanonicalizeIterArg.cpp::isNoEffect deliberately treats operations
+    // without MemoryEffectOpInterface as effecting.  In GenericOperation,
+    // an empty effect string means a reviewed operation whose interface
+    // reported no effects; "none" is the conservative/default marker used
+    // for operations such as scf.for that do not expose that interface.
+    // Treating both spellings alike lets an outer dead iter-arg delete a
+    // nested loop that still contains fixpipe/store side effects.
+    if (operation.blockId != body.id || !operation.effects.empty())
       return std::nullopt;
-    visitedOperations.insert(operation.id);
+    visitedOperationFlags[static_cast<size_t>(operation.id)] = 1;
     for (int operand : operation.operands)
       if (IsCanonicalizationValueInBlock(
-              operand, body.id, definitions, blockArguments, module) &&
-          visitedValues.insert(operand).second)
-        worklist.push_back(operand);
+              operand, body.id, analysis, topology, module)) {
+        if (operand >= 0 &&
+            static_cast<size_t>(operand) >= visitedValues.size())
+          visitedValues.resize(static_cast<size_t>(operand) + 1, uint8_t{0});
+        if (operand >= 0 &&
+            visitedValues[static_cast<size_t>(operand)] == 0) {
+          visitedValues[static_cast<size_t>(operand)] = 1;
+          worklist.push_back(operand);
+        }
+      }
   }
 
   std::set<int> mustDelete;
-  for (const GenericOperation &user : module.operations) {
-    if (!IsCanonicalizationActiveOperation(module, user))
+  for (int userId : analysis.users(allowedIterArg)) {
+    if (!topology.isActive(userId))
       continue;
+    const GenericOperation &user =
+        module.operations.at(static_cast<size_t>(userId));
     for (size_t operandIndex = 0; operandIndex < user.operands.size();
          ++operandIndex) {
       if (user.operands[operandIndex] != allowedIterArg)
@@ -428,7 +481,7 @@ CanonicalizationIterationIndependentOps(const GenericModule &module,
           return std::nullopt;
         continue;
       }
-      if (visitedOperations.count(user.id) == 0)
+      if (visitedOperationFlags[static_cast<size_t>(user.id)] == 0)
         return std::nullopt;
       mustDelete.insert(user.id);
     }
@@ -438,9 +491,11 @@ CanonicalizationIterationIndependentOps(const GenericModule &module,
     const GenericOperation &operation =
         module.operations.at(static_cast<size_t>(operationId));
     for (int result : operation.results) {
-      for (const GenericOperation &user : module.operations) {
-        if (!IsCanonicalizationActiveOperation(module, user))
+      for (int userId : analysis.users(result)) {
+        if (!topology.isActive(userId))
           continue;
+        const GenericOperation &user =
+            module.operations.at(static_cast<size_t>(userId));
         for (size_t operandIndex = 0; operandIndex < user.operands.size();
              ++operandIndex) {
           if (user.operands[operandIndex] != result ||
@@ -465,8 +520,10 @@ inline bool CanonicalizeIterArgs(GenericModule &module,
                                  PipelineAnalysisContext &useLists) {
   bool changed = false;
   GenericRewriter rewriter(module, &useLists);
+  CanonicalizationTopology topology(module);
   for (GenericOperation &loop : module.operations) {
-    if (loop.name != "scf.for" || loop.regions.size() != 1 ||
+    if (!topology.isActive(loop.id) || loop.name != "scf.for" ||
+        loop.regions.size() != 1 ||
         loop.operands.size() < 3 || loop.results.empty())
       continue;
     const GenericRegion &region =
@@ -504,7 +561,8 @@ inline bool CanonicalizeIterArgs(GenericModule &module,
       const int yielded = yield.operands.at(index);
       const std::optional<std::set<int>> deadOperations =
           CanonicalizationIterationIndependentOps(module, body, iterArg,
-                                                   yielded, index);
+                                                   yielded, index, useLists,
+                                                   topology);
       if (!deadOperations)
         continue;
       removable.push_back(index);
@@ -538,9 +596,10 @@ inline bool CanonicalizeIterArgs(GenericModule &module,
     }
     if (!operationsToErase.empty()) {
       for (int operationId : operationsToErase)
-        if (std::find(body.operations.begin(), body.operations.end(),
-                      operationId) != body.operations.end())
+        if (topology.isActive(operationId)) {
           rewriter.removeFromBlock(body.id, operationId);
+          topology.detach(operationId);
+        }
       changed = true;
     }
   }
@@ -576,6 +635,7 @@ CanonicalizationKnownBoolean(
 // no synthetic constant is needed in the lightweight representation.
 inline bool FoldCanonicalizationBooleanOps(
     GenericModule &module, PipelineAnalysisContext &useLists) {
+  const CanonicalizationTopology topology(module);
   std::map<int, ArithIntegerConstant> integerConstants;
   for (const GenericOperation &operation : module.operations)
     if (const std::optional<ArithIntegerConstant> value =
@@ -596,10 +656,7 @@ inline bool FoldCanonicalizationBooleanOps(
         operation.operands.size() != 2 || operation.results.size() != 1 ||
         operation.blockId < 0)
       continue;
-    const std::vector<int> &blockOperations =
-        module.blocks.at(static_cast<size_t>(operation.blockId)).operations;
-    if (std::find(blockOperations.begin(), blockOperations.end(),
-                  operation.id) == blockOperations.end())
+    if (!topology.isActive(operation.id))
       continue;
     const int lhs = operation.operands.front();
     const int rhs = operation.operands.back();
@@ -637,6 +694,7 @@ inline bool FoldCanonicalizationBooleanOps(
 inline bool EliminateCanonicalizationDeadCode(
     GenericModule &module, PipelineAnalysisContext &useLists) {
   GenericRewriter rewriter(module, &useLists);
+  CanonicalizationTopology topology(module);
   bool changed = false;
   for (auto iterator = module.operations.rbegin();
        iterator != module.operations.rend(); ++iterator) {
@@ -644,10 +702,7 @@ inline bool EliminateCanonicalizationDeadCode(
     if (operation.blockId < 0 || operation.results.empty() ||
         !operation.regions.empty() || IsCanonicalizationTerminator(operation))
       continue;
-    const std::vector<int> &blockOperations =
-        module.blocks.at(static_cast<size_t>(operation.blockId)).operations;
-    if (std::find(blockOperations.begin(), blockOperations.end(),
-                  operation.id) == blockOperations.end())
+    if (!topology.isActive(operation.id))
       continue;
     if (std::any_of(operation.results.begin(), operation.results.end(),
                     [&](int result) { return useLists.hasUsers(result); }))
@@ -658,6 +713,7 @@ inline bool EliminateCanonicalizationDeadCode(
     if (!noEffects)
       continue;
     rewriter.removeFromBlock(operation.blockId, operation.id);
+    topology.detach(operation.id);
     changed = true;
   }
   return changed;
@@ -686,23 +742,41 @@ CanonicalizationOperationPreOrder(const GenericModule &module) {
   return result;
 }
 
-// ExtendedCanonicalizer and CSE reuse equivalent dominating operations. Only
-// side-effect-free, regionless operations participate, matching MLIR CSE's
-// eligibility rule.
-inline GenericModule
-RunCanonicalizationHIVMAfterArithToAffine(GenericModule module) {
-  while (FoldConstantOffsetSizeAndStrideOperands(module)) {
+inline bool CanonicalizationOperationDominates(
+    const GenericModule &module, const CanonicalizationTopology &topology,
+    const GenericOperation &candidate, const GenericOperation &operation) {
+  const GenericOperation *cursor = &operation;
+  while (cursor) {
+    if (candidate.blockId == cursor->blockId && candidate.blockId >= 0 &&
+        topology.isActive(candidate.id) && topology.isActive(cursor->id)) {
+      const int candidateOrdinal =
+          topology.operationOrdinals.at(static_cast<size_t>(candidate.id));
+      const int cursorOrdinal =
+          topology.operationOrdinals.at(static_cast<size_t>(cursor->id));
+      if (candidateOrdinal >= 0 && cursorOrdinal >= 0 &&
+          candidateOrdinal < cursorOrdinal)
+        return true;
+    }
+    if (cursor->regionId < 0)
+      break;
+    const int parent = module.regions.at(
+        static_cast<size_t>(cursor->regionId)).parentOperation;
+    if (parent < 0)
+      break;
+    cursor = &module.operations.at(static_cast<size_t>(parent));
   }
-  PipelineAnalysisContext useLists(module, kGenericAnalysisUsers);
-  while (CanonicalizeIterArgs(module, useLists)) {
-  }
-  while (FoldCanonicalizationBooleanOps(module, useLists)) {
-  }
-  // CSE never crosses an isolated function boundary. Partition candidates by
-  // enclosing function so equivalent AIC/AIV operations do not trigger a
-  // quadratic sequence of dominance failures in combined projections.
+  return false;
+}
+
+// CSE never crosses an isolated function boundary. Partition candidates by
+// enclosing function so equivalent AIC/AIV operations do not trigger a
+// quadratic sequence of dominance failures in combined projections.
+inline void RunCanonicalizationCommonSubexpressionElimination(
+    GenericModule &module, PipelineAnalysisContext &useLists,
+    const std::set<int> *protectedOperationIds = nullptr) {
   const GenericModuleAnalysisIndexes enclosingFunctions(
       module, kGenericAnalysisEnclosingFunctions);
+  CanonicalizationTopology topology(module);
   std::map<std::pair<int, std::string>, std::vector<int>>
       availableOperations;
   GenericRewriter rewriter(module, &useLists);
@@ -717,17 +791,26 @@ RunCanonicalizationHIVMAfterArithToAffine(GenericModule module) {
     const auto key = std::make_pair(
         enclosingFunctions.enclosingFunctionId(snapshot.id),
         CanonicalizationOperationKey(snapshot));
+    const bool protectedFromReplacement =
+        protectedOperationIds != nullptr &&
+        protectedOperationIds->count(operationId) != 0;
     int dominating = -1;
     for (auto candidate = availableOperations[key].rbegin();
          candidate != availableOperations[key].rend(); ++candidate) {
-      if (GenericOperationDominates(
-              module, module.operations.at(static_cast<size_t>(*candidate)),
+      if (CanonicalizationOperationDominates(
+              module, topology,
+              module.operations.at(static_cast<size_t>(*candidate)),
               snapshot)) {
         dominating = *candidate;
         break;
       }
     }
-    if (dominating < 0) {
+    // A transform-created destination tile must remain distinct from an
+    // equivalent value created earlier in the block: the real transform
+    // cleanup runs before that final producer is fused.  It is nevertheless
+    // available to CSE operations created after it.  Recording it here also
+    // makes it the most recent dominating candidate for those later values.
+    if (dominating < 0 || protectedFromReplacement) {
       availableOperations[key].push_back(snapshot.id);
       continue;
     }
@@ -739,7 +822,31 @@ RunCanonicalizationHIVMAfterArithToAffine(GenericModule module) {
       rewriter.replaceAllUses(snapshot.results[index],
                               candidate.results[index]);
     rewriter.removeFromBlock(snapshot.blockId, snapshot.id);
+    topology.detach(snapshot.id);
   }
+}
+
+// ExtendedCanonicalizer and CSE reuse equivalent dominating operations. Only
+// side-effect-free, regionless operations participate, matching MLIR CSE's
+// eligibility rule.
+inline GenericModule
+RunCanonicalizationHIVMAfterArithToAffine(GenericModule module) {
+  // scf::createCanonicalizeIterArgPass registers
+  // tensor::populateFoldTensorEmptyPatterns before its iter-arg patterns.
+  // This is part of the production canonicalization pipeline, not just the
+  // later standalone FoldTensorEmpty pass after TileAndBindSubBlock.
+  module = RunFoldTensorEmpty(std::move(module));
+  const GenericModuleAnalysisIndexes foldIndexes(
+      module, kGenericAnalysisDefinitions | kGenericAnalysisUsers);
+  while (FoldConstantOffsetSizeAndStrideOperands(module, foldIndexes)) {
+  }
+  PipelineAnalysisContext useLists(
+      module, kGenericAnalysisDefinitions | kGenericAnalysisUsers);
+  while (CanonicalizeIterArgs(module, useLists)) {
+  }
+  while (FoldCanonicalizationBooleanOps(module, useLists)) {
+  }
+  RunCanonicalizationCommonSubexpressionElimination(module, useLists);
   while (FoldCanonicalizationBooleanOps(module, useLists)) {
   }
   while (EliminateCanonicalizationDeadCode(module, useLists)) {

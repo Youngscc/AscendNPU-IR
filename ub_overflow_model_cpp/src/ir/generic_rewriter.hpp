@@ -418,75 +418,227 @@ inline bool GenericOperationDominates(const GenericModule &module,
 inline GenericModule CompactGenericModule(GenericModule module) {
   if (module.operations.empty())
     return module;
-  std::set<int> reachableOperations;
-  std::set<int> reachableRegions;
-  std::set<int> reachableBlocks;
-  std::function<void(int)> visitOperation;
-  std::function<void(int)> visitRegion;
-  visitRegion = [&](int regionId) {
-    if (!reachableRegions.insert(regionId).second)
+  const size_t operationCount = module.operations.size();
+  const size_t regionCount = module.regions.size();
+  const size_t blockCount = module.blocks.size();
+  std::vector<uint8_t> reachableOperations(operationCount, uint8_t{0});
+  std::vector<uint8_t> reachableRegions(regionCount, uint8_t{0});
+  std::vector<uint8_t> reachableBlocks(blockCount, uint8_t{0});
+  std::vector<int> operationOrder;
+  std::vector<int> regionOrder;
+  std::vector<int> blockOrder;
+  std::vector<int> valueOrder;
+  operationOrder.reserve(operationCount);
+  regionOrder.reserve(regionCount);
+  blockOrder.reserve(blockCount);
+
+  std::vector<int> expectedOperationParent(operationCount, -2);
+  std::vector<int> expectedOperationRegion(operationCount, -2);
+  std::vector<int> expectedOperationBlock(operationCount, -2);
+  std::vector<int> expectedOperationOrdinal(operationCount, -2);
+  std::vector<int> expectedRegionParent(regionCount, -2);
+  std::vector<int> expectedBlockRegion(blockCount, -2);
+
+  std::function<void(int, int, int, int, int)> visitOperation;
+  std::function<void(int, int)> visitRegion;
+  visitRegion = [&](int regionId, int parent) {
+    const size_t regionIndex = static_cast<size_t>(regionId);
+    if (reachableRegions.at(regionIndex) != 0)
       return;
-    for (int blockId : module.regions.at(static_cast<size_t>(regionId)).blocks) {
-      if (!reachableBlocks.insert(blockId).second)
+    reachableRegions[regionIndex] = 1;
+    expectedRegionParent[regionIndex] = parent;
+    regionOrder.push_back(regionId);
+    const GenericRegion &region = module.regions.at(regionIndex);
+    for (int blockId : region.blocks) {
+      const size_t blockIndex = static_cast<size_t>(blockId);
+      if (reachableBlocks.at(blockIndex) != 0)
         continue;
-      for (int operationId :
-           module.blocks.at(static_cast<size_t>(blockId)).operations)
-        visitOperation(operationId);
+      reachableBlocks[blockIndex] = 1;
+      expectedBlockRegion[blockIndex] = regionId;
+      blockOrder.push_back(blockId);
+      const GenericBlock &block = module.blocks.at(blockIndex);
+      valueOrder.insert(valueOrder.end(), block.arguments.begin(),
+                        block.arguments.end());
+      for (size_t ordinal = 0; ordinal < block.operations.size(); ++ordinal)
+        visitOperation(block.operations[ordinal], parent, regionId, blockId,
+                       static_cast<int>(ordinal));
     }
   };
-  visitOperation = [&](int operationId) {
-    if (!reachableOperations.insert(operationId).second)
+  visitOperation = [&](int operationId, int parent, int region, int block,
+                       int ordinal) {
+    const size_t operationIndex = static_cast<size_t>(operationId);
+    if (reachableOperations.at(operationIndex) != 0)
       return;
-    for (int regionId :
-         module.operations.at(static_cast<size_t>(operationId)).regions)
-      visitRegion(regionId);
+    reachableOperations[operationIndex] = 1;
+    expectedOperationParent[operationIndex] = parent;
+    expectedOperationRegion[operationIndex] = region;
+    expectedOperationBlock[operationIndex] = block;
+    expectedOperationOrdinal[operationIndex] = ordinal;
+    operationOrder.push_back(operationId);
+    const GenericOperation &operation = module.operations.at(operationIndex);
+    valueOrder.insert(valueOrder.end(), operation.results.begin(),
+                      operation.results.end());
+    for (int regionId : operation.regions)
+      visitRegion(regionId, operationId);
   };
-  visitOperation(0);
+  visitOperation(0, -1, -1, -1, 0);
 
-  std::map<int, int> operationIds;
-  std::map<int, int> regionIds;
-  std::map<int, int> blockIds;
-  std::map<int, int> valueIds;
+  int maximumValue = -1;
+  auto observeValue = [&](int value) {
+    if (value >= 0)
+      maximumValue = std::max(maximumValue, value);
+  };
+  for (const GenericBlock &block : module.blocks)
+    for (int argument : block.arguments)
+      observeValue(argument);
+  std::vector<int> valueDefinitions;
+  for (const GenericOperation &operation : module.operations) {
+    for (int result : operation.results)
+      observeValue(result);
+    for (int operand : operation.operands)
+      observeValue(operand);
+    for (int operand : operation.dpsInputs)
+      observeValue(operand);
+    for (int operand : operation.dpsInits)
+      observeValue(operand);
+  }
+  const size_t valueCapacity =
+      maximumValue < 0 ? 0 : static_cast<size_t>(maximumValue) + 1;
+  std::vector<int> operationIds(operationCount, -1);
+  std::vector<int> regionIds(regionCount, -1);
+  std::vector<int> blockIds(blockCount, -1);
+  std::vector<int> valueIds(valueCapacity, -1);
+  valueDefinitions.assign(valueCapacity, -1);
+  for (const GenericOperation &operation : module.operations)
+    for (int result : operation.results)
+      if (result >= 0)
+        valueDefinitions[static_cast<size_t>(result)] = operation.id;
+  for (size_t index = 0; index < operationOrder.size(); ++index)
+    operationIds[static_cast<size_t>(operationOrder[index])] =
+        static_cast<int>(index);
+  for (size_t index = 0; index < regionOrder.size(); ++index)
+    regionIds[static_cast<size_t>(regionOrder[index])] =
+        static_cast<int>(index);
+  for (size_t index = 0; index < blockOrder.size(); ++index)
+    blockIds[static_cast<size_t>(blockOrder[index])] = static_cast<int>(index);
+  for (size_t index = 0; index < valueOrder.size(); ++index) {
+    const int value = valueOrder[index];
+    if (value >= 0)
+      valueIds[static_cast<size_t>(value)] = static_cast<int>(index);
+  }
+
+  auto mappedValue = [&](int value) {
+    return value >= 0 && static_cast<size_t>(value) < valueIds.size()
+               ? valueIds[static_cast<size_t>(value)]
+               : -1;
+  };
+  for (int operationId : operationOrder) {
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(operationId));
+    auto validateValue = [&](int value, const char *kind) {
+      if (mappedValue(value) >= 0)
+        return;
+      const int definition =
+          value >= 0 && static_cast<size_t>(value) < valueDefinitions.size()
+              ? valueDefinitions[static_cast<size_t>(value)]
+              : -1;
+      std::string description = "unknown";
+      if (definition >= 0) {
+        const GenericOperation &defining =
+            module.operations.at(static_cast<size_t>(definition));
+        description = defining.name + "#" + std::to_string(definition) +
+                      (reachableOperations[static_cast<size_t>(definition)] != 0
+                           ? "(reachable)"
+                           : "(erased)");
+      }
+      throw std::runtime_error(
+          "CompactGenericModule: " + operation.name + " " + kind +
+          " references unreachable SSA value " + std::to_string(value) +
+          " defined by " + description);
+    };
+    for (int operand : operation.operands)
+      validateValue(operand, "operand");
+    for (int operand : operation.dpsInputs)
+      validateValue(operand, "DPS input");
+    for (int operand : operation.dpsInits)
+      validateValue(operand, "DPS init");
+  }
+
+  bool identity = operationOrder.size() == operationCount &&
+                  regionOrder.size() == regionCount &&
+                  blockOrder.size() == blockCount;
+  for (size_t index = 0; identity && index < operationCount; ++index) {
+    const GenericOperation &operation = module.operations[index];
+    identity = operation.id == static_cast<int>(index) &&
+               operationIds[index] == static_cast<int>(index) &&
+               operation.parentId == expectedOperationParent[index] &&
+               operation.regionId == expectedOperationRegion[index] &&
+               operation.blockId == expectedOperationBlock[index] &&
+               operation.ordinal == expectedOperationOrdinal[index];
+  }
+  for (size_t index = 0; identity && index < regionCount; ++index)
+    identity = module.regions[index].id == static_cast<int>(index) &&
+               regionIds[index] == static_cast<int>(index) &&
+               module.regions[index].parentOperation ==
+                   expectedRegionParent[index];
+  for (size_t index = 0; identity && index < blockCount; ++index)
+    identity = module.blocks[index].id == static_cast<int>(index) &&
+               blockIds[index] == static_cast<int>(index) &&
+               module.blocks[index].regionId == expectedBlockRegion[index];
+  for (size_t index = 0; identity && index < valueOrder.size(); ++index)
+    identity = valueOrder[index] == static_cast<int>(index);
+  if (identity)
+    return module;
+
   GenericModule compact;
+  auto growthCapacity = [](size_t size) {
+    size_t capacity = 1;
+    while (capacity < size)
+      capacity *= 2;
+    return capacity;
+  };
+  // Preserve the normal geometric headroom of the former push-built vectors.
+  // Several rewrite passes append operations after compaction, so reserving
+  // exactly size() would force an immediate reallocation on their first op.
+  compact.operations.reserve(growthCapacity(operationOrder.size()));
+  compact.regions.reserve(growthCapacity(regionOrder.size()));
+  compact.blocks.reserve(growthCapacity(blockOrder.size()));
   std::function<int(int, int)> copyOperation;
   std::function<int(int, int)> copyRegion;
   copyRegion = [&](int oldRegion, int parent) {
-    const GenericRegion &source =
-        module.regions.at(static_cast<size_t>(oldRegion));
-    GenericRegion region;
-    region.id = static_cast<int>(compact.regions.size());
+    GenericRegion region =
+        std::move(module.regions.at(static_cast<size_t>(oldRegion)));
+    std::vector<int> oldBlocks = std::move(region.blocks);
+    region.id = regionIds.at(static_cast<size_t>(oldRegion));
     region.parentOperation = parent;
-    region.ordinal = source.ordinal;
-    regionIds[oldRegion] = region.id;
-    compact.regions.push_back(region);
-    for (int oldBlock : source.blocks) {
-      const GenericBlock &sourceBlock =
-          module.blocks.at(static_cast<size_t>(oldBlock));
-      GenericBlock block;
-      block.id = static_cast<int>(compact.blocks.size());
-      block.regionId = region.id;
-      block.ordinal = sourceBlock.ordinal;
-      block.argumentTypes = sourceBlock.argumentTypes;
-      for (int argument : sourceBlock.arguments) {
-        const int mapped = static_cast<int>(valueIds.size());
-        valueIds[argument] = mapped;
-        block.arguments.push_back(mapped);
-      }
-      blockIds[oldBlock] = block.id;
-      compact.blocks.push_back(block);
-      compact.regions[static_cast<size_t>(region.id)].blocks.push_back(block.id);
-      for (int oldOperation : sourceBlock.operations) {
-        const int mapped = copyOperation(oldOperation, block.id);
-        compact.blocks[static_cast<size_t>(block.id)].operations.push_back(mapped);
-      }
+    region.blocks.clear();
+    compact.regions.push_back(std::move(region));
+    GenericRegion &createdRegion = compact.regions.back();
+    createdRegion.blocks.reserve(oldBlocks.size());
+    for (int oldBlock : oldBlocks) {
+      GenericBlock block =
+          std::move(module.blocks.at(static_cast<size_t>(oldBlock)));
+      std::vector<int> oldOperations = std::move(block.operations);
+      block.id = blockIds.at(static_cast<size_t>(oldBlock));
+      block.regionId = createdRegion.id;
+      for (int &argument : block.arguments)
+        argument = mappedValue(argument);
+      block.operations.clear();
+      compact.blocks.push_back(std::move(block));
+      GenericBlock &createdBlock = compact.blocks.back();
+      createdBlock.operations.reserve(oldOperations.size());
+      createdRegion.blocks.push_back(createdBlock.id);
+      for (int oldOperation : oldOperations)
+        createdBlock.operations.push_back(
+            copyOperation(oldOperation, createdBlock.id));
     }
-    return region.id;
+    return createdRegion.id;
   };
   copyOperation = [&](int oldOperation, int block) {
     GenericOperation operation =
-        module.operations.at(static_cast<size_t>(oldOperation));
-    operation.id = static_cast<int>(compact.operations.size());
-    operationIds[oldOperation] = operation.id;
+        std::move(module.operations.at(static_cast<size_t>(oldOperation)));
+    std::vector<int> oldRegions = std::move(operation.regions);
+    operation.id = operationIds.at(static_cast<size_t>(oldOperation));
     operation.blockId = block;
     operation.regionId = block >= 0
                              ? compact.blocks.at(static_cast<size_t>(block)).regionId
@@ -497,37 +649,17 @@ inline GenericModule CompactGenericModule(GenericModule module) {
                                    .parentOperation
                              : -1;
     operation.regions.clear();
-    for (int &result : operation.results) {
-      const int mapped = static_cast<int>(valueIds.size());
-      valueIds[result] = mapped;
-      result = mapped;
-    }
-    compact.operations.push_back(operation);
-    for (int oldRegion :
-         module.operations.at(static_cast<size_t>(oldOperation)).regions) {
-      const int mapped = copyRegion(oldRegion, operation.id);
-      compact.operations[static_cast<size_t>(operation.id)].regions.push_back(mapped);
-    }
-    return operation.id;
+    for (int &result : operation.results)
+      result = mappedValue(result);
+    compact.operations.push_back(std::move(operation));
+    GenericOperation &createdOperation = compact.operations.back();
+    createdOperation.regions.reserve(oldRegions.size());
+    for (int oldRegion : oldRegions)
+      createdOperation.regions.push_back(
+          copyRegion(oldRegion, createdOperation.id));
+    return createdOperation.id;
   };
-
-  GenericOperation root = module.operations.front();
-  root.id = 0;
-  root.parentId = -1;
-  root.regionId = -1;
-  root.blockId = -1;
-  root.regions.clear();
-  for (int &result : root.results) {
-    const int mapped = static_cast<int>(valueIds.size());
-    valueIds[result] = mapped;
-    result = mapped;
-  }
-  compact.operations.push_back(root);
-  operationIds[0] = 0;
-  for (int oldRegion : module.operations.front().regions) {
-    const int mapped = copyRegion(oldRegion, 0);
-    compact.operations.front().regions.push_back(mapped);
-  }
+  copyOperation(0, -1);
 
   for (GenericOperation &operation : compact.operations) {
     auto remapSemanticValueReferences = [&](std::string &text) {
@@ -546,39 +678,21 @@ inline GenericModule CompactGenericModule(GenericModule module) {
           continue;
         }
         const int oldValue = std::stoi(token);
-        auto mapped = valueIds.find(oldValue);
-        if (mapped == valueIds.end()) {
+        const int mapped = mappedValue(oldValue);
+        if (mapped < 0) {
           position = close + 1;
           continue;
         }
         const std::string replacement =
-            "v(" + std::to_string(mapped->second) + ")";
+            "v(" + std::to_string(mapped) + ")";
         text.replace(position, close - position + 1, replacement);
         position += replacement.size();
       }
     };
     remapSemanticValueReferences(operation.properties);
     remapSemanticValueReferences(operation.attributes);
-    auto remapValue = [&](int &value, const char *kind) {
-      auto mapped = valueIds.find(value);
-      if (mapped == valueIds.end()) {
-        std::string definition = "unknown";
-        for (const GenericOperation &candidate : module.operations)
-          if (std::find(candidate.results.begin(), candidate.results.end(),
-                        value) != candidate.results.end()) {
-            definition = candidate.name + "#" +
-                         std::to_string(candidate.id) +
-                         (reachableOperations.count(candidate.id) != 0
-                              ? "(reachable)"
-                              : "(erased)");
-            break;
-          }
-        throw std::runtime_error(
-            "CompactGenericModule: " + operation.name + " " + kind +
-            " references unreachable SSA value " + std::to_string(value) +
-            " defined by " + definition);
-      }
-      value = mapped->second;
+    auto remapValue = [&](int &value, const char *) {
+      value = mappedValue(value);
     };
     for (int &operand : operation.operands)
       remapValue(operand, "operand");
@@ -587,8 +701,9 @@ inline GenericModule CompactGenericModule(GenericModule module) {
     for (int &operand : operation.dpsInits)
       remapValue(operand, "DPS init");
     for (int &successor : operation.successors)
-      if (blockIds.count(successor))
-        successor = blockIds.at(successor);
+      if (successor >= 0 && static_cast<size_t>(successor) < blockIds.size() &&
+          blockIds[static_cast<size_t>(successor)] >= 0)
+        successor = blockIds[static_cast<size_t>(successor)];
   }
   for (GenericBlock &block : compact.blocks)
     for (size_t index = 0; index < block.operations.size(); ++index)

@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <iostream>
 #include <optional>
+#include <sstream>
 #include <string>
 
 namespace {
@@ -20,22 +21,25 @@ enum class DebugEntry {
 
 struct Options {
   std::filesystem::path beforeCVPipeliningIR;
+  std::string beforeCVPipeliningText;
   std::filesystem::path afterCVPipeliningIR;
   std::filesystem::path beforePlanMemoryIR;
-  std::optional<uint32_t> randomSeed;
+  int planMemorySeed = -1;
   bool restrictInplaceAsISA = false;
-  bool disableCVPipelining = false;
+  bool disableAutoCVWorkSpaceManage = false;
   int cvPipelineDepth = -1;
   bool enablePreload = false;
-  bool enableCVLazyLoading = false;
+  bool enableLazyLoading = false;
   bool enableCodeMotion = true;
+  bool enableAutoBindSubBlock = true;
   int tileMixCubeLoop = 2;
   int tileMixVectorLoop = 2;
   bool enableUbufSaving = false;
   bool enableTritonKernelCompile = false;
-  bool disableAlignAllocSize = false;
-  bool disableEnableStrideAlign = false;
-  bool disableInferHIVMDataLayout = false;
+  bool enableHIVMAutoStorageAlign = true;
+  bool enableHIVMCrossCoreGSS = true;
+  bool enableHIVMInjectBlockAllSync = false;
+  bool disableAutoInjectBlockSync = false;
   bool enableAutoMultiBuffer = false;
   cvub::MultiBufferStrategy localMultiBufferStrategy =
       cvub::MultiBufferStrategy::CubeNoL0C;
@@ -49,12 +53,13 @@ struct Options {
   std::filesystem::path debugDirectory;
 };
 
-uint32_t ParseRandomSeed(const std::string &text) {
+int ParsePlanMemorySeed(const std::string &text) {
   size_t parsed = 0;
-  const unsigned long long value = std::stoull(text, &parsed);
-  if (parsed != text.size() || value >= 20)
-    throw std::runtime_error("--random-seed must be in [0, 19]");
-  return static_cast<uint32_t>(value);
+  const long long value = std::stoll(text, &parsed);
+  if (parsed != text.size() || value < -1 || value >= 20)
+    throw std::runtime_error(
+        "--plan-memory-seed must be -1 or in [0, 19]");
+  return static_cast<int>(value);
 }
 
 bool ParseBool(const std::string &text) {
@@ -80,26 +85,31 @@ DebugEntry ParseDebugEntry(const std::string &text) {
 void PrintHelp() {
   std::cout
       << "Usage: bishengir-ub-overflow-model "
-         "--before-cvpipelining-ir=<path> [options]\n"
+         "<before-cvpipelining-ir> [options]\n"
+      << "  --before-cvpipelining-ir=<path> remains available for API-style "
+         "invocation.\n"
+      << "  Use --before-cvpipelining-ir=- to read Generic MLIR from stdin.\n"
       << "\nCVPipelining options:\n"
-      << "  --disable-cv-pipelining=<bool>\n"
+      << "  --disable-auto-cv-work-space-manage=<bool>\n"
       << "  --cv-pipeline-depth=<n>\n"
       << "  --enable-preload=<bool>\n"
-      << "  --enable-cv-lazy-loading=<bool>\n"
+      << "  --enable-lazy-loading=<bool>\n"
       << "\nUB-affecting pass and PlanMemory options:\n"
       << "  --enable-code-motion=<bool>\n"
+      << "  --enable-auto-bind-sub-block=<bool>\n"
       << "  --tile-mix-cube-loop=<positive integer>\n"
       << "  --tile-mix-vector-loop=<positive integer>\n"
       << "  --enable-ubuf-saving=<bool>\n"
       << "  --enable-triton-kernel-compile=<bool>\n"
-      << "  --disable-align-alloc-size=<bool>\n"
-      << "  --disable-enable-stride-align=<bool>\n"
-      << "  --disable-infer-hivm-data-layout=<bool>\n"
+      << "  --enable-hivm-auto-storage-align=<bool>\n"
+      << "  --enable-hivm-cross-core-gss=<bool>\n"
+      << "  --enable-hivm-inject-block-all-sync=<bool>\n"
+      << "  --disable-auto-inject-block-sync=<bool>\n"
       << "  --enable-auto-multi-buffer=<bool>\n"
       << "  --limit-auto-multi-buffer-of-local-buffer=<strategy>\n"
       << "  --limit-auto-multi-buffer-buffer=<strategy>\n"
       << "  --restrict-inplace-as-isa\n"
-      << "  --random-seed=<0..19>\n"
+      << "  --plan-memory-seed=<-1|0..19>\n"
       << "  --format=<text|json>\n"
       << "  --show-runtime-timing[=<bool>]\n"
       << "      Emit total and per-stage runtime records to stderr.\n"
@@ -132,28 +142,31 @@ Options ParseOptions(int argc, char **argv) {
       options.afterCVPipeliningIR = *afterCV;
     else if (auto beforePlan = readValue("--before-plan-memory-ir"))
       options.beforePlanMemoryIR = *beforePlan;
-    else if (auto seed = readValue("--random-seed"))
-      options.randomSeed = ParseRandomSeed(*seed);
+    else if (auto seed = readValue("--plan-memory-seed"))
+      options.planMemorySeed = ParsePlanMemorySeed(*seed);
     else if (auto format = readValue("--format"))
       options.format = *format;
     else if (argument == "--restrict-inplace-as-isa")
       options.restrictInplaceAsISA = true;
-    else if (argument == "--disable-cv-pipelining")
-      options.disableCVPipelining = true;
-    else if (auto disableCV = readValue("--disable-cv-pipelining"))
-      options.disableCVPipelining = ParseBool(*disableCV);
+    else if (argument == "--disable-auto-cv-work-space-manage")
+      options.disableAutoCVWorkSpaceManage = true;
+    else if (auto disableCV =
+                 readValue("--disable-auto-cv-work-space-manage"))
+      options.disableAutoCVWorkSpaceManage = ParseBool(*disableCV);
     else if (auto depth = readValue("--cv-pipeline-depth"))
       options.cvPipelineDepth = std::stoi(*depth);
     else if (argument == "--enable-preload")
       options.enablePreload = true;
     else if (auto preload = readValue("--enable-preload"))
       options.enablePreload = ParseBool(*preload);
-    else if (argument == "--enable-cv-lazy-loading")
-      options.enableCVLazyLoading = true;
-    else if (auto lazyLoading = readValue("--enable-cv-lazy-loading"))
-      options.enableCVLazyLoading = ParseBool(*lazyLoading);
+    else if (argument == "--enable-lazy-loading")
+      options.enableLazyLoading = true;
+    else if (auto lazyLoading = readValue("--enable-lazy-loading"))
+      options.enableLazyLoading = ParseBool(*lazyLoading);
     else if (auto codeMotion = readValue("--enable-code-motion"))
       options.enableCodeMotion = ParseBool(*codeMotion);
+    else if (auto autoBind = readValue("--enable-auto-bind-sub-block"))
+      options.enableAutoBindSubBlock = ParseBool(*autoBind);
     else if (auto cubeLoop = readValue("--tile-mix-cube-loop"))
       options.tileMixCubeLoop = std::stoi(*cubeLoop);
     else if (auto vectorLoop = readValue("--tile-mix-vector-loop"))
@@ -167,20 +180,25 @@ Options ParseOptions(int argc, char **argv) {
     else if (auto enableTriton =
                  readValue("--enable-triton-kernel-compile"))
       options.enableTritonKernelCompile = ParseBool(*enableTriton);
-    else if (argument == "--disable-align-alloc-size")
-      options.disableAlignAllocSize = true;
-    else if (auto disableAlign = readValue("--disable-align-alloc-size"))
-      options.disableAlignAllocSize = ParseBool(*disableAlign);
-    else if (argument == "--disable-enable-stride-align")
-      options.disableEnableStrideAlign = true;
-    else if (auto disableStride =
-                 readValue("--disable-enable-stride-align"))
-      options.disableEnableStrideAlign = ParseBool(*disableStride);
-    else if (argument == "--disable-infer-hivm-data-layout")
-      options.disableInferHIVMDataLayout = true;
-    else if (auto disableLayout =
-                 readValue("--disable-infer-hivm-data-layout"))
-      options.disableInferHIVMDataLayout = ParseBool(*disableLayout);
+    else if (argument == "--enable-hivm-auto-storage-align")
+      options.enableHIVMAutoStorageAlign = true;
+    else if (auto storageAlign =
+                 readValue("--enable-hivm-auto-storage-align"))
+      options.enableHIVMAutoStorageAlign = ParseBool(*storageAlign);
+    else if (argument == "--enable-hivm-cross-core-gss")
+      options.enableHIVMCrossCoreGSS = true;
+    else if (auto crossCore = readValue("--enable-hivm-cross-core-gss"))
+      options.enableHIVMCrossCoreGSS = ParseBool(*crossCore);
+    else if (argument == "--enable-hivm-inject-block-all-sync")
+      options.enableHIVMInjectBlockAllSync = true;
+    else if (auto blockAll =
+                 readValue("--enable-hivm-inject-block-all-sync"))
+      options.enableHIVMInjectBlockAllSync = ParseBool(*blockAll);
+    else if (argument == "--disable-auto-inject-block-sync")
+      options.disableAutoInjectBlockSync = true;
+    else if (auto disableBlockSync =
+                 readValue("--disable-auto-inject-block-sync"))
+      options.disableAutoInjectBlockSync = ParseBool(*disableBlockSync);
     else if (argument == "--enable-auto-multi-buffer")
       options.enableAutoMultiBuffer = true;
     else if (auto autoMultiBuffer = readValue("--enable-auto-multi-buffer"))
@@ -210,6 +228,11 @@ Options ParseOptions(int argc, char **argv) {
     else if (argument == "--help" || argument == "-h") {
       PrintHelp();
       std::exit(0);
+    } else if ((!argument.empty() && argument.front() != '-') ||
+               argument == "-") {
+      if (!options.beforeCVPipeliningIR.empty())
+        throw std::runtime_error("multiple input files were provided");
+      options.beforeCVPipeliningIR = argument;
     } else {
       throw std::runtime_error("unknown option: " + argument);
     }
@@ -247,17 +270,28 @@ void ValidateOptions(const Options &options) {
     input = &options.afterCVPipeliningIR;
   else if (options.debugEntry == DebugEntry::BeforePlanMemory)
     input = &options.beforePlanMemoryIR;
-  if (!std::filesystem::is_regular_file(*input))
+  if (*input != "-" && !std::filesystem::is_regular_file(*input))
     throw std::runtime_error("input is not a regular file: " +
                              input->string());
 }
 
+void ReadStandardInput(Options &options) {
+  if (options.debugEntry != DebugEntry::BeforeCVPipelining ||
+      options.beforeCVPipeliningIR != "-")
+    return;
+  std::ostringstream contents;
+  contents << std::cin.rdbuf();
+  options.beforeCVPipeliningText = contents.str();
+  if (options.beforeCVPipeliningText.empty())
+    throw std::runtime_error("before-CVPipelining stdin is empty");
+}
+
 cvub::CVPipeliningOptions CVPipeliningOptions(const Options &options) {
   cvub::CVPipeliningOptions result;
-  result.disabled = options.disableCVPipelining;
+  result.disabled = options.disableAutoCVWorkSpaceManage;
   result.setDepthInUnrollMode = options.cvPipelineDepth;
   result.enableSkewMode = options.enablePreload;
-  result.enableLazyLoading = options.enableCVLazyLoading;
+  result.enableLazyLoading = options.enableLazyLoading;
   return result;
 }
 
@@ -266,11 +300,16 @@ cvub::UBAffectingPassOptions UBAffectingPassOptions(const Options &options) {
   result.tileMixCubeLoop = static_cast<unsigned>(options.tileMixCubeLoop);
   result.tileMixVectorLoop = static_cast<unsigned>(options.tileMixVectorLoop);
   result.enableCodeMotion = options.enableCodeMotion;
+  result.enableAutoBindSubBlock = options.enableAutoBindSubBlock;
   result.enableUbufSaving = options.enableUbufSaving;
   result.enableTritonKernelCompile = options.enableTritonKernelCompile;
-  result.disableAlignAllocSize = options.disableAlignAllocSize;
-  result.disableEnableStrideAlign = options.disableEnableStrideAlign;
-  result.disableInferHIVMDataLayout = options.disableInferHIVMDataLayout;
+  result.enableHIVMAutoStorageAlign = options.enableHIVMAutoStorageAlign;
+  result.enableHIVMCrossCoreGSS = options.enableHIVMCrossCoreGSS;
+  result.enableHIVMInjectBlockAllSync =
+      options.enableHIVMInjectBlockAllSync;
+  result.disableAutoInjectBlockSync = options.disableAutoInjectBlockSync;
+  result.disableAutoCVWorkSpaceManage =
+      options.disableAutoCVWorkSpaceManage;
   result.enableAutoMultiBuffer = options.enableAutoMultiBuffer;
   result.limitAutoMultiBufferOfLocalBuffer =
       options.localMultiBufferStrategy;
@@ -281,9 +320,10 @@ cvub::UBAffectingPassOptions UBAffectingPassOptions(const Options &options) {
 cvub::PlanMemoryModelResult PlanMemory(const cvub::PlanMemoryInput &input,
                                        const Options &options,
                                        cvub::DebugTrace *trace = nullptr) {
-  if (options.randomSeed)
+  if (options.planMemorySeed >= 0)
     return cvub::PlanLocalMemoryForSeed(
-        input, *options.randomSeed, options.restrictInplaceAsISA, trace);
+        input, static_cast<uint32_t>(options.planMemorySeed),
+        options.restrictInplaceAsISA, trace);
   return cvub::PlanLocalMemory(input, options.restrictInplaceAsISA, trace);
 }
 
@@ -293,9 +333,20 @@ cvub::ModulePlanResult RunModel(const Options &options,
     cvub::CVPipeliningUBPipelineOptions pipelineOptions;
     pipelineOptions.cvPipelining = CVPipeliningOptions(options);
     pipelineOptions.ubAffectingPasses = UBAffectingPassOptions(options);
-    pipelineOptions.planMemorySeed = options.randomSeed;
+    if (options.planMemorySeed >= 0)
+      pipelineOptions.planMemorySeed =
+          static_cast<uint32_t>(options.planMemorySeed);
     pipelineOptions.restrictInplaceAsISA = options.restrictInplaceAsISA;
     pipelineOptions.debugTrace = trace;
+    if (!options.beforeCVPipeliningText.empty()) {
+      cvub::GenericModule module = cvub::MeasureStage(
+          trace, "ParseGenericIR", [&] {
+            return cvub::ParseGenericIRText(
+                options.beforeCVPipeliningText, false);
+          });
+      return cvub::RunCVPipeliningUBModulePipeline(
+          std::move(module), pipelineOptions);
+    }
     return cvub::RunCVPipeliningUBModulePipeline(
         options.beforeCVPipeliningIR, pipelineOptions);
   }
@@ -305,7 +356,11 @@ cvub::ModulePlanResult RunModel(const Options &options,
         cvub::MeasureStage(trace, "ParseGenericIR", [&] {
           return cvub::ParseGenericIR(options.afterCVPipeliningIR, false);
         }),
-        UBAffectingPassOptions(options), options.randomSeed,
+        UBAffectingPassOptions(options),
+        options.planMemorySeed >= 0
+            ? std::optional<uint32_t>(
+                  static_cast<uint32_t>(options.planMemorySeed))
+            : std::nullopt,
         options.restrictInplaceAsISA, trace);
   }
   const cvub::PlanMemoryInput input = cvub::MeasureStage(
@@ -543,6 +598,7 @@ int main(int argc, char **argv) {
   try {
     options = ParseOptions(argc, argv);
     ValidateOptions(options);
+    ReadStandardInput(options);
     if (options.debug || options.showRuntimeTiming || options.verifyEachPass)
       debugTrace.emplace(std::cerr, options.debugDirectory, options.debug,
                          options.showRuntimeTiming,

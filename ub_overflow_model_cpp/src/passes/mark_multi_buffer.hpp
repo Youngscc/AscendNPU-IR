@@ -1,16 +1,10 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_MARK_MULTI_BUFFER_HPP
 #define CVPIPELINE_UB_MODEL_CPP_MARK_MULTI_BUFFER_HPP
 
+#include "../../include/ub_overflow_model/api.hpp"
 #include "../pipeline/after_inline_load_copy.hpp"
 
 namespace cvub {
-
-enum class MultiBufferStrategy {
-  NoLimit,
-  OnlyCube,
-  OnlyVector,
-  CubeNoL0C,
-};
 
 struct MarkMultiBufferOptions {
   bool enableAuto = false;
@@ -376,8 +370,7 @@ inline MarkMultiBufferResult ModelMarkMultiBuffer(
            index < terminator.operands.size() && index < operation.results.size();
            ++index) {
         auto returned = definitions.find(terminator.operands[index]);
-        if (returned == definitions.end() ||
-            returned->second->name != "memref.alloc")
+        if (returned == definitions.end())
           continue;
         bool usedByV1 = false;
         for (const GenericOperation &user : module.operations) {
@@ -391,6 +384,39 @@ inline MarkMultiBufferResult ModelMarkMultiBuffer(
             usedByV1 = true;
         }
         if (!usedByV1)
+          continue;
+        const GenericOperation *allocationDefinition = returned->second;
+        if (allocationDefinition->name == "scf.for") {
+          const auto resultPosition = std::find(
+              allocationDefinition->results.begin(),
+              allocationDefinition->results.end(), terminator.operands[index]);
+          if (resultPosition == allocationDefinition->results.end())
+            continue;
+          const size_t resultIndex = static_cast<size_t>(
+              std::distance(allocationDefinition->results.begin(),
+                            resultPosition));
+          if (afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization
+                  .singlePoint.canonicalizedIterArgResultKeys.count(
+                      {allocationDefinition->id,
+                       static_cast<int>(resultIndex)}) == 0 ||
+              allocationDefinition->operands.size() <
+                  allocationDefinition->results.size())
+            continue;
+          const size_t initIndex =
+              allocationDefinition->operands.size() -
+              allocationDefinition->results.size() + resultIndex;
+          auto init = definitions.find(
+              allocationDefinition->operands[initIndex]);
+          if (init == definitions.end())
+            continue;
+          allocationDefinition = init->second;
+        }
+        // The semantic model deliberately keeps the tensor-level operation
+        // names. OneShotBufferize materializes tensor.empty as memref.alloc;
+        // CanonicalizeIterArg then replaces the loop result above with that
+        // allocation, which is the value inspected by MarkScopeMultiBuffer.
+        if (allocationDefinition->name != "tensor.empty" &&
+            allocationDefinition->name != "memref.alloc")
           continue;
         for (const BufferizedValueBinding &binding :
              afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.bufferized.values) {
@@ -413,6 +439,10 @@ inline MarkMultiBufferResult ModelMarkMultiBuffer(
                   operation, "preload scope result buffer is unresolved");
             continue;
           }
+          if (BufferOwnerOperation(
+                  afterInlineLoadCopy.afterAllocExtraBuffer, *buffer) !=
+              allocationDefinition->id)
+            continue;
           if (buffer->addressSpace == AddressSpace::Unknown)
             MarkMultiBufferExactBlocker(
                 operation, "preload scope result address space is unresolved");

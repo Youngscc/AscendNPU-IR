@@ -61,6 +61,12 @@ inline SplitMixCoreType GetSplitMixCoreType(
     core = FindDictionaryValue(operation.properties, "tcore_type");
   if (core.empty())
     core = FindDictionaryValue(operation.attributes, "tcore_type");
+  if (core.empty() && operation.name == "scope.scope")
+    core = FindDictionaryValue(operation.properties,
+                               "hivm.loop_core_type");
+  if (core.empty() && operation.name == "scope.scope")
+    core = FindDictionaryValue(operation.attributes,
+                               "hivm.loop_core_type");
   core = SplitMixEnumValue(core);
   if (core == "CUBE")
     return SplitMixCoreType::Cube;
@@ -81,6 +87,197 @@ inline SplitMixCoreType GetSplitMixCoreType(
   return cubeOperations.count(operation.name) != 0
              ? SplitMixCoreType::Cube
              : SplitMixCoreType::Common;
+}
+
+// Mirror LoadOp::inferCoreType's fallback through
+// utils::checkUsersAllWithCondition.  Before InferHIVMMemScope the load
+// destination frequently has no explicit address space, so the production
+// implementation traces the backing memref and asks whether every concrete
+// user is a Cube or Vector operation, walking through view-like/agnostic ops.
+// Keep this graph-dependent rule separate from the cheap attribute/mnemonic
+// query above: only SplitMix projection owns the required immutable indexes.
+inline SplitMixCoreType InferSplitMixLoadCoreType(
+    const GenericModule &module, const GenericOperation &operation,
+    const GenericModuleAnalysisIndexes &analysis,
+    const std::set<int> *activeOperations = nullptr) {
+  if (operation.name != "hivm.hir.load" || operation.operands.size() < 2)
+    return GetSplitMixCoreType(operation);
+
+  // getCoreType() consults an explicit hivm.tcore_type before dispatching to
+  // LoadOp::inferCoreType().  LoadOp only performs address-space/user
+  // inference when that attribute is absent or CUBE_OR_VECTOR.  In
+  // particular, InsertLoadStoreForMixCV's "inserted-load" records already
+  // carry the authoritative CUBE/VECTOR choice at this boundary.
+  const SplitMixCoreType explicitCore = GetSplitMixCoreType(operation);
+  if (explicitCore == SplitMixCoreType::Cube ||
+      explicitCore == SplitMixCoreType::Vector)
+    return explicitCore;
+
+  if (operation.operandTypes.size() >= 2) {
+    const std::optional<MemRefTypeModel> source =
+        ParseMemRefType(operation.operandTypes[0]);
+    const std::optional<MemRefTypeModel> destination =
+        ParseMemRefType(operation.operandTypes[1]);
+    if (source && destination &&
+        source->addressSpace != AddressSpace::Unknown &&
+        destination->addressSpace != AddressSpace::Unknown)
+      return source->addressSpace == AddressSpace::GM &&
+                     destination->addressSpace == AddressSpace::UB
+                 ? SplitMixCoreType::Vector
+                 : SplitMixCoreType::Cube;
+  }
+
+  int destination = operation.operands[1];
+  std::set<int> traced;
+  while (traced.insert(destination).second) {
+    const int definition = analysis.definingOperationId(destination);
+    if (definition < 0)
+      break;
+    const GenericOperation &producer =
+        module.operations.at(static_cast<size_t>(definition));
+    static const std::set<std::string> traceThrough = {
+        "builtin.unrealized_conversion_cast", "memref.cast",
+        "memref.collapse_shape", "memref.expand_shape",
+        "memref.memory_space_cast", "memref.reinterpret_cast",
+        "memref.reshape", "memref.subview", "memref.transpose",
+        "memref.view"};
+    if (traceThrough.count(producer.name) == 0 || producer.operands.empty())
+      break;
+    destination = producer.operands.front();
+  }
+
+  auto allUsersHaveCore = [&](SplitMixCoreType target)
+      -> std::optional<bool> {
+    std::set<int> visiting;
+    std::function<std::optional<bool>(int)> check =
+        [&](int value) -> std::optional<bool> {
+      if (!visiting.insert(value).second)
+        return std::nullopt;
+      std::optional<bool> found;
+      for (int userId : analysis.users(value)) {
+        if (userId == operation.id ||
+            (activeOperations && activeOperations->count(userId) == 0))
+          continue;
+        const GenericOperation &user =
+            module.operations.at(static_cast<size_t>(userId));
+        const SplitMixCoreType userCore = GetSplitMixCoreType(user);
+        if (userCore == target) {
+          found = true;
+          continue;
+        }
+        // queryCoreTypeHelper returning a concrete opposite core (or a
+        // combined-core result) makes the production predicate fail.  Common
+        // tensor/memref/control-flow operations have no interface result and
+        // are traversed through their SSA results instead.
+        if (userCore != SplitMixCoreType::Common) {
+          visiting.erase(value);
+          return false;
+        }
+        for (int result : user.results) {
+          const std::optional<bool> nested = check(result);
+          if (nested && !*nested) {
+            visiting.erase(value);
+            return false;
+          }
+          if (nested)
+            found = true;
+        }
+      }
+      visiting.erase(value);
+      return found;
+    };
+    return check(destination);
+  };
+
+  const std::optional<bool> allCube =
+      allUsersHaveCore(SplitMixCoreType::Cube);
+  if (allCube && *allCube)
+    return SplitMixCoreType::Cube;
+  const std::optional<bool> allVector =
+      allUsersHaveCore(SplitMixCoreType::Vector);
+  if (allVector && *allVector)
+    return SplitMixCoreType::Vector;
+  return SplitMixCoreType::Common;
+}
+
+inline bool IsSplitMixOperationNestedIn(const GenericModule &module,
+                                        const GenericOperation &operation,
+                                        int ancestorId) {
+  int parent = operation.parentId;
+  while (parent >= 0) {
+    if (parent == ancestorId)
+      return true;
+    parent = module.operations.at(static_cast<size_t>(parent)).parentId;
+  }
+  return false;
+}
+
+inline bool ReplaceFilteredSplitMixScopeResults(
+    GenericModule &module, const GenericOperation &scope,
+    GenericRewriter &rewriter, PipelineAnalysisContext &useLists,
+    const GenericModuleAnalysisIndexes &analysis,
+    std::set<int> &activeOperations) {
+  if (scope.regions.size() != 1)
+    return false;
+  const GenericRegion &region =
+      module.regions.at(static_cast<size_t>(scope.regions.front()));
+  if (region.blocks.size() != 1)
+    return false;
+  const GenericBlock &block =
+      module.blocks.at(static_cast<size_t>(region.blocks.front()));
+  if (block.operations.empty())
+    return false;
+  const GenericOperation &terminator = module.operations.at(
+      static_cast<size_t>(block.operations.back()));
+  if (terminator.name != "scope.return" ||
+      terminator.operands.size() != scope.results.size())
+    return false;
+  const std::vector<int> returnedValues = terminator.operands;
+
+  const GenericBlock &parentBlock =
+      module.blocks.at(static_cast<size_t>(scope.blockId));
+  const auto position = std::find(parentBlock.operations.begin(),
+                                  parentBlock.operations.end(), scope.id);
+  size_t insertion = static_cast<size_t>(
+      std::distance(parentBlock.operations.begin(), position));
+  for (size_t index = 0; index < scope.results.size(); ++index) {
+    if (!useLists.hasUsers(scope.results[index]))
+      continue;
+    const int yielded = returnedValues[index];
+    const int definition = analysis.definingOperationId(yielded);
+    if (definition < 0 ||
+        !IsSplitMixOperationNestedIn(
+            module,
+            module.operations.at(static_cast<size_t>(definition)),
+            scope.id)) {
+      rewriter.replaceAllUses(scope.results[index], yielded);
+      continue;
+    }
+    if (index >= scope.resultTypes.size())
+      return false;
+    const std::string &type = scope.resultTypes[index];
+    int stub = -1;
+    if (startsWith(type, "tensor<")) {
+      stub = rewriter.createOperation(scope.parentId, scope.regionId,
+                                      scope.blockId, "tensor.empty", {type});
+    } else if (!type.empty() && type.front() == 'i') {
+      stub = rewriter.createOperation(
+          scope.parentId, scope.regionId, scope.blockId, "arith.constant",
+          {type}, {}, {}, "{value = 0 : " + type + "}");
+    } else if (!type.empty() && type.front() == 'f') {
+      stub = rewriter.createOperation(
+          scope.parentId, scope.regionId, scope.blockId, "arith.constant",
+          {type}, {}, {}, "{value = 0.000000e+00 : " + type + "}");
+    } else {
+      return false;
+    }
+    rewriter.insertToBlock(scope.blockId, insertion++, stub);
+    activeOperations.insert(stub);
+    rewriter.replaceAllUses(
+        scope.results[index],
+        module.operations.at(static_cast<size_t>(stub)).results.front());
+  }
+  return true;
 }
 
 inline bool IsSplitMixFunction(const GenericOperation &operation) {
@@ -128,10 +325,13 @@ inline void ReplaceSplitMixValue(GenericModule &module, int from, int to) {
 inline bool IsSplitMixTriviallyDead(const GenericModule &module,
                                     const GenericOperation &operation,
                                     const std::set<int> &activeOperations,
-                                    const PipelineAnalysisContext &useLists) {
+                                    const PipelineAnalysisContext &useLists,
+                                    int erasureRoot = -1) {
   if (operation.blockId < 0 || operation.name == "func.func" ||
       IsSplitMixTerminator(operation))
     return false;
+  if (erasureRoot < 0)
+    erasureRoot = operation.id;
   // HIVM_SynchronizationOp carries ordering side effects even though it has no
   // shaped memory effect. MLIR's isOpTriviallyDead therefore never removes it.
   if (operation.name == "hivm.hir.sync_block" ||
@@ -139,8 +339,27 @@ inline bool IsSplitMixTriviallyDead(const GenericModule &module,
       operation.name == "hivm.hir.sync_block_wait" ||
       operation.name == "hivm.hir.pipe_barrier")
     return false;
+  // isOpTriviallyDead evaluates uses outside the operation being erased.
+  // Region-local SSA chains commonly end in a terminator (for example,
+  // tensor.insert -> scf.yield -> scf.for result).  Counting those internal
+  // uses while deciding whether the enclosing unused loop is dead makes the
+  // region self-sustaining and prevents the greedy SplitMix post-process from
+  // deleting it.  Keep only users that would survive erasing `erasureRoot`.
+  const auto hasExternalUser = [&](int result) {
+    return std::any_of(
+        useLists.users(result).begin(), useLists.users(result).end(),
+        [&](int userId) {
+          if (activeOperations.count(userId) == 0)
+            return false;
+          if (userId == erasureRoot)
+            return false;
+          const GenericOperation &user =
+              module.operations.at(static_cast<size_t>(userId));
+          return !IsSplitMixOperationNestedIn(module, user, erasureRoot);
+        });
+  };
   if (std::any_of(operation.results.begin(), operation.results.end(),
-                  [&](int result) { return useLists.hasUsers(result); }))
+                  hasExternalUser))
     return false;
 
   if (!operation.regions.empty()) {
@@ -156,7 +375,7 @@ inline bool IsSplitMixTriviallyDead(const GenericModule &module,
           if (IsSplitMixTerminator(child))
             continue;
           if (!IsSplitMixTriviallyDead(module, child, activeOperations,
-                                       useLists))
+                                       useLists, erasureRoot))
             return false;
         }
     return true;
@@ -174,6 +393,32 @@ inline bool IsSplitMixTriviallyDead(const GenericModule &module,
                        return startsWith(value, "read@") ||
                               startsWith(value, "allocate@");
                      });
+}
+
+// Operation::erase drops an operation together with all nested regions.  A
+// detached GenericOperation keeps its region tables alive until compaction,
+// so explicitly detach the whole tree as well.  Otherwise the later
+// OperationFolder can observe an unreachable CVPipelining-loop constant and
+// incorrectly hoist it into the projected function.
+inline void EraseSplitMixOperationTree(
+    GenericModule &module, int operationId, GenericRewriter &rewriter,
+    std::set<int> &activeOperations) {
+  std::vector<int> tree;
+  std::function<void(int)> collect = [&](int current) {
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(current));
+    for (int regionId : operation.regions)
+      for (int blockId :
+           module.regions.at(static_cast<size_t>(regionId)).blocks)
+        for (int child :
+             module.blocks.at(static_cast<size_t>(blockId)).operations)
+          collect(child);
+    tree.push_back(current);
+  };
+  collect(operationId);
+  rewriter.removeManyFromBlocks(tree);
+  for (int current : tree)
+    activeOperations.erase(current);
 }
 
 inline void RunSplitMixOperationFolder(
@@ -205,6 +450,41 @@ inline void RunSplitMixOperationFolder(
   collect(functionId);
 
   GenericRewriter rewriter(module, &useLists);
+  // arith::AddIOp::fold is invoked by applyPatternsGreedily even though
+  // SplitMixKernel does not register an explicit arithmetic pattern.  In
+  // particular, CV multi-buffer event selection materializes `iv + 0`; the
+  // AIV post-process folds that back to the induction variable.
+  std::map<int, ArithIntegerConstant> integerConstants;
+  for (int operationId : activeOperations) {
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(operationId));
+    if (const std::optional<ArithIntegerConstant> value =
+            ParseArithIntegerConstant(operation);
+        value && operation.results.size() == 1)
+      integerConstants[operation.results.front()] = *value;
+  }
+  for (int operationId : postOrder) {
+    if (activeOperations.count(operationId) == 0)
+      continue;
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(operationId));
+    if (operation.name != "arith.addi" || operation.operands.size() != 2 ||
+        operation.results.size() != 1)
+      continue;
+    int replacement = -1;
+    const auto lhs = integerConstants.find(operation.operands.front());
+    const auto rhs = integerConstants.find(operation.operands.back());
+    if (lhs != integerConstants.end() && lhs->second.bits == 0)
+      replacement = operation.operands.back();
+    else if (rhs != integerConstants.end() && rhs->second.bits == 0)
+      replacement = operation.operands.front();
+    if (replacement < 0)
+      continue;
+    rewriter.replaceAllUses(operation.results.front(), replacement);
+    rewriter.removeFromBlock(operation.blockId, operationId);
+    activeOperations.erase(operationId);
+  }
+
   std::set<int> folderOwnedConstants;
   std::map<std::tuple<std::string, std::string, std::string>, int>
       uniquedConstants;
@@ -217,9 +497,18 @@ inline void RunSplitMixOperationFolder(
         operation.resultTypes.size() != 1)
       continue;
 
-    const auto key = std::make_tuple(operation.name,
-                                     operation.properties + operation.attributes,
-                                     operation.resultTypes.front());
+    // OperationFolder uniques constants by the semantic value attribute and
+    // result type.  Generic IR can encode the same value in properties, in
+    // attributes, or redundantly in both; using the raw dictionaries as the
+    // key would therefore keep equivalent constants distinct.
+    std::string value =
+        FindDictionaryValue(operation.properties, "value");
+    if (value.empty())
+      value = FindDictionaryValue(operation.attributes, "value");
+    const auto key = std::make_tuple(
+        operation.name,
+        value.empty() ? operation.properties + operation.attributes : value,
+        operation.resultTypes.front());
     auto existing = uniquedConstants.find(key);
     if (existing != uniquedConstants.end()) {
       const int replacement =
@@ -263,6 +552,20 @@ inline void RemoveUselessSplitMixMarkOps(
   GenericRewriter rewriter(module);
   std::vector<int> marks;
   std::vector<int> erasedMarks;
+  auto hasSemanticAttributes = [](const std::string &dictionary) {
+    const std::string value = trim(dictionary);
+    if (value.empty() || value == "{}")
+      return false;
+    if (value.size() < 2 || value.front() != '{' || value.back() != '}')
+      return true;
+    for (const std::string &entry :
+         splitTopLevel(value.substr(1, value.size() - 2))) {
+      const size_t equal = entry.find('=');
+      if (trim(entry.substr(0, equal)) != "effects")
+        return true;
+    }
+    return false;
+  };
   for (int operationId : activeOperations)
     if (module.operations.at(static_cast<size_t>(operationId)).name ==
         "annotation.mark")
@@ -270,8 +573,8 @@ inline void RemoveUselessSplitMixMarkOps(
   for (int operationId : marks) {
     const GenericOperation &mark =
         module.operations.at(static_cast<size_t>(operationId));
-    if ((trim(mark.attributes) != "" && trim(mark.attributes) != "{}") ||
-        (trim(mark.properties) != "" && trim(mark.properties) != "{}") ||
+    if (hasSemanticAttributes(mark.attributes) ||
+        hasSemanticAttributes(mark.properties) ||
         mark.operands.empty())
       continue;
     const int source = mark.operands.front();
@@ -363,6 +666,13 @@ inline void PostProcessSplitMixCubeFunc(
   };
   collect(functionId);
 
+  std::unordered_map<int, int> definitions;
+  definitions.reserve(descendants.size());
+  for (int operationId : descendants)
+    for (int result :
+         module.operations.at(static_cast<size_t>(operationId)).results)
+      definitions[result] = operationId;
+
   GenericRewriter rewriter(module, &useLists);
   std::vector<int> erasedOperations;
   for (int operationId : descendants) {
@@ -378,6 +688,26 @@ inline void PostProcessSplitMixCubeFunc(
     if (replacementMark && operation.operands.size() >= 2) {
       rewriter.replaceAllUses(operation.operands[0], operation.operands[1]);
       continue;
+    }
+
+    // postProcessCubeFunc registers FoldEmptyInsertSlice in the same greedy
+    // driver as PostCubeReplacement.  A vector-side value filtered from the
+    // Cube projection is represented by tensor.empty; inserting that empty
+    // value is an identity on the destination and must disappear before
+    // OneShotBufferize.
+    if (operation.name == "tensor.insert_slice" &&
+        operation.operands.size() >= 2 && operation.results.size() == 1) {
+      auto sourceDefinition = definitions.find(operation.operands.front());
+      if (sourceDefinition != definitions.end() &&
+          module.operations
+                  .at(static_cast<size_t>(sourceDefinition->second))
+                  .name == "tensor.empty") {
+        rewriter.replaceAllUses(operation.results.front(),
+                                operation.operands[1]);
+        erasedOperations.push_back(operationId);
+        activeOperations.erase(operationId);
+        continue;
+      }
     }
 
     const bool cubeErasure =
@@ -498,7 +828,8 @@ inline void AnnotateSplitMixOperand(
   }
   const GenericOperation producer =
       module.operations.at(static_cast<size_t>(definition));
-  const SplitMixCoreType producerCore = GetSplitMixCoreType(producer);
+  const SplitMixCoreType producerCore = InferSplitMixLoadCoreType(
+      module, producer, analysis, &activeOperations);
   if (producerCore == retainedCore) {
     if (producer.blockId < 0) {
       visiting.erase(value);
@@ -598,8 +929,12 @@ inline GenericModule RunSplitMixKernelSelectedProjections(
   // operations from blocks, but it does not redefine existing SSA values.
   // Definitions and value types are therefore immutable throughout the
   // projection and can be indexed once for every recursive annotation walk.
+  // LoadOp core inference also mirrors checkUsersAllWithCondition, so retain
+  // the immutable value-user adjacency alongside the mutation-aware use
+  // counts used for deadness.
   const GenericModuleAnalysisIndexes analysis(
-      module, kGenericAnalysisDefinitions | kGenericAnalysisValueTypes);
+      module, kGenericAnalysisDefinitions | kGenericAnalysisUsers |
+                  kGenericAnalysisValueTypes);
   PipelineAnalysisContext useLists(module, kGenericAnalysisUsers);
   std::set<int> activeOperations;
   for (const GenericBlock &block : module.blocks)
@@ -638,20 +973,37 @@ inline GenericModule RunSplitMixKernelSelectedProjections(
         continue;
       const GenericOperation operation =
           module.operations.at(static_cast<size_t>(operationId));
-      if (GetSplitMixCoreType(operation) != filteredCore)
-        continue;
       if (operation.name == "scf.for" && operation.operands.size() >= 2) {
-        // filterMixFunc sets upperBound to lowerBound. The greedy rewrite in
-        // postProcessVectorFunc then folds that zero-trip loop to its init
-        // operands and erases the loop.
-        if (operation.results.size() + 3 > operation.operands.size())
+        std::string loopCore = FindDictionaryValue(
+            operation.properties, "hivm.loop_core_type");
+        if (loopCore.empty())
+          loopCore = FindDictionaryValue(operation.attributes,
+                                          "hivm.loop_core_type");
+        loopCore = SplitMixEnumValue(loopCore);
+        const SplitMixCoreType typedLoopCore =
+            loopCore == "CUBE"     ? SplitMixCoreType::Cube
+            : loopCore == "VECTOR" ? SplitMixCoreType::Vector
+                                    : SplitMixCoreType::Common;
+        if (typedLoopCore == filteredCore) {
+          // filterMixFunc keeps a pipelined loop as an anchor and makes it
+          // zero-trip. The canonicalizer nested under InlineScope erases it
+          // later; erasing it here changes the observable pass boundary.
+          rewriter.replaceOperand(operationId, 1,
+                                  operation.operands.front());
+          continue;
+        }
+      }
+      if (InferSplitMixLoadCoreType(module, operation, analysis,
+                                    &activeOperations) != filteredCore)
+        continue;
+      if (operation.name == "scope.scope") {
+        if (!ReplaceFilteredSplitMixScopeResults(
+                module, operation, rewriter, useLists, analysis,
+                activeOperations))
           throw std::runtime_error(
-              "SplitMixKernel: scf.for result/init operand mismatch");
-        for (size_t index = 0; index < operation.results.size(); ++index)
-          rewriter.replaceAllUses(operation.results[index],
-                                  operation.operands[index + 3]);
-        rewriter.removeFromBlock(operation.blockId, operationId);
-        activeOperations.erase(operationId);
+              "SplitMixKernel: cannot replace filtered scope results");
+        EraseSplitMixOperationTree(module, operationId, rewriter,
+                                   activeOperations);
         continue;
       }
       AnnotateSplitMixOperationInputs(

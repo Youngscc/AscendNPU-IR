@@ -196,6 +196,21 @@ inline bool SinglePointBufferSurvives(
   return false;
 }
 
+inline bool IsErasedSinglePointLocalBuffer(
+    const std::string &buffer,
+    const std::map<std::string, std::string> &bufferMapping) {
+  if (bufferMapping.empty())
+    return false;
+  const std::set<std::string> alternatives = BufferAlternatives(buffer);
+  const bool hasLocalAlternative =
+      std::any_of(alternatives.begin(), alternatives.end(),
+                  [](const std::string &alternative) {
+                    return startsWith(alternative, "local:");
+                  });
+  return hasLocalAlternative &&
+         !SinglePointBufferSurvives(buffer, bufferMapping);
+}
+
 inline std::string PhysicalTypeSignature(const std::string &type) {
   const std::optional<MemRefTypeModel> parsed = ParseMemRefType(type);
   if (!parsed)
@@ -802,7 +817,12 @@ BuildPlanMemoryInputSemanticIR(AfterMarkMultiBufferState afterMarkMultiBuffer) {
         continue;
     }
     if (operation.name == "tensor.insert_slice") {
-      if (buffers.size() > 1)
+      // OneShotBufferize erases an insert_slice when its source and
+      // destination already resolve to the same physical buffer.  Otherwise
+      // it materializes a destination subview followed by hivm.hir.copy.
+      if (buffers.size() > 1 &&
+          mappedBufferIdentity(buffers[0]) !=
+              mappedBufferIdentity(buffers[1]))
         append(operation, "hivm.hir.copy", {buffers[0], buffers[1]});
       continue;
     }

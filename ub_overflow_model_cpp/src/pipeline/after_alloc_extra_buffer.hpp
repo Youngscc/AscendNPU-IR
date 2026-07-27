@@ -15,6 +15,86 @@ struct AfterAllocExtraBufferState {
   std::map<std::string, int> bufferOwnerOperations;
 };
 
+// OneShotBufferize lowers an out-of-place tensor.insert_slice to a subview of
+// the destination followed by hivm.hir.copy.  CopyOp::verify rejects L1-to-L1
+// (cbuf-to-cbuf) copies once InferHIVMMemScope has assigned both buffers.  The
+// compact model keeps the tensor operation in its logical IR, so reproduce
+// that verifier on the projected buffer identities before continuing.
+inline void ValidateBufferizedCopyAddressSpaces(
+    const PostBufferizationRewriteState &postBufferization,
+    const std::map<std::string, AddressSpace> &scopes) {
+  const auto validateCopy = [&](const std::string &source,
+                                const std::string &destination) {
+    if (source == destination)
+      return;
+    auto sourceScope = scopes.find(source);
+    auto destinationScope = scopes.find(destination);
+    if (sourceScope == scopes.end() || destinationScope == scopes.end())
+      return;
+    if (sourceScope->second == AddressSpace::L1 &&
+        destinationScope->second == AddressSpace::L1)
+      throw std::runtime_error(
+          "CopyLowering: unsupported cbuf to cbuf");
+  };
+
+  const GenericModule &module = postBufferization.bufferized.logicalModule;
+  // An out-of-place OneShot operand allocation is initialized by copying the
+  // original operand buffer into the new allocation before the write.
+  for (size_t ordinal = 0;
+       ordinal < postBufferization.singlePoint.allocations.size(); ++ordinal) {
+    const BufferAllocation &allocation =
+        postBufferization.singlePoint.allocations[ordinal];
+    if (!startsWith(allocation.source, "operand:"))
+      continue;
+    const size_t first = allocation.source.find(':');
+    const size_t second = allocation.source.find(':', first + 1);
+    if (first == std::string::npos || second == std::string::npos)
+      continue;
+    const int operationId =
+        std::stoi(allocation.source.substr(first + 1, second - first - 1));
+    const size_t operand = static_cast<size_t>(
+        std::stoull(allocation.source.substr(second + 1)));
+    if (operationId < 0 ||
+        static_cast<size_t>(operationId) >= module.operations.size())
+      continue;
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(operationId));
+    if (operand >= operation.operands.size())
+      continue;
+    // The compact OneShot analysis is exact for the loop-carried conflict
+    // copies used by SCF bufferization.  Do not turn a conservative
+    // out-of-place decision on a straight-line HIVM destination operand into
+    // a synthetic copy: production OneShot keeps those DPS chains in-place.
+    if (operation.name != "scf.for" && operation.name != "scf.while")
+      continue;
+    const std::string *rawSource = FindBufferizedValueBuffer(
+        postBufferization.bufferized, operation.operands[operand]);
+    if (!rawSource)
+      continue;
+    validateCopy(
+        MappedBufferIdentity(
+            *rawSource, postBufferization.singlePoint.bufferMapping),
+        "base:" + std::to_string(ordinal));
+  }
+
+  for (const GenericOperation &operation : module.operations) {
+    if (operation.name != "tensor.insert_slice" ||
+        operation.operandTypes.size() < 2)
+      continue;
+    const std::string *rawSource = FindBufferizedOperationBuffer(
+        postBufferization.bufferized, operation.id, 0);
+    const std::string *rawDestination = FindBufferizedOperationBuffer(
+        postBufferization.bufferized, operation.id, 1);
+    if (!rawSource || !rawDestination)
+      continue;
+    const std::string source = MappedBufferIdentity(
+        *rawSource, postBufferization.singlePoint.bufferMapping);
+    const std::string destination = MappedBufferIdentity(
+        *rawDestination, postBufferization.singlePoint.bufferMapping);
+    validateCopy(source, destination);
+  }
+}
+
 inline uint64_t StaticBufferBits(const std::string &type,
                                  PipelineMetadataCache &metadata) {
   const std::optional<MemRefTypeModel> parsed = metadata.memRefType(type);
@@ -62,8 +142,8 @@ TryStaticBufferBits(const std::string &type,
 //   extent = min(base + tileSize, other) - base
 //
 // Since min(base + tileSize, other) <= base + tileSize, the closed upper
-// bound is tileSize. The generic IR stores affine expressions in the same
-// value-based form used by ConvertArithToAffine.
+// bound is tileSize. Support both the value-based form produced by the model's
+// ConvertArithToAffine projection and the raw affine_map form dumped by cv2pm.
 inline std::optional<int64_t> ConstantizeBufferSizeUpperBound(
     int value, const GenericModule &module,
     const GenericModuleAnalysisIndexes &analysis) {
@@ -74,27 +154,44 @@ inline std::optional<int64_t> ConstantizeBufferSizeUpperBound(
           : &module.operations.at(static_cast<size_t>(definitionId));
   if (!definition || definition->name != "affine.apply")
     return std::nullopt;
-  const std::optional<std::string> expression =
-      ExistingAffineApplyExpression(*definition);
-  if (!expression)
-    return std::nullopt;
-  const std::optional<AffineLinearForm> extent =
-      FlattenAffineLinearExpression(*expression);
-  if (!extent || extent->coefficients.size() != 2)
-    return std::nullopt;
-
   std::optional<int> minValue;
   std::optional<int> baseValue;
-  for (const auto &[term, coefficient] : extent->coefficients) {
-    const std::optional<int> termValue = AffineValue(term);
-    if (!termValue)
+  int64_t extentConstant = 0;
+  if (const std::optional<std::string> expression =
+          ExistingAffineApplyExpression(*definition)) {
+    const std::optional<AffineLinearForm> extent =
+        FlattenAffineLinearExpression(*expression);
+    if (!extent || extent->coefficients.size() != 2)
       return std::nullopt;
-    if (coefficient == 1)
-      minValue = *termValue;
-    else if (coefficient == -1)
-      baseValue = *termValue;
-    else
+    extentConstant = extent->constant;
+    for (const auto &[term, coefficient] : extent->coefficients) {
+      const std::optional<int> termValue = AffineValue(term);
+      if (!termValue)
+        return std::nullopt;
+      if (coefficient == 1)
+        minValue = *termValue;
+      else if (coefficient == -1)
+        baseValue = *termValue;
+      else
+        return std::nullopt;
+    }
+  } else {
+    // Existing cv2pm dumps can already contain affine.apply operations instead
+    // of the arith operations converted by this model.  Preserve the same
+    // ValueBounds relation for the canonical two-operand difference map.
+    std::string map = FindDictionaryValue(definition->properties, "map");
+    if (map.empty())
+      map = FindDictionaryValue(definition->attributes, "map");
+    std::string compact;
+    for (char character : map)
+      if (!std::isspace(static_cast<unsigned char>(character)))
+        compact.push_back(character);
+    if (definition->operands.size() != 2 ||
+        (compact.find("->(s0-s1)") == std::string::npos &&
+         compact.find("->(d0-d1)") == std::string::npos))
       return std::nullopt;
+    minValue = definition->operands[0];
+    baseValue = definition->operands[1];
   }
   if (!minValue || !baseValue)
     return std::nullopt;
@@ -105,21 +202,153 @@ inline std::optional<int64_t> ConstantizeBufferSizeUpperBound(
           : &module.operations.at(static_cast<size_t>(minDefinitionId));
   if (!minDefinition || minDefinition->name != "affine.min")
     return std::nullopt;
-  const std::optional<std::vector<std::string>> minExpressions =
-      ExistingAffineMinMaxExpressions(*minDefinition);
-  if (!minExpressions)
-    return std::nullopt;
+  std::vector<int> candidateValues;
+  std::vector<std::string> candidateExpressions;
+  if (const std::optional<std::vector<std::string>> expressions =
+          ExistingAffineMinMaxExpressions(*minDefinition)) {
+    candidateExpressions = *expressions;
+  } else {
+    std::string map = FindDictionaryValue(minDefinition->properties, "map");
+    if (map.empty())
+      map = FindDictionaryValue(minDefinition->attributes, "map");
+    std::string compact;
+    for (char character : map)
+      if (!std::isspace(static_cast<unsigned char>(character)))
+        compact.push_back(character);
+    // affine.min/max with an identity result list represents min/max of its
+    // operands. This is one form emitted by cv2pm after affine lowering.
+    if (minDefinition->operands.size() == 2 &&
+        (compact.find("->(s0,s1)") != std::string::npos ||
+         compact.find("->(d0,d1)") != std::string::npos))
+      candidateValues = minDefinition->operands;
+    else if (minDefinition->operands.size() == 2) {
+      // The other raw cv2pm form keeps the tile bound in the affine map:
+      //   min(base + tileSize, other) - base
+      // ValueBoundsConstraintSet proves the same `<= tileSize` relation. Map
+      // sN/dN back to the real operands instead of treating symbols as model
+      // SSA IDs.
+      const size_t arrow = compact.find("->(");
+      const size_t close =
+          arrow == std::string::npos ? std::string::npos
+                                     : compact.find(')', arrow + 3);
+      bool proven = false;
+      int64_t maximumOffset = -1;
+      if (close != std::string::npos) {
+        const std::vector<std::string> rawExpressions = splitTopLevel(
+            compact.substr(arrow + 3, close - arrow - 3));
+        static const std::regex symbolOffset(R"(^[sd]([0-9]+)(?:\+([0-9]+))?$)");
+        for (const std::string &raw : rawExpressions) {
+          std::smatch match;
+          if (!std::regex_match(raw, match, symbolOffset))
+            continue;
+          const size_t operandIndex =
+              static_cast<size_t>(std::stoull(match[1].str()));
+          if (operandIndex >= minDefinition->operands.size() ||
+              minDefinition->operands[operandIndex] != *baseValue)
+            continue;
+          const int64_t offset =
+              match[2].matched ? std::stoll(match[2].str()) : 0;
+          maximumOffset = std::max(maximumOffset, offset);
+          proven = true;
+        }
+      }
+      if (proven && maximumOffset >= 0) {
+        const std::optional<int64_t> result =
+            CheckedAddInt64(maximumOffset, extentConstant);
+        if (result && *result >= 0)
+          return result;
+      }
+      return std::nullopt;
+    } else
+      return std::nullopt;
+  }
 
-  for (const std::string &candidate : *minExpressions) {
+  std::set<int> visiting;
+  std::function<std::optional<int64_t>(int)> relativeConstant;
+  relativeConstant = [&](int candidate) -> std::optional<int64_t> {
+    if (candidate == *baseValue)
+      return 0;
+    if (!visiting.insert(candidate).second)
+      return std::nullopt;
+    const int candidateDefinitionId = analysis.definingOperationId(candidate);
+    const GenericOperation *candidateDefinition =
+        candidateDefinitionId < 0
+            ? nullptr
+            : &module.operations.at(static_cast<size_t>(candidateDefinitionId));
+    std::optional<int64_t> result;
+    if (candidateDefinition && candidateDefinition->name == "affine.apply" &&
+        candidateDefinition->operands.size() == 1) {
+      std::string map =
+          FindDictionaryValue(candidateDefinition->properties, "map");
+      if (map.empty())
+        map = FindDictionaryValue(candidateDefinition->attributes, "map");
+      std::string compact;
+      for (char character : map)
+        if (!std::isspace(static_cast<unsigned char>(character)))
+          compact.push_back(character);
+      size_t arrow = compact.find("->(s0");
+      size_t prefixLength = 5;
+      if (arrow == std::string::npos) {
+        arrow = compact.find("->(d0");
+        prefixLength = 5;
+      }
+      if (arrow != std::string::npos) {
+        const size_t begin = arrow + prefixLength;
+        const size_t end = compact.find(')', begin);
+        if (end != std::string::npos) {
+          const std::string suffix = compact.substr(begin, end - begin);
+          try {
+            size_t consumed = 0;
+            int64_t offset = 0;
+            if (suffix.empty() || suffix.front() == '+' ||
+                suffix.front() == '-') {
+              if (!suffix.empty())
+                offset = std::stoll(suffix, &consumed, 10);
+              if (suffix.empty() || consumed == suffix.size())
+                if (const std::optional<int64_t> parent =
+                        relativeConstant(candidateDefinition->operands.front()))
+                  result = CheckedAddInt64(*parent, offset);
+            }
+          } catch (const std::exception &) {
+          }
+        }
+      }
+    }
+    visiting.erase(candidate);
+    return result;
+  };
+
+  for (const std::string &candidate : candidateExpressions) {
     const std::optional<AffineLinearForm> bound =
         FlattenAffineLinearExpression(candidate);
     if (!bound || bound->coefficients.size() != 1)
       continue;
     const auto &[term, coefficient] = *bound->coefficients.begin();
-    if (coefficient != 1 || AffineValue(term) != baseValue ||
-        bound->constant < 0)
+    if (coefficient != 1)
       continue;
-    return CheckedAddInt64(bound->constant, extent->constant);
+    const std::optional<int> candidateValue = AffineValue(term);
+    if (!candidateValue)
+      continue;
+    const std::optional<int64_t> relative = relativeConstant(*candidateValue);
+    if (!relative)
+      continue;
+    const std::optional<int64_t> candidateBound =
+        CheckedAddInt64(*relative, bound->constant);
+    if (!candidateBound || *candidateBound < 0)
+      continue;
+    const std::optional<int64_t> result =
+        CheckedAddInt64(*candidateBound, extentConstant);
+    if (result && *result >= 0)
+      return result;
+  }
+  for (int candidate : candidateValues) {
+    const std::optional<int64_t> relative = relativeConstant(candidate);
+    if (!relative || *relative < 0)
+      continue;
+    const std::optional<int64_t> result =
+        CheckedAddInt64(*relative, extentConstant);
+    if (result && *result >= 0)
+      return result;
   }
   return std::nullopt;
 }
@@ -157,7 +386,10 @@ inline std::vector<std::optional<int64_t>> AllocationUpperBounds(
           allocation.dynamicExtentValues[dynamicIndex++], module, analysis);
       if (!bound)
         throw std::runtime_error(
-            "AllocExtraBuffer: dynamic result allocation upper bound is unknown");
+            "AllocExtraBuffer: dynamic result allocation upper bound is unknown "
+            "for " + allocation.source + " extent value " +
+            std::to_string(
+                allocation.dynamicExtentValues[dynamicIndex - 1]));
     }
     return bounds;
   }
@@ -275,14 +507,35 @@ inline std::string GeneratedBufferType(
                                                : valueType->second;
 }
 
+inline std::string FormatMemRefType(const MemRefTypeModel &type);
+
 inline std::optional<ExtraBufferAllocation> ModelExtraBufferForOperation(
     GenericOperation operation,
     std::vector<std::string> physicalTypes,
-    PipelineMetadataCache &metadata) {
+    PipelineMetadataCache &metadata, bool enableSavingUb = false) {
   // AllocExtraBufferPass walks only operations implementing
   // ExtraBufferOpInterface. Operations such as hivm.hir.copy are not visited.
   if (!HasAllocExtraBufferInterface(operation.name))
     return std::nullopt;
+  // FlattenInterface operations are rank-compatible at the compiler boundary.
+  // Keep synthetic operations built for the standalone interface query under
+  // the same invariant, including views introduced by LiftLowestStrideTo1.
+  size_t interfaceRank = 0;
+  for (const std::string &typeText : operation.operandTypes)
+    if (const std::optional<MemRefTypeModel> type =
+            metadata.memRefType(typeText))
+      interfaceRank = std::max(interfaceRank, type->shape.size());
+  for (std::string &typeText : operation.operandTypes) {
+    std::optional<MemRefTypeModel> type = metadata.memRefType(typeText);
+    if (!type)
+      continue;
+    while (type->shape.size() < interfaceRank) {
+      type->shape.push_back(1);
+      type->strides.push_back(1);
+      type->hasStridedLayout = true;
+    }
+    typeText = FormatMemRefType(*type);
+  }
   if (operation.name == "hivm.hir.vinterleave") {
     for (size_t index = 0; index < operation.operandTypes.size(); ++index) {
       const std::optional<MemRefTypeModel> type =
@@ -302,7 +555,10 @@ inline std::optional<ExtraBufferAllocation> ModelExtraBufferForOperation(
   function.name = "func.func";
   function.properties = "{sym_name = \"kernel\"}";
   function.attributes =
-      "{hacc.function_kind = #hacc.function_kind<DEVICE>}";
+      enableSavingUb
+          ? "{hacc.function_kind = #hacc.function_kind<DEVICE>, "
+            "hivm.enable_saving_ub}"
+          : "{hacc.function_kind = #hacc.function_kind<DEVICE>}";
   fake.operations.push_back(function);
 
   int nextValue = 1000;
@@ -350,6 +606,32 @@ inline std::string AllocationTypeForTrace(
     throw std::runtime_error("AllocExtraBuffer: invalid traced allocation size");
   return "memref<" + std::to_string(record.constBits / bitWidth) + "x" +
          type->elementType + ">";
+}
+
+inline std::string GeneratedBufferAllocationTypeForTrace(
+    const PostBufferizationRewriteState &postBufferization,
+    const std::string &buffer, const LocalBufferIndex &bufferIndex,
+    const std::string &fallback, PipelineMetadataCache &metadata) {
+  if (startsWith(buffer, "choice(") && buffer.back() == ')') {
+    for (const std::string &alternative :
+         splitTopLevel(buffer.substr(7, buffer.size() - 8))) {
+      const std::string type = GeneratedBufferAllocationTypeForTrace(
+          postBufferization, alternative, bufferIndex, "", metadata);
+      if (!type.empty())
+        return type;
+    }
+    return fallback;
+  }
+  std::string identity = buffer;
+  if (startsWith(identity, "local:")) {
+    auto mapped = postBufferization.singlePoint.bufferMapping.find(identity);
+    identity = mapped != postBufferization.singlePoint.bufferMapping.end()
+                   ? "base:" + mapped->second.substr(6)
+                   : "base:" + identity.substr(6);
+  }
+  if (const LocalBufferRecord *record = bufferIndex.findSource(identity))
+    return AllocationTypeForTrace(*record, metadata);
+  return fallback;
 }
 
 inline std::string FormatMemRefType(const MemRefTypeModel &type) {
@@ -400,7 +682,7 @@ inline std::string SetDictionaryValue(const std::string &dictionary,
 inline MemRefTypeModel AlignedOperandType(
     const LocalBufferRecord &record, MemRefTypeModel type,
     const AlignStorageResult &alignStorage,
-    PipelineMetadataCache &metadata) {
+    PipelineMetadataCache &metadata, bool liftLowestStride = true) {
   auto found = alignStorage.strideAlignments.find(record.sourceIdentity);
   if (found == alignStorage.strideAlignments.end())
     return type;
@@ -457,7 +739,7 @@ inline MemRefTypeModel AlignedOperandType(
     if (stride)
       type.strides[reverse - 2] = static_cast<int64_t>(*stride);
   }
-  if (!type.strides.empty() && type.strides.back() != 1) {
+  if (liftLowestStride && !type.strides.empty() && type.strides.back() != 1) {
     type.shape.push_back(1);
     type.strides.push_back(1);
   }
@@ -522,6 +804,153 @@ inline void FlattenLimitedOperationForAllocExtraBuffer(
 
 inline void FlattenForAllocExtraBuffer(GenericOperation &operation,
                                        PipelineMetadataCache &metadata) {
+  if (IsElementwiseNaryOp(operation.name)) {
+    std::vector<MemRefTypeModel> types;
+    std::vector<size_t> indices;
+    for (size_t index = 0; index < operation.operandTypes.size(); ++index) {
+      if (std::optional<MemRefTypeModel> type =
+              metadata.memRefType(operation.operandTypes[index])) {
+        indices.push_back(index);
+        types.push_back(*type);
+      }
+    }
+    if (types.empty())
+      return;
+    const std::vector<int64_t> broadcast =
+        GetInlineBroadcastAxes(operation);
+    const size_t rank = types.front().shape.size();
+    for (const MemRefTypeModel &type : types)
+      if (type.shape.size() != rank)
+        throw std::runtime_error(
+            "AllocExtraBuffer: elementwise flatten operand rank mismatch");
+    std::set<size_t> barriers;
+    for (int64_t dimension : broadcast) {
+      if (dimension < 0 || static_cast<size_t>(dimension) >= rank)
+        throw std::runtime_error(
+            "AllocExtraBuffer: invalid elementwise broadcast dimension");
+      barriers.insert(static_cast<size_t>(dimension));
+    }
+
+    // getFlattenedUnit: a dimension is removable only when every shaped DPS
+    // operand is unit, and target (broadcast) dimensions are preserved.
+    std::vector<bool> unit(rank, true);
+    for (const MemRefTypeModel &type : types)
+      for (size_t axis = 0; axis < rank; ++axis)
+        unit[axis] = unit[axis] && type.shape[axis] &&
+                     *type.shape[axis] == 1 && barriers.count(axis) == 0;
+    std::vector<std::vector<size_t>> unitReassociation(1);
+    size_t axis = 0;
+    while (axis < rank && unit[axis])
+      unitReassociation.back().push_back(axis++);
+    bool firstNonUnit = true;
+    while (axis < rank) {
+      if (!firstNonUnit)
+        unitReassociation.push_back({});
+      firstNonUnit = false;
+      unitReassociation.back().push_back(axis++);
+      while (axis < rank && unit[axis])
+        unitReassociation.back().push_back(axis++);
+    }
+    if (!unitReassociation.empty() && unitReassociation.front().empty())
+      unitReassociation.erase(unitReassociation.begin());
+    std::vector<MemRefTypeModel> unitTypes;
+    for (const MemRefTypeModel &type : types)
+      unitTypes.push_back(CollapseMemRefType(type, unitReassociation));
+
+    std::set<size_t> adjustedBarriers;
+    for (size_t group = 0; group < unitReassociation.size(); ++group)
+      for (size_t originalAxis : unitReassociation[group])
+        if (barriers.count(originalAxis) != 0) {
+          adjustedBarriers.insert(group);
+          break;
+        }
+
+    // collapseUniformReassociation with checkInputConsistency=true. The
+    // consistency mask is computed from DPS inputs only; collapsing the init
+    // together with disagreeing broadcast inputs is precisely what changes
+    // topk's real ExtraBuffer decision.
+    const std::set<size_t> initIndices = [&]() {
+      const std::vector<size_t> values = DpsInitOperandIndices(
+          operation.name, operation.operandTypes.size(), operation.properties);
+      return std::set<size_t>(values.begin(), values.end());
+    }();
+    std::vector<bool> inputConsistency(unitTypes.front().shape.size(), true);
+    const MemRefTypeModel *pivot = nullptr;
+    for (size_t typeIndex = 0; typeIndex < unitTypes.size(); ++typeIndex) {
+      if (initIndices.count(indices[typeIndex]) != 0)
+        continue;
+      if (!pivot) {
+        pivot = &unitTypes[typeIndex];
+        continue;
+      }
+      if (pivot->shape.size() != unitTypes[typeIndex].shape.size())
+        continue;
+      for (size_t current = 0; current < inputConsistency.size(); ++current)
+        if (pivot->shape[current] != unitTypes[typeIndex].shape[current])
+          inputConsistency[current] = false;
+    }
+    const std::vector<bool> contiguous = GetContiguousAxes(unitTypes);
+    std::vector<std::vector<size_t>> uniform;
+    for (size_t current = 0; current < unitTypes.front().shape.size();
+         ++current) {
+      bool newGroup = current == 0;
+      if (current > 0 &&
+          (adjustedBarriers.count(current - 1) !=
+           adjustedBarriers.count(current)))
+        newGroup = true;
+      if (!contiguous[current])
+        newGroup = true;
+      bool mergeWithBefore = inputConsistency[current];
+      if (current > 0 && !inputConsistency[current - 1])
+        mergeWithBefore = false;
+      if (!mergeWithBefore)
+        newGroup = true;
+      if (newGroup)
+        uniform.push_back({});
+      uniform.back().push_back(current);
+    }
+    std::vector<std::vector<size_t>> reassociation;
+    for (const std::vector<size_t> &group : uniform) {
+      reassociation.push_back({});
+      for (size_t intermediateAxis : group)
+        reassociation.back().insert(
+            reassociation.back().end(),
+            unitReassociation.at(intermediateAxis).begin(),
+            unitReassociation.at(intermediateAxis).end());
+    }
+    for (size_t index = 0; index < types.size(); ++index)
+      operation.operandTypes[indices[index]] =
+          FormatMemRefType(CollapseMemRefType(types[index], reassociation));
+    std::vector<int64_t> adjusted;
+    for (int64_t dimension : broadcast) {
+      if (dimension < 0)
+        throw std::runtime_error(
+            "AllocExtraBuffer: negative elementwise broadcast dimension");
+      const std::optional<size_t> mapped = ReassociatedDimension(
+          reassociation, static_cast<size_t>(dimension));
+      if (!mapped)
+        throw std::runtime_error(
+            "AllocExtraBuffer: unmapped elementwise broadcast dimension");
+      if (adjusted.empty() ||
+          adjusted.back() != static_cast<int64_t>(*mapped))
+        adjusted.push_back(static_cast<int64_t>(*mapped));
+    }
+    std::string value = "array<i64";
+    if (!adjusted.empty()) {
+      value += ": ";
+      for (size_t index = 0; index < adjusted.size(); ++index) {
+        if (index != 0)
+          value += ", ";
+        value += std::to_string(adjusted[index]);
+      }
+    }
+    value += ">";
+    operation.properties =
+        SetDictionaryValue(operation.properties, "broadcast", value);
+    operation.attributes =
+        SetDictionaryValue(operation.attributes, "broadcast", value);
+    return;
+  }
   if (operation.name == "hivm.hir.vreduce") {
     FlattenLimitedOperationForAllocExtraBuffer(operation, "reduce_dims",
                                                GetLimitedAxes(operation),
@@ -538,6 +967,65 @@ inline void FlattenForAllocExtraBuffer(GenericOperation &operation,
                                                DecomposeI64Array(value),
                                                metadata);
   }
+}
+
+inline bool LiftLowestStrideForAllocExtraBuffer(
+    GenericOperation &operation, PipelineMetadataCache &metadata) {
+  const bool supported = IsElementwiseNaryOp(operation.name) ||
+                         operation.name == "hivm.hir.vbrc" ||
+                         operation.name == "hivm.hir.vreduce" ||
+                         operation.name == "hivm.hir.vtranspose" ||
+                         operation.name == "hivm.hir.vmulextended" ||
+                         operation.name == "hivm.hir.vcumsum" ||
+                         operation.name == "hivm.hir.vcumprod";
+  if (!supported)
+    return false;
+  bool shouldLift = false;
+  for (const std::string &typeText : operation.operandTypes) {
+    const std::optional<MemRefTypeModel> type =
+        metadata.memRefType(typeText);
+    if (type && !type->shape.empty() && !IsLastDimContiguous(*type)) {
+      shouldLift = true;
+      break;
+    }
+  }
+  if (!shouldLift)
+    return false;
+  for (std::string &typeText : operation.operandTypes) {
+    std::optional<MemRefTypeModel> type = metadata.memRefType(typeText);
+    if (!type)
+      continue;
+    type->shape.push_back(1);
+    type->strides.push_back(1);
+    type->hasStridedLayout = true;
+    typeText = FormatMemRefType(*type);
+  }
+  const auto appendDimension = [&](const std::string &name) {
+    std::string value = FindDictionaryValue(operation.properties, name);
+    if (value.empty())
+      value = FindDictionaryValue(operation.attributes, name);
+    std::vector<int64_t> dimensions = DecomposeI64Array(value);
+    if (dimensions.empty())
+      return;
+    // LiftLowestStride extends transpose/permutation dimensions, but leaves
+    // broadcast and reduction dimensions unchanged because the new innermost
+    // axis is a plain parallel loop.
+    if (name == "transpose")
+      dimensions.push_back(static_cast<int64_t>(dimensions.size()));
+    std::string array = "array<i64: ";
+    for (size_t index = 0; index < dimensions.size(); ++index) {
+      if (index != 0)
+        array += ", ";
+      array += std::to_string(dimensions[index]);
+    }
+    array += ">";
+    operation.properties =
+        SetDictionaryValue(operation.properties, name, array);
+    operation.attributes =
+        SetDictionaryValue(operation.attributes, name, array);
+  };
+  appendDimension("transpose");
+  return true;
 }
 
 inline std::vector<std::pair<int, ExtraBufferAllocation>>
@@ -567,6 +1055,18 @@ ModelConnectedAllocExtraBuffer(const PostBufferizationRewriteState &postBufferiz
       continue;
     if (postBufferization.singlePoint.scalarizedOperations.count(source.id) != 0)
       continue;
+    const int functionId = analysis.enclosingFunctionId(source.id);
+    const GenericOperation *enclosingFunction =
+        functionId < 0
+            ? nullptr
+            : &module.operations.at(static_cast<size_t>(functionId));
+    const bool enableSavingUb =
+        enclosingFunction &&
+        (HasUnitAttribute(enclosingFunction->attributes,
+                          "hivm.enable_saving_ub") ||
+         !FindDictionaryValue(enclosingFunction->attributes,
+                              "hivm.enable_saving_ub")
+              .empty());
     std::map<size_t, std::string> operandBuffers;
     ForEachBufferizedOperationBuffer(
         postBufferization.bufferized, source.id,
@@ -578,12 +1078,15 @@ ModelConnectedAllocExtraBuffer(const PostBufferizationRewriteState &postBufferiz
     auto buildOriginal = [&]() {
       GenericOperation operation = source;
       std::vector<std::string> physical(operation.operandTypes.size());
+      std::vector<const LocalBufferRecord *> mappedRecords(
+          operation.operandTypes.size(), nullptr);
       for (size_t index = 0; index < operation.operandTypes.size(); ++index) {
         auto buffer = operandBuffers.find(index);
         const std::string identity =
             buffer == operandBuffers.end() ? std::string() : buffer->second;
         const LocalBufferRecord *mappedBuffer =
             bufferIndex.findSource(identity);
+        mappedRecords[index] = mappedBuffer;
         operation.operandTypes[index] =
             mappedBuffer
                 ? mappedBuffer->type
@@ -606,23 +1109,15 @@ ModelConnectedAllocExtraBuffer(const PostBufferizationRewriteState &postBufferiz
         physical[index] = operation.operandTypes[index];
         if (const LocalBufferRecord *record =
                 bufferIndex.findSource(identity)) {
-          if (operation.name == "hivm.hir.vreduce" ||
-              operation.name == "hivm.hir.vbrc") {
-            // FlattenInterface operates on the operand view type, not on the
-            // shape of the backing allocation.  Preserve expanded/collapsed
-            // view shapes here, then project any root stride alignment onto
-            // that view.  Using the allocation type loses singleton-axis
-            // placement (for example 1x1x2 versus 2x1x1) and can suppress a
-            // required VBrc scratch buffer.
-            operation.operandTypes[index] =
-                IsTensorType(source.operandTypes[index])
-                    ? ConvertTensorToMemRefType(source.operandTypes[index])
-                    : source.operandTypes[index];
-            if (std::optional<MemRefTypeModel> type =
-                    metadata.memRefType(operation.operandTypes[index]))
-              operation.operandTypes[index] = FormatMemRefType(
-                  AlignedOperandType(*record, *type, alignStorage, metadata));
-          }
+          // ExtraBufferOpInterface queries the memref view passed to the
+          // operation, while traceToAllocMaxSize follows that view back to
+          // its backing allocation.  Keep those two types distinct.  Using
+          // the allocation type as the operand type erases reshape views
+          // such as 16x1 and changes the real inline-broadcast decision.
+          operation.operandTypes[index] =
+              IsTensorType(source.operandTypes[index])
+                  ? ConvertTensorToMemRefType(source.operandTypes[index])
+                  : source.operandTypes[index];
           physical[index] = record->type;
           if (operation.name == "hivm.hir.vreduce" ||
               operation.name == "hivm.hir.vbrc") {
@@ -643,7 +1138,34 @@ ModelConnectedAllocExtraBuffer(const PostBufferizationRewriteState &postBufferiz
           }
         }
       }
+
+      // FlattenInterface first makes broadcast operands rank-compatible, then
+      // EnableStrideAlign and LiftLowestStrideTo1 rewrite the resulting views.
+      // Apply the same ordering before querying ExtraBufferOpInterface.  Rank
+      // extension uses trailing unit axes, matching the compiler's
+      // broadcastable view (e.g. 1x2 -> 1x2x1).
+      size_t commonRank = 0;
+      for (const std::string &typeText : operation.operandTypes)
+        if (const std::optional<MemRefTypeModel> type =
+                metadata.memRefType(typeText))
+          commonRank = std::max(commonRank, type->shape.size());
+      for (size_t index = 0; index < operation.operandTypes.size(); ++index) {
+        const LocalBufferRecord *record = mappedRecords[index];
+        std::optional<MemRefTypeModel> type =
+            metadata.memRefType(operation.operandTypes[index]);
+        if (!record || !type)
+          continue;
+        while (type->shape.size() < commonRank) {
+          type->shape.push_back(1);
+          type->strides.push_back(1);
+          type->hasStridedLayout = true;
+        }
+        operation.operandTypes[index] = FormatMemRefType(
+            AlignedOperandType(*record, *type, alignStorage, metadata,
+                               /*liftLowestStride=*/false));
+      }
       FlattenForAllocExtraBuffer(operation, metadata);
+      LiftLowestStrideForAllocExtraBuffer(operation, metadata);
       operation.operands.resize(operation.operandTypes.size());
       return std::pair<GenericOperation, std::vector<std::string>>{
           std::move(operation), std::move(physical)};
@@ -652,9 +1174,26 @@ ModelConnectedAllocExtraBuffer(const PostBufferizationRewriteState &postBufferiz
     auto rewrite = rewrites.find(source.id);
     if (rewrite == rewrites.end()) {
       auto [operation, physical] = buildOriginal();
-      if (std::optional<ExtraBufferAllocation> extra =
-              ModelExtraBufferForOperation(std::move(operation), physical,
-                                           metadata))
+      const bool debugExtra = std::getenv("CVUB_DEBUG_EXTRA") != nullptr;
+      if (debugExtra && (operation.name == "hivm.hir.vor" ||
+                         operation.name == "hivm.hir.vand")) {
+        std::cerr << "EXTRA_QUERY op=" << source.id
+                  << " name=" << operation.name
+                  << " props=" << operation.properties;
+        for (size_t index = 0; index < operation.operandTypes.size(); ++index)
+          std::cerr << " logical" << index << '='
+                    << operation.operandTypes[index] << " physical" << index
+                    << '=' << physical[index];
+        std::cerr << '\n';
+      }
+      std::optional<ExtraBufferAllocation> extra =
+          ModelExtraBufferForOperation(std::move(operation), physical,
+                                       metadata, enableSavingUb);
+      if (debugExtra && (source.name == "hivm.hir.vor" ||
+                         source.name == "hivm.hir.vand"))
+        std::cerr << "EXTRA_RESULT op=" << source.id << " type="
+                  << (extra ? extra->type : "none") << '\n';
+      if (extra)
         result.push_back({source.id, std::move(*extra)});
       continue;
     }
@@ -672,12 +1211,30 @@ ModelConnectedAllocExtraBuffer(const PostBufferizationRewriteState &postBufferiz
           throw std::runtime_error("AllocExtraBuffer: generated operation buffer is missing: " +
                                    buffer);
         operation.operandTypes.push_back(type);
-        physical.push_back(type);
+        // Keep the logical memref view passed to the generated operation, but
+        // model utils::traceToAllocMaxSize through its backing allocation.
+        // Decomposition commonly creates memref<?xT> views backed by a
+        // statically bounded UB allocation; cv2pm traces through that view
+        // before querying ExtraBufferOpInterface.
+        physical.push_back(GeneratedBufferAllocationTypeForTrace(
+            postBufferization, buffer, bufferIndex, type, metadata));
+      }
+      // DecomposeVSubScalarOp replaces `vsub(vector, scalar, dst)` with
+      // `vadd(vector, 0 - scalar, dst)`. Bufferized accesses intentionally
+      // omit the scalar SSA value, so restore its type between the two
+      // physical buffer operands before querying VAdd's real extra-buffer
+      // interface.
+      if (generated.decomposedScalarVSub &&
+          source.operandTypes.size() >= 3 &&
+          operation.operandTypes.size() == 2) {
+        operation.operandTypes.insert(operation.operandTypes.begin() + 1,
+                                      source.operandTypes[1]);
+        physical.insert(physical.begin() + 1, source.operandTypes[1]);
       }
       operation.operands.resize(operation.operandTypes.size());
       if (std::optional<ExtraBufferAllocation> extra =
               ModelExtraBufferForOperation(std::move(operation), physical,
-                                           metadata))
+                                           metadata, enableSavingUb))
         result.push_back({source.id, std::move(*extra)});
     }
   }
@@ -696,6 +1253,7 @@ inline AfterAllocExtraBufferState BuildAfterAllocExtraBufferState(
       postBufferization.bufferized.logicalContext.metadata;
   analysis.ensureCompatible(module);
   const std::map<std::string, AddressSpace> scopes = InferHIVMMemScope(postBufferization);
+  ValidateBufferizedCopyAddressSpaces(postBufferization, scopes);
   const bool preserveCompactedBaseOrder =
       !postBufferization.bufferized.preBufferizationCSE.erasedOperations.empty();
   struct Pending {

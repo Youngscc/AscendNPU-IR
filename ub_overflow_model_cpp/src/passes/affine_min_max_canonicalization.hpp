@@ -38,7 +38,7 @@ ExistingAffineMinMaxExpressions(const GenericOperation &operation) {
     map = FindDictionaryValue(operation.attributes, "map");
   const std::string prefix = operation.name + "(";
   if (!startsWith(map, prefix) || map.back() != ')')
-    return std::nullopt;
+    return ExistingAffineMapExpressions(operation);
   const std::string body =
       map.substr(prefix.size(), map.size() - prefix.size() - 1);
   std::vector<std::string> expressions;
@@ -60,6 +60,61 @@ ExistingAffineMinMaxExpressions(const GenericOperation &operation) {
 // The greedy canonicalizer visits affine.apply producers before their later
 // min/max consumers. Record identity/constant folds first so a consumer sees
 // the same producer value that MergeAffineMinMaxOp sees in MLIR.
+inline void FoldExistingAffineConstantOperands(GenericModule &module) {
+  std::map<int, const GenericOperation *> definitions;
+  for (const GenericOperation &operation : module.operations)
+    for (int result : operation.results)
+      definitions[result] = &operation;
+
+  for (GenericOperation &operation : module.operations) {
+    std::optional<std::vector<std::string>> expressions;
+    if (const std::optional<std::string> apply =
+            ExistingAffineApplyExpression(operation))
+      expressions = std::vector<std::string>{*apply};
+    else
+      expressions = ExistingAffineMinMaxExpressions(operation);
+    if (!expressions)
+      continue;
+
+    bool changed = false;
+    for (int operand : operation.operands) {
+      const auto definition = definitions.find(operand);
+      if (definition == definitions.end() ||
+          !IsIndexConstant(*definition->second))
+        continue;
+      const std::string constant =
+          IndexConstantExpression(*definition->second);
+      for (std::string &expression : *expressions)
+        expression = ReplaceAffineExpressionValue(expression, operand,
+                                                   constant);
+      changed = true;
+    }
+    if (!changed)
+      continue;
+    std::vector<int> operands;
+    std::vector<std::string> operandTypes;
+    for (size_t index = 0; index < operation.operands.size(); ++index) {
+      const int operand = operation.operands[index];
+      const auto definition = definitions.find(operand);
+      if (definition != definitions.end() &&
+          IsIndexConstant(*definition->second))
+        continue;
+      operands.push_back(operand);
+      if (index < operation.operandTypes.size())
+        operandTypes.push_back(operation.operandTypes[index]);
+    }
+    operation.operands = std::move(operands);
+    operation.operandTypes = std::move(operandTypes);
+    std::vector<std::string> canonical = std::move(*expressions);
+    if (operation.name == "affine.min" || operation.name == "affine.max")
+      std::sort(canonical.begin(), canonical.end());
+    operation.properties =
+        "{map = " + operation.name + "(" +
+        JoinDelimited(canonical, ",") + ")}";
+    operation.attributes = operation.properties;
+  }
+}
+
 inline void RunAffineApplyCanonicalization(
     const GenericModule &module, ConvertArithToAffineState &state) {
   std::map<int, int> valueAliases;
@@ -119,6 +174,104 @@ inline void RunAffineApplyCanonicalization(
     const int resolved = resolveAlias(*value);
     state.foldedValues[operation.id] = resolved;
     valueAliases[operation.results.front()] = resolved;
+  }
+}
+
+// SimplifyAffineOp is registered on every affine.apply, not only on the
+// affine.apply producers consumed by affine.min/max. Compose an apply operand
+// into its consumer's map, canonicalize the resulting operand list, and erase
+// a producer once no materialized operation references its result. This is the
+// generic form of the same MLIR canonicalization used below for min/max.
+inline void RunAffineApplyComposition(
+    const GenericModule &module, ConvertArithToAffineState &state) {
+  std::map<int, const GenericOperation *> definitions;
+  for (const GenericOperation &operation : module.operations)
+    for (int result : operation.results)
+      definitions[result] = &operation;
+
+  auto convertedApply = [&](const GenericOperation &operation) {
+    const auto replacement = state.replacementNames.find(operation.id);
+    return replacement != state.replacementNames.end() &&
+           replacement->second == "affine.apply" &&
+           state.foldedValues.count(operation.id) == 0 &&
+           state.foldedConstants.count(operation.id) == 0;
+  };
+
+  for (const GenericOperation &operation : module.operations) {
+    if (!convertedApply(operation))
+      continue;
+    std::vector<int> &operands = state.replacementOperands.at(operation.id);
+    std::vector<std::string> &expressions =
+        state.replacementMapExpressions.at(operation.id);
+    if (expressions.size() != 1)
+      continue;
+    while (true) {
+      bool changed = false;
+      for (size_t operandIndex = 0; operandIndex < operands.size();
+           ++operandIndex) {
+        const int operand = operands[operandIndex];
+        const auto definition = definitions.find(operand);
+        if (definition == definitions.end())
+          continue;
+        const GenericOperation &producer = *definition->second;
+        const bool producerConverted = convertedApply(producer);
+        const std::optional<std::string> producerExisting =
+            ExistingAffineApplyExpression(producer);
+        if (!producerConverted && !producerExisting)
+          continue;
+        const std::string producerExpression =
+            producerConverted
+                ? state.replacementMapExpressions.at(producer.id).front()
+                : *producerExisting;
+        const std::vector<int> &producerOperands =
+            producerConverted ? state.replacementOperands.at(producer.id)
+                              : producer.operands;
+        operands.erase(operands.begin() +
+                       static_cast<std::ptrdiff_t>(operandIndex));
+        for (int producerOperand : producerOperands)
+          operands.push_back(producerOperand);
+        expressions.front() = ReplaceAffineExpressionValue(
+            expressions.front(), operand, producerExpression);
+        changed = true;
+        break;
+      }
+      if (!changed)
+        break;
+    }
+
+    std::vector<int> canonicalOperands;
+    for (int operand : operands)
+      if (AffineExpressionUsesValue(expressions.front(), operand))
+        AppendUniqueAffineOperand(operand, canonicalOperands);
+    operands = std::move(canonicalOperands);
+  }
+
+  std::set<int> referencedValues;
+  // Identity-folded applies redirect all of their users to this value during
+  // materialization, so the aliased producer is still live even though the
+  // identity operation itself is omitted from the operand scan below.
+  for (const auto &[operation, value] : state.foldedValues) {
+    (void)operation;
+    referencedValues.insert(value);
+  }
+  for (const GenericOperation &operation : module.operations) {
+    if (state.erasedOperations.count(operation.id) != 0 ||
+        state.foldedValues.count(operation.id) != 0)
+      continue;
+    const auto replacement = state.replacementNames.find(operation.id);
+    const std::vector<int> &operands =
+        replacement != state.replacementNames.end()
+            ? state.replacementOperands.at(operation.id)
+            : operation.operands;
+    referencedValues.insert(operands.begin(), operands.end());
+  }
+  for (const GenericOperation &operation : module.operations) {
+    if (!convertedApply(operation) || operation.results.size() != 1)
+      continue;
+    if (referencedValues.count(operation.results.front()) == 0) {
+      state.composedApplyOperations.insert(operation.id);
+      state.erasedOperations.insert(operation.id);
+    }
   }
 }
 
@@ -478,6 +631,8 @@ inline GenericModule RunArithToAffineConversionPass(GenericModule module) {
 inline GenericModule
 RunArithToAffineConversionWithAffineCanonicalization(GenericModule module) {
   ConvertArithToAffineState state = RunConvertArithToAffine(module, false);
+  RunAffineApplyCanonicalization(module, state);
+  RunAffineApplyComposition(module, state);
   RunAffineApplyCanonicalization(module, state);
   RunAffineMinMaxCanonicalization(module, state);
   RunAffineApplyCompositionForMinMax(module, state);

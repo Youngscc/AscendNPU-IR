@@ -3,6 +3,7 @@
 
 #include "cvpipelining_analysis.hpp"
 
+
 namespace cvub {
 
 inline std::string CVPipelineExpandShapedType(const std::string &type,
@@ -417,14 +418,51 @@ public:
 
     std::map<int, int> outerResultValues;
     std::map<int, int> expandedProducedValues;
+    std::map<int, int> expandedWorkspaceTensors;
     for (size_t itemIndex = 0; itemIndex < analysis.worklist.size();
          ++itemIndex) {
+      const CVPipelineWorkItem &item = analysis.worklist[itemIndex];
+      // CVPipelining.cpp::processWorkspaceOutputs sets the insertion point to
+      // this work item's forOp before materializing each expanded workspace
+      // tensor.  Although the production pass performs that rewrite after all
+      // jam loops have been created, the resulting block order is one
+      // to_tensor immediately before its owning loop, not all workspace
+      // tensors followed by all loops.
+      for (int output : item.workspaceOutputs) {
+        const int allocation = workspaceAllocation(output);
+        const auto expanded = workspaceAllocations.find(allocation);
+        const auto expandedType = workspaceTypes.find(allocation);
+        if (expanded == workspaceAllocations.end() ||
+            expandedType == workspaceTypes.end())
+          throw std::runtime_error(
+              "CVPipelining: missing expanded workspace output");
+        const std::string tensorType =
+            "tensor<" + expandedType->second.substr(7);
+        const int toTensor = createInBlock(
+            newLoop, outerRegion, outerBlock, "bufferization.to_tensor",
+            {tensorType}, {expanded->second}, {expandedType->second},
+            "{restrict}");
+        const int expandedTensor = result(toTensor);
+        expandedWorkspaceTensors[allocation] = expandedTensor;
+
+        const GenericOperation &oldAllocation =
+            module.operations.at(static_cast<size_t>(allocation));
+        if (oldAllocation.results.size() != 1)
+          throw std::runtime_error(
+              "CVPipelining: malformed workspace allocation");
+        for (const GenericOperation &operation : module.operations)
+          if (operation.name == "bufferization.to_tensor" &&
+              operation.operands == oldAllocation.results)
+            for (int oldTensor : operation.results)
+              expandedProducedValues[oldTensor] = expandedTensor;
+      }
       try {
         if (!rewriteWorkItem(
-                analysis.worklist[itemIndex], oldLoop, oldBody, newLoop,
+                item, oldLoop, oldBody, newLoop,
                 outerRegion, outerBlock, result(indexZero), result(actualUpper),
                 result(indexOne), originalStep, outerIV, globalValues,
                 expandedLocalOutputs, workspaceAllocations, workspaceTypes,
+                expandedWorkspaceTensors,
                 expandedProducedValues, outerResultValues))
           return false;
       } catch (const std::out_of_range &) {
@@ -474,10 +512,20 @@ public:
          ++index)
       replacements[oldLoop.results[index]] = createdLoop.results[index];
     for (GenericOperation &operation : module.operations)
-      if (!CVPipelineIsDescendant(module, operation.id, analysis.loop))
+      if (!CVPipelineIsDescendant(module, operation.id, analysis.loop)) {
         for (int &operand : operation.operands)
           if (replacements.count(operand))
             operand = replacements.at(operand);
+        // MLIR's replaceAllUsesWith updates OpOperands, and the DPS interface
+        // observes those same operands. Keep the lightweight cached DPS views
+        // synchronized with that real replacement.
+        for (int &operand : operation.dpsInputs)
+          if (replacements.count(operand))
+            operand = replacements.at(operand);
+        for (int &operand : operation.dpsInits)
+          if (replacements.count(operand))
+            operand = replacements.at(operand);
+      }
 
     GenericBlock &parent = module.blocks.at(static_cast<size_t>(parentBlock));
     parent.operations.erase(parent.operations.begin() +
@@ -756,6 +804,7 @@ private:
       const std::map<int, int> &expandedLocalOutputs,
       const std::map<int, int> &workspaceAllocations,
       const std::map<int, std::string> &workspaceTypes,
+      const std::map<int, int> &expandedWorkspaceTensors,
       std::map<int, int> &expandedProducedValues,
       std::map<int, int> &outerResultValues) {
     std::vector<int> inits;
@@ -869,7 +918,10 @@ private:
         if (!extracted.count(operand)) {
           const int slice = createTensorExtract(loop, region, block,
                                                 produced->second,
-                                                valueType(operand, "cross-item operand"), innerIV);
+                                                valueType(
+                                                    operand,
+                                                    "cross-item operand"),
+                                                innerIV);
           extracted[operand] = result(slice);
         }
         operationValues[operand] = extracted.at(operand);
@@ -938,13 +990,24 @@ private:
                                separatorOperands, separatorTypes,
                                source.attributes);
       } else {
+        std::set<int> preCloneMappings;
+        for (const auto &[sourceValue, unused] : operationValues) {
+          (void)unused;
+          preCloneMappings.insert(sourceValue);
+        }
         cloned = rewriter.cloneOperationTree(operationId, loop, region, block,
                                               operationValues);
         rewriter.appendToBlock(block, cloned);
         // OpBuilder::clone updates IRMapping for every nested result as well as
-        // the top-level results. Preserve that mapping for later top-level ops
-        // that consume values defined in a cloned region.
-        values.insert(operationValues.begin(), operationValues.end());
+        // the top-level results. Preserve only mappings that cloning created
+        // for such results. `operationValues` also contains per-operation
+        // operand overrides (most importantly a local output's DPS init
+        // slice); leaking those overrides into `values` would remap every
+        // later use of a shared tensor.empty. The real IRMapping passed to
+        // OpBuilder::clone does not acquire mappings for overridden operands.
+        for (const auto &[sourceValue, replacement] : operationValues)
+          if (preCloneMappings.count(sourceValue) == 0)
+            values[sourceValue] = replacement;
       }
       if (atomic != analysis.atomicEffectMap.end())
         createSetAtomic(loop, region, block, atomicNoneEffect(atomic->second));
@@ -978,6 +1041,7 @@ private:
     }
     yields.insert(yields.end(), localYieldValues.begin(), localYieldValues.end());
     createInBlock(loop, region, block, "scf.yield", {}, yields, initTypes);
+
     const GenericOperation &createdLoop =
         module.operations.at(static_cast<size_t>(loop));
     size_t loopResult = 0;
@@ -1002,16 +1066,14 @@ private:
       if (!workspaceAllocations.count(allocation))
         throw std::runtime_error("CVPipelining: missing final workspace " +
                                  std::to_string(allocation));
-      const int expanded = workspaceAllocations.at(allocation);
-      const std::string expandedType = workspaceTypes.at(allocation);
-      const std::string tensorType = "tensor<" + expandedType.substr(7);
-      const int toTensor = createInBlock(
-          outerLoop, outerRegion, outerBlock, "bufferization.to_tensor",
-          {tensorType}, {expanded}, {expandedType}, "{restrict}");
       const GenericOperation &source = module.operations.at(
           static_cast<size_t>(output));
       if (!source.results.empty()) {
-        const int expandedResult = result(toTensor);
+        const auto workspaceTensor = expandedWorkspaceTensors.find(allocation);
+        if (workspaceTensor == expandedWorkspaceTensors.end())
+          throw std::runtime_error(
+              "CVPipelining: missing expanded workspace tensor");
+        const int expandedResult = workspaceTensor->second;
         (void)valueType(expandedResult, "workspace tensor");
         expandedProducedValues[source.results.front()] = expandedResult;
       }

@@ -5,6 +5,9 @@
 #include "../ir/generic_analysis.hpp"
 #include "../pipeline/local_buffer_record.hpp"
 
+#include <cstdlib>
+#include <iostream>
+
 namespace cvub {
 
 struct AlignedOperand {
@@ -22,6 +25,10 @@ struct AlignStorageResult {
 inline std::optional<size_t> RootDimToOperandDim(
     const LocalBufferRecord &record, const MemRefTypeModel &operandType,
     size_t rootDimension, PipelineMetadataCache &metadata);
+
+inline std::optional<size_t> OperandDimToRootDim(
+    const LocalBufferRecord &record, const MemRefTypeModel &operandType,
+    size_t operandDimension, PipelineMetadataCache &metadata);
 
 inline bool IsLastDimContiguous(const MemRefTypeModel &type) {
   return type.shape.empty() ||
@@ -466,6 +473,14 @@ GetLimitedAxes(const GenericOperation &operation) {
   return {};
 }
 
+inline std::vector<int64_t>
+GetInlineBroadcastAxes(const GenericOperation &operation) {
+  std::string value = FindDictionaryValue(operation.properties, "broadcast");
+  if (value.empty())
+    value = FindDictionaryValue(operation.attributes, "broadcast");
+  return DecomposeI64Array(value);
+}
+
 inline void MarkSizeAlignment(
     const AlignedOperand &operand, size_t axis, uint64_t alignmentBytes,
     const LocalBufferIndex &bufferIndex,
@@ -639,11 +654,112 @@ inline void MarkBufferizationConflictCopies(
     if (!alignDim)
       continue;
     if (source->addressSpace == AddressSpace::UB &&
-        !AlreadyAligned(*sourceType, *alignDim))
-      marks[source->sourceIdentity].insert(*alignDim);
+        !AlreadyAligned(*sourceType, *alignDim)) {
+      const bool inserted = marks[source->sourceIdentity].insert(*alignDim).second;
+      if (inserted && std::getenv("CVUB_DEBUG_ALIGN"))
+        std::cerr << "ALIGN_CONFLICT op=" << operation.id
+                  << " name=" << operation.name << " operand=" << operand
+                  << " side=source buffer=" << source->sourceIdentity
+                  << " dim=" << *alignDim << '\n';
+    }
     if (destination->addressSpace == AddressSpace::UB &&
-        !AlreadyAligned(*destinationType, *alignDim))
-      marks[destination->sourceIdentity].insert(*alignDim);
+        !AlreadyAligned(*destinationType, *alignDim)) {
+      const bool inserted =
+          marks[destination->sourceIdentity].insert(*alignDim).second;
+      if (inserted && std::getenv("CVUB_DEBUG_ALIGN"))
+        std::cerr << "ALIGN_CONFLICT op=" << operation.id
+                  << " name=" << operation.name << " operand=" << operand
+                  << " side=destination buffer=" << destination->sourceIdentity
+                  << " dim=" << *alignDim << '\n';
+    }
+  }
+}
+
+// OneShotBufferize lowers tensor.insert_slice to a subview of the destination
+// buffer followed by the configured memcpy operation (hivm.hir.copy in the
+// production pipeline).  MarkStrideAlign therefore observes that generated
+// copy just like every copy that was already present in the input IR.  The
+// compact model keeps tensor.insert_slice in its logical module, so project
+// the two bufferized operand types here before running the same stride test.
+inline void MarkBufferizedInsertSliceCopies(
+    const PostBufferizationRewriteState &postBufferization,
+    const LocalBufferIndex &bufferIndex,
+    std::map<std::string, std::set<size_t>> &marks,
+    PipelineMetadataCache &metadata) {
+  const GenericModule &module =
+      postBufferization.bufferized.logicalModule;
+  for (const GenericOperation &operation : module.operations) {
+    if (operation.name != "tensor.insert_slice" ||
+        operation.operandTypes.size() < 2)
+      continue;
+    const std::string *rawSource = FindBufferizedOperationBuffer(
+        postBufferization.bufferized, operation.id, 0);
+    const std::string *rawDestination = FindBufferizedOperationBuffer(
+        postBufferization.bufferized, operation.id, 1);
+    if (!rawSource || !rawDestination)
+      continue;
+    const std::string source = MappedBufferIdentity(
+        *rawSource, postBufferization.singlePoint.bufferMapping);
+    const std::string destination = MappedBufferIdentity(
+        *rawDestination, postBufferization.singlePoint.bufferMapping);
+    // An in-place insert_slice is folded after bufferization and creates no
+    // copy for MarkStrideAlign to inspect.
+    if (source == destination)
+      continue;
+
+    const LocalBufferRecord *sourceRecord = bufferIndex.findSource(source);
+    const LocalBufferRecord *destinationRecord =
+        bufferIndex.findSource(destination);
+    if (!sourceRecord || !destinationRecord)
+      continue;
+    const std::string sourceTypeText =
+        IsTensorType(operation.operandTypes[0])
+            ? ConvertTensorToMemRefType(operation.operandTypes[0])
+            : operation.operandTypes[0];
+    std::optional<MemRefTypeModel> sourceType =
+        metadata.memRefType(sourceTypeText);
+    const std::optional<MemRefTypeModel> destinationRootType =
+        metadata.memRefType(destinationRecord->type);
+    if (!sourceType || !destinationRootType ||
+        sourceType->shape.size() > destinationRootType->strides.size())
+      continue;
+
+    // memref::SubViewOp::inferRankReducedResultType retains the source tensor
+    // shape and takes its layout from the destination allocation.  This is
+    // the same projection used later when PlanMemoryInput emits the subview.
+    MemRefTypeModel destinationViewType = *sourceType;
+    destinationViewType.addressSpace = destinationRootType->addressSpace;
+    destinationViewType.hasStridedLayout = true;
+    destinationViewType.strides.assign(
+        destinationRootType->strides.begin(),
+        destinationRootType->strides.begin() +
+            static_cast<std::ptrdiff_t>(sourceType->shape.size()));
+
+    const std::vector<MemRefTypeModel> types = {*sourceType,
+                                                destinationViewType};
+    const std::optional<size_t> alignDim =
+        GetLastUnContinuousDim(types);
+    if (!alignDim)
+      continue;
+    const std::array<std::pair<const LocalBufferRecord *, MemRefTypeModel>, 2>
+        operands = {{{sourceRecord, *sourceType},
+                     {destinationRecord, std::move(destinationViewType)}}};
+    for (const auto &[record, type] : operands) {
+      if (record->addressSpace != AddressSpace::UB ||
+          AlreadyAligned(type, *alignDim))
+        continue;
+      const std::optional<size_t> rootDimension =
+          OperandDimToRootDim(*record, type, *alignDim, metadata);
+      if (!rootDimension)
+        continue;
+      const bool inserted =
+          marks[record->sourceIdentity].insert(*rootDimension).second;
+      if (inserted && std::getenv("CVUB_DEBUG_ALIGN"))
+        std::cerr << "ALIGN_BUFFERIZED_COPY op=" << operation.id
+                  << " name=" << operation.name
+                  << " buffer=" << record->sourceIdentity
+                  << " dim=" << *rootDimension << '\n';
+    }
   }
 }
 
@@ -821,6 +937,122 @@ inline std::vector<AlignedOperand> OperationOperandTypes(
   return result;
 }
 
+// Mirrors adjustReduceAlignDim() in
+// HIVM/Transforms/AlignBuffer/AdjustAlignUtil.cpp.  EnableStrideAlign invokes
+// this adjustment both while creating the original marks and while propagating
+// a union of marks to every operand of a structured operation.  In particular,
+// a last-axis vreduce DPS init must not inherit the alignment of the dimension
+// immediately before the reduce axis.
+inline std::optional<size_t> AdjustVReduceAlignDimension(
+    const GenericOperation &operation,
+    const std::vector<AlignedOperand> &operands,
+    const AlignedOperand &operand, size_t alignDim) {
+  if (operation.name != "hivm.hir.vreduce")
+    return alignDim;
+
+  std::vector<MemRefTypeModel> types;
+  types.reserve(operands.size());
+  for (const AlignedOperand &candidate : operands)
+    types.push_back(candidate.type);
+  const std::vector<int64_t> reduceDims = GetLimitedAxes(operation);
+  if (reduceDims.empty() || reduceDims.back() < 0)
+    return alignDim;
+  const std::vector<std::vector<size_t>> reassociation =
+      ReassociationWithBarriers(types, reduceDims);
+  if (reassociation.empty())
+    return alignDim;
+
+  // isLastReduce() also requires unit stride on the last flattened axis.
+  if (std::any_of(types.begin(), types.end(), [&](const MemRefTypeModel &type) {
+        return !IsLastDimContiguous(CollapseMemRefType(type, reassociation));
+      }))
+    return alignDim;
+  const std::optional<size_t> flattenedReduceDim = ReassociatedDimension(
+      reassociation, static_cast<size_t>(reduceDims.back()));
+  if (!flattenedReduceDim || *flattenedReduceDim + 1 != reassociation.size())
+    return alignDim;
+
+  const std::optional<size_t> flattenedAlignDim =
+      ReassociatedDimension(reassociation, alignDim);
+  if (!flattenedAlignDim || *flattenedAlignDim + 2 != reassociation.size())
+    return alignDim;
+  if (!operand.isDpsInit)
+    return alignDim;
+
+  // getPrevUncontiguousDim(flattenAlignDim - 1, ...) in the compiler skips
+  // the dimension immediately before the reduce axis and searches farther
+  // outward. PreviousUncontinuousDimension has the same indexing convention
+  // when passed flattenedAlignDim - 1.
+  if (*flattenedAlignDim == 0)
+    return std::nullopt;
+  return PreviousUncontinuousDimension(types, reassociation,
+                                        *flattenedAlignDim - 1);
+}
+
+// Mirrors adjustInlineBrcOp().  Inline-broadcastable elementwise operations
+// may consume a size-one trailing dimension with a unit penultimate stride.
+// In that case the alignment attributed to the broadcast boundary is moved to
+// the preceding discontinuous dimension for that operand.
+inline std::optional<size_t> AdjustInlineBroadcastAlignDimension(
+    const GenericOperation &operation,
+    const std::vector<AlignedOperand> &operands,
+    const AlignedOperand &operand, size_t alignDim) {
+  if (operation.name == "hivm.hir.vbrc")
+    return alignDim;
+  const std::vector<int64_t> broadcastAxes =
+      GetInlineBroadcastAxes(operation);
+  const size_t rank = operand.type.shape.size();
+  if (std::getenv("CVUB_DEBUG_ALIGN") && operation.id == 58 &&
+      operand.operandNumber == 1) {
+    std::cerr << "ALIGN_INLINE_CHECK op=" << operation.id << " axes=";
+    for (int64_t axis : broadcastAxes)
+      std::cerr << axis << ',';
+    std::cerr << " rank=" << rank << " last="
+              << (rank && operand.type.shape.back()
+                      ? std::to_string(*operand.type.shape.back())
+                      : "?")
+              << " penultimate_stride="
+              << (rank > 1 && operand.type.strides.size() == rank &&
+                          operand.type.strides[rank - 2]
+                      ? std::to_string(*operand.type.strides[rank - 2])
+                      : "?")
+              << " align=" << alignDim << '\n';
+  }
+  if (rank <= 1 ||
+      std::find(broadcastAxes.begin(), broadcastAxes.end(),
+                static_cast<int64_t>(rank - 1)) == broadcastAxes.end() ||
+      !operand.type.shape.back() || *operand.type.shape.back() != 1 ||
+      operand.type.strides.size() != rank ||
+      !operand.type.strides[rank - 2] ||
+      *operand.type.strides[rank - 2] != 1)
+    return alignDim;
+
+  std::vector<MemRefTypeModel> types;
+  types.reserve(operands.size());
+  for (const AlignedOperand &candidate : operands)
+    types.push_back(candidate.type);
+  const std::vector<std::vector<size_t>> reassociation =
+      UniformReassociationPipelineWithBarriers(types, broadcastAxes);
+  const std::optional<size_t> flattenedAlignDim =
+      ReassociatedDimension(reassociation, alignDim);
+  if (!flattenedAlignDim)
+    return alignDim;
+  return PreviousUncontinuousDimension(types, reassociation,
+                                        *flattenedAlignDim);
+}
+
+inline std::optional<size_t> AdjustStrideAlignDimension(
+    const GenericOperation &operation,
+    const std::vector<AlignedOperand> &operands,
+    const AlignedOperand &operand, size_t alignDim) {
+  std::optional<size_t> adjusted =
+      AdjustVReduceAlignDimension(operation, operands, operand, alignDim);
+  if (!adjusted)
+    return std::nullopt;
+  return AdjustInlineBroadcastAlignDimension(operation, operands, operand,
+                                              *adjusted);
+}
+
 inline AlignStorageResult
 ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
                   std::vector<LocalBufferRecord> &buffers,
@@ -861,9 +1093,12 @@ ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
   }
 
   std::map<std::string, std::set<size_t>> marks;
-  if (enableStrideAlign)
+  if (enableStrideAlign) {
     MarkBufferizationConflictCopies(postBufferization, bufferIndex, marks,
                                     metadata);
+    MarkBufferizedInsertSliceCopies(postBufferization, bufferIndex, marks,
+                                    metadata);
+  }
   for (const GenericOperation &operation :
        postBufferization.bufferized.logicalModule.operations) {
       if (!enableStrideAlign)
@@ -907,7 +1142,16 @@ ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
                 OperandDimToRootDim(*record, operand.type,
                                      *operandAlignDim, metadata);
             if (rootDimension)
-              marks[record->sourceIdentity].insert(*rootDimension);
+              {
+                const bool inserted =
+                    marks[record->sourceIdentity].insert(*rootDimension).second;
+                if (inserted && std::getenv("CVUB_DEBUG_ALIGN"))
+                  std::cerr << "ALIGN_INITIAL op=" << operation.id
+                            << " name=" << operation.name
+                            << " operand=" << operand.operandNumber
+                            << " buffer=" << record->sourceIdentity
+                            << " dim=" << *rootDimension << '\n';
+              }
           }
         }
         continue;
@@ -956,33 +1200,9 @@ ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
       for (const AlignedOperand &operand : operands) {
         const LocalBufferRecord *record =
             bufferIndex.findSource(operand.buffer);
-        std::optional<size_t> adjustedAlignDim = alignDim;
-        if (operation.name == "hivm.hir.vreduce") {
-          const std::vector<int64_t> reduceDims =
-              GetLimitedAxes(operation);
-          const std::vector<std::vector<size_t>> reassociation =
-              ReassociationWithBarriers(types, reduceDims);
-          const std::optional<size_t> flattenedAlignDim =
-              ReassociatedDimension(reassociation, *alignDim);
-          const std::optional<size_t> flattenedReduceDim =
-              reduceDims.empty() || reduceDims.back() < 0
-                  ? std::nullopt
-                  : ReassociatedDimension(
-                        reassociation,
-                        static_cast<size_t>(reduceDims.back()));
-          const bool isLastReduce =
-              flattenedReduceDim &&
-              *flattenedReduceDim + 1 == reassociation.size();
-          if (isLastReduce && flattenedAlignDim &&
-              *flattenedAlignDim + 2 == reassociation.size() &&
-              operand.isDpsInit) {
-            adjustedAlignDim =
-                *flattenedAlignDim == 0
-                    ? std::nullopt
-                    : PreviousUncontinuousDimension(
-                          types, reassociation, *flattenedAlignDim - 1);
-          }
-        }
+        const std::optional<size_t> adjustedAlignDim =
+            AdjustStrideAlignDimension(operation, operands, operand,
+                                       *alignDim);
         if (!record || record->addressSpace != AddressSpace::UB ||
             !adjustedAlignDim ||
             AlreadyAligned(operand.type, *adjustedAlignDim))
@@ -990,8 +1210,16 @@ ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
         const std::optional<size_t> rootDimension =
             OperandDimToRootDim(*record, operand.type, *adjustedAlignDim,
                                 metadata);
-        if (rootDimension)
-          marks[record->sourceIdentity].insert(*rootDimension);
+        if (rootDimension) {
+          const bool inserted =
+              marks[record->sourceIdentity].insert(*rootDimension).second;
+          if (inserted && std::getenv("CVUB_DEBUG_ALIGN"))
+            std::cerr << "ALIGN_INITIAL op=" << operation.id
+                      << " name=" << operation.name
+                      << " operand=" << operand.operandNumber
+                      << " buffer=" << record->sourceIdentity
+                      << " dim=" << *rootDimension << '\n';
+        }
       }
   }
 
@@ -1029,16 +1257,30 @@ ModelAlignStorage(const PostBufferizationRewriteState &postBufferization,
         if (!record || record->addressSpace != AddressSpace::UB)
           continue;
         for (size_t dimension : unionDimensions) {
-          if (dimension >= operand.type.shape.size() ||
-              AlreadyAligned(operand.type, dimension))
+          if (dimension >= operand.type.shape.size())
+            continue;
+          const std::optional<size_t> adjustedDimension =
+              AdjustStrideAlignDimension(operation, operands, operand,
+                                         dimension);
+          if (!adjustedDimension ||
+              AlreadyAligned(operand.type, *adjustedDimension))
             continue;
           const std::optional<size_t> rootDimension =
-              OperandDimToRootDim(*record, operand.type, dimension,
+              OperandDimToRootDim(*record, operand.type, *adjustedDimension,
                                   metadata);
           if (!rootDimension)
             continue;
-          propagated |=
+          const bool inserted =
               marks[record->sourceIdentity].insert(*rootDimension).second;
+          propagated |= inserted;
+          if (inserted && std::getenv("CVUB_DEBUG_ALIGN"))
+            std::cerr << "ALIGN_PROPAGATE op=" << operation.id
+                      << " name=" << operation.name
+                      << " operand=" << operand.operandNumber
+                      << " buffer=" << record->sourceIdentity
+                      << " source_dim=" << dimension
+                      << " adjusted_dim=" << *adjustedDimension
+                      << " root_dim=" << *rootDimension << '\n';
         }
       }
     }

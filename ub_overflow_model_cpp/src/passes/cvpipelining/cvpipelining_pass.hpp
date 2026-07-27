@@ -23,6 +23,57 @@ inline bool CVPipelineHasGeneratedPipelineAttr(
          text.find("hivm.preload_num") != std::string::npos;
 }
 
+// The real CVPipelining pass rewrites workspace Store/Fixpipe destinations to
+// memref views before it materializes tensor slices for actual result users.
+// The lightweight rewriter has to build a value map eagerly, so it can leave a
+// dead extract_slice behind for a destination that is subsequently replaced.
+// Match the real pass boundary by removing only those dead extracts whose
+// source is a workspace allocation.  Delay this until all generated loops are
+// complete because a later rewrite item may still consume an eager mapping.
+inline GenericModule CVPipelineRemoveUnusedGeneratedWorkspaceSlices(
+    GenericModule module) {
+  std::map<int, int> definitions;
+  std::map<int, size_t> uses;
+  for (const GenericOperation &operation : module.operations) {
+    for (int value : operation.results)
+      definitions[value] = operation.id;
+    for (int value : operation.operands)
+      ++uses[value];
+  }
+
+  std::vector<std::pair<int, int>> removals;
+  for (const GenericOperation &operation : module.operations) {
+    if (operation.name != "tensor.extract_slice" ||
+        operation.operands.empty() || operation.results.empty() ||
+        std::any_of(operation.results.begin(), operation.results.end(),
+                    [&](int value) { return uses[value] != 0; }))
+      continue;
+
+    const auto tensorDefinition = definitions.find(operation.operands.front());
+    if (tensorDefinition == definitions.end())
+      continue;
+    const GenericOperation &toTensor = module.operations.at(
+        static_cast<size_t>(tensorDefinition->second));
+    if (toTensor.name != "bufferization.to_tensor" ||
+        toTensor.operands.empty())
+      continue;
+
+    const auto allocationDefinition = definitions.find(toTensor.operands.front());
+    if (allocationDefinition == definitions.end() ||
+        module.operations.at(static_cast<size_t>(allocationDefinition->second))
+                .name != "memref_ext.alloc_workspace")
+      continue;
+    removals.emplace_back(operation.blockId, operation.id);
+  }
+
+  if (removals.empty())
+    return module;
+  GenericRewriter rewriter(module);
+  for (const auto &[blockId, operationId] : removals)
+    rewriter.removeFromBlock(blockId, operationId);
+  return CompactGenericModule(std::move(module));
+}
+
 inline GenericModule RunCVPipeliningPass(
     GenericModule module, const CVPipeliningOptions &options) {
   if (options.disabled || options.setDepthInUnrollMode == 0 ||
@@ -74,6 +125,7 @@ inline GenericModule RunCVPipeliningPass(
     }
   }
 
+  module = CVPipelineRemoveUnusedGeneratedWorkspaceSlices(std::move(module));
   CVPipelineRemoveWorkspaceMultiBufferMarks(module);
   return module;
 }

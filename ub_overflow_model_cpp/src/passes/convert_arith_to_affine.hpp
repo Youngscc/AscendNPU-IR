@@ -65,6 +65,172 @@ inline std::string AffineValueExpression(int value) {
   return "v(" + std::to_string(value) + ")";
 }
 
+// Decode the ordinary affine_map form emitted by MLIR passes into the compact
+// expression representation used by the lightweight model.  This is shared
+// by affine.apply composition and MergeAffineMinMaxOp: unlike affine.apply,
+// affine.min/max maps normally have multiple result expressions.
+inline std::optional<std::vector<std::string>>
+ExistingAffineMapExpressions(const GenericOperation &operation) {
+  std::string map = FindDictionaryValue(operation.properties, "map");
+  if (map.empty())
+    map = FindDictionaryValue(operation.attributes, "map");
+  std::string compact;
+  for (char character : map)
+    if (!std::isspace(static_cast<unsigned char>(character)))
+      compact.push_back(character);
+  const std::string mapPrefix = "affine_map<(";
+  const size_t dimensionEnd = compact.find(')', mapPrefix.size());
+  const size_t resultArrow = compact.find("->(", dimensionEnd);
+  if (!startsWith(compact, mapPrefix) || dimensionEnd == std::string::npos ||
+      resultArrow == std::string::npos || compact.size() < resultArrow + 5 ||
+      compact.substr(compact.size() - 2) != ")>")
+    return std::nullopt;
+  const std::string dimensionText = compact.substr(
+      mapPrefix.size(), dimensionEnd - mapPrefix.size());
+  const std::string symbolSection = compact.substr(
+      dimensionEnd + 1, resultArrow - dimensionEnd - 1);
+  std::string symbolText;
+  if (!symbolSection.empty()) {
+    if (symbolSection.size() < 2 || symbolSection.front() != '[' ||
+        symbolSection.back() != ']')
+      return std::nullopt;
+    symbolText = symbolSection.substr(1, symbolSection.size() - 2);
+  }
+  const std::string resultText = compact.substr(
+      resultArrow + 3, compact.size() - resultArrow - 5);
+  const std::vector<std::string> dimensions =
+      dimensionText.empty()
+          ? std::vector<std::string>{}
+          : splitTopLevel(dimensionText);
+  const std::vector<std::string> symbols =
+      symbolText.empty()
+          ? std::vector<std::string>{}
+          : splitTopLevel(symbolText);
+  const std::vector<std::string> results = splitTopLevel(resultText);
+  if (dimensions.size() + symbols.size() != operation.operands.size() ||
+      results.empty())
+    return std::nullopt;
+  std::map<std::string, int> affineOperands;
+  for (size_t index = 0; index < dimensions.size(); ++index)
+    affineOperands[dimensions[index]] = operation.operands[index];
+  for (size_t index = 0; index < symbols.size(); ++index)
+    affineOperands[symbols[index]] =
+        operation.operands[dimensions.size() + index];
+
+  std::function<std::optional<std::string>(std::string)> decodeExpression;
+  decodeExpression = [&](std::string expression)
+      -> std::optional<std::string> {
+    while (expression.size() >= 2 && expression.front() == '(' &&
+           expression.back() == ')') {
+      int depth = 0;
+      bool wrapsWholeExpression = true;
+      for (size_t index = 0; index < expression.size(); ++index) {
+        depth += expression[index] == '(' ? 1 :
+                 expression[index] == ')' ? -1 : 0;
+        if (depth == 0 && index + 1 != expression.size()) {
+          wrapsWholeExpression = false;
+          break;
+        }
+      }
+      if (!wrapsWholeExpression)
+        break;
+      expression = expression.substr(1, expression.size() - 2);
+    }
+    if (auto operand = affineOperands.find(expression);
+        operand != affineOperands.end())
+      return AffineValueExpression(operand->second);
+    static const std::regex integerLiteral(R"(-?[0-9]+)");
+    if (std::regex_match(expression, integerLiteral))
+      return "c(" + expression + ")";
+
+    const auto topLevelCharacter =
+        [&](char wanted) -> std::optional<size_t> {
+      int depth = 0;
+      for (size_t cursor = expression.size(); cursor > 0; --cursor) {
+        const size_t index = cursor - 1;
+        if (expression[index] == ')') {
+          ++depth;
+          continue;
+        }
+        if (expression[index] == '(') {
+          --depth;
+          continue;
+        }
+        if (depth != 0 || expression[index] != wanted || index == 0)
+          continue;
+        const char previous = expression[index - 1];
+        if ((wanted == '+' || wanted == '-') &&
+            (previous == '+' || previous == '-' || previous == '*' ||
+             previous == '('))
+          continue;
+        return index;
+      }
+      return std::nullopt;
+    };
+    const std::optional<size_t> plus = topLevelCharacter('+');
+    const std::optional<size_t> minus = topLevelCharacter('-');
+    const std::optional<size_t> addOrSubtract =
+        !plus ? minus
+              : !minus ? plus
+                       : std::optional<size_t>(std::max(*plus, *minus));
+    if (addOrSubtract) {
+      const char operationKind = expression[*addOrSubtract];
+      const auto lhs =
+          decodeExpression(expression.substr(0, *addOrSubtract));
+      const auto rhs =
+          decodeExpression(expression.substr(*addOrSubtract + 1));
+      if (!lhs || !rhs)
+        return std::nullopt;
+      return operationKind == '+'
+                 ? std::optional<std::string>("add(" + *lhs + "," + *rhs +
+                                              ")")
+                 : std::optional<std::string>(
+                       "add(" + *lhs + ",mul(c(-1)," + *rhs + "))");
+    }
+    for (const std::string &operationKind :
+         {std::string("ceildiv"), std::string("floordiv"),
+          std::string("mod")}) {
+      int depth = 0;
+      for (size_t index = expression.size(); index-- > 0;) {
+        depth += expression[index] == ')' ? 1 :
+                 expression[index] == '(' ? -1 : 0;
+        if (depth != 0 || index + operationKind.size() > expression.size() ||
+            expression.compare(index, operationKind.size(), operationKind) !=
+                0)
+          continue;
+        const auto lhs = decodeExpression(expression.substr(0, index));
+        const auto rhs = decodeExpression(
+            expression.substr(index + operationKind.size()));
+        if (!lhs || !rhs)
+          return std::nullopt;
+        return operationKind + "(" + *lhs + "," + *rhs + ")";
+      }
+    }
+    if (const std::optional<size_t> position = topLevelCharacter('*')) {
+      const auto lhs = decodeExpression(expression.substr(0, *position));
+      const auto rhs = decodeExpression(expression.substr(*position + 1));
+      if (lhs && rhs)
+        return "mul(" + *lhs + "," + *rhs + ")";
+      return std::nullopt;
+    }
+    if (!expression.empty() && expression.front() == '-') {
+      const auto operand = decodeExpression(expression.substr(1));
+      if (operand)
+        return "mul(c(-1)," + *operand + ")";
+    }
+    return std::nullopt;
+  };
+  std::vector<std::string> decoded;
+  decoded.reserve(results.size());
+  for (const std::string &result : results) {
+    const std::optional<std::string> expression = decodeExpression(result);
+    if (!expression)
+      return std::nullopt;
+    decoded.push_back(*expression);
+  }
+  return decoded;
+}
+
 inline std::optional<std::string>
 ExistingAffineApplyExpression(const GenericOperation &operation) {
   if (operation.name != "affine.apply")
@@ -73,9 +239,36 @@ ExistingAffineApplyExpression(const GenericOperation &operation) {
   if (map.empty())
     map = FindDictionaryValue(operation.attributes, "map");
   const std::string prefix = "affine.apply(";
-  if (!startsWith(map, prefix) || map.back() != ')')
+  if (startsWith(map, prefix) && map.back() == ')')
+    return map.substr(prefix.size(), map.size() - prefix.size() - 1);
+
+  // makeComposedFoldedAffineMin composes an existing affine.apply producer.
+  // CVPipelining creates these maps directly rather than through this model's
+  // compact affine.apply(...) representation.
+  std::string compact;
+  for (char character : map)
+    if (!std::isspace(static_cast<unsigned char>(character)))
+      compact.push_back(character);
+  if (operation.operands.size() == 3 &&
+      compact ==
+          "affine_map<(d0,d1)[s0]->((d0-d1)ceildivs0)>")
+    return "ceildiv(add(" + AffineValueExpression(operation.operands[0]) +
+           ",mul(c(-1)," + AffineValueExpression(operation.operands[1]) +
+           "))," + AffineValueExpression(operation.operands[2]) + ")";
+  if (operation.operands.size() == 1) {
+    static const std::regex composedTripCount(
+        R"(^affine_map<\(d0\)->\(\(-d0\+(-?[0-9]+)\)ceildiv([0-9]+)\)>$)");
+    std::smatch match;
+    if (std::regex_match(compact, match, composedTripCount))
+      return "ceildiv(add(c(" + match[1].str() + "),mul(c(-1)," +
+             AffineValueExpression(operation.operands.front()) + ")),c(" +
+             match[2].str() + "))";
+  }
+
+  const auto expressions = ExistingAffineMapExpressions(operation);
+  if (!expressions || expressions->size() != 1)
     return std::nullopt;
-  return map.substr(prefix.size(), map.size() - prefix.size() - 1);
+  return expressions->front();
 }
 
 inline std::optional<int64_t> AffineConstantValue(
@@ -593,6 +786,22 @@ RunConvertArithToAffine(const GenericModule &module,
         result.composedApplyOperations.insert(operation.id);
         result.erasedOperations.insert(operation.id);
       }
+    }
+    // makeComposedAffineApply also composes affine.apply operations that were
+    // already present before this conversion pass (not just arith operations
+    // being converted in the current rewrite). Once every user has consumed
+    // that expression, the greedy conversion driver erases the dead producer.
+    for (const GenericOperation &operation : module.operations) {
+      if (operation.name != "affine.apply" || operation.results.size() != 1 ||
+          !ExistingAffineApplyExpression(operation))
+        continue;
+      const auto resultUsers = users.find(operation.results.front());
+      if (resultUsers != users.end() && !resultUsers->second.empty() &&
+          std::all_of(resultUsers->second.begin(), resultUsers->second.end(),
+                      [&](int userId) {
+                        return result.replacementNames.count(userId) != 0;
+                      }))
+        result.erasedOperations.insert(operation.id);
     }
     for (const GenericOperation &constant : module.operations) {
       if (!IsIndexConstant(constant))

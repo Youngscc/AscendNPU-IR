@@ -1,6 +1,9 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_ONE_SHOT_BUFFERIZE_HPP
 #define CVPIPELINE_UB_MODEL_CPP_ONE_SHOT_BUFFERIZE_HPP
 
+#include "../ir/generic_analysis.hpp"
+#include "../ir/generic_rewriter.hpp"
+#include "../ir/operation_folder.hpp"
 #include "../pipeline/buffer_topology.hpp"
 
 namespace cvub {
@@ -56,6 +59,50 @@ inline std::map<int, size_t> ValueUseCounts(const GenericModule &module) {
   return result;
 }
 
+inline std::vector<int>
+PostBufferizationCSEOperationPreOrder(const GenericModule &module) {
+  std::vector<int> result;
+  std::function<void(int)> visit = [&](int operationId) {
+    result.push_back(operationId);
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(operationId));
+    for (int regionId : operation.regions) {
+      const GenericRegion &region =
+          module.regions.at(static_cast<size_t>(regionId));
+      for (int blockId : region.blocks)
+        for (int childId :
+             module.blocks.at(static_cast<size_t>(blockId)).operations)
+          visit(childId);
+    }
+  };
+  if (!module.operations.empty())
+    visit(0);
+  return result;
+}
+
+inline std::string
+PostBufferizationCSEOperationKey(const GenericOperation &operation) {
+  std::ostringstream key;
+  key << operation.name << '\n' << JoinDelimited(operation.resultTypes, ",")
+      << '\n' << JoinDelimited(operation.operandTypes, ",") << '\n'
+      << joinIds(operation.operands) << '\n';
+  if (operation.name == "arith.constant") {
+    if (const std::optional<ArithIntegerConstant> integer =
+            ParseArithIntegerConstant(operation)) {
+      key << "integer:" << integer->width << ':' << integer->bits;
+    } else {
+      std::string value =
+          FindDictionaryValue(operation.properties, "value");
+      if (value.empty())
+        value = FindDictionaryValue(operation.attributes, "value");
+      key << "value:" << trim(std::move(value));
+    }
+  } else {
+    key << operation.properties << '\n' << operation.attributes;
+  }
+  return key.str();
+}
+
 inline PreBufferizationCSEState
 ModelPreBufferizationCSE(const GenericModule &module) {
   PreBufferizationCSEState result;
@@ -92,6 +139,56 @@ ModelPreBufferizationCSE(const GenericModule &module) {
       result.elidedTensorEmptyResults.insert(destination);
   }
   return result;
+}
+
+// OneShotBufferize is followed immediately by the HIVM canonicalization
+// pipeline. Scalar-only CSE commutes with tensor bufferization, so applying
+// this projection before the compact model's OneShot analysis preserves its
+// tensor decisions while also reproducing the operation/value renumbering
+// produced by the real post-bufferization CSE.
+inline GenericModule
+RunPostOneShotScalarCSEProjection(GenericModule module) {
+  const GenericModuleAnalysisIndexes enclosingFunctions(
+      module, kGenericAnalysisEnclosingFunctions);
+  std::map<std::pair<int, std::string>, std::vector<int>> availableOperations;
+  GenericRewriter rewriter(module);
+  for (int operationId : PostBufferizationCSEOperationPreOrder(module)) {
+    const GenericOperation snapshot =
+        module.operations.at(static_cast<size_t>(operationId));
+    if (snapshot.results.empty() || snapshot.blockId < 0 ||
+        !snapshot.regions.empty() ||
+        (!snapshot.effects.empty() && snapshot.effects != "none") ||
+        std::any_of(snapshot.resultTypes.begin(), snapshot.resultTypes.end(),
+                    [](const std::string &type) {
+                      return startsWith(type, "tensor<") || IsMemRefType(type);
+                    }))
+      continue;
+    const auto key = std::make_pair(
+        enclosingFunctions.enclosingFunctionId(snapshot.id),
+        PostBufferizationCSEOperationKey(snapshot));
+    int dominating = -1;
+    for (auto candidate = availableOperations[key].rbegin();
+         candidate != availableOperations[key].rend(); ++candidate) {
+      if (GenericOperationDominates(
+              module, module.operations.at(static_cast<size_t>(*candidate)),
+              snapshot)) {
+        dominating = *candidate;
+        break;
+      }
+    }
+    if (dominating < 0) {
+      availableOperations[key].push_back(snapshot.id);
+      continue;
+    }
+    const GenericOperation &candidate =
+        module.operations.at(static_cast<size_t>(dominating));
+    if (candidate.results.size() != snapshot.results.size())
+      continue;
+    for (size_t index = 0; index < snapshot.results.size(); ++index)
+      rewriter.replaceAllUses(snapshot.results[index], candidate.results[index]);
+    rewriter.removeFromBlock(snapshot.blockId, snapshot.id);
+  }
+  return CompactGenericModule(std::move(module));
 }
 
 inline std::vector<BufferAllocation>

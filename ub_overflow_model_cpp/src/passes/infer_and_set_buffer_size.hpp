@@ -304,6 +304,11 @@ inline GenericModule RunSetBufferSize(GenericModule module) {
 
 inline GenericModule RunInferAndSetBufferSizePipeline(GenericModule module) {
   module = RunAutoInferBufferSize(std::move(module));
+  // inferAndSetBufferSizePipeline runs the module-level BiSheng
+  // ArithToAffine conversion here, before ConstantizeBufferSize and
+  // SetBufferSize.  In particular, this composes CVPipelining's capped trip
+  // count into the affine.min observed by the following passes.
+  module = RunArithToAffineConversion(std::move(module));
   module = RunConstantizeBufferSize(std::move(module));
   return RunSetBufferSize(std::move(module));
 }

@@ -75,8 +75,10 @@ inline GenericModule RunGlobalWorkspacePlan(GenericModule module) {
     for (int operationId : allocations) {
       GenericOperation &allocation =
           module.operations.at(static_cast<size_t>(operationId));
-      const std::vector<size_t> segments =
+      std::vector<size_t> segments =
           OperandSegmentSizes(allocation.properties);
+      if (segments.empty())
+        segments = OperandSegmentSizes(allocation.attributes);
       if (segments.size() != 3 || segments.front() != 1)
         throw std::runtime_error(
             "GlobalWorkspacePlan: unsupported alloc_workspace operand layout");
@@ -115,8 +117,12 @@ inline GenericModule RunGlobalWorkspacePlan(GenericModule module) {
       updated.operandTypes.push_back("index");
       std::vector<size_t> updatedSegments = segments;
       updatedSegments[2] = 1;
-      updated.properties =
-          SetOperandSegmentSizes(updated.properties, updatedSegments);
+      if (updated.properties.find("operandSegmentSizes") != std::string::npos)
+        updated.properties =
+            SetOperandSegmentSizes(updated.properties, updatedSegments);
+      else
+        updated.attributes =
+            SetOperandSegmentSizes(updated.attributes, updatedSegments);
 
       workspaceOffsets[workspace] = CheckedAdd(
           offsetBits,

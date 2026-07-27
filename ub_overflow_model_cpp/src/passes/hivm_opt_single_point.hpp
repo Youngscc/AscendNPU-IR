@@ -14,6 +14,32 @@ struct HIVMOptSinglePointResult {
   std::set<std::pair<int, int>> canonicalizedIterArgAccesses;
 };
 
+inline bool IsCanonicalizedIterArgInsertSlice(
+    const GenericModule &module, const GenericModuleAnalysisIndexes &analysis,
+    const HIVMOptSinglePointResult &singlePoint,
+    const GenericOperation &operation) {
+  if (operation.name != "tensor.insert_slice" ||
+      operation.results.size() != 1)
+    return false;
+  const int result = operation.results.front();
+  for (int userId : analysis.users(result)) {
+    const GenericOperation &user =
+        module.operations.at(static_cast<size_t>(userId));
+    if (user.name != "scf.yield" || user.parentId < 0)
+      continue;
+    const GenericOperation &loop =
+        module.operations.at(static_cast<size_t>(user.parentId));
+    if (loop.name != "scf.for")
+      continue;
+    for (size_t index = 0; index < user.operands.size(); ++index)
+      if (user.operands[index] == result &&
+          singlePoint.canonicalizedIterArgResultKeys.count(
+              {loop.id, static_cast<int>(index)}) != 0)
+        return true;
+  }
+  return false;
+}
+
 inline bool IsSinglePointType(const std::string &type,
                               bool requireScalarHardwareType) {
   std::optional<MemRefTypeModel> parsed = ParseMemRefType(type);

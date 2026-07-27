@@ -19,6 +19,13 @@ inline bool IsLoopInvariantCodeMotionTerminator(
 inline bool IsLoopInvariantCodeMotionSpeculatable(
     const GenericOperation &operation,
     const std::map<int, ArithIntegerConstant> &integerConstants) {
+  // MultiBufferCounterOp intentionally has neither Pure nor
+  // AlwaysSpeculatable in HIVMOps.td: it denotes the current iteration and
+  // LowerMultiBufferCounter later materializes a loop-carried load/store.
+  // Keeping the anchor in its owning loop also keeps all dependent event-id
+  // arithmetic there, exactly as MLIR LICM does.
+  if (operation.name == "hivm.hir.multi_buffer_counter")
+    return false;
   if (IsHIVMVectorOp(operation.name))
     return true;
 

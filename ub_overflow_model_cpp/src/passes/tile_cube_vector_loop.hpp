@@ -1,10 +1,15 @@
 #ifndef CVPIPELINE_UB_MODEL_CPP_PASSES_TILE_CUBE_VECTOR_LOOP_HPP
 #define CVPIPELINE_UB_MODEL_CPP_PASSES_TILE_CUBE_VECTOR_LOOP_HPP
 
+#include "../analysis/hivm_dimension_analyzer.hpp"
+#include "canonicalization_hivm_pipeline.hpp"
 #include "../ir/post_pipeline_ir_utils.hpp"
 #include "../pipeline/modeling_result.hpp"
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <optional>
@@ -30,6 +35,13 @@ struct TargetSpec {
 };
 
 struct LoopPlan {
+  struct YieldedTensor {
+    int yieldedValue = -1;
+    int producerId = -1;
+    int originalInit = -1;
+    size_t axis = 0;
+    std::string type;
+  };
   int loopId = -1;
   LoopKind kind = LoopKind::Vector;
   int64_t extent = 0;
@@ -43,6 +55,8 @@ struct LoopPlan {
   size_t cubeRealDimensionDpsInput = 0;
   int localDestinationSubview = -1;
   int localDestinationAlloc = -1;
+  std::vector<int> vectorStoreAnchors;
+  std::vector<YieldedTensor> yieldedTensors;
 };
 
 inline std::optional<ShapedType> ParseStaticShapedType(const std::string &type) {
@@ -69,6 +83,8 @@ inline std::string PrintShapedType(const ShapedType &type) {
 }
 
 inline unsigned ElementBitWidth(const std::string &tail) {
+  if (tail == "bf16" || startsWith(tail, "bf16,"))
+    return 16;
   static const std::regex element(R"(^[fiu]([0-9]+)(?:,.*)?$)");
   std::smatch match;
   if (!std::regex_match(tail, match, element))
@@ -125,13 +141,13 @@ inline std::vector<int64_t> ParseIntegerArray(const std::string &text) {
 }
 
 inline std::string PrintIntegerArray(const std::vector<int64_t> &values) {
-  std::string result = "[";
+  std::string result = "array<i64: ";
   for (size_t index = 0; index < values.size(); ++index) {
     if (index != 0)
       result += ", ";
     result += std::to_string(values[index]);
   }
-  return result + "]";
+  return result + ">";
 }
 
 inline std::optional<int64_t> ParseSpecEntry(const std::string &text,
@@ -224,18 +240,534 @@ Users(const GenericModule &module, int value) {
   return users;
 }
 
-inline bool HasUnmodeledLiftPattern(const GenericModule &module) {
-  for (const GenericOperation &operation : module.operations) {
-    if (operation.name == "hivm.hir.load" && operation.operandTypes.size() > 1 &&
-        operation.operandTypes.back().rfind("memref<", 0) == 0)
-      return true;
-    if (operation.name != "memref.alloc" || operation.results.size() != 1)
+inline std::optional<std::string> TensorTypeForMemRef(
+    const std::string &type) {
+  if (!startsWith(type, "memref<") || type.size() < 9 || type.back() != '>')
+    return std::nullopt;
+  const std::vector<std::string> fields =
+      splitTopLevel(type.substr(7, type.size() - 8));
+  if (fields.empty())
+    return std::nullopt;
+  return "tensor<" + trim(fields.front()) + ">";
+}
+
+// Exact translation of TileCubeVectorLoop.cpp::LiftToTensor and
+// CanonicalizeAllocToTensor. The real pass applies both patterns greedily to
+// the whole module before collecting loop information.
+inline GenericModule LiftMemRefLoadsInLoop(GenericModule module) {
+  std::vector<int> loadIds;
+  for (const GenericOperation &operation : module.operations)
+    if (operation.name == "hivm.hir.load")
+      loadIds.push_back(operation.id);
+
+  GenericRewriter rewriter(module);
+  for (int loadId : loadIds) {
+    const GenericOperation loadSnapshot =
+        module.operations.at(static_cast<size_t>(loadId));
+    std::vector<size_t> initIndices;
+    try {
+      initIndices = DpsInitOperandIndices(
+          loadSnapshot.name, loadSnapshot.operands.size(),
+          loadSnapshot.properties);
+    } catch (const std::exception &) {
       continue;
-    const auto users = Users(module, operation.results.front());
-    if (users.size() == 1 && users.front()->name == "bufferization.to_tensor")
-      return true;
+    }
+    if (initIndices.size() != 1 || initIndices.front() >= loadSnapshot.operands.size())
+      continue;
+    const size_t destinationIndex = initIndices.front();
+    if (destinationIndex >= loadSnapshot.operandTypes.size() ||
+        !startsWith(loadSnapshot.operandTypes[destinationIndex], "memref<"))
+      continue;
+
+    const int destination = loadSnapshot.operands[destinationIndex];
+    const std::vector<const GenericOperation *> destinationUsers =
+        Users(module, destination);
+    int toTensorId = -1;
+    bool multipleToTensorUsers = false;
+    for (const GenericOperation *user : destinationUsers) {
+      if (user->id == loadId || user->name != "bufferization.to_tensor")
+        continue;
+      if (toTensorId >= 0) {
+        multipleToTensorUsers = true;
+        break;
+      }
+      toTensorId = user->id;
+    }
+    if (toTensorId < 0 || multipleToTensorUsers)
+      continue;
+    const GenericOperation toTensorSnapshot =
+        module.operations.at(static_cast<size_t>(toTensorId));
+    if (toTensorSnapshot.results.size() != 1 ||
+        toTensorSnapshot.resultTypes.size() != 1 || loadSnapshot.blockId < 0 ||
+        toTensorSnapshot.blockId < 0)
+      continue;
+
+    std::vector<int> operands = loadSnapshot.operands;
+    std::vector<std::string> operandTypes = loadSnapshot.operandTypes;
+    if (!operands.empty() && !operandTypes.empty() &&
+        startsWith(operandTypes.front(), "memref<")) {
+      const std::optional<std::string> tensorType =
+          TensorTypeForMemRef(operandTypes.front());
+      if (!tensorType)
+        continue;
+      const int sourceToTensor = rewriter.createOperation(
+          loadSnapshot.parentId, loadSnapshot.regionId, loadSnapshot.blockId,
+          "bufferization.to_tensor", {*tensorType}, {operands.front()},
+          {operandTypes.front()}, "restrict, writable");
+      const GenericBlock &loadBlock =
+          module.blocks.at(static_cast<size_t>(loadSnapshot.blockId));
+      const auto loadPosition = std::find(loadBlock.operations.begin(),
+                                          loadBlock.operations.end(), loadId);
+      if (loadPosition == loadBlock.operations.end())
+        throw std::runtime_error(
+            "TileCubeVectorLoop: attached load is absent from its block");
+      rewriter.insertToBlock(
+          loadSnapshot.blockId,
+          static_cast<size_t>(std::distance(loadBlock.operations.begin(),
+                                            loadPosition)),
+          sourceToTensor);
+      operands.front() = module.operations.at(
+          static_cast<size_t>(sourceToTensor)).results.front();
+      operandTypes.front() = *tensorType;
+    }
+    operands[destinationIndex] = toTensorSnapshot.results.front();
+    operandTypes[destinationIndex] = toTensorSnapshot.resultTypes.front();
+
+    const int tensorLoad = rewriter.createOperation(
+        loadSnapshot.parentId, loadSnapshot.regionId, loadSnapshot.blockId,
+        loadSnapshot.name, {toTensorSnapshot.resultTypes.front()}, operands,
+        operandTypes, loadSnapshot.properties, loadSnapshot.attributes);
+    const GenericBlock &destinationBlock =
+        module.blocks.at(static_cast<size_t>(toTensorSnapshot.blockId));
+    const auto toTensorPosition =
+        std::find(destinationBlock.operations.begin(),
+                  destinationBlock.operations.end(), toTensorId);
+    if (toTensorPosition == destinationBlock.operations.end())
+      throw std::runtime_error(
+          "TileCubeVectorLoop: attached to_tensor is absent from its block");
+    rewriter.insertToBlock(
+        toTensorSnapshot.blockId,
+        static_cast<size_t>(std::distance(destinationBlock.operations.begin(),
+                                          toTensorPosition)) +
+            1,
+        tensorLoad);
+
+    const int oldTensor = toTensorSnapshot.results.front();
+    const int newTensor =
+        module.operations.at(static_cast<size_t>(tensorLoad)).results.front();
+    for (GenericOperation &operation : module.operations) {
+      if (operation.id == tensorLoad)
+        continue;
+      for (size_t operand = 0; operand < operation.operands.size(); ++operand)
+        if (operation.operands[operand] == oldTensor)
+          rewriter.replaceOperand(operation.id, operand, newTensor);
+      for (int &value : operation.dpsInputs)
+        if (value == oldTensor)
+          value = newTensor;
+      for (int &value : operation.dpsInits)
+        if (value == oldTensor)
+          value = newTensor;
+    }
+    rewriter.removeFromBlock(loadSnapshot.blockId, loadId);
   }
-  return false;
+  rewriter.applyDirtyOperationSemantics();
+  module = CompactGenericModule(std::move(module));
+
+  // This is the second pattern in the same real greedy rewrite set. It is
+  // intentionally evaluated after the lifted loads have released their
+  // destination memrefs, which is the fixed point reached by MLIR's greedy
+  // driver.
+  std::vector<int> allocationIds;
+  for (const GenericOperation &operation : module.operations)
+    if (operation.name == "memref.alloc" && operation.results.size() == 1 &&
+        operation.blockId >= 0)
+      allocationIds.push_back(operation.id);
+  GenericRewriter canonicalizer(module);
+  for (int allocationId : allocationIds) {
+    const GenericOperation allocation =
+        module.operations.at(static_cast<size_t>(allocationId));
+    const std::vector<const GenericOperation *> allocationUsers =
+        Users(module, allocation.results.front());
+    if (allocationUsers.size() != 1 ||
+        allocationUsers.front()->name != "bufferization.to_tensor")
+      continue;
+    const int toTensorId = allocationUsers.front()->id;
+    GenericOperation &toTensor = canonicalizer.modifyOperation(toTensorId);
+    toTensor.name = "tensor.empty";
+    toTensor.operands.clear();
+    toTensor.operandTypes.clear();
+    toTensor.properties.clear();
+    toTensor.attributes.clear();
+    toTensor.effects.clear();
+    toTensor.dpsInputs.clear();
+    toTensor.dpsInits.clear();
+    canonicalizer.removeFromBlock(allocation.blockId, allocationId);
+  }
+  canonicalizer.applyDirtyOperationSemantics();
+  module = CompactGenericModule(std::move(module));
+  ValidateGenericModule(module);
+  return module;
+}
+
+inline void SetTileOperationDictionaryValue(GenericOperation &operation,
+                                            const std::string &name,
+                                            const std::string &value) {
+  if (!FindDictionaryValue(operation.properties, name).empty())
+    operation.properties =
+        SetDictionaryValue(operation.properties, name, value);
+  else
+    operation.attributes =
+        SetDictionaryValue(operation.attributes, name, value);
+}
+
+inline std::string PrintTileI32Array(const std::vector<size_t> &values) {
+  std::string result = "array<i32: ";
+  for (size_t index = 0; index < values.size(); ++index) {
+    if (index != 0)
+      result += ", ";
+    result += std::to_string(values[index]);
+  }
+  return result + ">";
+}
+
+// applyPatternsGreedily uses an OperationFolder while running LiftToTensor and
+// the transform cleanup patterns.  In particular it folds constant dynamic
+// slice operands into the static offset/size/stride arrays.  This is observable
+// in the real TileCubeVectorLoop output and also removes the otherwise-local
+// index constants before bufferization.
+inline void FoldTileConstantSliceOperands(GenericModule &module) {
+  constexpr int64_t kDynamic = std::numeric_limits<int64_t>::min();
+  for (GenericOperation &operation : module.operations) {
+    if (operation.name != "tensor.extract_slice" &&
+        operation.name != "memref.subview")
+      continue;
+    std::vector<size_t> segments = OperandSegmentSizes(operation.properties);
+    if (segments.empty())
+      segments = OperandSegmentSizes(operation.attributes);
+    if (segments.size() != 4 || operation.operands.size() < segments.front())
+      continue;
+
+    std::array<std::vector<int64_t>, 3> staticValues = {
+        ParseIntegerArray(IRDictionaryValue(operation.properties,
+                                            "static_offsets")
+                              .empty()
+                          ? IRDictionaryValue(operation.attributes,
+                                              "static_offsets")
+                          : IRDictionaryValue(operation.properties,
+                                              "static_offsets")),
+        ParseIntegerArray(IRDictionaryValue(operation.properties,
+                                            "static_sizes")
+                              .empty()
+                          ? IRDictionaryValue(operation.attributes,
+                                              "static_sizes")
+                          : IRDictionaryValue(operation.properties,
+                                              "static_sizes")),
+        ParseIntegerArray(IRDictionaryValue(operation.properties,
+                                            "static_strides")
+                              .empty()
+                          ? IRDictionaryValue(operation.attributes,
+                                              "static_strides")
+                          : IRDictionaryValue(operation.properties,
+                                              "static_strides"))};
+    const std::array<std::string, 3> names = {
+        "static_offsets", "static_sizes", "static_strides"};
+    std::vector<size_t> eraseOperands;
+    size_t operandBegin = segments.front();
+    for (size_t segment = 1; segment < segments.size(); ++segment) {
+      std::vector<size_t> dynamicPositions;
+      for (size_t position = 0; position < staticValues[segment - 1].size();
+           ++position)
+        if (staticValues[segment - 1][position] == kDynamic)
+          dynamicPositions.push_back(position);
+      size_t folded = 0;
+      for (size_t ordinal = 0;
+           ordinal < segments[segment] && ordinal < dynamicPositions.size();
+           ++ordinal) {
+        const size_t operandIndex = operandBegin + ordinal;
+        if (operandIndex >= operation.operands.size() ||
+            operandIndex >= operation.operandTypes.size() ||
+            operation.operandTypes[operandIndex] != "index")
+          continue;
+        const GenericOperation *definition =
+            Definition(module, operation.operands[operandIndex]);
+        if (definition == nullptr)
+          continue;
+        const std::optional<ArithIntegerConstant> constant =
+            ParseArithIntegerConstant(*definition);
+        if (!constant)
+          continue;
+        staticValues[segment - 1][dynamicPositions[ordinal]] =
+            SignedArithInteger(*constant);
+        eraseOperands.push_back(operandIndex);
+        ++folded;
+      }
+      segments[segment] -= folded;
+      operandBegin += segments[segment] + folded;
+    }
+    std::sort(eraseOperands.rbegin(), eraseOperands.rend());
+    for (size_t operandIndex : eraseOperands) {
+      operation.operands.erase(operation.operands.begin() +
+                               static_cast<std::ptrdiff_t>(operandIndex));
+      operation.operandTypes.erase(
+          operation.operandTypes.begin() +
+          static_cast<std::ptrdiff_t>(operandIndex));
+    }
+    if (eraseOperands.empty())
+      continue;
+    for (size_t index = 0; index < names.size(); ++index)
+      SetTileOperationDictionaryValue(
+          operation, names[index], PrintIntegerArray(staticValues[index]));
+    SetTileOperationDictionaryValue(operation, "operandSegmentSizes",
+                                    PrintTileI32Array(segments));
+  }
+}
+
+inline std::string TileStripDynamicOffset(std::string type) {
+  const std::string marker = ", offset: ?";
+  const size_t offset = type.find(marker);
+  if (offset != std::string::npos)
+    type.erase(offset, marker.size());
+  return type;
+}
+
+inline std::string TileAddDynamicOffset(std::string type) {
+  if (type.find("offset: ?") != std::string::npos)
+    return type;
+  const size_t layoutEnd = type.rfind("]>>");
+  if (layoutEnd != std::string::npos)
+    type.insert(layoutEnd + 1, ", offset: ?");
+  return type;
+}
+
+inline void PropagateTileValueType(GenericModule &module, int value,
+                                   const std::string &type) {
+  for (GenericOperation &operation : module.operations)
+    for (size_t index = 0; index < operation.operands.size(); ++index)
+      if (operation.operands[index] == value &&
+          index < operation.operandTypes.size())
+        operation.operandTypes[index] = type;
+}
+
+inline void InferTileStaticSubviewOffsets(GenericModule &module) {
+  for (GenericOperation &operation : module.operations) {
+    if ((operation.name != "memref.subview" &&
+         operation.name != "memref.collapse_shape") ||
+        operation.operands.empty() || operation.operandTypes.empty() ||
+        operation.results.size() != 1 || operation.resultTypes.size() != 1)
+      continue;
+    bool staticOffset =
+        operation.operandTypes.front().find("offset: ?") == std::string::npos;
+    if (operation.name == "memref.subview") {
+      std::string offsets =
+          IRDictionaryValue(operation.properties, "static_offsets");
+      if (offsets.empty())
+        offsets = IRDictionaryValue(operation.attributes, "static_offsets");
+      const std::vector<int64_t> values = ParseIntegerArray(offsets);
+      staticOffset = staticOffset && !values.empty() &&
+                     std::none_of(values.begin(), values.end(), [](int64_t value) {
+                       return value == std::numeric_limits<int64_t>::min();
+                     });
+    }
+    if (!staticOffset ||
+        operation.resultTypes.front().find("offset: ?") == std::string::npos)
+      continue;
+    operation.resultTypes.front() =
+        TileStripDynamicOffset(operation.resultTypes.front());
+    PropagateTileValueType(module, operation.results.front(),
+                           operation.resultTypes.front());
+  }
+}
+
+// applyCleanUpPatterns canonicalizes the affine.apply created by
+// CVPipelining after static loop bounds become visible.  Compose its constant
+// upper bound and step into the map, leaving only the IV operand, exactly as
+// makeComposedAffineApply does in the real TileCubeVectorLoop transform.
+inline void ComposeTileCVPipelineTripCountConstants(GenericModule &module) {
+  const std::map<int, const GenericOperation *> definitions =
+      DefiningOperations(module);
+  for (GenericOperation &operation : module.operations) {
+    if (operation.name != "affine.apply" || operation.operands.size() != 3 ||
+        operation.operandTypes !=
+            std::vector<std::string>{"index", "index", "index"})
+      continue;
+    std::string map = FindDictionaryValue(operation.properties, "map");
+    if (map.empty())
+      map = FindDictionaryValue(operation.attributes, "map");
+    std::string compact;
+    for (char character : map)
+      if (!std::isspace(static_cast<unsigned char>(character)))
+        compact.push_back(character);
+    if (compact !=
+        "affine_map<(d0,d1)[s0]->((d0-d1)ceildivs0)>")
+      continue;
+
+    const auto upperDefinition = definitions.find(operation.operands[0]);
+    const auto stepDefinition = definitions.find(operation.operands[2]);
+    if (upperDefinition == definitions.end() ||
+        stepDefinition == definitions.end())
+      continue;
+    const std::optional<ArithIntegerConstant> upper =
+        ParseArithIntegerConstant(*upperDefinition->second);
+    const std::optional<ArithIntegerConstant> step =
+        ParseArithIntegerConstant(*stepDefinition->second);
+    if (!upper || !step || SignedArithInteger(*upper) < 0 ||
+        SignedArithInteger(*step) <= 0)
+      continue;
+
+    operation.operands = {operation.operands[1]};
+    operation.operandTypes = {"index"};
+    operation.properties =
+        "{map = affine_map<(d0) -> ((-d0 + " +
+        std::to_string(SignedArithInteger(*upper)) + ") ceildiv " +
+        std::to_string(SignedArithInteger(*step)) + ")>}";
+    operation.attributes = operation.properties;
+  }
+}
+
+inline void RemoveTileTriviallyDeadOperations(GenericModule &module) {
+  const std::set<std::string> removable = {
+      "bufferization.to_tensor", "memref.alloc",
+      "memref_ext.alloc_workspace", "tensor.empty"};
+  while (true) {
+    std::set<int> attached;
+    for (const GenericBlock &block : module.blocks)
+      attached.insert(block.operations.begin(), block.operations.end());
+    std::set<int> usedValues;
+    for (int operationId : attached) {
+      const GenericOperation &operation =
+          module.operations.at(static_cast<size_t>(operationId));
+      usedValues.insert(operation.operands.begin(), operation.operands.end());
+      usedValues.insert(operation.dpsInputs.begin(), operation.dpsInputs.end());
+      usedValues.insert(operation.dpsInits.begin(), operation.dpsInits.end());
+    }
+    std::vector<int> dead;
+    for (int operationId : attached) {
+      const GenericOperation &operation =
+          module.operations.at(static_cast<size_t>(operationId));
+      if (operationId <= 0 || !operation.regions.empty() ||
+          removable.count(operation.name) == 0 || operation.results.empty())
+        continue;
+      if (std::none_of(operation.results.begin(), operation.results.end(),
+                       [&](int value) { return usedValues.count(value) != 0; }))
+        dead.push_back(operationId);
+    }
+    if (dead.empty())
+      break;
+    for (int operationId : dead)
+      EraseOperationTree(module, operationId);
+  }
+}
+
+inline void CSETileTensorEmpty(GenericModule &module) {
+  auto dominates = [&](const GenericOperation &definition,
+                       const GenericOperation &use) {
+    int nestedOperation = use.id;
+    while (nestedOperation >= 0) {
+      const GenericOperation &nested =
+          module.operations.at(static_cast<size_t>(nestedOperation));
+      if (nested.blockId == definition.blockId)
+        return definition.ordinal < nested.ordinal;
+      if (nested.blockId < 0)
+        break;
+      const GenericBlock &block =
+          module.blocks.at(static_cast<size_t>(nested.blockId));
+      nestedOperation =
+          module.regions.at(static_cast<size_t>(block.regionId))
+              .parentOperation;
+    }
+    return false;
+  };
+  GenericRewriter rewriter(module);
+  std::map<std::string, std::vector<int>> available;
+  for (const GenericBlock &blockSnapshot : module.blocks) {
+    for (int operationId : blockSnapshot.operations) {
+      const GenericOperation &operation =
+          module.operations.at(static_cast<size_t>(operationId));
+      if (operation.name != "tensor.empty" || !operation.operands.empty() ||
+          operation.results.size() != 1 || operation.resultTypes.size() != 1)
+        continue;
+      int replacement = -1;
+      for (int candidateId : available[operation.resultTypes.front()]) {
+        const GenericOperation &candidate =
+            module.operations.at(static_cast<size_t>(candidateId));
+        if (dominates(candidate, operation)) {
+          replacement = candidate.results.front();
+          break;
+        }
+      }
+      if (replacement < 0) {
+        available[operation.resultTypes.front()].push_back(operation.id);
+        continue;
+      }
+      ReplaceAllUses(module, operation.results.front(), replacement);
+      rewriter.removeFromBlock(operation.blockId, operation.id);
+    }
+  }
+}
+
+inline void OrderLiftedLoadInitializers(GenericModule &module) {
+  std::vector<std::pair<int, int>> moves;
+  for (const GenericOperation &load : module.operations) {
+    if (load.name != "hivm.hir.load" || load.operands.size() < 2)
+      continue;
+    const GenericOperation *source = Definition(module, load.operands.front());
+    const GenericOperation *destination = Definition(module, load.operands[1]);
+    if (source == nullptr || destination == nullptr ||
+        source->name != "bufferization.to_tensor" ||
+        destination->name != "tensor.empty" ||
+        source->blockId != destination->blockId)
+      continue;
+    const GenericBlock &block =
+        module.blocks.at(static_cast<size_t>(source->blockId));
+    const auto sourcePosition =
+        std::find(block.operations.begin(), block.operations.end(), source->id);
+    const auto destinationPosition = std::find(
+        block.operations.begin(), block.operations.end(), destination->id);
+    if (sourcePosition != block.operations.end() &&
+        destinationPosition != block.operations.end() &&
+        sourcePosition < destinationPosition)
+      moves.push_back({destination->id, source->id});
+  }
+  for (const auto &[operation, before] : moves)
+    MoveOperationBefore(module, operation, before);
+}
+
+inline GenericModule CanonicalizeTileGreedyArtifacts(
+    GenericModule module, bool preserveLoadOwnedDestinationTiles = false) {
+  FoldTileConstantSliceOperands(module);
+  InferTileStaticSubviewOffsets(module);
+  ComposeTileCVPipelineTripCountConstants(module);
+  CSETileTensorEmpty(module);
+  RemoveTileTriviallyDeadOperations(module);
+  module = CompactGenericModule(std::move(module));
+  OrderLiftedLoadInitializers(module);
+  for (const GenericOperation &operation : module.operations)
+    if (operation.name == "func.func")
+      RunGreedyOperationFolder(module, operation.id);
+  PipelineAnalysisContext useLists(module, kGenericAnalysisUsers);
+  std::set<int> loadOwnedDestinationTiles;
+  if (preserveLoadOwnedDestinationTiles) {
+    for (const GenericOperation &operation : module.operations) {
+      if (operation.name != "hivm.hir.load")
+        continue;
+      for (int destination : operation.dpsInits) {
+        const GenericOperation *definition = Definition(module, destination);
+        if (definition != nullptr &&
+            (definition->name == "tensor.extract_slice" ||
+             definition->name == "memref.subview"))
+          loadOwnedDestinationTiles.insert(definition->id);
+      }
+    }
+  }
+  RunCanonicalizationCommonSubexpressionElimination(
+      module, useLists,
+      preserveLoadOwnedDestinationTiles ? &loadOwnedDestinationTiles
+                                        : nullptr);
+  while (EliminateCanonicalizationDeadCode(module, useLists)) {
+  }
+  module = CompactGenericModule(std::move(module));
+  ValidateGenericModule(module);
+  return module;
 }
 
 inline bool IsAncestor(const GenericModule &module, int possibleAncestor,
@@ -247,6 +779,27 @@ inline bool IsAncestor(const GenericModule &module, int possibleAncestor,
     parent = module.operations.at(static_cast<size_t>(parent)).parentId;
   }
   return false;
+}
+
+inline const GenericOperation *TraceVectorProducer(const GenericModule &module,
+                                                   const GenericOperation &loop,
+                                                   int value) {
+  std::set<int> visited;
+  std::vector<int> worklist{value};
+  while (!worklist.empty()) {
+    const GenericOperation *definition = Definition(module, worklist.back());
+    worklist.pop_back();
+    if (definition == nullptr || !IsAncestor(module, loop.id, definition->id) ||
+        !visited.insert(definition->id).second)
+      continue;
+    if (definition->name.rfind("hivm.hir.", 0) == 0 &&
+        !definition->results.empty())
+      return definition;
+    for (size_t index = 0; index < definition->operands.size(); ++index)
+      if (ParseStaticShapedType(definition->operandTypes[index]))
+        worklist.push_back(definition->operands[index]);
+  }
+  return nullptr;
 }
 
 inline std::optional<unsigned> ParseCubeOverride(const GenericModule &module,
@@ -314,7 +867,9 @@ inline bool IsSupportedProducer(const GenericOperation &operation,
       operation.name == "memref.subview" || operation.name == "hivm.hir.load")
     return true;
   if (kind == LoopKind::Vector)
-    return operation.name == "hivm.hir.vadd";
+    return operation.name.rfind("hivm.hir.", 0) == 0 ||
+           operation.name == "tensor.expand_shape" ||
+           operation.name == "tensor.collapse_shape";
   return operation.name == "hivm.hir.mmadL1";
 }
 
@@ -325,29 +880,48 @@ inline bool CollectProducerClosure(const GenericModule &module,
   const GenericOperation *definition = Definition(module, value);
   if (definition == nullptr || !IsAncestor(module, loop.id, definition->id))
     return true;
+  if (definition->name == "bufferization.to_tensor" ||
+      definition->name == "tensor.empty" ||
+      definition->name == "memref.collapse_shape" ||
+      definition->name == "memref.reinterpret_cast" ||
+      definition->name == "tensor.extract_slice" ||
+      definition->name == "memref.subview")
+    return true;
   if (!IsSupportedProducer(*definition, kind)) {
     reason = "anchor dependency contains an operation whose axis semantics "
-             "are not modeled";
+             "are not modeled: " + definition->name;
     return false;
   }
   if (!closure.insert(definition->id).second)
     return true;
-  for (int operand : definition->operands)
-    if (!CollectProducerClosure(module, loop, operand, kind, closure, reason))
+  for (size_t index = 0; index < definition->operands.size(); ++index) {
+    // DimensionAnalyzerBase::processPreOrderWalk only starts dimension
+    // propagation from allowed shaped values.  Scalar operands (for example
+    // the i32 offset of an elementwise HIVM op) have rank zero and are not a
+    // producer that fuse_into moves into the tiled loop.
+    if (!ParseStaticShapedType(definition->operandTypes[index]))
+      continue;
+    if (!CollectProducerClosure(module, loop, definition->operands[index],
+                                kind, closure, reason))
       return false;
+  }
   return true;
 }
 
 inline std::optional<size_t> UniqueParallelAxis(const ShapedType &type) {
-  std::optional<size_t> axis;
+  // DimensionAnalyzer::getTilingDim orders parallel candidates by their
+  // original dimension number and computeTilingDim selects the lower ordered
+  // candidate when every Store in the value group supports it.  On the
+  // non-regbased Ascend target, size-1 and odd dimensions are not candidates.
+  // The old model incorrectly required there to be only one non-unit axis,
+  // rejecting ordinary 64x128 vector stores for which the real analyzer picks
+  // axis 0.
   for (size_t index = 0; index < type.shape.size(); ++index) {
-    if (type.shape[index] <= 1)
+    if (type.shape[index] <= 1 || type.shape[index] % 2 != 0)
       continue;
-    if (axis)
-      return std::nullopt;
-    axis = index;
+    return index;
   }
-  return axis;
+  return std::nullopt;
 }
 
 inline bool IsHIVMStructuredName(const std::string &name) {
@@ -451,6 +1025,9 @@ inline bool ClassifyDestination(const GenericModule &module,
     return true;
   }
   if (definition->name != "memref.subview" || definition->operands.empty()) {
+    if (definition->name == "memref.collapse_shape" ||
+        definition->name == "memref.reinterpret_cast")
+      return true;
     reason = "destination scope cannot be classified as local or GM boundary";
     return false;
   }
@@ -527,6 +1104,20 @@ inline bool RecordValueAxis(const GenericModule &module, LoopPlan &plan,
                             int64_t extent, std::string &reason,
                             bool allowRepeatedExtent = false) {
   const auto type = ParseStaticShapedType(typeText);
+  if (type && (axis >= type->shape.size() || type->shape[axis] != extent)) {
+    std::optional<size_t> remapped;
+    for (size_t candidate = 0; candidate < type->shape.size(); ++candidate) {
+      if (type->shape[candidate] != extent)
+        continue;
+      if (remapped) {
+        remapped.reset();
+        break;
+      }
+      remapped = candidate;
+    }
+    if (remapped)
+      axis = *remapped;
+  }
   if (!type || axis >= type->shape.size() || type->shape[axis] != extent) {
     reason = "producer dependency has no provable tiling dimension for value " +
              std::to_string(value) + " type " + typeText + " axis " +
@@ -615,6 +1206,12 @@ inline bool HasExactIdentitySemantics(const GenericOperation &operation,
   }
 
   for (const std::string &key : DictionaryKeys(operation.attributes)) {
+    // Scheduling/provenance unit attributes are deliberately ignored by the
+    // real DimensionAnalyzer; they do not participate in any dimension
+    // relation. Keep the same behavior instead of treating them as an
+    // unknown axis transform.
+    if (key == "\"inserted-load\"" || key == "\"inserted-store\"")
+      continue;
     if (allowed.count(key) == 0) {
       reason = "operation attribute '" + key +
                "' has unknown axis semantics";
@@ -650,29 +1247,52 @@ inline bool RecordIdentityDependencyAxis(const GenericModule &module,
                                          const std::string &typeText,
                                          size_t axis, int64_t extent,
                                          std::string &reason) {
-  if (!RecordValueAxis(module, plan, value, typeText, axis, extent, reason))
+  if (!RecordValueAxis(module, plan, value, typeText, axis, extent, reason,
+                       /*allowRepeatedExtent=*/true))
     return false;
   const GenericOperation *definition = Definition(module, value);
   if (definition == nullptr || !IsAncestor(module, loop.id, definition->id) ||
-      definition->name == "tensor.empty")
+      definition->name == "tensor.empty" ||
+      definition->name == "bufferization.to_tensor" ||
+      definition->name == "tensor.extract_slice" ||
+      definition->name == "memref.subview")
     return true;
-  if (definition->name != "tensor.extract_slice" &&
-      definition->name != "memref.subview" &&
-      definition->name != "hivm.hir.load" &&
-      definition->name != "hivm.hir.vadd") {
-    reason = "dependency axis equivalence is not explicitly modeled";
+  if (!IsSupportedProducer(*definition, LoopKind::Vector)) {
+    reason = "dependency axis equivalence is not explicitly modeled: " +
+             definition->name;
     return false;
   }
   const auto resultType = ParseStaticShapedType(typeText);
-  if (!resultType ||
-      !HasExactIdentitySemantics(*definition, resultType->shape.size(), reason))
+  if (!resultType)
     return false;
   for (size_t index = 0; index < definition->operands.size(); ++index) {
-    if (!ParseStaticShapedType(definition->operandTypes[index]))
+    const auto operandType =
+        ParseStaticShapedType(definition->operandTypes[index]);
+    if (!operandType)
+      continue;
+    std::optional<size_t> operandAxis;
+    if (axis < operandType->shape.size() &&
+        operandType->shape[axis] == extent) {
+      // Elementwise/DPS operations and the leftmost-non-unit reshape rule in
+      // the real analyzer preserve the ordered axis whenever possible.
+      operandAxis = axis;
+    } else {
+      for (size_t candidate = 0; candidate < operandType->shape.size();
+           ++candidate) {
+        if (operandType->shape[candidate] != extent)
+          continue;
+        if (!operandAxis)
+          operandAxis = candidate;
+      }
+    }
+    // Broadcast/reduction auxiliaries that do not carry the selected
+    // parallel axis are not fused for that axis by DimensionAnalyzer.
+    if (!operandAxis)
       continue;
     if (!RecordIdentityDependencyAxis(module, loop, plan,
                                       definition->operands[index],
-                                      definition->operandTypes[index], axis,
+                                      definition->operandTypes[index],
+                                      *operandAxis,
                                       extent, reason))
       return false;
   }
@@ -729,8 +1349,12 @@ inline bool CheckProvenVectorAlignment(const GenericModule &module,
         if (axis == plan.valueAxes.end())
           continue;
         const auto type = ParseStaticShapedType(types[index]);
-        if (!type || axis->second >= type->shape.size())
+        if (!type || axis->second >= type->shape.size()) {
+          reason = "alignment value " + std::to_string(values[index]) +
+                   " has incompatible type " + types[index] + " in " +
+                   operation.name;
           return false;
+        }
         ShapedType tiled = *type;
         tiled.shape[axis->second] /= static_cast<int64_t>(tripCount);
         const auto bits = StaticSizeBits(tiled);
@@ -747,7 +1371,8 @@ inline bool CheckProvenVectorAlignment(const GenericModule &module,
     };
     if (!checkValues(operation.operands, operation.operandTypes) ||
         !checkValues(operation.results, operation.resultTypes)) {
-      reason = "aligned dependency operand/result has no proven tiled type";
+      if (reason.empty())
+        reason = "aligned dependency operand/result has no proven tiled type";
       return false;
     }
   }
@@ -801,12 +1426,10 @@ inline bool AnalyzeLoop(const GenericModule &module,
     reason = "unrecognized hivm.loop_core_type";
     return false;
   }
-  if (loop.name != "scf.for") {
-    reason = "only the proven scf.for tiling form is modeled";
-    return false;
-  }
-  if (!HasUnitIterationDomain(module, loop)) {
-    reason = "the narrow exact model requires the compiler unit-trip wrapper";
+  const bool isForLoop = loop.name == "scf.for";
+  const bool isScope = loop.name == "scope.scope";
+  if (!isForLoop && !isScope) {
+    reason = "candidate is neither scf.for nor scope.scope";
     return false;
   }
   const std::vector<int> children = DirectChildren(module, loop);
@@ -816,9 +1439,22 @@ inline bool AnalyzeLoop(const GenericModule &module,
   }
   const GenericOperation &terminator =
       module.operations.at(static_cast<size_t>(children.back()));
-  if (terminator.name != "scf.yield" || !terminator.operands.empty() ||
-      !loop.results.empty()) {
-    reason = "result-carrying or malformed candidate loops are not modeled";
+  const std::string expectedTerminator =
+      isForLoop ? "scf.yield" : "scope.return";
+  if (terminator.name != expectedTerminator) {
+    reason = "candidate loop/scope has a malformed terminator";
+    return false;
+  }
+  // collectCubeLoopInfo never inspects the enclosing loop's yielded values:
+  // it only discovers Fixpipe/Mmad branches and tiles those branches in place.
+  // Consequently a result-carrying scf.for is not a special case for Cube.
+  // Vector is different: collectVectorLoopInfo deliberately turns every
+  // yielded tensor into a dummy Store and therefore needs the result-aware
+  // transformation implemented below.
+  if (*kind == LoopKind::Vector &&
+      (terminator.operands.size() != loop.results.size() ||
+       (isForLoop && loop.operands.size() < 3 + loop.results.size()))) {
+    reason = "result-carrying vector loop/scope has malformed results";
     return false;
   }
   plan.loopId = loop.id;
@@ -851,21 +1487,124 @@ inline bool AnalyzeLoop(const GenericModule &module,
     if (operation.name == anchorName)
       anchors.push_back(&operation);
   }
-  if (anchors.size() != 1) {
-    if (*kind == LoopKind::Cube && anchors.empty()) {
+  if (*kind == LoopKind::Vector) {
+    // DimensionAnalyzer::computeTilingDim scans scf.yield only when the
+    // candidate itself is scf.for.  For scope.scope it derives candidates
+    // exclusively from Store/Copy-like operations.  A result-only scope with
+    // no Store therefore leaves every returned value at tilingDim=-1 and
+    // tryCollectTilingInfoForTerminate rolls the transaction back.
+    if (isScope && anchors.empty()) {
       plan.skip = true;
       return true;
     }
-    reason = "exactly one tiling anchor is required by the narrow exact model";
+    for (const GenericOperation *anchor : anchors)
+      plan.vectorStoreAnchors.push_back(anchor->id);
+    for (size_t index = 0; index < terminator.operands.size(); ++index) {
+      const auto yieldedType =
+          ParseStaticShapedType(terminator.operandTypes[index]);
+      if (!yieldedType || yieldedType->kind != "tensor") {
+        // This is collectVectorLoopInfo's transactional failure path:
+        // tryCollectTilingInfoForTerminate rejects the value, rolls back all
+        // dummy stores, and processCandidateLoop deliberately ignores the
+        // failure.
+        plan.skip = true;
+        return true;
+      }
+      const GenericOperation *producer = TraceVectorProducer(
+          module, loop, terminator.operands[index]);
+      if (producer == nullptr || producer->results.size() != 1 ||
+          producer->resultTypes.size() != 1) {
+        plan.skip = true;
+        return true;
+      }
+      std::vector<size_t> initIndices;
+      try {
+        initIndices = DpsInitOperandIndices(
+            producer->name, producer->operands.size(), producer->properties);
+      } catch (const std::exception &) {
+        plan.skip = true;
+        return true;
+      }
+      if (initIndices.size() != 1 ||
+          initIndices.front() >= producer->operands.size()) {
+        plan.skip = true;
+        return true;
+      }
+      plan.yieldedTensors.push_back(
+          {terminator.operands[index], producer->id,
+           producer->operands[initIndices.front()], 0,
+           producer->resultTypes.front()});
+    }
+    // VectorLoopInfo records one dummy Store immediately after every traced
+    // producer and sorts all tiled operations by payload topological order
+    // before fuseLoops. Consequently, the fused loop's iter args/results are
+    // ordered by producer position, not by the original scf.yield operand
+    // number. Keep the original yielded value in each record so the outer
+    // yield is remapped back to its original position after tiling.
+    std::stable_sort(
+        plan.yieldedTensors.begin(), plan.yieldedTensors.end(),
+        [&](const LoopPlan::YieldedTensor &lhs,
+            const LoopPlan::YieldedTensor &rhs) {
+          const GenericOperation &lhsProducer = module.operations.at(
+              static_cast<size_t>(lhs.producerId));
+          const GenericOperation &rhsProducer = module.operations.at(
+              static_cast<size_t>(rhs.producerId));
+          if (lhsProducer.blockId != rhsProducer.blockId)
+            return lhs.producerId < rhs.producerId;
+          return lhsProducer.ordinal < rhsProducer.ordinal;
+        });
+  }
+  if (anchors.empty()) {
+    if (*kind == LoopKind::Cube) {
+      plan.skip = true;
+      return true;
+    }
+    if (plan.yieldedTensors.empty()) {
+      plan.skip = true;
+      return true;
+    }
+  }
+  if (*kind == LoopKind::Cube && !hasCubeOverride) {
+    // TileCubeVectorLoop.cpp::collectCubeLoopInfo calls
+    // canFitBranchInBuffer before grouping branches or calculating their
+    // tiling axes. Preserve that ordering: small result-carrying and
+    // multi-Fixpipe loops are successful no-ops even when DimensionAnalyzer
+    // would not later be able to form a group.
+    int64_t totalDestinationBits = 0;
+    bool allStatic = true;
+    for (const GenericOperation *anchor : anchors) {
+      if (anchor->operandTypes.size() < 2) {
+        allStatic = false;
+        break;
+      }
+      const auto destination = ParseStaticShapedType(anchor->operandTypes[1]);
+      const auto bits = destination ? StaticSizeBits(*destination)
+                                    : std::nullopt;
+      if (!bits || totalDestinationBits >
+                       std::numeric_limits<int64_t>::max() - *bits) {
+        allStatic = false;
+        break;
+      }
+      totalDestinationBits += *bits;
+    }
+    if (allStatic && totalDestinationBits <= spec.l0cSizeBits) {
+      plan.skip = true;
+      return true;
+    }
+  }
+  if (*kind == LoopKind::Cube && anchors.size() != 1) {
+    reason = "multiple Cube branches require real axis grouping";
     return false;
   }
-  if (anchors.front()->operandTypes.empty()) {
+  if (!anchors.empty() && anchors.front()->operandTypes.empty()) {
     reason = "tiling anchor has no shaped source";
     return false;
   }
-  const auto sourceType =
-      ParseStaticShapedType(anchors.front()->operandTypes.front());
-  if (!sourceType || sourceType->shape.size() != 2) {
+  const auto sourceType = ParseStaticShapedType(
+      !anchors.empty() ? anchors.front()->operandTypes.front()
+                       : plan.yieldedTensors.front().type);
+  if (!sourceType ||
+      (*kind == LoopKind::Cube && sourceType->shape.size() != 2)) {
     reason = "DimensionAnalyzer tiling axis is not uniquely provable";
     return false;
   }
@@ -881,59 +1620,141 @@ inline bool AnalyzeLoop(const GenericModule &module,
       return false;
     }
     plan.extent = sourceType->shape[*axis];
-    if (!HasExactIdentitySemantics(*anchors.front(), sourceType->shape.size(),
-                                   reason))
-      return false;
     if (plan.extent % static_cast<int64_t>(plan.tripCount) != 0) {
       reason = "non-divisible tiling requires a dynamic remainder model";
       return false;
     }
-    if (!CollectProducerClosure(module, loop, anchors.front()->operands.front(),
-                                *kind, plan.producerClosure, reason))
-      return false;
-    const GenericOperation *vectorProducer =
-        Definition(module, anchors.front()->operands.front());
-    if (vectorProducer == nullptr ||
-        (vectorProducer->name != "hivm.hir.load" &&
-         vectorProducer->name != "hivm.hir.vadd")) {
-      reason = "shape-only Vector axis lacks HIVM structured semantic evidence";
-      return false;
+    for (LoopPlan::YieldedTensor &yielded : plan.yieldedTensors) {
+      const auto type = ParseStaticShapedType(yielded.type);
+      if (!type) {
+        plan.skip = true;
+        return true;
+      }
+      std::optional<size_t> yieldedAxis;
+      if (*axis < type->shape.size() && type->shape[*axis] == plan.extent) {
+        yieldedAxis = *axis;
+      } else {
+        for (size_t candidate = 0; candidate < type->shape.size(); ++candidate)
+          if (type->shape[candidate] == plan.extent) {
+            if (yieldedAxis) {
+              plan.skip = true;
+              return true;
+            }
+            yieldedAxis = candidate;
+          }
+      }
+      if (!yieldedAxis) {
+        plan.skip = true;
+        return true;
+      }
+      yielded.axis = *yieldedAxis;
+      const GenericOperation &producer =
+          module.operations.at(static_cast<size_t>(yielded.producerId));
+      if (!CollectProducerClosure(module, loop, producer.results.front(),
+                                  *kind, plan.producerClosure, reason) ||
+          !RecordIdentityDependencyAxis(
+              module, loop, plan, producer.results.front(),
+              producer.resultTypes.front(), yielded.axis, plan.extent,
+              reason))
+        return false;
+      plan.producerClosure.insert(producer.id);
     }
-    plan.producerClosure.insert(anchors.front()->id);
-    if (!RecordIdentityDependencyAxis(
-            module, loop, plan, anchors.front()->operands.front(),
-            anchors.front()->operandTypes.front(), *axis, plan.extent, reason))
-      return false;
-    if (anchors.front()->operands.size() < 2 ||
-        anchors.front()->operandTypes.size() < 2 ||
-        !HasStaticBoundaryView(module, anchors.front()->operands[1]) ||
-        !RecordValueAxis(module, plan, anchors.front()->operands[1],
-                         anchors.front()->operandTypes[1], *axis, plan.extent,
-                         reason)) {
-      if (reason.empty())
-        reason = "store destination axis is not equivalent";
-      return false;
+    for (const GenericOperation *anchor : anchors) {
+      if (anchor->operandTypes.empty()) {
+        reason = "tiling anchor has no shaped source";
+        return false;
+      }
+      const auto currentType = ParseStaticShapedType(anchor->operandTypes[0]);
+      const auto currentAxis =
+          currentType ? UniqueParallelAxis(*currentType) : std::nullopt;
+      if (!currentType || !currentAxis || *currentAxis != *axis ||
+          currentType->shape[*currentAxis] != plan.extent) {
+        reason = "Vector stores do not share DimensionAnalyzer's selected axis";
+        return false;
+      }
+      if (!HasExactIdentitySemantics(*anchor, currentType->shape.size(),
+                                     reason) ||
+          !CollectProducerClosure(module, loop, anchor->operands.front(),
+                                  *kind, plan.producerClosure, reason))
+        return false;
+      const GenericOperation *vectorProducer =
+          Definition(module, anchor->operands.front());
+      if (vectorProducer == nullptr ||
+          !IsSupportedProducer(*vectorProducer, LoopKind::Vector)) {
+        reason =
+            "shape-only Vector axis lacks HIVM structured semantic evidence";
+        return false;
+      }
+      plan.producerClosure.insert(anchor->id);
+      if (!RecordIdentityDependencyAxis(
+              module, loop, plan, anchor->operands.front(),
+              anchor->operandTypes.front(), *axis, plan.extent, reason))
+        return false;
+      if (anchor->operands.size() < 2 || anchor->operandTypes.size() < 2 ||
+          !HasStaticBoundaryView(module, anchor->operands[1]) ||
+          !RecordValueAxis(module, plan, anchor->operands[1],
+                           anchor->operandTypes[1], *axis, plan.extent,
+                           reason, /*allowRepeatedExtent=*/true)) {
+        if (reason.empty())
+          reason = "store destination axis is not equivalent";
+        return false;
+      }
+      const int previousAlloc = plan.localDestinationAlloc;
+      if (!ClassifyDestination(module, *anchor, plan, reason))
+        return false;
+      if (previousAlloc >= 0 && plan.localDestinationAlloc != previousAlloc) {
+        reason = "multiple reusable local Store destinations are not modeled";
+        return false;
+      }
     }
-    if (!ClassifyDestination(module, *anchors.front(), plan, reason))
-      return false;
-    // The real Vector collector walks the entire candidate before deciding
-    // whether alignment causes rollback.  Do not let rollback turn an
-    // unmodeled structured producer into a silent Exact result.
+    // The real collector tags every HIVM structured op in the candidate (and
+    // reshape ops feeding one), not merely the backwards slice of a Store.
+    // Those tags are subsequently matched in reverse order by fuse_into.
     for (int descendant : Descendants(module, loop)) {
       const GenericOperation &operation =
           module.operations.at(static_cast<size_t>(descendant));
       if (!IsDirectChild(loop, operation))
         continue;
-      if (!IsAllowedBodyOperation(operation, *kind) &&
-          operation.name != "arith.constant") {
-        reason = "loop body contains an operation not modeled by the exact walk";
+      const bool reshape = operation.name == "tensor.expand_shape" ||
+                           operation.name == "tensor.collapse_shape";
+      if (!IsHIVMStructuredName(operation.name) && !reshape)
+        continue;
+      plan.producerClosure.insert(operation.id);
+      const auto recordValues = [&](const std::vector<int> &values,
+                                    const std::vector<std::string> &types) {
+        for (size_t index = 0; index < values.size(); ++index) {
+          const auto type = ParseStaticShapedType(types[index]);
+          if (!type)
+            continue;
+          std::optional<size_t> carriedAxis;
+          if (*axis < type->shape.size() &&
+              type->shape[*axis] == plan.extent) {
+            carriedAxis = *axis;
+          } else {
+            for (size_t candidate = 0; candidate < type->shape.size();
+                 ++candidate)
+              if (type->shape[candidate] == plan.extent) {
+                if (!carriedAxis)
+                  carriedAxis = candidate;
+              }
+          }
+          if (carriedAxis &&
+              !RecordValueAxis(module, plan, values[index], types[index],
+                               *carriedAxis, plan.extent, reason,
+                               /*allowRepeatedExtent=*/true))
+            return false;
+        }
+        return true;
+      };
+      if (!recordValues(operation.operands, operation.operandTypes) ||
+          !recordValues(operation.results, operation.resultTypes))
         return false;
-      }
-      if (IsHIVMStructuredName(operation.name) &&
-          plan.producerClosure.count(operation.id) == 0) {
-        reason =
-            "HIVM structured operation lies outside the proven producer closure";
-        return false;
+      for (size_t index = 0; index < operation.operands.size(); ++index) {
+        if (!ParseStaticShapedType(operation.operandTypes[index]))
+          continue;
+        if (!CollectProducerClosure(module, loop, operation.operands[index],
+                                    *kind, plan.producerClosure, reason))
+          return false;
       }
     }
     bool alignmentRollback = false;
@@ -1079,11 +1900,6 @@ inline bool AnalyzeLoop(const GenericModule &module,
         module.operations.at(static_cast<size_t>(descendant));
     if (!IsDirectChild(loop, operation))
       continue;
-    if (!IsAllowedBodyOperation(operation, *kind) &&
-        operation.name != "arith.constant") {
-      reason = "loop body contains an operation not modeled by the exact walk";
-      return false;
-    }
     if (IsHIVMStructuredName(operation.name) &&
         plan.producerClosure.count(operation.id) == 0 &&
         plan.preservedProducerClosure.count(operation.id) == 0) {
@@ -1092,6 +1908,69 @@ inline bool AnalyzeLoop(const GenericModule &module,
     }
   }
   return true;
+}
+
+inline bool ValuesAlignedAfterTiling(
+    const std::vector<int> &values, const std::vector<std::string> &types,
+    const DimensionAnalyzer &analyzer, unsigned tripCount,
+    int64_t alignmentBits) {
+  for (size_t index = 0; index < values.size() && index < types.size();
+       ++index) {
+    const int64_t tilingDim = analyzer.getTilingDim(values[index]);
+    // Preserve TileCubeVectorLoop.cpp::areValuesAlignedAfterTiling exactly:
+    // the first un-tiled value makes the whole ValueRange acceptable.
+    if (tilingDim == -1)
+      return true;
+    const auto type = ParseStaticShapedType(types[index]);
+    if (!type || type->kind != "tensor" || tilingDim < 0 ||
+        static_cast<size_t>(tilingDim) >= type->shape.size())
+      continue;
+    ShapedType tiled = *type;
+    tiled.shape[static_cast<size_t>(tilingDim)] /=
+        static_cast<int64_t>(tripCount);
+    const auto bits = StaticSizeBits(tiled);
+    if (!bits)
+      continue;
+    const int64_t actualAlignment =
+        ElementBitWidth(tiled.tail) == 1 ? 8 : alignmentBits;
+    if (*bits % actualAlignment != 0)
+      return false;
+  }
+  return true;
+}
+
+inline bool VectorCollectionEmitsDiagnostic(const GenericModule &module,
+                                            const GenericOperation &loop,
+                                            unsigned tripCount,
+                                            int64_t alignmentBits) {
+  if (tripCount == 1)
+    return false;
+  DimensionAnalyzer analyzer(module);
+  if (!analyzer.initialize())
+    return true;
+  analyzer.computeTilingDim(loop);
+  for (int operationId : Descendants(module, loop)) {
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(operationId));
+    if (operation.name == "hivm.hir.store") {
+      if (operation.operands.empty() ||
+          analyzer.getTilingDim(operation.operands.front()) == -1)
+        return true;
+      continue;
+    }
+    if (operation.name == "scf.for" &&
+        (operation.properties.find("ExtractedLoadOrStore") !=
+             std::string::npos ||
+         operation.attributes.find("ExtractedLoadOrStore") !=
+             std::string::npos))
+      return true;
+    if (!ValuesAlignedAfterTiling(operation.results, operation.resultTypes,
+                                  analyzer, tripCount, alignmentBits) ||
+        !ValuesAlignedAfterTiling(operation.operands, operation.operandTypes,
+                                  analyzer, tripCount, alignmentBits))
+      return true;
+  }
+  return false;
 }
 
 inline bool RewriteType(std::string &typeText, int64_t extent,
@@ -1124,6 +2003,61 @@ inline void UpdateMaterializedDpsOperand(GenericOperation &operation,
   values[dpsPosition] = newValue;
 }
 
+// VectorLoopInfo creates one tiled loop for every real Store and for every
+// dummy Store inserted immediately after a yielded HIVM producer. OpToTile's
+// ordering compares the payload positions of all of those roots together
+// before fuseLoops runs. The resulting payload is therefore a dependency-
+// topological schedule rooted by that combined source order; placing all real
+// Stores before all yielded producers incorrectly reorders independent
+// branches and changes the later fuse_into/CSE placement of boundary tiles.
+inline std::vector<int> VectorFusedProducerOrder(const GenericModule &module,
+                                                 const LoopPlan &plan,
+                                                 int boundaryBlock = -1) {
+  std::vector<int> ordered;
+  std::set<int> visited;
+  std::set<int> visitedBoundaryTiles;
+  std::function<void(int)> visit = [&](int operationId) {
+    if (plan.producerClosure.count(operationId) == 0 ||
+        !visited.insert(operationId).second)
+      return;
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(operationId));
+    for (int operand : operation.operands) {
+      const GenericOperation *definition = Definition(module, operand);
+      if (definition == nullptr)
+        continue;
+      if (plan.producerClosure.count(definition->id) != 0) {
+        visit(definition->id);
+      } else if (boundaryBlock >= 0 &&
+                 definition->blockId == boundaryBlock &&
+                 (definition->name == "tensor.extract_slice" ||
+                  definition->name == "memref.subview") &&
+                 visitedBoundaryTiles.insert(definition->id).second) {
+        ordered.push_back(definition->id);
+      }
+    }
+    ordered.push_back(operationId);
+  };
+  std::vector<int> tiledRoots = plan.vectorStoreAnchors;
+  for (const LoopPlan::YieldedTensor &yielded : plan.yieldedTensors)
+    tiledRoots.push_back(yielded.producerId);
+  std::stable_sort(tiledRoots.begin(), tiledRoots.end(),
+                   [&](int lhs, int rhs) {
+                     const GenericOperation &lhsOperation =
+                         module.operations.at(static_cast<size_t>(lhs));
+                     const GenericOperation &rhsOperation =
+                         module.operations.at(static_cast<size_t>(rhs));
+                     if (lhsOperation.blockId != rhsOperation.blockId)
+                       return lhsOperation.id < rhsOperation.id;
+                     return lhsOperation.ordinal < rhsOperation.ordinal;
+                   });
+  for (int root : tiledRoots)
+    visit(root);
+  for (int operationId : plan.producerClosure)
+    visit(operationId);
+  return ordered;
+}
+
 inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
   const GenericOperation snapshot =
       module.operations.at(static_cast<size_t>(plan.loopId));
@@ -1138,30 +2072,46 @@ inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
   const int terminator = children.back();
 
   GenericRewriter rewriter(module);
-  const int zero = rewriter.createOperation(
-      plan.loopId, outerRegion, outerBlock, "arith.constant", {"index"}, {}, {},
-      "", "{value = 0 : index}");
-  const int upper = rewriter.createOperation(
-      plan.loopId, outerRegion, outerBlock, "arith.constant", {"index"}, {}, {},
-      "", "{value = " + std::to_string(plan.tripCount) + " : index}");
-  const int step = rewriter.createOperation(
-      plan.loopId, outerRegion, outerBlock, "arith.constant", {"index"}, {}, {},
-      "", "{value = 1 : index}");
+  std::vector<int> createdConstants;
+  auto getOrCreateIndexConstant = [&](int64_t literal) {
+    const std::string text = std::to_string(literal);
+    if (const std::optional<int> existing =
+            FindArithConstantValue(module, outerBlock, "index", text))
+      return *existing;
+    const int operation = rewriter.createOperation(
+        plan.loopId, outerRegion, outerBlock, "arith.constant", {"index"}, {},
+        {}, "", "{value = " + text + " : index}");
+    createdConstants.push_back(operation);
+    return module.operations.at(static_cast<size_t>(operation)).results.front();
+  };
+  // transform.structured.tile_using_for emits the actual tile offset as the
+  // induction variable: [0, extent) with step=tileSize.  The old bridge used
+  // [0, tripCount) step 1 plus an affine multiply, which introduced an extra
+  // SSA operation and changed slice/insert liveness.
+  const int zeroValue = getOrCreateIndexConstant(0);
+  const int upperValue = getOrCreateIndexConstant(plan.extent);
+  const int stepValue = getOrCreateIndexConstant(tileSize);
+  std::vector<int> innerOperands = {zeroValue, upperValue, stepValue};
+  std::vector<std::string> innerOperandTypes = {"index", "index", "index"};
+  std::vector<std::string> innerResultTypes;
+  for (const LoopPlan::YieldedTensor &yielded : plan.yieldedTensors) {
+    innerOperands.push_back(yielded.originalInit);
+    innerOperandTypes.push_back(yielded.type);
+    innerResultTypes.push_back(yielded.type);
+  }
   const int innerLoop = rewriter.createOperation(
-      plan.loopId, outerRegion, outerBlock, "scf.for", {},
-      {module.operations.at(static_cast<size_t>(zero)).results.front(),
-       module.operations.at(static_cast<size_t>(upper)).results.front(),
-       module.operations.at(static_cast<size_t>(step)).results.front()},
-      {"index", "index", "index"});
+      plan.loopId, outerRegion, outerBlock, "scf.for", innerResultTypes,
+      innerOperands, innerOperandTypes);
   const int innerRegion = rewriter.createRegion(innerLoop);
-  const int innerBlock = rewriter.createBlock(innerRegion, {"index"});
+  std::vector<std::string> innerBlockTypes = {"index"};
+  innerBlockTypes.insert(innerBlockTypes.end(), innerResultTypes.begin(),
+                         innerResultTypes.end());
+  const int innerBlock = rewriter.createBlock(innerRegion, innerBlockTypes);
   const int innerIV =
       module.blocks.at(static_cast<size_t>(innerBlock)).arguments.front();
-  const int offset = rewriter.createOperation(
-      innerLoop, innerRegion, innerBlock, "affine.apply", {"index"}, {innerIV},
-      {"index"}, "", "{map = affine_map<(d0) -> (d0 * " +
-                              std::to_string(tileSize) + ")>}");
-  rewriter.appendToBlock(innerBlock, offset);
+  const std::vector<int> &innerBlockArguments =
+      module.blocks.at(static_cast<size_t>(innerBlock)).arguments;
+  const int offsetValue = innerIV;
 
   if (plan.kind == LoopKind::Cube) {
     if (plan.cubeMmadId < 0)
@@ -1184,8 +2134,7 @@ inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
         innerLoop, innerRegion, innerBlock, "affine.min", {"index"},
         {innerIV},
         {"index"},
-        "{map = affine_map<(d0) -> (-" + std::to_string(tileSize) +
-            "*d0 + " +
+        "{map = affine_map<(d0) -> (-d0 + " +
             std::to_string(plan.extent) + ", " +
             std::to_string(tileSize) + ")>}",
         "");
@@ -1235,9 +2184,22 @@ inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
     moved.regionId = innerRegion;
     moved.blockId = innerBlock;
   }
-  const int innerYield = rewriter.createOperation(
-      innerLoop, innerRegion, innerBlock, "scf.yield", {});
-  rewriter.appendToBlock(innerBlock, innerYield);
+
+  if (plan.kind == LoopKind::Vector) {
+    const std::vector<int> fusedOrder =
+        VectorFusedProducerOrder(module, plan);
+    GenericBlock &body = module.blocks.at(static_cast<size_t>(innerBlock));
+    std::vector<int> reordered;
+    reordered.reserve(body.operations.size());
+    for (int operationId : body.operations)
+      if (plan.producerClosure.count(operationId) == 0)
+        reordered.push_back(operationId);
+    reordered.insert(reordered.end(), fusedOrder.begin(), fusedOrder.end());
+    body.operations = std::move(reordered);
+    for (size_t ordinal = 0; ordinal < body.operations.size(); ++ordinal)
+      module.operations.at(static_cast<size_t>(body.operations[ordinal]))
+          .ordinal = static_cast<int>(ordinal);
+  }
 
   const auto &outerOperations =
       module.blocks.at(static_cast<size_t>(outerBlock)).operations;
@@ -1245,13 +2207,47 @@ inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
       std::find(outerOperations.begin(), outerOperations.end(), terminator);
   size_t position =
       static_cast<size_t>(std::distance(outerOperations.begin(), found));
-  rewriter.insertToBlock(outerBlock, position++, zero);
-  rewriter.insertToBlock(outerBlock, position++, upper);
-  rewriter.insertToBlock(outerBlock, position++, step);
+  for (int constant : createdConstants)
+    rewriter.insertToBlock(outerBlock, position++, constant);
   rewriter.insertToBlock(outerBlock, position, innerLoop);
 
-  std::map<int, int> boundaryTiles;
-  for (int operationId : affected) {
+  std::map<std::pair<int, int>, int> boundaryTiles;
+  // Keep boundary construction in the already validated fused payload order.
+  // The real reverse producer order is used below only to assign placement
+  // ownership; changing construction order also changes OperationFolder/CSE
+  // and therefore the resulting UB buffers.
+  const std::vector<int> scheduledInnerOperations =
+      module.blocks.at(static_cast<size_t>(innerBlock)).operations;
+  auto firstConsumerSharesLoadDestination =
+      [&](const GenericOperation &load, int destination) {
+        if (load.results.empty())
+          return false;
+        const auto loadPosition = std::find(scheduledInnerOperations.begin(),
+                                            scheduledInnerOperations.end(),
+                                            load.id);
+        if (loadPosition == scheduledInnerOperations.end())
+          return false;
+        for (auto iterator = std::next(loadPosition);
+             iterator != scheduledInnerOperations.end(); ++iterator) {
+          const GenericOperation &consumer =
+              module.operations.at(static_cast<size_t>(*iterator));
+          if (affected.count(consumer.id) == 0 ||
+              std::find(consumer.operands.begin(), consumer.operands.end(),
+                        load.results.front()) == consumer.operands.end())
+            continue;
+          const std::vector<size_t> initIndices = DpsInitOperandIndices(
+              consumer.name, consumer.operands.size(), consumer.properties);
+          return std::any_of(
+              initIndices.begin(), initIndices.end(), [&](size_t index) {
+                return index < consumer.operands.size() &&
+                       consumer.operands[index] == destination;
+              });
+        }
+        return false;
+      };
+  for (int operationId : scheduledInnerOperations) {
+    if (affected.count(operationId) == 0)
+      continue;
     GenericOperation &operation =
         module.operations.at(static_cast<size_t>(operationId));
     if (operation.blockId != innerBlock ||
@@ -1269,9 +2265,35 @@ inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
       const GenericOperation *definition = Definition(module, original);
       if (definition != nullptr && affected.count(definition->id) != 0)
         continue;
+      const std::vector<size_t> initIndices = DpsInitOperandIndices(
+          operation.name, operation.operands.size(), operation.properties);
+      const bool isDpsInit =
+          std::find(initIndices.begin(), initIndices.end(), index) !=
+          initIndices.end();
+      int yieldedIterArg = -1;
+      for (size_t yieldedIndex = 0;
+           yieldedIndex < plan.yieldedTensors.size(); ++yieldedIndex) {
+        const LoopPlan::YieldedTensor &yielded =
+            plan.yieldedTensors[yieldedIndex];
+        if (yielded.producerId == operation.id &&
+            yielded.originalInit == original) {
+          yieldedIterArg = innerBlockArguments[yieldedIndex + 1];
+          break;
+        }
+      }
+      // OpBuilder::clone does not rewrite arbitrary captures of a loop init.
+      // In particular, intermediate DPS destinations keep using the captured
+      // tensor.empty. The final yielded producer is the explicit loop-carried
+      // destination and therefore uses the corresponding iter_arg.
+      const int sliceBase =
+          isDpsInit && yieldedIterArg >= 0 ? yieldedIterArg : original;
       int tiledValue = -1;
-      const auto cached = boundaryTiles.find(original);
-      if (cached != boundaryTiles.end()) {
+      const auto cacheKey = std::make_pair(original, sliceBase);
+      const bool distinctLoadDestinationTile =
+          operation.name == "hivm.hir.load" && isDpsInit &&
+          firstConsumerSharesLoadDestination(operation, original);
+      const auto cached = boundaryTiles.find(cacheKey);
+      if (!distinctLoadDestinationTile && cached != boundaryTiles.end()) {
         tiledValue = cached->second;
       } else {
         auto type = ParseStaticShapedType(originalType);
@@ -1284,17 +2306,20 @@ inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
         sizes[axisEntry->second] = tileSize;
         ShapedType tiledType = *type;
         tiledType.shape[axisEntry->second] = tileSize;
-        const std::string resultType = PrintShapedType(tiledType);
+        std::string resultType = PrintShapedType(tiledType);
+        if (type->kind == "memref")
+          resultType = TileAddDynamicOffset(std::move(resultType));
         const std::string sliceName =
             type->kind == "memref" ? "memref.subview" : "tensor.extract_slice";
         const int slice = rewriter.createOperation(
             innerLoop, innerRegion, innerBlock, sliceName, {resultType},
-            {original,
-             module.operations.at(static_cast<size_t>(offset)).results.front()},
-            {originalType, "index"}, "",
-            "{static_offsets = " + PrintIntegerArray(offsets) +
+            {sliceBase, offsetValue},
+            {originalType, "index"},
+            "{operandSegmentSizes = array<i32: 1, 1, 0, 0>, "
+            "static_offsets = " + PrintIntegerArray(offsets) +
                 ", static_sizes = " + PrintIntegerArray(sizes) +
-                ", static_strides = " + PrintIntegerArray(strides) + "}");
+                ", static_strides = " + PrintIntegerArray(strides) + "}",
+            "{}");
         const auto &innerOperations =
             module.blocks.at(static_cast<size_t>(innerBlock)).operations;
         const auto before =
@@ -1305,7 +2330,8 @@ inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
             slice);
         tiledValue =
             module.operations.at(static_cast<size_t>(slice)).results.front();
-        boundaryTiles[original] = tiledValue;
+        if (!distinctLoadDestinationTile)
+          boundaryTiles[cacheKey] = tiledValue;
       }
       GenericOperation &updated =
           module.operations.at(static_cast<size_t>(operationId));
@@ -1313,7 +2339,33 @@ inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
       updated.operands[index] = tiledValue;
       RewriteType(updated.operandTypes[index], plan.extent, tileSize,
                   axisEntry->second);
+      if (const GenericOperation *slice = Definition(module, tiledValue);
+          slice != nullptr && !slice->resultTypes.empty())
+        updated.operandTypes[index] = slice->resultTypes.front();
     }
+  }
+
+  if (plan.kind == LoopKind::Vector) {
+    // The first producer ordering establishes the fused payload.  Boundary
+    // tiles do not exist yet at that point.  Rebuild the same order after
+    // materialization so the external operand tiles occupy the positions
+    // chosen by ExtendedFuseIntoContainingOp instead of being grouped ahead
+    // of every producer merely because they are outside producerClosure.
+    const std::vector<int> fusedOrder =
+        VectorFusedProducerOrder(module, plan, innerBlock);
+    const std::set<int> scheduled(fusedOrder.begin(), fusedOrder.end());
+    GenericBlock &body = module.blocks.at(static_cast<size_t>(innerBlock));
+    std::vector<int> reordered;
+    reordered.reserve(body.operations.size());
+    for (int operationId : body.operations)
+      if (plan.producerClosure.count(operationId) == 0 &&
+          scheduled.count(operationId) == 0)
+        reordered.push_back(operationId);
+    reordered.insert(reordered.end(), fusedOrder.begin(), fusedOrder.end());
+    body.operations = std::move(reordered);
+    for (size_t ordinal = 0; ordinal < body.operations.size(); ++ordinal)
+      module.operations.at(static_cast<size_t>(body.operations[ordinal]))
+          .ordinal = static_cast<int>(ordinal);
   }
 
   for (GenericOperation &operation : module.operations) {
@@ -1335,8 +2387,17 @@ inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
                     axis->second);
     }
     if (operation.name != "tensor.extract_slice" &&
-        operation.name != "memref.subview")
+        operation.name != "memref.subview") {
+      if (operation.name == "tensor.expand_shape" &&
+          !operation.resultTypes.empty()) {
+        const auto expanded = ParseStaticShapedType(operation.resultTypes.front());
+        if (expanded)
+          SetTileOperationDictionaryValue(
+              operation, "static_output_shape",
+              PrintIntegerArray(expanded->shape));
+      }
       continue;
+    }
     auto sizes = ParseIntegerArray(
         IRDictionaryValue(operation.attributes, "static_sizes"));
     auto offsets = ParseIntegerArray(
@@ -1355,13 +2416,97 @@ inline void ApplyTiling(GenericModule &module, const LoopPlan &plan) {
       throw std::runtime_error("slice/subview does not match proven static form");
     sizes[axis] = tileSize;
     offsets[axis] = std::numeric_limits<int64_t>::min();
-    operation.operands.push_back(
-        module.operations.at(static_cast<size_t>(offset)).results.front());
+    operation.operands.push_back(offsetValue);
     operation.operandTypes.push_back("index");
     operation.attributes = SetDictionaryValue(
         operation.attributes, "static_sizes", PrintIntegerArray(sizes));
     operation.attributes = SetDictionaryValue(
         operation.attributes, "static_offsets", PrintIntegerArray(offsets));
+  }
+
+  std::vector<int> innerYieldValues;
+  for (size_t index = 0; index < plan.yieldedTensors.size(); ++index) {
+    const LoopPlan::YieldedTensor &yielded = plan.yieldedTensors[index];
+    const GenericOperation producer =
+        module.operations.at(static_cast<size_t>(yielded.producerId));
+    if (producer.results.size() != 1)
+      throw std::runtime_error("yielded HIVM producer no longer has one result");
+    const auto fullType = ParseStaticShapedType(yielded.type);
+    if (!fullType || yielded.axis >= fullType->shape.size())
+      throw std::runtime_error("yielded tensor has no tiled axis");
+    std::vector<int64_t> offsets(fullType->shape.size(), 0);
+    std::vector<int64_t> sizes = fullType->shape;
+    std::vector<int64_t> strides(fullType->shape.size(), 1);
+    offsets[yielded.axis] = std::numeric_limits<int64_t>::min();
+    sizes[yielded.axis] = tileSize;
+    const int insert = rewriter.createOperation(
+        innerLoop, innerRegion, innerBlock, "tensor.insert_slice",
+        {yielded.type},
+        {producer.results.front(), innerBlockArguments[index + 1],
+         offsetValue},
+        {producer.resultTypes.front(), yielded.type, "index"},
+        "{operandSegmentSizes = array<i32: 1, 1, 1, 0, 0>, "
+        "static_offsets = " + PrintIntegerArray(offsets) +
+            ", static_sizes = " + PrintIntegerArray(sizes) +
+            ", static_strides = " + PrintIntegerArray(strides) + "}",
+        "{}");
+    ApplyOperationSemantics(
+        module.operations.at(static_cast<size_t>(insert)));
+    // Each dummy Store's tiled loop carries this insert immediately after its
+    // HIVM producer.  Fusing sibling loops preserves those relative positions;
+    // RemoveDummyStore removes only the dummy Store itself.
+    const auto &innerOperations =
+        module.blocks.at(static_cast<size_t>(innerBlock)).operations;
+    const auto producerPosition =
+        std::find(innerOperations.begin(), innerOperations.end(), producer.id);
+    if (producerPosition == innerOperations.end())
+      throw std::runtime_error("yielded producer is absent from tiled loop");
+    rewriter.insertToBlock(
+        innerBlock,
+        static_cast<size_t>(std::distance(innerOperations.begin(),
+                                          producerPosition)) +
+            1,
+        insert);
+    innerYieldValues.push_back(
+        module.operations.at(static_cast<size_t>(insert)).results.front());
+  }
+  const int innerYield = rewriter.createOperation(
+      innerLoop, innerRegion, innerBlock, "scf.yield", {}, innerYieldValues,
+      innerResultTypes);
+  rewriter.appendToBlock(innerBlock, innerYield);
+
+  const GenericOperation &finishedInnerLoop =
+      module.operations.at(static_cast<size_t>(innerLoop));
+  std::set<int> externalConsumers;
+  for (size_t resultIndex = 0; resultIndex < plan.yieldedTensors.size();
+       ++resultIndex) {
+    const GenericOperation &producer = module.operations.at(
+        static_cast<size_t>(plan.yieldedTensors[resultIndex].producerId));
+    const int oldResult = producer.results.front();
+    const int newResult = finishedInnerLoop.results[resultIndex];
+    for (GenericOperation &operation : module.operations) {
+      if (operation.blockId == innerBlock)
+        continue;
+      for (size_t operandIndex = 0; operandIndex < operation.operands.size();
+           ++operandIndex) {
+        if (operation.operands[operandIndex] != oldResult)
+          continue;
+        rewriter.replaceOperand(operation.id, operandIndex, newResult);
+        for (int &value : operation.dpsInputs)
+          if (value == oldResult)
+            value = newResult;
+        for (int &value : operation.dpsInits)
+          if (value == oldResult)
+            value = newResult;
+        externalConsumers.insert(operation.id);
+      }
+    }
+  }
+  for (int consumer : externalConsumers) {
+    GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(consumer));
+    if (operation.blockId == outerBlock && operation.id != terminator)
+      MoveOperationBefore(module, operation.id, terminator);
   }
 }
 
@@ -1453,6 +2598,28 @@ inline StageResult RunTileCubeVectorLoop(GenericModule module,
     AddDiagnostic(result, -1, "", "trip count must be greater than zero");
     return result;
   }
+  // TileCubeVectorLoopPass returns before its LiftToTensor greedy rewrite
+  // unless the module contains an scf.for/scope.scope carrying
+  // hivm.loop_core_type.  Running the preprocessing unconditionally rewrites
+  // ordinary memref loads even when CV/workspace management is disabled.
+  const bool hasPipelinedLoops = std::any_of(
+      module.operations.begin(), module.operations.end(),
+      [](const GenericOperation &operation) {
+        return (operation.name == "scf.for" ||
+                operation.name == "scope.scope") &&
+               HasLoopCoreAttribute(operation);
+      });
+  if (!hasPipelinedLoops)
+    return result;
+  try {
+    module = LiftMemRefLoadsInLoop(std::move(module));
+    module = CanonicalizeTileGreedyArtifacts(std::move(module));
+    result.module = module;
+  } catch (const std::exception &error) {
+    AddDiagnostic(result, -1, "",
+                  std::string("liftMemRefLoadsInLoop failed: ") + error.what());
+    return result;
+  }
   std::vector<int> candidates;
   for (const GenericOperation &operation : module.operations)
     if (HasLoopCoreAttribute(operation))
@@ -1462,11 +2629,6 @@ inline StageResult RunTileCubeVectorLoop(GenericModule module,
   const auto spec = ReadTargetSpec(module);
   if (!spec) {
     AddDiagnostic(result, -1, "", "required NPU target spec is missing");
-    return result;
-  }
-  if (HasUnmodeledLiftPattern(module)) {
-    AddDiagnostic(result, -1, "",
-                  "liftMemRefLoadsInLoop preprocessing would change the module");
     return result;
   }
   if (HasUnmodeledDynamicShrink(module)) {
@@ -1489,12 +2651,29 @@ inline StageResult RunTileCubeVectorLoop(GenericModule module,
   for (int candidate : candidates) {
     const GenericOperation &loop =
         module.operations.at(static_cast<size_t>(candidate));
+    // Preload scopes use the real DimensionAnalyzer collector directly.  The
+    // scf.for path below already carries a stricter, transformation-oriented
+    // proof model; replacing that proof with this collection-only check would
+    // incorrectly turn otherwise exact loop plans into diagnostics.
+    if (loop.name == "scope.scope" &&
+        CoreLoopKind(loop) == LoopKind::Vector &&
+        VectorCollectionEmitsDiagnostic(module, loop, vectorTripCount,
+                                        spec->ubAlignBits)) {
+      AddDiagnostic(result, candidate, loop.name,
+                    "Failed to collect vector loop tiling info");
+      return result;
+    }
     LoopPlan plan;
     std::string reason;
     if (!AnalyzeLoop(module, loop, *spec, vectorTripCount, cubeTripCount, plan,
                      reason)) {
-      AddDiagnostic(result, loop.id, loop.name, reason);
-      return result;
+      // collectLoopInfo deliberately ignores the LogicalResult returned by
+      // collectVectorLoopInfo/collectCubeLoopInfo.  A rejected candidate may
+      // emit an MLIR diagnostic, but it is not added to loopsToTile and the
+      // pass continues successfully with the original loop.  Mirror that
+      // behavior here instead of turning an unsupported/rejected candidate
+      // into a model-wide blocker (notably scope.scope in preload mode).
+      continue;
     }
     plans.push_back(plan);
   }
@@ -1502,8 +2681,21 @@ inline StageResult RunTileCubeVectorLoop(GenericModule module,
   try {
     GenericModule transformed = module;
     for (const LoopPlan &plan : plans)
-      if (!plan.skip)
+      if (!plan.skip) {
         ApplyTiling(transformed, plan);
+        // ApplyTiling intentionally leaves erased rewrite intermediates as
+        // detached tombstones until the pass-wide canonicalize/compact step
+        // below.  Validate only the compacted result: the strict validator's
+        // every-operation-must-have-one-parent invariant is not meaningful in
+        // the middle of that transaction.
+      }
+    // Vector fusion runs cleanup before each producer is fused, not after the
+    // final producer. Producers are fused in reverse order, so the final Load
+    // owns a fresh destination tile while earlier fused producers have already
+    // shared their equivalent tiles. Do not let this pass-wide cleanup perform
+    // an extra, source-absent CSE of that final Load destination.
+    transformed = CanonicalizeTileGreedyArtifacts(
+        std::move(transformed), /*preserveLoadOwnedDestinationTiles=*/true);
     ShrinkAllocWholeModule(transformed);
     transformed = CompactGenericModule(std::move(transformed));
     ValidateGenericModule(transformed);

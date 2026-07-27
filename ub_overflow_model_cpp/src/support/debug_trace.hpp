@@ -12,6 +12,7 @@
 #include <ostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -20,6 +21,12 @@ namespace cvub {
 
 class DebugTrace {
 public:
+  struct RuntimeTimingRecord {
+    std::string name;
+    size_t occurrence = 0;
+    uint64_t nanoseconds = 0;
+  };
+
   DebugTrace(std::ostream &output,
              std::filesystem::path artifactDirectory = {},
              bool emitDebug = true, bool emitRuntimeTiming = false,
@@ -51,7 +58,7 @@ public:
 
   template <typename Callable>
   std::invoke_result_t<Callable &&>
-  Measure(const std::string &stageName, Callable &&callable) {
+  Measure(std::string_view stageName, Callable &&callable) {
     if (!emitRuntimeTiming_)
       return std::forward<Callable>(callable)();
     const auto started = Clock::now();
@@ -74,6 +81,9 @@ public:
 
   bool RuntimeTimingEnabled() const { return emitRuntimeTiming_; }
   bool VerifyEachPass() const { return verifyEachPass_; }
+  const std::vector<RuntimeTimingRecord> &RuntimeTimings() const {
+    return runtimeTimings_;
+  }
 
   template <typename Duration>
   void PrintRuntimeTiming(Duration total) {
@@ -90,12 +100,6 @@ public:
 private:
   using Clock = std::chrono::steady_clock;
 
-  struct RuntimeTimingRecord {
-    std::string name;
-    size_t occurrence = 0;
-    uint64_t nanoseconds = 0;
-  };
-
   template <typename Duration> static uint64_t ToNanoseconds(Duration value) {
     const auto nanoseconds =
         std::chrono::duration_cast<std::chrono::nanoseconds>(value).count();
@@ -103,9 +107,11 @@ private:
   }
 
   template <typename Duration>
-  void RecordTiming(const std::string &stageName, Duration duration) {
+  void RecordTiming(std::string_view stageName, Duration duration) {
+    std::string ownedName(stageName);
+    const size_t occurrence = ++timingOccurrences_[ownedName];
     runtimeTimings_.push_back(
-        {stageName, ++timingOccurrences_[stageName], ToNanoseconds(duration)});
+        {std::move(ownedName), occurrence, ToNanoseconds(duration)});
   }
 
   void WriteArtifact(const std::string &passName,
@@ -154,7 +160,7 @@ private:
 
 template <typename Callable>
 std::invoke_result_t<Callable &&>
-MeasureStage(DebugTrace *trace, const std::string &stageName,
+MeasureStage(DebugTrace *trace, std::string_view stageName,
              Callable &&callable) {
   if (trace)
     return trace->Measure(stageName, std::forward<Callable>(callable));

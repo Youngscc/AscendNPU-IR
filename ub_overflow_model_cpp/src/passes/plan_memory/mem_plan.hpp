@@ -914,7 +914,10 @@ inline std::map<std::string, std::vector<uint64_t>> UpdateBuffer2Offsets(
 
 inline PlanMemoryModelResult PlanLocalMemoryImpl(
     const PlanMemoryInput &input, bool restrictInplaceAsISA,
-    std::optional<uint32_t> randomSeed, DebugTrace *trace = nullptr) {
+    std::optional<uint32_t> randomSeed, DebugTrace *trace = nullptr,
+    uint64_t capacityBits = kUBCapacityBits) {
+  if (capacityBits == 0)
+    throw std::runtime_error("PlanMemory UB capacity must be positive");
   std::vector<BufferInfoRecord> bufferInfos = MeasureStage(
       trace, "PlanMemory.PrepareBufferInfos",
       [&] { return BuildBufferInfos(input); });
@@ -963,12 +966,12 @@ inline PlanMemoryModelResult PlanLocalMemoryImpl(
     bool success = false;
     ResetMemPlanState(planState);
     MeasureStage(trace, "PlanMemory.PlanAddress", [&] {
-      if (noReuseBits <= kUBCapacityBits) {
+      if (noReuseBits <= capacityBits) {
         requiredBits = PlanBuffersWithoutReuse(entries, 256);
         success = true;
       } else {
         success = PlanMemAddressOfWholeLocalBuffer(
-            entries, kUBCapacityBits, 256, requiredBits, planState,
+            entries, capacityBits, 256, requiredBits, planState,
             liveness.inplacableBufferPairs);
       }
     });
@@ -990,7 +993,7 @@ inline PlanMemoryModelResult PlanLocalMemoryImpl(
           materialized.selectedSeed = attempt;
           materialized.requiredBits = requiredBits;
           materialized.peakBits = requiredBits;
-          materialized.capacityBits = kUBCapacityBits;
+          materialized.capacityBits = capacityBits;
           materialized.inplacePairs = liveness.inplacePairList;
           materialized.multiBufferNums = liveness.buffer2MultiNum;
           std::unordered_map<std::string, LifetimeRecord> lifeByName;
@@ -1041,42 +1044,49 @@ inline PlanMemoryModelResult PlanLocalMemoryImpl(
 
 inline PlanMemoryModelResult PlanLocalMemoryImpl(
     const fs::path &beforeIR, bool restrictInplaceAsISA,
-    std::optional<uint32_t> randomSeed, DebugTrace *trace = nullptr) {
+    std::optional<uint32_t> randomSeed, DebugTrace *trace = nullptr,
+    uint64_t capacityBits = kUBCapacityBits) {
   if (!fs::exists(beforeIR) || !fs::is_regular_file(beforeIR))
     throw std::runtime_error("PlanMemory-before IR does not exist: " +
                              beforeIR.string());
   return PlanLocalMemoryImpl(ParsePlanMemoryInput(beforeIR, "AIV"),
-                             restrictInplaceAsISA, randomSeed, trace);
+                             restrictInplaceAsISA, randomSeed, trace,
+                             capacityBits);
 }
 
 inline PlanMemoryModelResult
 PlanLocalMemory(const fs::path &beforeIR, bool restrictInplaceAsISA = false,
-                DebugTrace *trace = nullptr) {
+                DebugTrace *trace = nullptr,
+                uint64_t capacityBits = kUBCapacityBits) {
   return PlanLocalMemoryImpl(beforeIR, restrictInplaceAsISA, std::nullopt,
-                             trace);
+                             trace, capacityBits);
 }
 
 inline PlanMemoryModelResult
 PlanLocalMemoryForSeed(const fs::path &beforeIR, uint32_t randomSeed,
                        bool restrictInplaceAsISA = false,
-                       DebugTrace *trace = nullptr) {
+                       DebugTrace *trace = nullptr,
+                       uint64_t capacityBits = kUBCapacityBits) {
   return PlanLocalMemoryImpl(beforeIR, restrictInplaceAsISA, randomSeed,
-                             trace);
+                             trace, capacityBits);
 }
 
 inline PlanMemoryModelResult
 PlanLocalMemory(const PlanMemoryInput &input,
                 bool restrictInplaceAsISA = false,
-                DebugTrace *trace = nullptr) {
+                DebugTrace *trace = nullptr,
+                uint64_t capacityBits = kUBCapacityBits) {
   return PlanLocalMemoryImpl(input, restrictInplaceAsISA, std::nullopt,
-                             trace);
+                             trace, capacityBits);
 }
 
 inline PlanMemoryModelResult
 PlanLocalMemoryForSeed(const PlanMemoryInput &input, uint32_t randomSeed,
                        bool restrictInplaceAsISA = false,
-                       DebugTrace *trace = nullptr) {
-  return PlanLocalMemoryImpl(input, restrictInplaceAsISA, randomSeed, trace);
+                       DebugTrace *trace = nullptr,
+                       uint64_t capacityBits = kUBCapacityBits) {
+  return PlanLocalMemoryImpl(input, restrictInplaceAsISA, randomSeed, trace,
+                             capacityBits);
 }
 
 

@@ -8,6 +8,9 @@
 #include "plan_memory_input_semantic_ir.hpp"
 #include "../passes/plan_memory/plan_memory_model.hpp"
 
+#include <cstdlib>
+#include <iostream>
+
 namespace cvub {
 
 inline std::string PlanMemoryBufferName(std::string identity) {
@@ -19,6 +22,14 @@ inline std::string PlanMemoryBufferName(std::string identity) {
 
 inline std::string PlanMemoryValueName(int value) {
   return "%v" + std::to_string(value);
+}
+
+inline std::string PlanMemoryDictionaryValue(const GenericOperation &operation,
+                                             const std::string &name) {
+  std::string value = FindDictionaryValue(operation.properties, name);
+  if (value.empty())
+    value = FindDictionaryValue(operation.attributes, name);
+  return value;
 }
 
 inline std::string PlanMemoryPreserveAddressSpace(std::string type,
@@ -108,6 +119,16 @@ public:
     sourceBuffers.reserve(inputModule.planningContext
                               .afterAllocBufferBySource.size());
     bufferByIdentity.reserve(inputModule.buffers.size());
+    bufferNames.reserve(inputModule.buffers.size());
+    bufferTypes.reserve(inputModule.buffers.size());
+    finalBufferRecords.reserve(inputModule.buffers.size());
+    resultAllocationNames.reserve(inputModule.buffers.size());
+    resultAllocationTypes.reserve(inputModule.buffers.size());
+    allocationViewAliases.reserve(inputModule.buffers.size());
+    latestSubviewAliases.reserve(inputModule.buffers.size());
+    latestSubviewAliasesByBackingName.reserve(inputModule.buffers.size());
+    stableBufferAliases.reserve(inputModule.buffers.size());
+    emittedAllocations.reserve(inputModule.buffers.size());
     const size_t operationCapacity = logical.operations.size();
     syntheticBlocks.reserve(logical.regions.size());
     scalarValues.reserve(valueCapacity);
@@ -121,11 +142,21 @@ public:
     atomicLockValues.reserve(operationCapacity / 8 + 1);
     canonicalViewAliases.reserve(valueCapacity);
     erasedValueAliases.reserve(valueCapacity);
+    cseAliases.reserve(valueCapacity / 4 + 1);
+    composedExpandShapes.reserve(valueCapacity / 8 + 1);
+    composedCollapseShapes.reserve(valueCapacity / 8 + 1);
     sunkFillWorkspaceViews.reserve(operationCapacity / 8 + 1);
     sunkFillInlineLoadViews.reserve(operationCapacity / 8 + 1);
     foldedScalarConstants.reserve(valueCapacity / 4 + 1);
     materializedAffineConstants.reserve(valueCapacity / 4 + 1);
     eventsBySource.reserve(inputModule.accesses.size());
+    erasedOperations.reserve(operationCapacity);
+    erasedOutputOperations.reserve(operationCapacity / 4 + 1);
+    transformedInsertSlices.reserve(operationCapacity / 8 + 1);
+    replayedInsertSliceProducers.reserve(operationCapacity / 8 + 1);
+    sunkFillInlineCopies.reserve(operationCapacity / 8 + 1);
+    erasedMappedLoops.reserve(operationCapacity / 8 + 1);
+    erasedRegionIds.reserve(logical.regions.size());
     const PreBufferizationCSEState &preBufferizationCSE =
         inputModule.afterMarkMultiBuffer.afterInlineLoadCopy
             .afterAllocExtraBuffer.postBufferization.bufferized
@@ -171,6 +202,7 @@ public:
     });
     regionPathCache.resize(logical.operations.size());
     regionPathCached.assign(logical.operations.size(), false);
+    operationPlacementCache.resize(logical.operations.size());
   }
 
   PlanMemoryInput Build() {
@@ -481,9 +513,13 @@ private:
   }
 
   void indexBuffers() {
-    std::set<size_t> targetOrdinals;
+    std::vector<bool> targetOrdinals(
+        module.afterMarkMultiBuffer.afterInlineLoadCopy.buffers.size(), false);
     for (const PlanMemoryInputBufferRecord &buffer : module.buffers) {
-      targetOrdinals.insert(buffer.globalOrdinal);
+      if (buffer.globalOrdinal >= targetOrdinals.size())
+        throw std::runtime_error(
+            "PlanMemory input builder: invalid target buffer ordinal");
+      targetOrdinals[buffer.globalOrdinal] = true;
       finalIdentity[buffer.sourceIdentity] = buffer.identity;
       targetSourceIdentities.insert(buffer.sourceIdentity);
       const std::string name = PlanMemoryBufferName(buffer.identity);
@@ -504,7 +540,7 @@ private:
       bufferByIdentity[buffer.identity] = &buffer;
     }
     for (size_t ordinal = 0; ordinal < module.afterMarkMultiBuffer.afterInlineLoadCopy.buffers.size(); ++ordinal) {
-      if (targetOrdinals.count(ordinal))
+      if (targetOrdinals[ordinal])
         continue;
       const int owner = module.planningContext.liveBufferOwners.at(ordinal);
       if (owner >= 0)
@@ -1503,21 +1539,64 @@ private:
     return groups;
   }
 
-  OperationRecord baseOperation(const GenericOperation &source,
-                                const std::string &name) {
-    OperationRecord operation;
-    operation.index = static_cast<int>(result.operations.size());
-    operation.line = operation.index + 1;
-    operation.indent = static_cast<int>(regionPath(source).size() * 2);
-    operation.operationId = nextOperationId++;
-    operation.opName = name;
+  static std::string formatReassociationKey(
+      const std::vector<std::vector<size_t>> &reassociation) {
+    std::ostringstream key;
+    key << "reassociation=";
+    for (size_t groupIndex = 0; groupIndex < reassociation.size();
+         ++groupIndex) {
+      if (groupIndex)
+        key << ';';
+      for (size_t axisIndex = 0;
+           axisIndex < reassociation[groupIndex].size(); ++axisIndex) {
+        if (axisIndex)
+          key << ',';
+        key << reassociation[groupIndex][axisIndex];
+      }
+    }
+    return key.str();
+  }
+
+  static std::optional<std::vector<std::vector<size_t>>>
+  composeCollapseReassociation(
+      const std::vector<std::vector<size_t>> &producer,
+      const std::vector<std::vector<size_t>> &consumer) {
+    std::vector<std::vector<size_t>> composed;
+    composed.reserve(consumer.size());
+    for (const std::vector<size_t> &consumerGroup : consumer) {
+      std::vector<size_t> group;
+      for (size_t producerGroup : consumerGroup) {
+        if (producerGroup >= producer.size())
+          return std::nullopt;
+        group.insert(group.end(), producer[producerGroup].begin(),
+                     producer[producerGroup].end());
+      }
+      composed.push_back(std::move(group));
+    }
+    return composed;
+  }
+
+  struct CachedOperationPlacement {
+    std::vector<int> regionPath;
+    int blockId = -1;
+    std::string blockLabel;
+    std::vector<std::string> blockArguments;
+  };
+
+  const CachedOperationPlacement &
+  operationPlacement(const GenericOperation &source) const {
+    std::optional<CachedOperationPlacement> &cached =
+        operationPlacementCache.at(static_cast<size_t>(source.id));
+    if (cached)
+      return *cached;
     const GenericOperation *placement = &source;
     if (source.parentId >= 0 &&
         erasedMappedLoops.count(source.parentId) != 0)
       placement = &logical.operations.at(static_cast<size_t>(source.parentId));
-    operation.regionPath = regionPath(*placement);
-    operation.blockId = placement->blockId;
-    operation.blockLabel = "^bb" + std::to_string(placement->blockId);
+    CachedOperationPlacement placementRecord;
+    placementRecord.regionPath = regionPath(*placement);
+    placementRecord.blockId = placement->blockId;
+    placementRecord.blockLabel = "^bb" + std::to_string(placement->blockId);
     if (placement->blockId >= 0) {
       const GenericBlock &block =
           logical.blocks.at(static_cast<size_t>(placement->blockId));
@@ -1525,6 +1604,7 @@ private:
           logical.regions.at(static_cast<size_t>(block.regionId));
       const GenericOperation &parent =
           logical.operations.at(static_cast<size_t>(region.parentOperation));
+      placementRecord.blockArguments.reserve(block.arguments.size());
       for (size_t index = 0; index < block.arguments.size(); ++index) {
         if (parent.name == "scf.for" && index > 0) {
           const size_t resultIndex = index - 1;
@@ -1547,10 +1627,27 @@ private:
           if (canonicalizedResult || canonicalizedAccess)
             continue;
         }
-        operation.blockArguments.push_back(
+        placementRecord.blockArguments.push_back(
             PlanMemoryValueName(block.arguments[index]));
       }
     }
+    cached = std::move(placementRecord);
+    return *cached;
+  }
+
+  OperationRecord baseOperation(const GenericOperation &source,
+                                const std::string &name) {
+    OperationRecord operation;
+    operation.index = static_cast<int>(result.operations.size());
+    operation.line = operation.index + 1;
+    operation.operationId = nextOperationId++;
+    operation.opName = name;
+    const CachedOperationPlacement &placement = operationPlacement(source);
+    operation.indent = static_cast<int>(placement.regionPath.size() * 2);
+    operation.regionPath = placement.regionPath;
+    operation.blockId = placement.blockId;
+    operation.blockLabel = placement.blockLabel;
+    operation.blockArguments = placement.blockArguments;
     return operation;
   }
 
@@ -1690,7 +1787,7 @@ private:
     subview.hasStridedLayout = true;
     std::vector<std::optional<int64_t>> fullStrides = sourceMemref->strides;
     std::vector<int64_t> staticStrides = DecomposeI64Array(
-        FindDictionaryValue(source.properties, "static_strides"));
+        PlanMemoryDictionaryValue(source, "static_strides"));
     while (!staticStrides.empty() &&
            staticStrides.size() < sourceMemref->shape.size())
       staticStrides.push_back(1);
@@ -1707,10 +1804,11 @@ private:
               *fullStrides[index] * staticStrides[index];
       }
     }
-    std::vector<int64_t> staticSizes = DecomposeI64Array(
-        FindDictionaryValue(source.properties, "static_sizes"));
-    const std::vector<size_t> segments =
-        OperandSegmentSizes(source.properties);
+    std::vector<int64_t> staticSizes =
+        DecomposeI64Array(PlanMemoryDictionaryValue(source, "static_sizes"));
+    std::vector<size_t> segments = OperandSegmentSizes(source.properties);
+    if (segments.empty())
+      segments = OperandSegmentSizes(source.attributes);
     if (segments.size() >= 3) {
       size_t dynamicSizeOperand = 1 + segments[1];
       for (int64_t &size : staticSizes) {
@@ -1764,7 +1862,7 @@ private:
           "PlanMemory input builder: incomplete extract_slice rank reduction");
     subview.offset = sourceMemref->offset;
     std::vector<int64_t> staticOffsets = DecomposeI64Array(
-        FindDictionaryValue(source.properties, "static_offsets"));
+        PlanMemoryDictionaryValue(source, "static_offsets"));
     while (!staticOffsets.empty() &&
            staticOffsets.size() < sourceMemref->shape.size())
       staticOffsets.push_back(0);
@@ -2224,16 +2322,29 @@ private:
     std::vector<std::string> outputNames;
     std::vector<std::string> inputTypes;
     std::vector<std::string> outputTypes;
+    std::map<int, std::set<std::string>> postBufferIdentitiesByValue;
+    size_t previewEventAccess = 0;
+    for (int operand : source.operands) {
+      if (valueBuffers.count(operand) == 0 ||
+          previewEventAccess >= event.accesses.size())
+        continue;
+      postBufferIdentitiesByValue[operand].insert(
+          accessIdentity(event.accesses[previewEventAccess++]));
+    }
     size_t nextEventAccess = 0;
     for (size_t index = 0; index < source.operands.size(); ++index) {
       if (loadInitConditionOperand && index == *loadInitConditionOperand)
         continue;
       std::string name = valueName(source.operands[index]);
-      if (operandAliases) {
+      bool hasValueAlias = false;
+      if (operandAliases &&
+          postBufferIdentitiesByValue[source.operands[index]].size() <= 1) {
         auto valueAlias = operandAliases->find(
             "value:" + std::to_string(source.operands[index]));
-        if (valueAlias != operandAliases->end())
+        if (valueAlias != operandAliases->end()) {
           name = valueAlias->second;
+          hasValueAlias = true;
+        }
       }
       auto buffer = valueBuffers.find(source.operands[index]);
       if (buffer != valueBuffers.end() &&
@@ -2244,12 +2355,23 @@ private:
         auto alias = operandAliases
                          ? operandAliases->find(postBufferIdentity)
                          : std::map<std::string, std::string>::const_iterator{};
-        if (operandAliases && alias != operandAliases->end())
-          name = alias->second;
-        else if (preservedSSAValues.count(source.operands[index]) == 0)
-          name = stableBufferAliases.count(postBufferIdentity) != 0
-                     ? stableBufferAliases.at(postBufferIdentity)
-                     : bufferNames.at(postBufferIdentity);
+        // FlattenOps clones the destination-style operation with the
+        // collapsed operands held in its IRMapping.  Once an unambiguous
+        // value-specific mapping is present it must win over the generic
+        // post-bufferization allocation fallback as well as the identity
+        // mapping.  A repeated tensor init is different: OneShotBufferize may
+        // allocate a distinct memref for each tied result even though both
+        // pre-bufferization operands have the same SSA value.  In that case
+        // the value-keyed alias is ambiguous and the post-buffer identity is
+        // the exact operand selected by the real bufferized operation.
+        if (!hasValueAlias) {
+          if (operandAliases && alias != operandAliases->end())
+            name = alias->second;
+          else if (preservedSSAValues.count(source.operands[index]) == 0)
+            name = stableBufferAliases.count(postBufferIdentity) != 0
+                       ? stableBufferAliases.at(postBufferIdentity)
+                       : bufferNames.at(postBufferIdentity);
+        }
       }
       std::string type = index < source.operandTypes.size()
                              ? source.operandTypes[index]
@@ -2296,6 +2418,44 @@ private:
                              std::move(inputTypes), std::move(outputNames),
                              std::move(outputTypes));
     return true;
+  }
+
+  // OneShotBufferize replaces an in-place destination-style tensor result
+  // with the memref bound to the corresponding destination operand.  Keep
+  // that exact SSA view in the bridge as well: using only the shared buffer
+  // identity loses a subview result and falls back to the backing allocation.
+  // Subsequent HIVM operations must therefore resolve the tensor result to
+  // the same (possibly flattened) destination operand used by the emitted
+  // operation.
+  void rememberDestinationStyleResultAliases(
+      const GenericOperation &source,
+      const PlanMemoryInputAccessRecord &event,
+      const std::map<std::string, std::string> *operandAliases) {
+    if (!operandAliases || event.generatedOperation ||
+        event.operationName != source.name ||
+        !IsDestinationStyleOp(source.name))
+      return;
+    const std::vector<size_t> destinations = DpsInitOperandIndices(
+        source.name, source.operands.size(), source.properties);
+    const size_t count = std::min(source.results.size(), destinations.size());
+    for (size_t resultIndex = 0; resultIndex < count; ++resultIndex) {
+      const size_t operandIndex = destinations[resultIndex];
+      if (operandIndex >= source.operands.size())
+        continue;
+      const int resultValue = source.results[resultIndex];
+      const int destinationValue = source.operands[operandIndex];
+      const auto resultBuffer = bufferizedBufferIds.find(resultValue);
+      const auto destinationBuffer = bufferizedBufferIds.find(destinationValue);
+      if (resultBuffer == bufferizedBufferIds.end() ||
+          destinationBuffer == bufferizedBufferIds.end() ||
+          resultBuffer->second != destinationBuffer->second)
+        continue;
+      // `operandAliases` contains the per-operation result of FlattenOps.
+      // OneShotBufferize performs DPS replacement before FlattenOps, so that
+      // collapsed alias must not escape to later operations (its rank may be
+      // lower than the tensor result). Resolve the destination SSA itself.
+      canonicalViewAliases[resultValue] = valueName(destinationValue);
+    }
   }
 
   void emitAccess(const GenericOperation &source,
@@ -2568,6 +2728,7 @@ private:
         operation.materializedTemporaryTypes =
             planMemoryTypes(temporaries);
       }
+      rememberDestinationStyleResultAliases(source, event, operandAliases);
     } else if (event.operationName == "memref.store") {
       std::string memory = writes.empty() ? std::string("%external")
                                           : writes.front();
@@ -2939,6 +3100,7 @@ private:
         bool materializeAlignedView =
             index < source.operands.size() &&
             preservedSSAValues.count(source.operands[index]) == 0 &&
+            canonicalViewAliases.count(source.operands[index]) == 0 &&
             !(source.name == "hivm.hir.store" &&
               !latestSubviewForValue(source.operands[index]).empty());
         if (index < source.operands.size() &&
@@ -3003,6 +3165,7 @@ private:
             const bool preserveOriginalSSA =
                 !replacedByOutOfPlaceBuffer &&
                 (preservedSSAValues.count(source.operands[index]) != 0 ||
+                 canonicalViewAliases.count(source.operands[index]) != 0 ||
                  preserveInsertSourceSubview ||
                  (source.name == "hivm.hir.store" &&
                   !latestSubviewForValue(source.operands[index]).empty()) ||
@@ -3011,23 +3174,25 @@ private:
             if (!preserveOriginalSSA)
               name = bufferNames.at(identity);
             auto stable = stableBufferAliases.find(identity);
-            bool stableRankCompatible = true;
-            if (stable != stableBufferAliases.end() &&
-                (event.operationName == "hivm.hir.vreduce" ||
-                 event.operationName == "hivm.hir.vbrc" ||
-                 event.operationName == "hivm.hir.vcumsum" ||
-                 event.operationName == "hivm.hir.vcumprod")) {
+            bool stableShapeCompatible = true;
+            const bool requiresSameRank =
+                event.operationName == "hivm.hir.vreduce" ||
+                event.operationName == "hivm.hir.vbrc" ||
+                event.operationName == "hivm.hir.vcumsum" ||
+                event.operationName == "hivm.hir.vcumprod";
+            if (stable != stableBufferAliases.end() && requiresSameRank) {
               auto stableType = namedValueTypes.find(stable->second);
               const std::optional<MemRefTypeModel> parsedStable =
                   stableType == namedValueTypes.end()
                       ? std::nullopt
                       : ParseMemRefType(stableType->second);
-              stableRankCompatible =
+              stableShapeCompatible =
                   !parsedStable || parsedStable->shape.size() ==
                                        parsed->shape.size();
             }
             const bool resultFeedsInsertSlice = std::any_of(
-                source.results.begin(), source.results.end(), [&](int resultValue) {
+                source.results.begin(), source.results.end(),
+                [&](int resultValue) {
                   const std::vector<int> &users = analysis.users(resultValue);
                   return std::any_of(users.begin(), users.end(),
                                      [&](int userId) {
@@ -3045,12 +3210,39 @@ private:
                   stableType == namedValueTypes.end()
                       ? std::nullopt
                       : ParseMemRefType(stableType->second);
-              stableRankCompatible =
+              stableShapeCompatible =
                   !parsedStable || parsedStable->shape == parsed->shape;
+            } else if (stable != stableBufferAliases.end() &&
+                       !requiresSameRank &&
+                       event.operationName == source.name) {
+              // A stable alias with a different rank may be the exact input
+              // to the subsequent FlattenInterface reshape.  With equal
+              // ranks, however, conflicting static extents describe distinct
+              // SSA views of the same storage (for example 1x16 versus
+              // 16x1); substituting one for the other changes real uses.
+              // Apply this only to operations that survive bufferization as
+              // themselves.  A lowered event with a different operation name
+              // (for example the copy emitted for tensor.insert_slice)
+              // deliberately carries a bufferized subview whose shape differs
+              // from the source tensor operand; that stable subview is the
+              // exact OneShotBufferize SSA value.
+              auto stableType = namedValueTypes.find(stable->second);
+              const auto parsedStable =
+                  stableType == namedValueTypes.end()
+                      ? std::nullopt
+                      : ParseMemRefType(stableType->second);
+              if (parsedStable &&
+                  parsedStable->shape.size() == parsed->shape.size())
+                for (size_t axis = 0; axis < parsed->shape.size(); ++axis)
+                  if (parsedStable->shape[axis] && parsed->shape[axis] &&
+                      parsedStable->shape[axis] != parsed->shape[axis]) {
+                    stableShapeCompatible = false;
+                    break;
+                  }
             }
             const bool usesStableAlias =
                 stable != stableBufferAliases.end() &&
-                stableRankCompatible &&
+                stableShapeCompatible &&
                 (!preserveOriginalSSA ||
                  (source.name == "tensor.insert_slice" &&
                   [&]() {
@@ -3189,6 +3381,20 @@ private:
     if (operandTypes.empty())
       return aliases;
 
+    const bool debugFlatten = std::getenv("CVUB_DEBUG_FLATTEN") != nullptr;
+    if (debugFlatten) {
+      std::cerr << "FLATTEN_EVENT source=" << source.id << ':' << source.name
+                << " event=" << event.operationName
+                << " generated=" << event.generatedOperation
+                << " source_operands=" << useSourceOperands << '\n';
+      for (size_t index = 0; index < operands.size(); ++index)
+        std::cerr << "  operand[" << index << "] identity="
+                  << operands[index].identity << " value="
+                  << operands[index].sourceValue << " name="
+                  << operands[index].name << " type=" << operands[index].type
+                  << '\n';
+    }
+
     std::vector<size_t> originalRanks;
     originalRanks.reserve(operandTypes.size());
     for (const MemRefTypeModel &type : operandTypes)
@@ -3206,16 +3412,27 @@ private:
         type.strides.insert(type.strides.begin(), leadingStride);
         type.hasStridedLayout = true;
       }
+    // FlattenOps rewrites one HIVM operation at a time. Keep emission-local
+    // reuse here so the pre-canonicalization SSA order remains faithful. The
+    // later PlanMemory normalize step models canonicalizationHIVMPipeline's
+    // dominance-aware createCSEPass across different HIVM operations.
+    std::map<std::string, std::map<std::vector<int>, std::string>>
+        eventCollapseAliases;
     auto emitAlias = [&](const std::string &operationName,
                          const std::string &operandName,
                          const std::string &type,
                          const std::string &prefix,
                          const std::string &sourceType = std::string(),
                          const std::string &semanticProperties =
-                             std::string()) {
+                             std::string(),
+                         const std::vector<std::vector<size_t>>
+                             *reshapeReassociation = nullptr) {
       std::string effectiveOperandName = operandName;
       std::string effectiveSourceType = sourceType;
       std::string effectiveSemanticProperties = semanticProperties;
+      std::vector<std::vector<size_t>> effectiveReassociation =
+          reshapeReassociation ? *reshapeReassociation
+                               : std::vector<std::vector<size_t>>{};
       std::string cseKey;
       if (operationName == "memref.collapse_shape") {
         auto priorCollapse = composedCollapseShapes.find(operandName);
@@ -3256,6 +3473,24 @@ private:
               erasedOutputOperations.insert(priorCollapse->second.operation);
             effectiveOperandName = priorCollapse->second.source;
             effectiveSourceType = priorCollapse->second.sourceType;
+            // ComposeCollapseShapeOp rewrites
+            // collapse(collapse(source)) into one collapse whose
+            // reassociation is expressed in the original source rank.  CSE
+            // then compares that composed attribute with other dominating
+            // collapses.  Preserve the same attribute identity here; keeping
+            // only the consumer reassociation makes two textually identical
+            // views look different to the lightweight canonicalizer.
+            if (!priorCollapse->second.reassociation.empty() &&
+                reshapeReassociation) {
+              const auto composed = composeCollapseReassociation(
+                  priorCollapse->second.reassociation,
+                  *reshapeReassociation);
+              if (composed) {
+                effectiveReassociation = *composed;
+                effectiveSemanticProperties =
+                    formatReassociationKey(effectiveReassociation);
+              }
+            }
           }
         }
         auto expand = composedExpandShapes.find(operandName);
@@ -3263,19 +3498,12 @@ private:
             expand == composedExpandShapes.end()
                 ? std::nullopt
                 : ParseMemRefType(expand->second.sourceType);
+        const std::optional<MemRefTypeModel> expandResult =
+            expand == composedExpandShapes.end()
+                ? std::nullopt
+                : ParseMemRefType(expand->second.resultType);
         const std::optional<MemRefTypeModel> collapseResult =
             ParseMemRefType(type);
-        const auto staticElementCount = [](const MemRefTypeModel &memref)
-            -> std::optional<uint64_t> {
-          uint64_t count = 1;
-          for (const std::optional<int64_t> &extent : memref.shape) {
-            if (!extent || *extent < 0)
-              return std::nullopt;
-            count = CheckedMul(count, static_cast<uint64_t>(*extent),
-                               "composed expand element count");
-          }
-          return count;
-        };
         if (expandSource && collapseResult &&
             expandSource->shape == collapseResult->shape &&
             expandSource->elementType == collapseResult->elementType &&
@@ -3286,36 +3514,108 @@ private:
             erasedOutputOperations.insert(expand->second.operation);
           return expand->second.source;
         }
-        if (!module.afterMarkMultiBuffer.afterInlineLoadCopy
-                 .afterAllocExtraBuffer.enableStrideAlign &&
-            expandSource && collapseResult &&
-            expandSource->elementType == "i32" &&
-            expandSource->shape.size() == 1 &&
-            collapseResult->shape.size() == 2 &&
-            std::count_if(collapseResult->shape.begin(),
-                          collapseResult->shape.end(),
-                          [](const std::optional<int64_t> &extent) {
-                            return extent && *extent == 1;
-                          }) == 1 &&
-            expandSource->shape.size() < collapseResult->shape.size() &&
-            staticElementCount(*expandSource) ==
-                staticElementCount(*collapseResult) &&
-            expandSource->elementType == collapseResult->elementType &&
-            expandSource->addressSpace == collapseResult->addressSpace &&
-            !outputValueHasUse(operandName, expand->second.operation)) {
-          // ExtendedCanonicalizer composes collapse(expand(x)) when the
-          // collapsed result is still an expansion of x. Rewrite the already
-          // emitted expand in place so PlanMemory observes the same SSA value
-          // definition order as the suffix pipeline.
-          OperationRecord &prior = result.operations.at(
-              static_cast<size_t>(expand->second.operation));
-          prior.text = operandName + " = memref.expand_shape " +
-                       expand->second.source + " : " +
-                       expand->second.sourceType + " -> " + type;
-          prior.normalizationKey =
-              trim(prior.text.substr(prior.text.find('=') + 1));
-          namedValueTypes[operandName] = type;
-          return operandName;
+        if (expand != composedExpandShapes.end() && expandSource &&
+            expandResult && collapseResult && reshapeReassociation &&
+            !expand->second.dynamic && IsIdentityStrides(*expandSource) &&
+            IsIdentityStrides(*expandResult) &&
+            !expand->second.reassociation.empty() &&
+            expandSource->shape.size() != collapseResult->shape.size()) {
+          // This is the upstream ComposeCollapseOfExpandOp canonicalization:
+          //   collapse_shape(expand_shape(src)) -> reshape(src)
+          // FlattenOps creates the collapse at the HIVM operation, and the
+          // canonicalizer creates the composed reshape at that position.  It
+          // must not rewrite the earlier expand in place: doing so moves the
+          // SSA definition before intervening allocs and changes the ordered
+          // live set consumed by PlanMemory's seeded shuffle.
+          const auto composeReassociation = [&]()
+              -> std::optional<std::vector<std::vector<size_t>>> {
+            const size_t sourceRank = expandSource->shape.size();
+            const size_t resultRank = collapseResult->shape.size();
+            const auto &higher = sourceRank > resultRank
+                                     ? expand->second.reassociation
+                                     : *reshapeReassociation;
+            const auto &lower = sourceRank > resultRank
+                                    ? *reshapeReassociation
+                                    : expand->second.reassociation;
+            std::vector<std::vector<size_t>> composed;
+            size_t higherIndex = 0;
+            for (const std::vector<size_t> &lowerGroup : lower) {
+              if (lowerGroup.empty())
+                return std::nullopt;
+              std::vector<size_t> group;
+              bool covered = false;
+              while (higherIndex < higher.size()) {
+                if (higher[higherIndex].empty())
+                  return std::nullopt;
+                const size_t rightmost = higher[higherIndex].back();
+                if (rightmost > lowerGroup.back())
+                  return std::nullopt;
+                group.push_back(higherIndex++);
+                if (rightmost == lowerGroup.back()) {
+                  covered = true;
+                  break;
+                }
+              }
+              if (!covered)
+                return std::nullopt;
+              composed.push_back(std::move(group));
+            }
+            if (higherIndex != higher.size())
+              return std::nullopt;
+            return composed;
+          }();
+          if (composeReassociation) {
+            if ((source.name != "hivm.hir.vconcat" ||
+                 !expand->second.dynamic) &&
+                !outputValueHasUse(operandName, expand->second.operation))
+              erasedOutputOperations.insert(expand->second.operation);
+            const std::string composedOperation =
+                expandSource->shape.size() < collapseResult->shape.size()
+                    ? "memref.expand_shape"
+                    : "memref.collapse_shape";
+            std::ostringstream composedKey;
+            composedKey << composedOperation << '\n' << expand->second.source
+                        << '\n'
+                        << PhysicalTypeSignature(expand->second.sourceType)
+                        << '\n' << PhysicalTypeSignature(type)
+                        << '\n'
+                        << formatReassociationKey(*composeReassociation);
+            const std::vector<int> aliasPath =
+                regionOverride ? *regionOverride : regionPath(source);
+            auto existing = composedReshapeCseAliases.find(composedKey.str());
+            if (existing != composedReshapeCseAliases.end()) {
+              std::vector<int> prefixPath = aliasPath;
+              while (true) {
+                auto alias = existing->second.find(prefixPath);
+                if (alias != existing->second.end())
+                  return alias->second;
+                if (prefixPath.empty())
+                  break;
+                prefixPath.pop_back();
+              }
+            }
+            OperationRecord operation = baseOperation(source, composedOperation);
+            if (regionOverride)
+              placeInRegion(operation, *regionOverride);
+            const std::string resultName =
+                "%" + prefix + "_" + std::to_string(nextFlattenValue++);
+            operation.text = resultName + " = " + composedOperation + " " +
+                             expand->second.source + " : " +
+                             expand->second.sourceType + " -> " + type;
+            operation.normalizationKey = composedKey.str();
+            SetOperationValueLists(operation, {resultName},
+                                   {expand->second.source});
+            result.operations.push_back(std::move(operation));
+            namedValueTypes[resultName] = type;
+            composedReshapeCseAliases[composedKey.str()][aliasPath] =
+                resultName;
+            if (composedOperation == "memref.collapse_shape")
+              composedCollapseShapes[resultName] =
+                  {expand->second.source, expand->second.sourceType,
+                   result.operations.back().index, false, {},
+                   *composeReassociation};
+            return resultName;
+          }
         }
         if (expand != composedExpandShapes.end() && collapseResult &&
             collapseResult->shape.size() == 1) {
@@ -3327,38 +3627,15 @@ private:
           effectiveSourceType = expand->second.sourceType;
           effectiveSemanticProperties.clear();
         }
-        if (effectiveSemanticProperties.empty()) {
-          const std::vector<int> aliasPath =
-              regionOverride ? *regionOverride : regionPath(source);
-          for (const auto &[existingResult, existing] :
-               composedCollapseShapes) {
-            if (existing.source != effectiveOperandName ||
-                PhysicalTypeSignature(existing.sourceType) !=
-                    PhysicalTypeSignature(effectiveSourceType))
-              continue;
-            auto existingType = namedValueTypes.find(existingResult);
-            if (existingType == namedValueTypes.end() ||
-                PhysicalTypeSignature(existingType->second) !=
-                    PhysicalTypeSignature(type))
-              continue;
-            const OperationRecord &existingOperation = result.operations.at(
-                static_cast<size_t>(existing.operation));
-            if (existingOperation.regionPath.size() <= aliasPath.size() &&
-                std::equal(existingOperation.regionPath.begin(),
-                           existingOperation.regionPath.end(),
-                           aliasPath.begin()))
-              return existingResult;
-          }
-        }
         const std::vector<int> aliasPath =
             regionOverride ? *regionOverride : regionPath(source);
         cseKey = operationName + "\n" + effectiveOperandName + "\n" +
                  PhysicalTypeSignature(effectiveSourceType) + "\n" +
                  PhysicalTypeSignature(type);
-        if (composedExpandShapes.count(operandName) != 0)
+        if (!effectiveSemanticProperties.empty())
           cseKey += "\n" + effectiveSemanticProperties;
-        auto collapseAliases = collapseCseAliases.find(cseKey);
-        if (collapseAliases != collapseCseAliases.end()) {
+        auto collapseAliases = eventCollapseAliases.find(cseKey);
+        if (collapseAliases != eventCollapseAliases.end()) {
           std::vector<int> regionPrefix = aliasPath;
           while (true) {
             auto existing = collapseAliases->second.find(regionPrefix);
@@ -3380,21 +3657,23 @@ private:
       if (!effectiveSourceType.empty())
         operation.text += effectiveSourceType + " -> ";
       operation.text += type;
-      if (!effectiveSemanticProperties.empty() &&
-          composedExpandShapes.count(operandName) != 0) {
-        const size_t equal = operation.text.find('=');
-        operation.normalizationKey =
-            trim(operation.text.substr(equal + 1)) + "\n" +
-            effectiveSemanticProperties;
+      if (!effectiveSemanticProperties.empty()) {
+        // MLIR CSE compares the canonicalized operation, not the path by
+        // which it was created.  Use the same structural identity as the
+        // collapse(expand_shape) composition above so an ordinary flatten and
+        // an equivalent composed flatten share the dominating view exactly as
+        // they do after cv2pm's ExtendedCanonicalizer/createCSEPass.
+        operation.normalizationKey = cseKey;
       }
       result.operations.push_back(std::move(operation));
       if (operationName == "memref.collapse_shape") {
         const std::vector<int> aliasPath =
             regionOverride ? *regionOverride : regionPath(source);
-        collapseCseAliases[cseKey][aliasPath] = resultName;
+        eventCollapseAliases[cseKey][aliasPath] = resultName;
         composedCollapseShapes[resultName] =
             {effectiveOperandName, effectiveSourceType,
-             result.operations.back().index, false};
+             result.operations.back().index, false, {},
+             effectiveReassociation};
       }
       return resultName;
     };
@@ -3417,6 +3696,54 @@ private:
 
     std::vector<std::vector<size_t>> reassociation =
         UniformReassociationPipeline(operandTypes);
+    // HIVM elementwise operations with inline broadcasting are flattened via
+    // getFlattenedBroadcastableOTF in the real FlattenInterface.  Broadcast
+    // loop dimensions are barriers: collapsing across either side would lose
+    // the distinction between a size-one broadcast operand and the full-size
+    // operands.  Treating these operations as ordinary uniform elementwise
+    // operations also composes away live expand_shape values, which changes
+    // the SSA population shuffled by PlanMemory.
+    std::string inlineBroadcastDimensions =
+        FindDictionaryValue(source.properties, "broadcast");
+    if (inlineBroadcastDimensions.empty())
+      inlineBroadcastDimensions =
+          FindDictionaryValue(source.attributes, "broadcast");
+    const std::vector<int64_t> inlineBroadcastAxes =
+        DecomposeI64Array(inlineBroadcastDimensions);
+    const bool broadcastableElementwise =
+        event.operationName != "hivm.hir.vbrc" &&
+        !inlineBroadcastAxes.empty();
+    if (broadcastableElementwise) {
+      reassociation = UniformReassociationPipelineWithBarriers(
+          operandTypes, inlineBroadcastAxes);
+      // BroadcastableOTF does not carry
+      // CollapsibleConsecutiveTargetDimsTrait.  Therefore every broadcast
+      // target dimension starts its own reassociation group, including two
+      // adjacent targets such as broadcast=[0, 1].  The generic barrier
+      // helper intentionally permits consecutive targets to collapse, so
+      // refine (but never merge) its layout here.
+      std::set<size_t> broadcastTargets;
+      for (int64_t axis : inlineBroadcastAxes)
+        if (axis >= 0 && static_cast<size_t>(axis) < rank)
+          broadcastTargets.insert(static_cast<size_t>(axis));
+      std::vector<size_t> originalGroup(rank,
+                                        std::numeric_limits<size_t>::max());
+      for (size_t group = 0; group < reassociation.size(); ++group)
+        for (size_t axis : reassociation[group])
+          if (axis < rank)
+            originalGroup[axis] = group;
+      std::vector<std::vector<size_t>> refined;
+      for (size_t axis = 0; axis < rank; ++axis) {
+        const bool target = broadcastTargets.count(axis) != 0;
+        const bool previousTarget =
+            axis > 0 && broadcastTargets.count(axis - 1) != 0;
+        if (axis == 0 || originalGroup[axis] != originalGroup[axis - 1] ||
+            target || previousTarget)
+          refined.push_back({});
+        refined.back().push_back(axis);
+      }
+      reassociation = std::move(refined);
+    }
     const bool dimensionLimitedOperation =
         event.operationName == "hivm.hir.vreduce" ||
         event.operationName == "hivm.hir.vbrc" ||
@@ -3434,6 +3761,19 @@ private:
         dimensions = FindDictionaryValue(source.attributes, dimensionName);
       reassociation = UniformReassociationPipelineWithBarriers(
           operandTypes, DecomposeI64Array(dimensions));
+    }
+    if (debugFlatten) {
+      std::cerr << "  reassociation";
+      for (const std::vector<size_t> &group : reassociation) {
+        std::cerr << " [";
+        for (size_t index = 0; index < group.size(); ++index) {
+          if (index)
+            std::cerr << ',';
+          std::cerr << group[index];
+        }
+        std::cerr << ']';
+      }
+      std::cerr << '\n';
     }
     if (event.operationName == "hivm.hir.vtranspose") {
       const std::vector<int64_t> permutation = DecomposeI64Array(
@@ -3494,21 +3834,15 @@ private:
     }
 
     if (reassociation.size() != rank) {
-      std::ostringstream reassociationKey;
-      reassociationKey << "reassociation=";
-      for (size_t groupIndex = 0; groupIndex < reassociation.size();
-           ++groupIndex) {
-        if (groupIndex)
-          reassociationKey << ';';
-        for (size_t axisIndex = 0;
-             axisIndex < reassociation[groupIndex].size(); ++axisIndex) {
-          if (axisIndex)
-            reassociationKey << ',';
-          reassociationKey << reassociation[groupIndex][axisIndex];
-        }
-      }
+      const std::string reassociationKey =
+          formatReassociationKey(reassociation);
       for (size_t index = 0; index < operands.size(); ++index) {
         Operand &operand = operands[index];
+        if (debugFlatten)
+          std::cerr << "  collapse[" << index << "] original_rank="
+                    << originalRanks[index] << " target_rank="
+                    << reassociation.size() << " name=" << operand.name
+                    << '\n';
         if (originalRanks[index] == reassociation.size()) {
           operandTypes[index] = *ParseMemRefType(operand.type);
           continue;
@@ -3533,7 +3867,10 @@ private:
             PlanMemoryFormatMemRefType(operandTypes[index]), operand.type);
         const std::string resultName = emitAlias(
             "memref.collapse_shape", operand.name, operand.type, "flatten",
-            sourceType, reassociationKey.str());
+            sourceType, reassociationKey, &reassociation);
+        if (debugFlatten)
+          std::cerr << "    -> " << resultName << " type=" << operand.type
+                    << '\n';
         operand.name = resultName;
         if (namedValueTypes.count(resultName) == 0)
           namedValueTypes[resultName] = operand.type;
@@ -4235,6 +4572,23 @@ private:
     if (source.name == "memref.alloc" || source.name == "memref.alloca")
       return;
     if (source.name == "annotation.mark") {
+      // HIVMOptSinglePoint erases allocations that are used only by
+      // non-materializing annotations.  Canonicalization then removes the
+      // dangling marks.  Test the original allocation against SinglePoint's
+      // survivor map here instead of remapping it: a removed local allocation
+      // can share its ordinal with a compacted survivor.
+      if (!source.operands.empty() && !source.operandTypes.empty() &&
+          (IsTensorType(source.operandTypes.front()) ||
+           IsMemRefType(source.operandTypes.front()))) {
+        const HIVMOptSinglePointResult &singlePoint =
+            module.afterMarkMultiBuffer.afterInlineLoadCopy
+                .afterAllocExtraBuffer.postBufferization.singlePoint;
+        auto rawBuffer = bufferizedBufferIds.find(source.operands.front());
+        if (rawBuffer != bufferizedBufferIds.end() &&
+            IsErasedSinglePointLocalBuffer(rawBuffer->second,
+                                           singlePoint.bufferMapping))
+          return;
+      }
       const bool strideAlign =
           !FindDictionaryValue(source.attributes,
                                "hivm.stride_align_dims").empty() ||
@@ -4326,6 +4680,7 @@ private:
       return buffer == valueBuffers.end() ? operandName
                                            : bufferNames.at(buffer->second);
     };
+
     std::ostringstream text;
     std::vector<std::string> typedResults;
     typedResults.reserve(source.results.size());
@@ -4443,19 +4798,27 @@ private:
         !source.operands.empty()) {
       const std::string resultName =
           PlanMemoryValueName(source.results.front());
+      std::string reassociation =
+          PlanMemoryDictionaryValue(source, "reassociation");
       composedExpandShapes[resultName] =
           {valueName(source.operands.front()),
            operandTypes.empty() ? std::string() : operandTypes.front(),
-           result.operations.back().index, source.operands.size() > 1};
+           result.operations.back().index, source.operands.size() > 1,
+           resultTypes.empty() ? std::string() : resultTypes.front(),
+           parseReassociation(reassociation)};
     }
     if (name == "memref.collapse_shape" && source.results.size() == 1 &&
         !source.operands.empty()) {
       const std::string resultName =
           PlanMemoryValueName(source.results.front());
+      const std::string reassociation =
+          PlanMemoryDictionaryValue(source, "reassociation");
       composedCollapseShapes[resultName] =
           {valueName(source.operands.front()),
            operandTypes.empty() ? std::string() : operandTypes.front(),
-           result.operations.back().index, false};
+           result.operations.back().index, false,
+           resultTypes.empty() ? std::string() : resultTypes.front(),
+           parseReassociation(reassociation)};
       auto buffer = valueBuffers.find(source.operands.front());
       if (buffer != valueBuffers.end())
         stableBufferAliases[buffer->second] =
@@ -4734,6 +5097,13 @@ private:
 
   void emitOperation(const GenericOperation &source) {
     if (erasedOperations.count(source.id) != 0)
+      return;
+    if (IsCanonicalizedIterArgInsertSlice(
+            logical, analysis,
+            module.afterMarkMultiBuffer.afterInlineLoadCopy
+                .afterAllocExtraBuffer.postBufferization.singlePoint,
+            source) &&
+        eventsBySource.count(source.id) == 0)
       return;
     auto materializedConstant = materializedAffineConstants.find(source.id);
     if (materializedConstant != materializedAffineConstants.end()) {
@@ -5565,27 +5935,29 @@ private:
   mutable std::unordered_map<std::string, MappedIdentityLookup>
       mappedIdentityCache;
   std::unordered_set<std::string> targetSourceIdentities;
-  std::map<std::string, std::string> bufferNames;
-  std::map<std::string, std::string> bufferTypes;
-  std::map<std::string, const LocalBufferRecord *> finalBufferRecords;
+  std::unordered_map<std::string, std::string> bufferNames;
+  std::unordered_map<std::string, std::string> bufferTypes;
+  std::unordered_map<std::string, const LocalBufferRecord *>
+      finalBufferRecords;
   std::unordered_map<std::string, const LocalBufferRecord *> sourceBuffers;
   std::map<std::pair<int, size_t>, std::string> decomposeAllocationTypes;
   std::unordered_map<std::string, std::string> namedValueTypes;
   // Collected alongside allocation emission. The normalize bridge consumes
   // these indexes immediately after emission, so rebuilding them from the
   // completed allocation vector would be a redundant extra stage traversal.
-  std::set<std::string> resultAllocationNames;
-  std::map<std::string, std::string> resultAllocationTypes;
-  std::map<std::string, std::string> allocationViewAliases;
-  std::map<std::string, std::string> latestSubviewAliases;
-  std::map<std::string, std::string> latestSubviewAliasesByBackingName;
+  std::unordered_set<std::string> resultAllocationNames;
+  std::unordered_map<std::string, std::string> resultAllocationTypes;
+  std::unordered_map<std::string, std::string> allocationViewAliases;
+  std::unordered_map<std::string, std::string> latestSubviewAliases;
+  std::unordered_map<std::string, std::string>
+      latestSubviewAliasesByBackingName;
   std::unordered_map<std::string, std::string> alignedViewTypes;
-  std::map<std::string, std::string> stableBufferAliases;
+  std::unordered_map<std::string, std::string> stableBufferAliases;
   std::unordered_map<int, std::vector<const PlanMemoryInputBufferRecord *>>
       buffersByOwner;
   std::unordered_map<std::string, const PlanMemoryInputBufferRecord *>
       bufferByIdentity;
-  std::set<std::string> emittedAllocations;
+  std::unordered_set<std::string> emittedAllocations;
   std::unordered_map<int, std::vector<size_t>> nonTargetBuffersByOwner;
   std::unordered_map<int, std::string> valueBuffers;
   std::unordered_set<int> unambiguousBufferizedValues;
@@ -5594,7 +5966,7 @@ private:
   std::unordered_map<std::string, int> bufferRepresentativeValues;
   std::map<std::pair<std::string, std::string>, int>
       bufferRepresentativeValuesByType;
-  std::map<std::string, std::string> cseAliases;
+  std::unordered_map<std::string, std::string> cseAliases;
   std::map<std::string, std::map<std::vector<int>, std::string>>
       collapseCseAliases;
   std::map<const PlanMemoryInputAccessRecord *, std::vector<bool>>
@@ -5607,8 +5979,8 @@ private:
   std::unordered_map<int, const GenericOperation *> insertSliceByProducer;
   std::unordered_map<int, const GenericOperation *>
       inPlaceInsertSliceCandidates;
-  std::set<int> transformedInsertSlices;
-  std::set<int> replayedInsertSliceProducers;
+  std::unordered_set<int> transformedInsertSlices;
+  std::unordered_set<int> replayedInsertSliceProducers;
   std::unordered_map<int, std::string> atomicLockValues;
   std::map<int, std::map<std::string, std::string>> atomicTemporaryViews;
   struct ExpandShapeRecord {
@@ -5616,20 +5988,26 @@ private:
     std::string sourceType;
     int operation = -1;
     bool dynamic = false;
+    std::string resultType;
+    std::vector<std::vector<size_t>> reassociation;
   };
-  std::map<std::string, ExpandShapeRecord> composedExpandShapes;
-  std::map<std::string, ExpandShapeRecord> composedCollapseShapes;
-  std::set<int> erasedOutputOperations;
+  std::unordered_map<std::string, ExpandShapeRecord> composedExpandShapes;
+  std::unordered_map<std::string, ExpandShapeRecord> composedCollapseShapes;
+  std::map<std::string, std::map<std::vector<int>, std::string>>
+      composedReshapeCseAliases;
+  std::unordered_set<int> erasedOutputOperations;
   std::unordered_map<int, std::string> canonicalViewAliases;
   std::unordered_map<int, std::string> erasedValueAliases;
   std::unordered_map<int, int> sunkFillWorkspaceViews;
   std::unordered_map<int, int> sunkFillInlineLoadViews;
-  std::set<int> sunkFillInlineCopies;
-  std::set<int> erasedMappedLoops;
-  std::set<int> erasedRegionIds;
+  std::unordered_set<int> sunkFillInlineCopies;
+  std::unordered_set<int> erasedMappedLoops;
+  std::unordered_set<int> erasedRegionIds;
   mutable std::vector<std::vector<int>> regionPathCache;
   mutable std::vector<bool> regionPathCached;
-  std::set<int> erasedOperations;
+  mutable std::vector<std::optional<CachedOperationPlacement>>
+      operationPlacementCache;
+  std::unordered_set<int> erasedOperations;
   ConvertArithToAffineState arithToAffine;
   std::unordered_map<int, int64_t> foldedScalarConstants;
   std::unordered_map<int, int64_t> materializedAffineConstants;
@@ -5664,6 +6042,7 @@ BuildPlanMemoryInput(const PlanMemoryInputSemanticIR &module,
 
 inline std::string
 SerializeCanonicalPlanMemoryInput(const PlanMemoryInput &input);
+inline std::string SerializePlanMemoryInput(const PlanMemoryInput &input);
 
 // Normal pipeline entry: consume the final multi-buffer state and produce the
 // PlanMemory input in one ownership scope. PlanMemoryInputSemanticIR remains
@@ -5696,6 +6075,8 @@ BuildPlanMemoryInput(AfterMarkMultiBufferState afterMarkMultiBuffer,
                  {"function_arguments", input.functionArguments.size()}});
     trace->Artifact("PlanMemoryInput",
                     [&] { return SerializeCanonicalPlanMemoryInput(input); });
+    trace->Artifact("PlanMemoryInputRaw",
+                    [&] { return SerializePlanMemoryInput(input); });
   }
   return input;
 }

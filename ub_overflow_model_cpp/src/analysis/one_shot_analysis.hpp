@@ -4,6 +4,9 @@
 #include "../passes/one_shot_bufferize.hpp"
 #include "../ir/generic_analysis.hpp"
 
+#include <cstdlib>
+#include <iostream>
+
 
 namespace cvub {
 
@@ -97,6 +100,10 @@ public:
           continue;
         const bool outOfPlace =
             wouldCreateReadAfterWriteInterference(operation, index);
+        if (debugDecisions)
+          std::cerr << "CVUB_ONESHOT_DECISION\t" << operation.id << '\t'
+                    << index << '\t'
+                    << (outOfPlace ? "out_of_place" : "in_place") << '\n';
         setDecision(operation.id, index,
                     outOfPlace ? OneShotBufferizationDecision::OutOfPlace
                                : OneShotBufferizationDecision::InPlace);
@@ -127,10 +134,12 @@ private:
     aliasParents.assign(definitions.size(), -1);
     aliasMembers.clear();
     aliasMembers.resize(definitions.size());
+    equivalentParents.assign(definitions.size(), -1);
     for (size_t value = 0; value < definitions.size(); ++value)
       if (definitions[value] || blockArgumentOwners[value] >= 0) {
         aliasParents[value] = static_cast<int>(value);
         aliasMembers[value].push_back(static_cast<int>(value));
+        equivalentParents[value] = static_cast<int>(value);
       }
   }
 
@@ -164,6 +173,53 @@ private:
       lhsMembers.insert(lhsMembers.end(), rhsMembers.begin(), rhsMembers.end());
       rhsMembers.clear();
     }
+  }
+
+  int findEquivalent(int value) {
+    if (value < 0)
+      return value;
+    const size_t ordinal = static_cast<size_t>(value);
+    if (ordinal >= equivalentParents.size())
+      equivalentParents.resize(ordinal + 1, -1);
+    if (equivalentParents[ordinal] < 0) {
+      equivalentParents[ordinal] = value;
+      return value;
+    }
+    if (equivalentParents[ordinal] != value)
+      equivalentParents[ordinal] =
+          findEquivalent(equivalentParents[ordinal]);
+    return equivalentParents[ordinal];
+  }
+
+  void unionEquivalent(int lhs, int rhs) {
+    const int lhsRoot = findEquivalent(lhs);
+    const int rhsRoot = findEquivalent(rhs);
+    if (lhsRoot != rhsRoot)
+      equivalentParents[static_cast<size_t>(rhsRoot)] = lhsRoot;
+  }
+
+  bool areEquivalentBufferizedValues(int lhs, int rhs) {
+    return findEquivalent(lhs) == findEquivalent(rhs);
+  }
+
+  bool bufferRelationIsEquivalent(const GenericOperation &operation,
+                                  size_t operand) const {
+    const std::vector<size_t> &inits = dpsInitOperandIndices(operation);
+    if (std::find(inits.begin(), inits.end(), operand) != inits.end())
+      return true;
+    if (operand == 0 &&
+        (operation.name == "tensor.cast" ||
+         operation.name == "tensor.collapse_shape" ||
+         operation.name == "tensor.expand_shape" ||
+         operation.name == "hivm.hir.bitcast"))
+      return true;
+    if (operation.name == "scf.for" && operand >= 3)
+      return true;
+    if (operation.name == "scf.yield" && operation.parentId >= 0 &&
+        module.operations.at(static_cast<size_t>(operation.parentId)).name ==
+            "scf.if")
+      return true;
+    return false;
   }
 
   std::vector<int> getAliasingValues(const GenericOperation &operation,
@@ -201,8 +257,11 @@ private:
   void bufferizeInPlace(const GenericOperation &operation, size_t operand) {
     if (operand >= operation.operands.size())
       return;
-    for (int alias : getAliasingValues(operation, operand))
+    for (int alias : getAliasingValues(operation, operand)) {
       unionAliases(operation.operands[operand], alias);
+      if (bufferRelationIsEquivalent(operation, operand))
+        unionEquivalent(operation.operands[operand], alias);
+    }
   }
 
   void indexValuesAndUses() {
@@ -616,7 +675,42 @@ private:
                      const GenericOperation &rhs) const {
     if (isProperAncestor(lhs, rhs))
       return false;
-    return lhs.id < rhs.id;
+
+    // Mirror DominanceInfo::happensBefore for nested structured regions.  An
+    // operation inside an scf.if/loop is ordered against an operation in an
+    // enclosing block through the region-owning operation.  Looking only up
+    // the RHS ancestor chain misses the symmetric and common case
+    //
+    //   scf.if { READ }
+    //   WRITE
+    //
+    // and turns READ-before-WRITE into a false RaW conflict.  Operation IDs
+    // cannot be used here: greedy rewrites append IDs even when inserting an
+    // operation before an older user.  Record the LHS representative in every
+    // enclosing block, then walk the RHS outward until both representatives
+    // are in the closest common block and compare their block ordinals.
+    std::map<int, const GenericOperation *> lhsByEnclosingBlock;
+    const GenericOperation *cursor = &lhs;
+    while (cursor) {
+      if (cursor->blockId >= 0)
+        lhsByEnclosingBlock.emplace(cursor->blockId, cursor);
+      if (cursor->parentId < 0)
+        break;
+      cursor = &module.operations.at(
+          static_cast<size_t>(cursor->parentId));
+    }
+
+    cursor = &rhs;
+    while (cursor) {
+      auto common = lhsByEnclosingBlock.find(cursor->blockId);
+      if (cursor->blockId >= 0 && common != lhsByEnclosingBlock.end())
+        return common->second->ordinal < cursor->ordinal;
+      if (cursor->parentId < 0)
+        break;
+      cursor = &module.operations.at(
+          static_cast<size_t>(cursor->parentId));
+    }
+    return false;
   }
 
   const std::map<int, int> &
@@ -684,33 +778,51 @@ private:
                                 const GenericOperation &insertSlice) {
     const std::string &signature = subsetSignature(insertSlice);
     const int destination = insertSlice.operands.at(1);
-    return !findValueInReverseUseDefChain(
-                value,
-                [&](int candidate) {
-                  const GenericOperation *definingOperation =
-                      definition(candidate);
-                  if (!definingOperation ||
-                      definingOperation->name != "tensor.extract_slice" ||
-                      definingOperation->operands.empty())
-                    return false;
-                  return findAlias(definingOperation->operands.front()) ==
-                             findAlias(destination) &&
-                         subsetSignature(*definingOperation) == signature;
-                })
-                .empty();
+    const auto matchingSubset = [&](int candidate) {
+      const GenericOperation *definingOperation = definition(candidate);
+      if (!definingOperation ||
+          definingOperation->name != "tensor.extract_slice" ||
+          definingOperation->operands.empty())
+        return false;
+      return areEquivalentBufferizedValues(
+                 definingOperation->operands.front(), destination) &&
+             subsetSignature(*definingOperation) == signature;
+    };
+    const std::vector<int> backwardSlice = findValueInReverseUseDefChain(
+        value, matchingSubset, /*alwaysIncludeLeaves=*/true);
+    return std::all_of(backwardSlice.begin(), backwardSlice.end(),
+                       matchingSubset);
   }
 
   bool areNonConflictingSubsets(const OpOperand &read,
                                 const OpOperand &write) {
     const GenericOperation &readingOperation =
         module.operations.at(static_cast<size_t>(read.first));
-    if (readingOperation.name == "tensor.insert_slice" && read.second == 1) {
+    if (readingOperation.name == "tensor.insert_slice") {
       const GenericOperation &writingOperation =
           module.operations.at(static_cast<size_t>(write.first));
-      return matchesInsertDestination(
-          writingOperation.operands.at(static_cast<size_t>(write.second)),
-          readingOperation);
+      if (read.second == 1 &&
+          matchesInsertDestination(
+              writingOperation.operands.at(static_cast<size_t>(write.second)),
+              readingOperation))
+        return true;
+      if (read.second == 0 && write.first == read.first &&
+          write.second == 1 &&
+          matchesInsertDestination(
+              readingOperation.operands.at(static_cast<size_t>(read.second)),
+              readingOperation))
+        return true;
     }
+    const GenericOperation &writingOperation =
+        module.operations.at(static_cast<size_t>(write.first));
+    if (writingOperation.name == "tensor.insert_slice" &&
+        write.second == 1 &&
+        areEquivalentBufferizedValues(
+            readingOperation.operands.at(static_cast<size_t>(read.second)),
+            writingOperation.operands.front()) &&
+        matchesInsertDestination(writingOperation.operands.front(),
+                                 writingOperation))
+      return true;
     return false;
   }
 
@@ -819,6 +931,11 @@ private:
               writingOperation, static_cast<size_t>(write.second));
           if (aliases.size() == 1 && aliases.front() == definitionValue)
             continue;
+          if (debugDecisions)
+            std::cerr << "CVUB_ONESHOT_CONFLICT\tread\t" << read.first
+                      << '\t' << read.second << "\twrite\t" << write.first
+                      << '\t' << write.second << "\tdefinition\t"
+                      << definitionValue << '\n';
           return true;
         }
       }
@@ -848,6 +965,7 @@ private:
   std::vector<int> blockArgumentOwners;
   std::vector<int> aliasParents;
   std::vector<std::vector<int>> aliasMembers;
+  std::vector<int> equivalentParents;
   std::vector<std::vector<OpOperand>> uses;
   std::vector<std::vector<size_t>> dpsInitOperands;
   mutable std::vector<std::vector<OpOperand>> aliasingOperandCache;
@@ -860,6 +978,7 @@ private:
   mutable std::vector<bool> enclosingIfRegionReady;
   mutable std::vector<std::string> subsetSignatureCache;
   mutable std::vector<bool> subsetSignatureReady;
+  const bool debugDecisions = std::getenv("CVUB_DEBUG_ONESHOT") != nullptr;
   // -1 = not analyzed yet, 0 = in-place, 1 = out-of-place.
   std::vector<std::vector<int8_t>> operandDecisions;
 };

@@ -392,6 +392,11 @@ inline bool ProvesSubsetHoistingNoOp(const GenericModule &module, int loopId) {
         if (operation.name == "tensor.extract_slice") {
           if (use.operand != 0)
             return false;
+          for (size_t operand = 1; operand < operation.operands.size();
+               ++operand)
+            if (!DefinedOutsideOrHoisted(module, operation.operands[operand],
+                                         loopId, {}))
+              return true;
           sawExtraction = true;
           continue;
         }
@@ -401,6 +406,11 @@ inline bool ProvesSubsetHoistingNoOp(const GenericModule &module, int loopId) {
             return true;
           if (nextValue || operation.results.size() != 1)
             return true;
+          for (size_t operand = 2; operand < operation.operands.size();
+               ++operand)
+            if (!DefinedOutsideOrHoisted(module, operation.operands[operand],
+                                         loopId, {}))
+              return true;
           sawInsertion = true;
           nextValue = operation.results.front();
           continue;

@@ -176,10 +176,28 @@ inline std::vector<int64_t> getDenseI64Array(const std::string &text,
   const size_t key = text.find(name);
   if (key == std::string::npos)
     return {};
-  const size_t begin = text.find('[', key + name.size());
-  const size_t end = text.find(']', begin == std::string::npos ? key : begin);
-  if (begin == std::string::npos || end == std::string::npos)
+  const size_t equal = text.find('=', key + name.size());
+  if (equal == std::string::npos)
     return {};
+  size_t value = equal + 1;
+  while (value < text.size() &&
+         std::isspace(static_cast<unsigned char>(text[value])))
+    ++value;
+
+  size_t begin = std::string::npos;
+  size_t end = std::string::npos;
+  if (text.compare(value, 6, "array<") == 0) {
+    begin = text.find(':', value + 6);
+    end = text.find('>', value + 6);
+    // DenseI64ArrayAttr prints an empty array as `array<i64>`.
+    if (end == std::string::npos || begin == std::string::npos || begin > end)
+      return {};
+  } else {
+    begin = text.find('[', value);
+    end = text.find(']', begin == std::string::npos ? value : begin);
+    if (begin == std::string::npos || end == std::string::npos)
+      return {};
+  }
   std::vector<int64_t> values;
   static const std::regex integerRegex(R"(-?[0-9]+)");
   const std::string body = text.substr(begin + 1, end - begin - 1);
@@ -810,11 +828,12 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
   buffer2LifeFreeTime.reserve(allocNames.size());
   ignoreInplaceBuffers.reserve(allocNames.size());
   std::mt19937 randomGenerator(randomSeed);
-  std::vector<std::string> preloadBuffers;
+  const bool debugShuffle =
+      std::getenv("CVUB_DEBUG_PLAN_SHUFFLE") != nullptr;
   std::unordered_set<std::string> preloadBufferSet;
+  std::map<int, std::vector<std::string>> preloadLoop2Buffers;
   std::vector<std::string> shuffledLiveValues;
   linearOperation.reserve(operations.size());
-  preloadBuffers.reserve(allocNames.size());
   preloadBufferSet.reserve(allocNames.size());
   shuffledLiveValues.reserve(allocNames.size());
 
@@ -926,6 +945,14 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
   };
   auto UpdateOpKillInfo = [&](OpInfo &info, const std::string &operand) {
     std::vector<std::string> aliases = GetAliasBuffers(operand);
+    if (debugShuffle) {
+      std::cerr << "PLAN_ALIAS kill op=" << info.index << ':'
+                << info.operation->opName << " operand=" << operand
+                << " aliases";
+      for (const std::string &alias : aliases)
+        std::cerr << ' ' << alias;
+      std::cerr << '\n';
+    }
     for (const std::string &alias : aliases) {
       auto it = buffer2status.find(alias);
       if (it == buffer2status.end())
@@ -940,6 +967,10 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
         continue;
       info.kill.push_back(alias);
       it->second = BufferStatus::KILLED;
+      if (debugShuffle)
+        std::cerr << "PLAN_KILL op=" << info.index << ':'
+                  << info.operation->opName << " operand=" << operand
+                  << " root=" << alias << '\n';
     }
   };
   auto OpKillHandle = [&](OpInfo &info) {
@@ -950,6 +981,16 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
     shuffledLiveValues.assign(orderedLive.begin(), orderedLive.end());
     std::shuffle(shuffledLiveValues.begin(), shuffledLiveValues.end(),
                  randomGenerator);
+    if (debugShuffle) {
+      std::cerr << "PLAN_SHUFFLE kill op=" << info.index << ':'
+                << info.operation->opName << " before";
+      for (const std::string &value : orderedLive)
+        std::cerr << ' ' << value;
+      std::cerr << " after";
+      for (const std::string &value : shuffledLiveValues)
+        std::cerr << ' ' << value;
+      std::cerr << '\n';
+    }
     for (const std::string &value : shuffledLiveValues)
       UpdateOpKillInfo(info, value);
   };
@@ -962,6 +1003,16 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
     shuffledLiveValues.assign(orderedLive.begin(), orderedLive.end());
     std::shuffle(shuffledLiveValues.begin(), shuffledLiveValues.end(),
                  randomGenerator);
+    if (debugShuffle) {
+      std::cerr << "PLAN_SHUFFLE loop op=" << op.index << ':' << op.opName
+                << " before";
+      for (const std::string &value : orderedLive)
+        std::cerr << ' ' << value;
+      std::cerr << " after";
+      for (const std::string &value : shuffledLiveValues)
+        std::cerr << ' ' << value;
+      std::cerr << '\n';
+    }
     for (const std::string &value : shuffledLiveValues)
       ForEachAlias(value, [&](const std::string &alias) {
         if (buffer2status.count(alias))
@@ -995,6 +1046,32 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
     std::vector<int> parentPath(child.regionPath.begin(),
                                 child.regionPath.end() - 1);
     return prepared.parentOperation(parentPath, child.regionPath.back());
+  };
+  std::unordered_map<int, const OperationRecord *> operationById;
+  operationById.reserve(operations.size());
+  for (const OperationRecord &operation : operations)
+    if (operation.opName != "scf.for.end" &&
+        operation.opName != "scf.while.end" &&
+        operation.opName != "affine.for.end" &&
+        operation.opName != "scf.forall.end")
+      operationById.emplace(operation.operationId, &operation);
+  const auto enclosingPreloadLoop =
+      [&](const OperationRecord &start) -> int {
+    const OperationRecord *current = &start;
+    while (true) {
+      const int parentId = GetParentOperationId(*current);
+      if (parentId < 0)
+        return -1;
+      auto parent = operationById.find(parentId);
+      if (parent == operationById.end())
+        return -1;
+      current = parent->second;
+      if (current->opName == "scf.for" ||
+          current->opName == "scf.while" ||
+          current->opName == "affine.for" ||
+          current->opName == "scf.forall")
+        return current->operationId;
+    }
   };
   auto IsInRegion = [](const OperationRecord &op, int region) {
     return region >= 0 && !op.regionPath.empty() &&
@@ -1248,8 +1325,27 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
           }
           if (line.find("hivm.preload_local_buffer") !=
                   std::string::npos &&
-              preloadBufferSet.insert(*alloc).second)
-            preloadBuffers.push_back(*alloc);
+              preloadBufferSet.insert(*alloc).second) {
+            // PlanMemory.cpp::UpdatePreloadBuffers associates each marked
+            // allocation with its own nearest LoopLikeOpInterface.  Falling
+            // back to the allocation's parent is required when a mark was
+            // hoisted outside that loop.  A global preload list incorrectly
+            // extends later scopes over the first preload loop.
+            int loop = enclosingPreloadLoop(op);
+            if (loop < 0) {
+              auto allocation = allocDefOperation.find(*alloc);
+              auto allocationOperation =
+                  allocation == allocDefOperation.end()
+                      ? operationById.end()
+                      : operationById.find(allocation->second);
+              if (allocationOperation != operationById.end())
+                loop = enclosingPreloadLoop(*allocationOperation->second);
+            }
+            if (loop < 0)
+              throw std::runtime_error(
+                  "preload local buffer must be inside a loop-like op");
+            preloadLoop2Buffers[loop].push_back(*alloc);
+          }
           UpdateOpKillInfo(info, *alloc);
         }
       }
@@ -1283,7 +1379,8 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
           op.opName);
   }
 
-  auto UpdatePreloadBuffersGenInfo = [&](OpInfo &info) {
+  auto UpdatePreloadBuffersGenInfo =
+      [&](OpInfo &info, const std::vector<std::string> &preloadBuffers) {
     for (const std::string &preloadBuffer : preloadBuffers)
       ForEachAlias(preloadBuffer, [&](const std::string &buffer) {
         auto status = buffer2status.find(buffer);
@@ -1295,7 +1392,8 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
         return true;
       });
   };
-  auto UpdatePreloadBuffersKillInfo = [&](OpInfo &info) {
+  auto UpdatePreloadBuffersKillInfo =
+      [&](OpInfo &info, const std::vector<std::string> &preloadBuffers) {
     for (const std::string &preloadBuffer : preloadBuffers)
       ForEachAlias(preloadBuffer, [&](const std::string &buffer) {
         auto status = buffer2status.find(buffer);
@@ -1308,26 +1406,19 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
       });
   };
   auto UpdatePreloadBuffersGenKillMap = [&]() {
-    int parentForOperationId = -1;
-    for (const OpInfo &info : linearOperation) {
-      if (info.operation->opName == "scope.scope") {
-        parentForOperationId = GetParentOperationId(*info.operation);
-        break;
-      }
-    }
-    if (parentForOperationId < 0)
+    if (preloadLoop2Buffers.empty())
       return;
-    size_t count = 0;
+    std::map<int, unsigned> loopVisitCount;
     for (OpInfo &info : linearOperation) {
-      if (info.operation->operationId != parentForOperationId)
+      auto loop = preloadLoop2Buffers.find(info.operation->operationId);
+      if (loop == preloadLoop2Buffers.end())
         continue;
-      if (count == 0) {
-        UpdatePreloadBuffersGenInfo(info);
-        ++count;
-      } else {
-        UpdatePreloadBuffersKillInfo(info);
-        break;
-      }
+      unsigned &count = loopVisitCount[loop->first];
+      if (count == 0)
+        UpdatePreloadBuffersGenInfo(info, loop->second);
+      else if (count == 1)
+        UpdatePreloadBuffersKillInfo(info, loop->second);
+      ++count;
     }
   };
   UpdatePreloadBuffersGenKillMap();
