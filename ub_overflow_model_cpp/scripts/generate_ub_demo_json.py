@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--suffix-local-multi-buffer-strategy", default="no-l0c")
     parser.add_argument("--suffix-mix-multi-buffer-strategy", default="only-cube")
     parser.add_argument("--restrict-inplace-as-isa", action="store_true")
-    parser.add_argument("--random-seed", default=None)
+    parser.add_argument("--plan-memory-seed", default=None)
     return parser.parse_args()
 
 
@@ -57,8 +57,8 @@ def main() -> int:
     ]
     if args.restrict_inplace_as_isa:
         command.append("--restrict-inplace-as-isa")
-    if args.random_seed is not None:
-        command.append(f"--random-seed={args.random_seed}")
+    if args.plan_memory_seed is not None:
+        command.append(f"--plan-memory-seed={args.plan_memory_seed}")
     completed = subprocess.run(
         command,
         cwd=root,

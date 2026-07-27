@@ -1,0 +1,11 @@
+--enable-hfusion-compile
+--enable-hivm-compile
+--enable-triton-kernel-compile
+--enable-memory-display
+--mlir-disable-threading
+--disable-auto-cv-work-space-manage=false
+--enable-auto-multi-buffer=true
+--limit-auto-multi-buffer-only-for-local-buffer=false
+--limit-auto-multi-buffer-of-local-buffer=no-l0c
+--limit-auto-multi-buffer-buffer=only-vector
+--set-workspace-multibuffer=4

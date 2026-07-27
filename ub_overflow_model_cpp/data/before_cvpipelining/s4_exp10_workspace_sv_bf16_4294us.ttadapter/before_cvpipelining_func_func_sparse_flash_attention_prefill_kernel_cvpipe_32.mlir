@@ -1,3 +1,10 @@
+#map = affine_map<()[s0] -> (s0 + 512)>
+#map1 = affine_map<()[s0, s1] -> (s0 * s1)>
+#map2 = affine_map<()[s0, s1] -> (s0 + s1)>
+#map3 = affine_map<()[s0] -> (s0 + 256)>
+#map4 = affine_map<()[s0] -> (s0, 1024)>
+#map5 = affine_map<()[s0, s1] -> (s0, s1)>
+#map6 = affine_map<()[s0, s1] -> (s0 - s1)>
 "builtin.module"() ({
   "func.func"() <{arg_attrs = [{hacc.arg_type = #hacc.arg_type<ffts_base_address>}, {hacc.arg_type = #hacc.arg_type<sync_block_lock>}, {hacc.arg_type = #hacc.arg_type<workspace>}, {tt.divisibility = 16 : i32, tt.tensor_kind = 0 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32, tt.tensor_kind = 2 : i32}, {tt.divisibility = 16 : i32, tt.tensor_kind = 0 : i32}, {tt.divisibility = 16 : i32, tt.tensor_kind = 0 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32, tt.tensor_kind = 2 : i32}, {tt.divisibility = 16 : i32, tt.tensor_kind = 2 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {tt.divisibility = 16 : i32}, {}, {}, {}, {}, {}, {}, {}, {}, {}], function_type = (i64, memref<?xi8>, memref<?xi8>, memref<?xbf16>, memref<?xbf16>, memref<?xbf16>, memref<?xi32>, memref<?xf32>, memref<?xbf16>, memref<?xbf16>, memref<?xf32>, memref<?xbf16>, memref<?xbf16>, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, f32, i32, i32, i32, i32, i32, i32, i32, i32) -> (), sym_name = "sparse_flash_attention_prefill_kernel_cvpipe"}> ({
   ^bb0(%arg0: i64, %arg1: memref<?xi8>, %arg2: memref<?xi8>, %arg3: memref<?xbf16>, %arg4: memref<?xbf16>, %arg5: memref<?xbf16>, %arg6: memref<?xi32>, %arg7: memref<?xf32>, %arg8: memref<?xbf16>, %arg9: memref<?xbf16>, %arg10: memref<?xf32>, %arg11: memref<?xbf16>, %arg12: memref<?xbf16>, %arg13: i32, %arg14: i32, %arg15: i32, %arg16: i32, %arg17: i32, %arg18: i32, %arg19: i32, %arg20: i32, %arg21: i32, %arg22: i32, %arg23: i32, %arg24: i32, %arg25: i32, %arg26: i32, %arg27: i32, %arg28: i32, %arg29: i32, %arg30: i32, %arg31: i32, %arg32: i32, %arg33: i32, %arg34: i32, %arg35: i32, %arg36: f32, %arg37: i32, %arg38: i32, %arg39: i32, %arg40: i32, %arg41: i32, %arg42: i32, %arg43: i32, %arg44: i32):
@@ -7,187 +14,152 @@
     %3 = "arith.constant"() <{value = 512 : index}> : () -> index
     %4 = "arith.constant"() <{value = 4 : i32}> : () -> i32
     %5 = "arith.constant"() <{value = 0 : i32}> : () -> i32
-    %6 = "arith.constant"() <{value = 1024 : index}> : () -> index
-    %7 = "arith.constant"() <{value = 256 : index}> : () -> index
-    %8 = "arith.constant"() <{value = 256 : i32}> : () -> i32
-    %9 = "arith.constant"() <{value = 0xFF800000 : f32}> : () -> f32
-    %10 = "arith.constant"() <{value = 16 : index}> : () -> index
-    %11 = "arith.constant"() <{value = 64 : index}> : () -> index
+    %6 = "arith.constant"() <{value = 256 : index}> : () -> index
+    %7 = "arith.constant"() <{value = 256 : i32}> : () -> i32
+    %8 = "arith.constant"() <{value = 0xFF800000 : f32}> : () -> f32
+    %9 = "arith.constant"() <{value = 16 : index}> : () -> index
+    %10 = "arith.constant"() <{value = 64 : index}> : () -> index
     "hivm.hir.set_mask_norm"() : () -> ()
-    %12 = "arith.muli"(%arg42, %arg43) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
-    %13 = "arith.muli"(%12, %arg44) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
-    "annotation.mark"(%13) {logical_block_num} : (i32) -> ()
-    %14 = "hivm.hir.get_block_idx"() : () -> i64
-    %15 = "arith.trunci"(%14) : (i64) -> i32
-    %16 = "arith.muli"(%arg44, %arg43) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
-    %17 = "arith.divsi"(%15, %16) : (i32, i32) -> i32
-    %18 = "arith.remsi"(%17, %arg42) : (i32, i32) -> i32
-    %19 = "tensor.empty"() : () -> tensor<16x256xf32>
-    %20 = "tensor.empty"() : () -> tensor<16x256xf32>
-    %21 = "tensor.empty"() : () -> tensor<16x256xf32>
-    %22 = "tensor.empty"() : () -> tensor<16x256xf32>
-    %23 = "tensor.empty"() : () -> tensor<16x256xf32>
-    %24 = "tensor.empty"() : () -> tensor<16x256xf32>
-    %25 = "tensor.empty"() : () -> tensor<16x256xf32>
-    %26 = "hivm.hir.vbrc"(%9, %25) <{broadcast_dims = array<i64>}> : (f32, tensor<16x256xf32>) -> tensor<16x256xf32>
-    %27 = "tensor.empty"() : () -> tensor<16x512xf32>
-    %28 = "tensor.empty"() : () -> tensor<16x512xf32>
-    %29 = "tensor.empty"() : () -> tensor<16x512xf32>
-    %30 = "tensor.empty"() : () -> tensor<16x512xf32>
-    %31 = "tensor.empty"() : () -> tensor<16x512xf32>
-    %32 = "tensor.empty"() : () -> tensor<16x512xf32>
-    %33 = "tensor.empty"() : () -> tensor<16xf32>
-    %34 = "tensor.empty"() : () -> tensor<16xf32>
-    %35 = "tensor.empty"() : () -> tensor<16xf32>
-    %36 = "tensor.empty"() : () -> tensor<16xf32>
-    %37 = "tensor.empty"() : () -> tensor<16xf32>
-    %38 = "tensor.empty"() : () -> tensor<16xf32>
-    %39 = "tensor.empty"() : () -> tensor<16xf32>
-    %40 = "tensor.empty"() : () -> tensor<16xf32>
-    %41 = "tensor.empty"() : () -> tensor<16xf32>
-    %42 = "tensor.empty"() : () -> tensor<16xf32>
-    %43 = "tensor.empty"() : () -> tensor<16xf32>
-    %44 = "tensor.empty"() : () -> tensor<16xf32>
-    %45 = "tensor.empty"() : () -> tensor<16xf32>
-    %46 = "tensor.empty"() : () -> tensor<16xf32>
-    %47 = "tensor.empty"() : () -> tensor<16xf32>
-    %48 = "tensor.empty"() : () -> tensor<16xf32>
-    %49 = "tensor.empty"() : () -> tensor<16xf32>
-    %50 = "hivm.hir.vbrc"(%9, %49) <{broadcast_dims = array<i64>}> : (f32, tensor<16xf32>) -> tensor<16xf32>
-    %51 = "arith.muli"(%18, %arg41) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
-    %52 = "arith.addi"(%18, %0) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
-    %53 = "arith.muli"(%52, %arg41) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
-    %54 = "arith.minsi"(%arg37, %53) : (i32, i32) -> i32
-    %55 = "arith.muli"(%18, %arg32) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
-    %56 = "arith.muli"(%18, %arg34) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
-    %57 = "arith.index_cast"(%55) : (i32) -> index
-    %58 = "arith.index_cast"(%arg33) : (i32) -> index
-    %59 = "memref.reinterpret_cast"(%arg11, %57, %58) <{operandSegmentSizes = array<i32: 1, 1, 0, 1>, static_offsets = array<i64: -9223372036854775808>, static_sizes = array<i64: 16, 256>, static_strides = array<i64: -9223372036854775808, 1>}> : (memref<?xbf16>, index, index) -> memref<16x256xbf16, strided<[?, 1], offset: ?>>
-    %60 = "arith.index_cast"(%56) : (i32) -> index
-    %61 = "arith.index_cast"(%arg35) : (i32) -> index
-    %62 = "memref.reinterpret_cast"(%arg12, %60, %61) <{operandSegmentSizes = array<i32: 1, 1, 0, 1>, static_offsets = array<i64: -9223372036854775808>, static_sizes = array<i64: 16, 512>, static_strides = array<i64: -9223372036854775808, 1>}> : (memref<?xbf16>, index, index) -> memref<16x512xbf16, strided<[?, 1], offset: ?>>
-    "scf.for"(%51, %54, %0) ({
+    %11 = "arith.muli"(%arg42, %arg43) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
+    %12 = "arith.muli"(%11, %arg44) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
+    "annotation.mark"(%12) <{effects = ["write"]}> {logical_block_num} : (i32) -> ()
+    %13 = "hivm.hir.get_block_idx"() : () -> i64
+    %14 = "arith.trunci"(%13) : (i64) -> i32
+    %15 = "arith.muli"(%arg44, %arg43) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
+    %16 = "arith.divsi"(%14, %15) : (i32, i32) -> i32
+    %17 = "arith.remsi"(%16, %arg42) : (i32, i32) -> i32
+    %18 = "tensor.empty"() : () -> tensor<16x256xf32>
+    %19 = "hivm.hir.vbrc"(%8, %18) <{broadcast_dims = array<i64>}> : (f32, tensor<16x256xf32>) -> tensor<16x256xf32>
+    %20 = "tensor.empty"() : () -> tensor<16x512xf32>
+    %21 = "tensor.empty"() : () -> tensor<16xf32>
+    %22 = "hivm.hir.vbrc"(%8, %21) <{broadcast_dims = array<i64>}> : (f32, tensor<16xf32>) -> tensor<16xf32>
+    %23 = "arith.muli"(%17, %arg41) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
+    %24 = "arith.addi"(%17, %0) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
+    %25 = "arith.muli"(%24, %arg41) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
+    %26 = "arith.minsi"(%arg37, %25) : (i32, i32) -> i32
+    %27 = "arith.muli"(%17, %arg32) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
+    %28 = "arith.muli"(%17, %arg34) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
+    %29 = "arith.index_cast"(%27) : (i32) -> index
+    %30 = "arith.index_cast"(%arg33) : (i32) -> index
+    %31 = "memref.reinterpret_cast"(%arg11, %29, %30) <{operandSegmentSizes = array<i32: 1, 1, 0, 1>, static_offsets = array<i64: -9223372036854775808>, static_sizes = array<i64: 16, 256>, static_strides = array<i64: -9223372036854775808, 1>}> : (memref<?xbf16>, index, index) -> memref<16x256xbf16, strided<[?, 1], offset: ?>>
+    %32 = "arith.index_cast"(%28) : (i32) -> index
+    %33 = "arith.index_cast"(%arg35) : (i32) -> index
+    %34 = "memref.reinterpret_cast"(%arg12, %32, %33) <{operandSegmentSizes = array<i32: 1, 1, 0, 1>, static_offsets = array<i64: -9223372036854775808>, static_sizes = array<i64: 16, 512>, static_strides = array<i64: -9223372036854775808, 1>}> : (memref<?xbf16>, index, index) -> memref<16x512xbf16, strided<[?, 1], offset: ?>>
+    "scf.for"(%23, %26, %0) ({
     ^bb0(%arg45: i32):
-      %63 = "arith.muli"(%arg45, %arg13) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
-      %64 = "arith.muli"(%arg45, %arg24) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
-      %65 = "arith.muli"(%arg45, %arg27) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
-      %66 = "arith.muli"(%arg45, %arg22) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
-      %67 = "arith.index_cast"(%63) : (i32) -> index
-      %68 = "arith.index_cast"(%arg15) : (i32) -> index
-      %69 = "memref.reinterpret_cast"(%arg3, %67, %68) <{operandSegmentSizes = array<i32: 1, 1, 0, 1>, static_offsets = array<i64: -9223372036854775808>, static_sizes = array<i64: 16, 512>, static_strides = array<i64: -9223372036854775808, 1>}> : (memref<?xbf16>, index, index) -> memref<16x512xbf16, strided<[?, 1], offset: ?>>
-      %70 = "arith.addi"(%67, %3) <{overflowFlags = #arith.overflow<none>}> : (index, index) -> index
-      %71 = "memref.reinterpret_cast"(%arg3, %70, %68) <{operandSegmentSizes = array<i32: 1, 1, 0, 1>, static_offsets = array<i64: -9223372036854775808>, static_sizes = array<i64: 16, 64>, static_strides = array<i64: -9223372036854775808, 1>}> : (memref<?xbf16>, index, index) -> memref<16x64xbf16, strided<[?, 1], offset: ?>>
-      %72 = "arith.index_cast"(%64) : (i32) -> index
-      %73 = "arith.index_cast"(%66) : (i32) -> index
-      %74 = "arith.index_cast"(%arg23) : (i32) -> index
-      %75 = "memref.reinterpret_cast"(%arg7, %73, %74) <{operandSegmentSizes = array<i32: 1, 1, 0, 1>, static_offsets = array<i64: -9223372036854775808>, static_sizes = array<i64: 16, 512>, static_strides = array<i64: -9223372036854775808, 1>}> : (memref<?xf32>, index, index) -> memref<16x512xf32, strided<[?, 1], offset: ?>>
-      %76 = "scf.for"(%5, %4, %0, %50) ({
+      %35 = "arith.muli"(%arg45, %arg13) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
+      %36 = "arith.muli"(%arg45, %arg24) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
+      %37 = "arith.muli"(%arg45, %arg27) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
+      %38 = "arith.muli"(%arg45, %arg22) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
+      %39 = "arith.index_cast"(%35) : (i32) -> index
+      %40 = "arith.index_cast"(%arg15) : (i32) -> index
+      %41 = "memref.reinterpret_cast"(%arg3, %39, %40) <{operandSegmentSizes = array<i32: 1, 1, 0, 1>, static_offsets = array<i64: -9223372036854775808>, static_sizes = array<i64: 16, 512>, static_strides = array<i64: -9223372036854775808, 1>}> : (memref<?xbf16>, index, index) -> memref<16x512xbf16, strided<[?, 1], offset: ?>>
+      %42 = "affine.apply"(%39) <{map = #map}> : (index) -> index
+      %43 = "memref.reinterpret_cast"(%arg3, %42, %40) <{operandSegmentSizes = array<i32: 1, 1, 0, 1>, static_offsets = array<i64: -9223372036854775808>, static_sizes = array<i64: 16, 64>, static_strides = array<i64: -9223372036854775808, 1>}> : (memref<?xbf16>, index, index) -> memref<16x64xbf16, strided<[?, 1], offset: ?>>
+      %44 = "arith.index_cast"(%36) : (i32) -> index
+      %45 = "arith.index_cast"(%38) : (i32) -> index
+      %46 = "arith.index_cast"(%arg23) : (i32) -> index
+      %47 = "memref.reinterpret_cast"(%arg7, %45, %46) <{operandSegmentSizes = array<i32: 1, 1, 0, 1>, static_offsets = array<i64: -9223372036854775808>, static_sizes = array<i64: 16, 512>, static_strides = array<i64: -9223372036854775808, 1>}> : (memref<?xf32>, index, index) -> memref<16x512xf32, strided<[?, 1], offset: ?>>
+      %48 = "scf.for"(%5, %4, %0, %22) ({
       ^bb0(%arg46: i32, %arg47: tensor<16xf32>):
-        %77 = "arith.muli"(%arg46, %8) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
-        %78 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<16x512xbf16>
-        "hivm.hir.load"(%69, %78) <{init_out_buffer = false, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0>, tcoretype = #hivm.tcore_type<CUBE>}> : (memref<16x512xbf16, strided<[?, 1], offset: ?>>, memref<16x512xbf16>) -> ()
-        %79 = "bufferization.to_tensor"(%78) <{restrict, writable}> : (memref<16x512xbf16>) -> tensor<16x512xbf16>
-        %80 = "arith.index_cast"(%77) : (i32) -> index
-        %81 = "arith.index_cast"(%arg26) : (i32) -> index
-        %82 = "arith.muli"(%80, %81) <{overflowFlags = #arith.overflow<none>}> : (index, index) -> index
-        %83 = "arith.addi"(%72, %82) <{overflowFlags = #arith.overflow<none>}> : (index, index) -> index
-        %84 = "memref.reinterpret_cast"(%arg8, %83, %81) <{operandSegmentSizes = array<i32: 1, 1, 0, 1>, static_offsets = array<i64: -9223372036854775808>, static_sizes = array<i64: 256, 512>, static_strides = array<i64: -9223372036854775808, 1>}> : (memref<?xbf16>, index, index) -> memref<256x512xbf16, strided<[?, 1], offset: ?>>
-        %85 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<256x512xbf16>
-        "hivm.hir.load"(%84, %85) <{init_out_buffer = false, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0>, tcoretype = #hivm.tcore_type<CUBE>}> : (memref<256x512xbf16, strided<[?, 1], offset: ?>>, memref<256x512xbf16>) -> ()
-        %86 = "bufferization.to_tensor"(%85) <{restrict, writable}> : (memref<256x512xbf16>) -> tensor<256x512xbf16>
-        %87 = "tensor.empty"() : () -> tensor<16x256xf32>
-        %88 = "hivm.hir.mmadL1"(%79, %86, %2, %10, %3, %7, %87) <{b_transpose, operandSegmentSizes = array<i32: 1, 1, 1, 1, 1, 1, 1, 0, 0, 0>}> : (tensor<16x512xbf16>, tensor<256x512xbf16>, i1, index, index, index, tensor<16x256xf32>) -> tensor<16x256xf32>
-        %89 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<16x64xbf16>
-        "hivm.hir.load"(%71, %89) <{init_out_buffer = false, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0>, tcoretype = #hivm.tcore_type<CUBE>}> : (memref<16x64xbf16, strided<[?, 1], offset: ?>>, memref<16x64xbf16>) -> ()
-        %90 = "bufferization.to_tensor"(%89) <{restrict, writable}> : (memref<16x64xbf16>) -> tensor<16x64xbf16>
-        %91 = "arith.index_cast"(%65) : (i32) -> index
-        %92 = "arith.index_cast"(%arg29) : (i32) -> index
-        %93 = "arith.muli"(%80, %92) <{overflowFlags = #arith.overflow<none>}> : (index, index) -> index
-        %94 = "arith.addi"(%91, %93) <{overflowFlags = #arith.overflow<none>}> : (index, index) -> index
-        %95 = "memref.reinterpret_cast"(%arg9, %94, %92) <{operandSegmentSizes = array<i32: 1, 1, 0, 1>, static_offsets = array<i64: -9223372036854775808>, static_sizes = array<i64: 256, 64>, static_strides = array<i64: -9223372036854775808, 1>}> : (memref<?xbf16>, index, index) -> memref<256x64xbf16, strided<[?, 1], offset: ?>>
-        %96 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<256x64xbf16>
-        "hivm.hir.load"(%95, %96) <{init_out_buffer = false, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0>, tcoretype = #hivm.tcore_type<CUBE>}> : (memref<256x64xbf16, strided<[?, 1], offset: ?>>, memref<256x64xbf16>) -> ()
-        %97 = "bufferization.to_tensor"(%96) <{restrict, writable}> : (memref<256x64xbf16>) -> tensor<256x64xbf16>
-        %98 = "hivm.hir.mmadL1"(%90, %97, %1, %10, %11, %7, %88) <{b_transpose, operandSegmentSizes = array<i32: 1, 1, 1, 1, 1, 1, 1, 0, 0, 0>}> {fixpipe_already_inserted = true} : (tensor<16x64xbf16>, tensor<256x64xbf16>, i1, index, index, index, tensor<16x256xf32>) -> tensor<16x256xf32>
-        %99 = "memref_ext.alloc_workspace"(%arg2) <{operandSegmentSizes = array<i32: 1, 0, 0>}> : (memref<?xi8>) -> memref<16x256xf32>
-        %100 = "bufferization.to_tensor"(%99) <{restrict, writable}> : (memref<16x256xf32>) -> tensor<16x256xf32>
-        %101 = "hivm.hir.fixpipe"(%98, %100) <{dma_mode = #hivm.dma_mode<nz2nd>, operandSegmentSizes = array<i32: 1, 1, 0, 0>}> : (tensor<16x256xf32>, tensor<16x256xf32>) -> tensor<16x256xf32>
-        %102 = "tensor.empty"() : () -> tensor<16x256xf32>
-        %103 = "hivm.hir.load"(%101, %102) <{init_out_buffer = false, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0>, tcoretype = #hivm.tcore_type<VECTOR>}> {"inserted-load"} : (tensor<16x256xf32>, tensor<16x256xf32>) -> tensor<16x256xf32>
-        %104 = "hivm.hir.vmul"(%103, %arg36, %24) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16x256xf32>, f32, tensor<16x256xf32>) -> tensor<16x256xf32>
-        %105 = "arith.addi"(%80, %7) <{overflowFlags = #arith.overflow<none>}> : (index, index) -> index
-        %106 = "arith.maxsi"(%80, %6) : (index, index) -> index
-        %107 = "arith.minsi"(%105, %106) : (index, index) -> index
-        %108 = "arith.subi"(%107, %80) <{overflowFlags = #arith.overflow<none>}> : (index, index) -> index
-        %109 = "tensor.extract_slice"(%104, %108) <{operandSegmentSizes = array<i32: 1, 0, 1, 0>, static_offsets = array<i64: 0, 0>, static_sizes = array<i64: 16, -9223372036854775808>, static_strides = array<i64: 1, 1>}> : (tensor<16x256xf32>, index) -> tensor<16x?xf32>
-        %110 = "tensor.insert_slice"(%109, %26, %108) <{operandSegmentSizes = array<i32: 1, 1, 0, 1, 0>, static_offsets = array<i64: 0, 0>, static_sizes = array<i64: 16, -9223372036854775808>, static_strides = array<i64: 1, 1>}> : (tensor<16x?xf32>, tensor<16x256xf32>, index) -> tensor<16x256xf32>
-        %111 = "tensor.empty"() : () -> tensor<16x1xf32>
-        %112 = "hivm.hir.vreduce"(%110, %111) <{arith = #hivm.reduce_op<max>, operandSegmentSizes = array<i32: 1, 1, 0, 0>, reduce_dims = array<i64: 1>}> : (tensor<16x256xf32>, tensor<16x1xf32>) -> tensor<16x1xf32>
-        %113 = "tensor.collapse_shape"(%112) <{reassociation = [[0, 1]]}> : (tensor<16x1xf32>) -> tensor<16xf32>
-        %114 = "hivm.hir.vbrc"(%112, %23) <{broadcast_dims = array<i64: 1>}> : (tensor<16x1xf32>, tensor<16x256xf32>) -> tensor<16x256xf32>
-        %115 = "hivm.hir.vsub"(%110, %114, %22) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16x256xf32>, tensor<16x256xf32>, tensor<16x256xf32>) -> tensor<16x256xf32>
-        %116 = "hivm.hir.vexp"(%115, %21) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 1, 1, 0>, transpose = array<i64>}> : (tensor<16x256xf32>, tensor<16x256xf32>) -> tensor<16x256xf32>
-        %117 = "tensor.empty"() : () -> tensor<16x1xf32>
-        %118 = "hivm.hir.vreduce"(%116, %117) <{arith = #hivm.reduce_op<sum>, operandSegmentSizes = array<i32: 1, 1, 0, 0>, reduce_dims = array<i64: 1>}> : (tensor<16x256xf32>, tensor<16x1xf32>) -> tensor<16x1xf32>
-        %119 = "tensor.collapse_shape"(%118) <{reassociation = [[0, 1]]}> : (tensor<16x1xf32>) -> tensor<16xf32>
-        %120 = "hivm.hir.vln"(%119, %48) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 1, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
-        %121 = "hivm.hir.vadd"(%113, %120, %47) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
-        %122 = "tensor.empty"() : () -> tensor<16xi1>
-        %123 = "tensor.empty"() : () -> tensor<16xi1>
-        %124 = "tensor.empty"() : () -> tensor<16xi1>
-        %125 = "tensor.empty"() : () -> tensor<16xi1>
-        %126 = "hivm.hir.vcmp"(%arg47, %arg47, %125) <{broadcast = array<i64>, compare_mode = #hivm.compare_mode<eq>, operandSegmentSizes = array<i32: 2, 1>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xi1>) -> tensor<16xi1>
-        %127 = "hivm.hir.vnot"(%126, %124) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 1, 1, 0>, transpose = array<i64>}> : (tensor<16xi1>, tensor<16xi1>) -> tensor<16xi1>
-        %128 = "hivm.hir.vcmp"(%121, %121, %123) <{broadcast = array<i64>, compare_mode = #hivm.compare_mode<eq>, operandSegmentSizes = array<i32: 2, 1>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xi1>) -> tensor<16xi1>
-        %129 = "hivm.hir.vnot"(%128, %122) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 1, 1, 0>, transpose = array<i64>}> : (tensor<16xi1>, tensor<16xi1>) -> tensor<16xi1>
-        %130 = "hivm.hir.vmax"(%arg47, %121, %46) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
-        %131 = "hivm.hir.vsel"(%127, %121, %130, %45) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 3, 1, 0>, transpose = array<i64>}> : (tensor<16xi1>, tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
-        %132 = "hivm.hir.vsel"(%129, %arg47, %131, %44) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 3, 1, 0>, transpose = array<i64>}> : (tensor<16xi1>, tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
-        %133 = "hivm.hir.vsub"(%arg47, %132, %43) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
-        %134 = "hivm.hir.vexp"(%133, %42) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 1, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
-        %135 = "hivm.hir.vsub"(%121, %132, %41) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
-        %136 = "hivm.hir.vexp"(%135, %40) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 1, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
-        %137 = "hivm.hir.vadd"(%134, %136, %39) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
-        %138 = "hivm.hir.vln"(%137, %38) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 1, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
-        %139 = "hivm.hir.vadd"(%132, %138, %37) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
-        %140 = "hivm.hir.vsub"(%121, %139, %36) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
-        %141 = "hivm.hir.vexp"(%140, %35) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 1, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
-        %142 = "hivm.hir.vbrc"(%118, %20) <{broadcast_dims = array<i64: 1>}> : (tensor<16x1xf32>, tensor<16x256xf32>) -> tensor<16x256xf32>
-        %143 = "hivm.hir.vdiv"(%116, %142, %19) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16x256xf32>, tensor<16x256xf32>, tensor<16x256xf32>) -> tensor<16x256xf32>
-        %144 = "tensor.empty"() : () -> tensor<16x256xbf16>
-        %145 = "hivm.hir.vcast"(%143, %144) <{broadcast = array<i64>, cast = #hivm.cast<cast_signed>, operandSegmentSizes = array<i32: 1, 1, 0>, round_mode = #hivm.round_mode<rint>, transpose = array<i64>}> : (tensor<16x256xf32>, tensor<16x256xbf16>) -> tensor<16x256xbf16>
-        "hivm.hir.store"(%145, %59) : (tensor<16x256xbf16>, memref<16x256xbf16, strided<[?, 1], offset: ?>>) -> ()
-        %146 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<16x256xbf16>
-        "hivm.hir.load"(%59, %146) <{init_out_buffer = false, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0>, tcoretype = #hivm.tcore_type<CUBE>}> : (memref<16x256xbf16, strided<[?, 1], offset: ?>>, memref<16x256xbf16>) -> ()
-        %147 = "bufferization.to_tensor"(%146) <{restrict, writable}> : (memref<16x256xbf16>) -> tensor<16x256xbf16>
-        %148 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<256x512xbf16>
-        "hivm.hir.load"(%84, %148) <{init_out_buffer = false, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0>, tcoretype = #hivm.tcore_type<CUBE>}> : (memref<256x512xbf16, strided<[?, 1], offset: ?>>, memref<256x512xbf16>) -> ()
-        %149 = "bufferization.to_tensor"(%148) <{restrict, writable}> : (memref<256x512xbf16>) -> tensor<256x512xbf16>
-        %150 = "tensor.empty"() : () -> tensor<16x512xf32>
-        %151 = "hivm.hir.mmadL1"(%147, %149, %2, %10, %7, %3, %150) <{operandSegmentSizes = array<i32: 1, 1, 1, 1, 1, 1, 1, 0, 0, 0>}> {fixpipe_already_inserted = true} : (tensor<16x256xbf16>, tensor<256x512xbf16>, i1, index, index, index, tensor<16x512xf32>) -> tensor<16x512xf32>
-        "hivm.hir.fixpipe"(%151, %62) <{dma_mode = #hivm.dma_mode<nz2nd>, operandSegmentSizes = array<i32: 1, 1, 0, 0>, pre_quant = #hivm.fixpipe_pre_quant_mode<F322BF16>}> : (tensor<16x512xf32>, memref<16x512xbf16, strided<[?, 1], offset: ?>>) -> ()
-        %152 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<16x512xf32>
-        "hivm.hir.load"(%75, %152) <{init_out_buffer = false, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0>, tcoretype = #hivm.tcore_type<VECTOR>}> : (memref<16x512xf32, strided<[?, 1], offset: ?>>, memref<16x512xf32>) -> ()
-        %153 = "bufferization.to_tensor"(%152) <{restrict, writable}> : (memref<16x512xf32>) -> tensor<16x512xf32>
-        %154 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<16x512xbf16>
-        "hivm.hir.load"(%62, %154) <{init_out_buffer = false, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0>, tcoretype = #hivm.tcore_type<VECTOR>}> : (memref<16x512xbf16, strided<[?, 1], offset: ?>>, memref<16x512xbf16>) -> ()
-        %155 = "bufferization.to_tensor"(%154) <{restrict, writable}> : (memref<16x512xbf16>) -> tensor<16x512xbf16>
-        %156 = "hivm.hir.vsub"(%arg47, %139, %34) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
-        %157 = "hivm.hir.vexp"(%156, %33) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 1, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
-        %158 = "tensor.expand_shape"(%157) <{reassociation = [[0, 1]], static_output_shape = array<i64: 16, 1>}> : (tensor<16xf32>) -> tensor<16x1xf32>
-        %159 = "hivm.hir.vbrc"(%158, %32) <{broadcast_dims = array<i64: 1>}> : (tensor<16x1xf32>, tensor<16x512xf32>) -> tensor<16x512xf32>
-        %160 = "hivm.hir.vmul"(%153, %159, %31) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16x512xf32>, tensor<16x512xf32>, tensor<16x512xf32>) -> tensor<16x512xf32>
-        %161 = "hivm.hir.vcast"(%155, %30) <{broadcast = array<i64>, cast = #hivm.cast<cast_signed>, operandSegmentSizes = array<i32: 1, 1, 0>, round_mode = #hivm.round_mode<rint>, transpose = array<i64>}> : (tensor<16x512xbf16>, tensor<16x512xf32>) -> tensor<16x512xf32>
-        %162 = "tensor.expand_shape"(%141) <{reassociation = [[0, 1]], static_output_shape = array<i64: 16, 1>}> : (tensor<16xf32>) -> tensor<16x1xf32>
-        %163 = "hivm.hir.vbrc"(%162, %29) <{broadcast_dims = array<i64: 1>}> : (tensor<16x1xf32>, tensor<16x512xf32>) -> tensor<16x512xf32>
-        %164 = "hivm.hir.vmul"(%161, %163, %28) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16x512xf32>, tensor<16x512xf32>, tensor<16x512xf32>) -> tensor<16x512xf32>
-        %165 = "hivm.hir.vadd"(%160, %164, %27) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16x512xf32>, tensor<16x512xf32>, tensor<16x512xf32>) -> tensor<16x512xf32>
-        "hivm.hir.store"(%165, %75) : (tensor<16x512xf32>, memref<16x512xf32, strided<[?, 1], offset: ?>>) -> ()
-        "scf.yield"(%139) : (tensor<16xf32>) -> ()
-      }) : (i32, i32, i32, tensor<16xf32>) -> tensor<16xf32>
+        %49 = "arith.muli"(%arg46, %7) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
+        %50 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<16x512xbf16>
+        "hivm.hir.load"(%41, %50) <{eviction_policy = #hivm.eviction_policy<EvictFirst>, init_out_buffer = false, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0>, tcoretype = #hivm.tcore_type<CUBE>}> : (memref<16x512xbf16, strided<[?, 1], offset: ?>>, memref<16x512xbf16>) -> ()
+        %51 = "bufferization.to_tensor"(%50) <{restrict, writable}> : (memref<16x512xbf16>) -> tensor<16x512xbf16>
+        %52 = "arith.index_cast"(%49) : (i32) -> index
+        %53 = "arith.index_cast"(%arg26) : (i32) -> index
+        %54 = "affine.apply"(%52, %53) <{map = #map1}> : (index, index) -> index
+        %55 = "affine.apply"(%44, %54) <{map = #map2}> : (index, index) -> index
+        %56 = "memref.reinterpret_cast"(%arg8, %55, %53) <{operandSegmentSizes = array<i32: 1, 1, 0, 1>, static_offsets = array<i64: -9223372036854775808>, static_sizes = array<i64: 256, 512>, static_strides = array<i64: -9223372036854775808, 1>}> : (memref<?xbf16>, index, index) -> memref<256x512xbf16, strided<[?, 1], offset: ?>>
+        %57 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<256x512xbf16>
+        "hivm.hir.load"(%56, %57) <{eviction_policy = #hivm.eviction_policy<EvictFirst>, init_out_buffer = false, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0>, tcoretype = #hivm.tcore_type<CUBE>}> : (memref<256x512xbf16, strided<[?, 1], offset: ?>>, memref<256x512xbf16>) -> ()
+        %58 = "bufferization.to_tensor"(%57) <{restrict, writable}> : (memref<256x512xbf16>) -> tensor<256x512xbf16>
+        %59 = "hivm.hir.mmadL1"(%51, %58, %2, %9, %3, %6, %18) <{b_transpose, operandSegmentSizes = array<i32: 1, 1, 1, 1, 1, 1, 1, 0, 0, 0>}> : (tensor<16x512xbf16>, tensor<256x512xbf16>, i1, index, index, index, tensor<16x256xf32>) -> tensor<16x256xf32>
+        %60 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<16x64xbf16>
+        "hivm.hir.load"(%43, %60) <{eviction_policy = #hivm.eviction_policy<EvictFirst>, init_out_buffer = false, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0>, tcoretype = #hivm.tcore_type<CUBE>}> : (memref<16x64xbf16, strided<[?, 1], offset: ?>>, memref<16x64xbf16>) -> ()
+        %61 = "bufferization.to_tensor"(%60) <{restrict, writable}> : (memref<16x64xbf16>) -> tensor<16x64xbf16>
+        %62 = "arith.index_cast"(%37) : (i32) -> index
+        %63 = "arith.index_cast"(%arg29) : (i32) -> index
+        %64 = "affine.apply"(%52, %63) <{map = #map1}> : (index, index) -> index
+        %65 = "affine.apply"(%62, %64) <{map = #map2}> : (index, index) -> index
+        %66 = "memref.reinterpret_cast"(%arg9, %65, %63) <{operandSegmentSizes = array<i32: 1, 1, 0, 1>, static_offsets = array<i64: -9223372036854775808>, static_sizes = array<i64: 256, 64>, static_strides = array<i64: -9223372036854775808, 1>}> : (memref<?xbf16>, index, index) -> memref<256x64xbf16, strided<[?, 1], offset: ?>>
+        %67 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<256x64xbf16>
+        "hivm.hir.load"(%66, %67) <{eviction_policy = #hivm.eviction_policy<EvictFirst>, init_out_buffer = false, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0>, tcoretype = #hivm.tcore_type<CUBE>}> : (memref<256x64xbf16, strided<[?, 1], offset: ?>>, memref<256x64xbf16>) -> ()
+        %68 = "bufferization.to_tensor"(%67) <{restrict, writable}> : (memref<256x64xbf16>) -> tensor<256x64xbf16>
+        %69 = "hivm.hir.mmadL1"(%61, %68, %1, %9, %10, %6, %59) <{b_transpose, operandSegmentSizes = array<i32: 1, 1, 1, 1, 1, 1, 1, 0, 0, 0>}> {fixpipe_for_result_already_inserted = true} : (tensor<16x64xbf16>, tensor<256x64xbf16>, i1, index, index, index, tensor<16x256xf32>) -> tensor<16x256xf32>
+        %70 = "memref_ext.alloc_workspace"(%arg2) <{operandSegmentSizes = array<i32: 1, 0, 0>}> : (memref<?xi8>) -> memref<16x256xf32>
+        %71 = "bufferization.to_tensor"(%70) <{restrict, writable}> : (memref<16x256xf32>) -> tensor<16x256xf32>
+        %72 = "hivm.hir.fixpipe"(%69, %71) <{dma_mode = #hivm.dma_mode<nz2nd>, operandSegmentSizes = array<i32: 1, 1, 0, 0>}> : (tensor<16x256xf32>, tensor<16x256xf32>) -> tensor<16x256xf32>
+        %73 = "hivm.hir.load"(%72, %18) <{init_out_buffer = false, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0>, tcoretype = #hivm.tcore_type<VECTOR>}> {"inserted-load"} : (tensor<16x256xf32>, tensor<16x256xf32>) -> tensor<16x256xf32>
+        %74 = "hivm.hir.vmul"(%73, %arg36, %18) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16x256xf32>, f32, tensor<16x256xf32>) -> tensor<16x256xf32>
+        %75 = "affine.apply"(%52) <{map = #map3}> : (index) -> index
+        %76 = "affine.max"(%52) <{map = #map4}> : (index) -> index
+        %77 = "affine.min"(%75, %76) <{map = #map5}> : (index, index) -> index
+        %78 = "affine.apply"(%77, %52) <{map = #map6}> : (index, index) -> index
+        %79 = "tensor.extract_slice"(%74, %78) <{operandSegmentSizes = array<i32: 1, 0, 1, 0>, static_offsets = array<i64: 0, 0>, static_sizes = array<i64: 16, -9223372036854775808>, static_strides = array<i64: 1, 1>}> : (tensor<16x256xf32>, index) -> tensor<16x?xf32>
+        %80 = "tensor.insert_slice"(%79, %19, %78) <{operandSegmentSizes = array<i32: 1, 1, 0, 1, 0>, static_offsets = array<i64: 0, 0>, static_sizes = array<i64: 16, -9223372036854775808>, static_strides = array<i64: 1, 1>}> : (tensor<16x?xf32>, tensor<16x256xf32>, index) -> tensor<16x256xf32>
+        %81 = "tensor.empty"() : () -> tensor<16x1xf32>
+        %82 = "hivm.hir.vreduce"(%80, %81) <{arith = #hivm.reduce_op<max>, operandSegmentSizes = array<i32: 1, 1, 0, 0>, reduce_dims = array<i64: 1>, tie_break_left = true, unsigned_src = false}> : (tensor<16x256xf32>, tensor<16x1xf32>) -> tensor<16x1xf32>
+        %83 = "tensor.collapse_shape"(%82) <{reassociation = [[0, 1]]}> : (tensor<16x1xf32>) -> tensor<16xf32>
+        %84 = "hivm.hir.vbrc"(%82, %18) <{broadcast_dims = array<i64: 1>}> : (tensor<16x1xf32>, tensor<16x256xf32>) -> tensor<16x256xf32>
+        %85 = "hivm.hir.vsub"(%80, %84, %18) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16x256xf32>, tensor<16x256xf32>, tensor<16x256xf32>) -> tensor<16x256xf32>
+        %86 = "hivm.hir.vexp"(%85, %18) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 1, 1, 0>, transpose = array<i64>}> : (tensor<16x256xf32>, tensor<16x256xf32>) -> tensor<16x256xf32>
+        %87 = "hivm.hir.vreduce"(%86, %81) <{arith = #hivm.reduce_op<sum>, operandSegmentSizes = array<i32: 1, 1, 0, 0>, reduce_dims = array<i64: 1>, tie_break_left = true, unsigned_src = false}> : (tensor<16x256xf32>, tensor<16x1xf32>) -> tensor<16x1xf32>
+        %88 = "tensor.collapse_shape"(%87) <{reassociation = [[0, 1]]}> : (tensor<16x1xf32>) -> tensor<16xf32>
+        %89 = "hivm.hir.vln"(%88, %21) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 1, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
+        %90 = "hivm.hir.vadd"(%83, %89, %21) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
+        %91 = "tensor.empty"() : () -> tensor<16xi1>
+        %92 = "hivm.hir.vcmp"(%arg47, %arg47, %91) <{broadcast = array<i64>, compare_mode = #hivm.compare_mode<eq>, is_signed = true, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xi1>) -> tensor<16xi1>
+        %93 = "hivm.hir.vnot"(%92, %91) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 1, 1, 0>, transpose = array<i64>}> : (tensor<16xi1>, tensor<16xi1>) -> tensor<16xi1>
+        %94 = "hivm.hir.vcmp"(%90, %90, %91) <{broadcast = array<i64>, compare_mode = #hivm.compare_mode<eq>, is_signed = true, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xi1>) -> tensor<16xi1>
+        %95 = "hivm.hir.vnot"(%94, %91) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 1, 1, 0>, transpose = array<i64>}> : (tensor<16xi1>, tensor<16xi1>) -> tensor<16xi1>
+        %96 = "hivm.hir.vmax"(%arg47, %90, %21) <{broadcast = array<i64>, is_signed = true, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
+        %97 = "hivm.hir.vsel"(%93, %90, %96, %21) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 3, 1, 0>, transpose = array<i64>}> : (tensor<16xi1>, tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
+        %98 = "hivm.hir.vsel"(%95, %arg47, %97, %21) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 3, 1, 0>, transpose = array<i64>}> : (tensor<16xi1>, tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
+        %99 = "hivm.hir.vsub"(%arg47, %98, %21) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
+        %100 = "hivm.hir.vexp"(%99, %21) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 1, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
+        %101 = "hivm.hir.vsub"(%90, %98, %21) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
+        %102 = "hivm.hir.vexp"(%101, %21) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 1, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
+        %103 = "hivm.hir.vadd"(%100, %102, %21) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
+        %104 = "hivm.hir.vln"(%103, %21) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 1, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
+        %105 = "hivm.hir.vadd"(%98, %104, %21) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
+        %106 = "hivm.hir.vsub"(%90, %105, %21) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
+        %107 = "hivm.hir.vexp"(%106, %21) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 1, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
+        %108 = "hivm.hir.vbrc"(%87, %18) <{broadcast_dims = array<i64: 1>}> : (tensor<16x1xf32>, tensor<16x256xf32>) -> tensor<16x256xf32>
+        %109 = "hivm.hir.vdiv"(%86, %108, %18) <{broadcast = array<i64>, isHP = false, isSigned = true, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16x256xf32>, tensor<16x256xf32>, tensor<16x256xf32>) -> tensor<16x256xf32>
+        %110 = "tensor.empty"() : () -> tensor<16x256xbf16>
+        %111 = "hivm.hir.vcast"(%109, %110) <{broadcast = array<i64>, cast = #hivm.cast<cast_signed>, operandSegmentSizes = array<i32: 1, 1, 0>, round_mode = #hivm.round_mode<rint>, transpose = array<i64>}> : (tensor<16x256xf32>, tensor<16x256xbf16>) -> tensor<16x256xbf16>
+        "hivm.hir.store"(%111, %31) : (tensor<16x256xbf16>, memref<16x256xbf16, strided<[?, 1], offset: ?>>) -> ()
+        %112 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<16x256xbf16>
+        "hivm.hir.load"(%31, %112) <{eviction_policy = #hivm.eviction_policy<EvictFirst>, init_out_buffer = false, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0>, tcoretype = #hivm.tcore_type<CUBE>}> : (memref<16x256xbf16, strided<[?, 1], offset: ?>>, memref<16x256xbf16>) -> ()
+        %113 = "bufferization.to_tensor"(%112) <{restrict, writable}> : (memref<16x256xbf16>) -> tensor<16x256xbf16>
+        %114 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<256x512xbf16>
+        "hivm.hir.load"(%56, %114) <{eviction_policy = #hivm.eviction_policy<EvictFirst>, init_out_buffer = false, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0>, tcoretype = #hivm.tcore_type<CUBE>}> : (memref<256x512xbf16, strided<[?, 1], offset: ?>>, memref<256x512xbf16>) -> ()
+        %115 = "bufferization.to_tensor"(%114) <{restrict, writable}> : (memref<256x512xbf16>) -> tensor<256x512xbf16>
+        %116 = "hivm.hir.mmadL1"(%113, %115, %2, %9, %6, %3, %20) <{operandSegmentSizes = array<i32: 1, 1, 1, 1, 1, 1, 1, 0, 0, 0>}> {fixpipe_for_result_already_inserted = true} : (tensor<16x256xbf16>, tensor<256x512xbf16>, i1, index, index, index, tensor<16x512xf32>) -> tensor<16x512xf32>
+        "hivm.hir.fixpipe"(%116, %34) <{dma_mode = #hivm.dma_mode<nz2nd>, operandSegmentSizes = array<i32: 1, 1, 0, 0>, pre_quant = #hivm.fixpipe_pre_quant_mode<F322BF16>}> : (tensor<16x512xf32>, memref<16x512xbf16, strided<[?, 1], offset: ?>>) -> ()
+        %117 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<16x512xf32>
+        "hivm.hir.load"(%47, %117) <{eviction_policy = #hivm.eviction_policy<EvictFirst>, init_out_buffer = false, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0>, tcoretype = #hivm.tcore_type<VECTOR>}> : (memref<16x512xf32, strided<[?, 1], offset: ?>>, memref<16x512xf32>) -> ()
+        %118 = "bufferization.to_tensor"(%117) <{restrict, writable}> : (memref<16x512xf32>) -> tensor<16x512xf32>
+        %119 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<16x512xbf16>
+        "hivm.hir.load"(%34, %119) <{eviction_policy = #hivm.eviction_policy<EvictFirst>, init_out_buffer = false, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 0, 0, 0, 0>, tcoretype = #hivm.tcore_type<VECTOR>}> : (memref<16x512xbf16, strided<[?, 1], offset: ?>>, memref<16x512xbf16>) -> ()
+        %120 = "bufferization.to_tensor"(%119) <{restrict, writable}> : (memref<16x512xbf16>) -> tensor<16x512xbf16>
+        %121 = "hivm.hir.vsub"(%arg47, %105, %21) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
+        %122 = "hivm.hir.vexp"(%121, %21) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 1, 1, 0>, transpose = array<i64>}> : (tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
+        %123 = "tensor.expand_shape"(%122) <{reassociation = [[0, 1]], static_output_shape = array<i64: 16, 1>}> : (tensor<16xf32>) -> tensor<16x1xf32>
+        %124 = "hivm.hir.vbrc"(%123, %20) <{broadcast_dims = array<i64: 1>}> : (tensor<16x1xf32>, tensor<16x512xf32>) -> tensor<16x512xf32>
+        %125 = "hivm.hir.vmul"(%118, %124, %20) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16x512xf32>, tensor<16x512xf32>, tensor<16x512xf32>) -> tensor<16x512xf32>
+        %126 = "hivm.hir.vcast"(%120, %20) <{broadcast = array<i64>, cast = #hivm.cast<cast_signed>, operandSegmentSizes = array<i32: 1, 1, 0>, round_mode = #hivm.round_mode<rint>, transpose = array<i64>}> : (tensor<16x512xbf16>, tensor<16x512xf32>) -> tensor<16x512xf32>
+        %127 = "tensor.expand_shape"(%107) <{reassociation = [[0, 1]], static_output_shape = array<i64: 16, 1>}> : (tensor<16xf32>) -> tensor<16x1xf32>
+        %128 = "hivm.hir.vbrc"(%127, %20) <{broadcast_dims = array<i64: 1>}> : (tensor<16x1xf32>, tensor<16x512xf32>) -> tensor<16x512xf32>
+        %129 = "hivm.hir.vmul"(%126, %128, %20) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16x512xf32>, tensor<16x512xf32>, tensor<16x512xf32>) -> tensor<16x512xf32>
+        %130 = "hivm.hir.vadd"(%125, %129, %20) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<16x512xf32>, tensor<16x512xf32>, tensor<16x512xf32>) -> tensor<16x512xf32>
+        "hivm.hir.store"(%130, %47) : (tensor<16x512xf32>, memref<16x512xf32, strided<[?, 1], offset: ?>>) -> ()
+        "scf.yield"(%105) : (tensor<16xf32>) -> ()
+      }) {fixpipe_for_mmad_result_already_inserted = true} : (i32, i32, i32, tensor<16xf32>) -> tensor<16xf32>
       "scf.yield"() : () -> ()
     }) : (i32, i32, i32) -> ()
     "func.return"() : () -> ()
   }) {SyncBlockLockArgIdx = 0 : i64, WorkspaceArgIdx = 1 : i64, func_dyn_memref_args = dense<[false, true, true, true, true, true, true, true, true, true, true, true, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]> : vector<45xi1>, hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<MIX>, mix_mode = "mix", parallel_mode = "simd"} : () -> ()
-}) {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #hacc.target_device_spec<#dlti.dl_entry<"AI_CORE_COUNT", 24 : i32>, #dlti.dl_entry<"CUBE_CORE_COUNT", 24 : i32>, #dlti.dl_entry<"VECTOR_CORE_COUNT", 48 : i32>, #dlti.dl_entry<"UB_SIZE", 1572864 : i32>, #dlti.dl_entry<"L1_SIZE", 4194304 : i32>, #dlti.dl_entry<"L0A_SIZE", 524288 : i32>, #dlti.dl_entry<"L0B_SIZE", 524288 : i32>, #dlti.dl_entry<"L0C_SIZE", 1048576 : i32>, #dlti.dl_entry<"UB_ALIGN_SIZE", 256 : i32>, #dlti.dl_entry<"L1_ALIGN_SIZE", 256 : i32>, #dlti.dl_entry<"L0C_ALIGN_SIZE", 4096 : i32>>>, hacc.hivmc_compatible_print = false, hacc.hivmc_version = #hacc.hivmc_version<"0.0.0">, hivm.module_core_type = #hivm.module_core_type<MIX>} : () -> ()
+}) {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #hacc.target_device_spec<#dlti.dl_entry<"AI_CORE_COUNT", 24 : i32>, #dlti.dl_entry<"CUBE_CORE_COUNT", 24 : i32>, #dlti.dl_entry<"VECTOR_CORE_COUNT", 48 : i32>, #dlti.dl_entry<"UB_SIZE", 1572864 : i32>, #dlti.dl_entry<"L1_SIZE", 4194304 : i32>, #dlti.dl_entry<"L0A_SIZE", 524288 : i32>, #dlti.dl_entry<"L0B_SIZE", 524288 : i32>, #dlti.dl_entry<"L0C_SIZE", 1048576 : i32>, #dlti.dl_entry<"UB_ALIGN_SIZE", 256 : i32>, #dlti.dl_entry<"L1_ALIGN_SIZE", 256 : i32>, #dlti.dl_entry<"L0C_ALIGN_SIZE", 4096 : i32>>>, hacc.hivmc_compatible_print = false, hacc.hivmc_version = #hacc.hivmc_version<"0.0.0">, hacc.target = #hacc.target<"Ascend910B1">, hivm.module_core_type = #hivm.module_core_type<MIX>} : () -> ()
 

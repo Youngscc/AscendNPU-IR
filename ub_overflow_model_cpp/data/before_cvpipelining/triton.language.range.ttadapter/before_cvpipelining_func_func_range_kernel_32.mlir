@@ -9,20 +9,18 @@
     "hivm.hir.set_mask_norm"() : () -> ()
     %5 = "arith.muli"(%arg5, %arg6) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
     %6 = "arith.muli"(%5, %arg7) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
-    "annotation.mark"(%6) {logical_block_num} : (i32) -> ()
+    "annotation.mark"(%6) <{effects = ["write"]}> {logical_block_num} : (i32) -> ()
     %7 = "scf.for"(%3, %2, %0, %4) ({
     ^bb0(%arg8: i32, %arg9: f32):
       %11 = "arith.index_cast"(%arg8) : (i32) -> index
       %12 = "memref.reinterpret_cast"(%arg3, %11) <{operandSegmentSizes = array<i32: 1, 1, 0, 0>, static_offsets = array<i64: -9223372036854775808>, static_sizes = array<i64: 1>, static_strides = array<i64: 1>}> : (memref<?xf32>, index) -> memref<1xf32, strided<[1], offset: ?>>
       %13 = "memref.load"(%12, %1) : (memref<1xf32, strided<[1], offset: ?>>, index) -> f32
       %14 = "tensor.empty"() : () -> tensor<1xf32>
-      %15 = "tensor.empty"() : () -> tensor<1xf32>
-      %16 = "tensor.empty"() : () -> tensor<1xf32>
-      %17 = "tensor.insert"(%arg9, %16, %1) : (f32, tensor<1xf32>, index) -> tensor<1xf32>
-      %18 = "tensor.insert"(%13, %15, %1) : (f32, tensor<1xf32>, index) -> tensor<1xf32>
-      %19 = "hivm.hir.vadd"(%17, %18, %14) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<1xf32>, tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
-      %20 = "tensor.extract"(%19, %1) : (tensor<1xf32>, index) -> f32
-      "scf.yield"(%20) : (f32) -> ()
+      %15 = "tensor.insert"(%arg9, %14, %1) : (f32, tensor<1xf32>, index) -> tensor<1xf32>
+      %16 = "tensor.insert"(%13, %14, %1) : (f32, tensor<1xf32>, index) -> tensor<1xf32>
+      %17 = "hivm.hir.vadd"(%15, %16, %14) <{broadcast = array<i64>, operandSegmentSizes = array<i32: 2, 1, 0>, transpose = array<i64>}> : (tensor<1xf32>, tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
+      %18 = "tensor.extract"(%17, %1) : (tensor<1xf32>, index) -> f32
+      "scf.yield"(%18) : (f32) -> ()
     }) : (i32, i32, i32, f32) -> f32
     %8 = "tensor.empty"() : () -> tensor<1xf32>
     %9 = "tensor.insert"(%7, %8, %1) : (f32, tensor<1xf32>, index) -> tensor<1xf32>
@@ -30,5 +28,5 @@
     "hivm.hir.store"(%9, %10) : (tensor<1xf32>, memref<1xf32, strided<[1]>>) -> ()
     "func.return"() : () -> ()
   }) {SyncBlockLockArgIdx = 0 : i64, WorkspaceArgIdx = 1 : i64, func_dyn_memref_args = dense<[false, true, true, true, true, false, false, false]> : vector<8xi1>, hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<AIV>, mix_mode = "aiv", parallel_mode = "simd"} : () -> ()
-}) {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #hacc.target_device_spec<#dlti.dl_entry<"AI_CORE_COUNT", 24 : i32>, #dlti.dl_entry<"CUBE_CORE_COUNT", 24 : i32>, #dlti.dl_entry<"VECTOR_CORE_COUNT", 48 : i32>, #dlti.dl_entry<"UB_SIZE", 1572864 : i32>, #dlti.dl_entry<"L1_SIZE", 4194304 : i32>, #dlti.dl_entry<"L0A_SIZE", 524288 : i32>, #dlti.dl_entry<"L0B_SIZE", 524288 : i32>, #dlti.dl_entry<"L0C_SIZE", 1048576 : i32>, #dlti.dl_entry<"UB_ALIGN_SIZE", 256 : i32>, #dlti.dl_entry<"L1_ALIGN_SIZE", 256 : i32>, #dlti.dl_entry<"L0C_ALIGN_SIZE", 4096 : i32>>>, hacc.hivmc_compatible_print = false, hacc.hivmc_version = #hacc.hivmc_version<"0.0.0">, hivm.module_core_type = #hivm.module_core_type<AIV>} : () -> ()
+}) {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #hacc.target_device_spec<#dlti.dl_entry<"AI_CORE_COUNT", 24 : i32>, #dlti.dl_entry<"CUBE_CORE_COUNT", 24 : i32>, #dlti.dl_entry<"VECTOR_CORE_COUNT", 48 : i32>, #dlti.dl_entry<"UB_SIZE", 1572864 : i32>, #dlti.dl_entry<"L1_SIZE", 4194304 : i32>, #dlti.dl_entry<"L0A_SIZE", 524288 : i32>, #dlti.dl_entry<"L0B_SIZE", 524288 : i32>, #dlti.dl_entry<"L0C_SIZE", 1048576 : i32>, #dlti.dl_entry<"UB_ALIGN_SIZE", 256 : i32>, #dlti.dl_entry<"L1_ALIGN_SIZE", 256 : i32>, #dlti.dl_entry<"L0C_ALIGN_SIZE", 4096 : i32>>>, hacc.hivmc_compatible_print = false, hacc.hivmc_version = #hacc.hivmc_version<"0.0.0">, hacc.target = #hacc.target<"Ascend910B1">, hivm.module_core_type = #hivm.module_core_type<AIV>} : () -> ()
 

@@ -35,3 +35,24 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 target_link_libraries(bishengir-cvpipeline-suffix-compile PRIVATE ${LIBS})
 mlir_check_all_link_libraries(bishengir-cvpipeline-suffix-compile)
+
+# Exact CVPipelining-before -> local PlanMemory compiler.  It intentionally
+# shares the driver/diagnostic implementation with the experimental suffix
+# oracle while selecting the unabridged production pass sequence at compile
+# time, so both tools remain independently buildable.
+add_bishengir_publish_tool(cv2pm-bishengir-compile
+  bishengir-cvpipeline-suffix-compile.cpp
+
+  DEPENDS
+  ${LIBS}
+)
+target_compile_definitions(cv2pm-bishengir-compile
+  PRIVATE BISHENGIR_CV2PM_FULL_PIPELINE=1)
+target_include_directories(cv2pm-bishengir-compile
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  target_compile_options(cv2pm-bishengir-compile
+    PRIVATE -Wshadow -Werror=shadow)
+endif()
+target_link_libraries(cv2pm-bishengir-compile PRIVATE ${LIBS})
+mlir_check_all_link_libraries(cv2pm-bishengir-compile)

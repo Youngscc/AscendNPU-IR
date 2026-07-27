@@ -64,7 +64,12 @@ ordered_calls = [
     "createCloneTensorEmptyPass",
     "createHIVMInlineOTFLoadStorePass",
 ]
-positions = [builder.index(call) for call in ordered_calls]
-if positions != sorted(positions):
-    raise SystemExit("oracle post-CVPipeline pass calls are out of order")
+cursor = 0
+for call in ordered_calls:
+    try:
+        cursor = builder.index(call, cursor) + len(call)
+    except ValueError as error:
+        raise SystemExit(
+            f"oracle post-CVPipeline pass call is missing or out of order: {call}"
+        ) from error
 print("[PASS] 14 post-CVPipeline stages match the oracle source")

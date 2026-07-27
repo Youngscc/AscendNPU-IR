@@ -7,13 +7,22 @@ import argparse
 import collections
 import json
 from pathlib import Path
-from typing import Counter
+from typing import Counter, Union
 
 
 PlanKey = tuple[int, int]
 LifetimeKey = tuple[str, int, int, int, int]
 BufferIdentity = tuple[str, int, tuple[int, ...], int, int]
 InplaceKey = tuple[BufferIdentity, BufferIdentity]
+OracleSource = Union[Path, str]
+
+
+def oracle_lines(source: OracleSource) -> list[str]:
+    if isinstance(source, Path):
+        text = source.read_text(encoding="utf-8", errors="replace")
+    else:
+        text = source
+    return text.splitlines()
 
 
 def canonical_function_name(name: str) -> str:
@@ -73,7 +82,7 @@ def model_multi_and_inplace(
 
 
 def parse_oracle_contract(
-    path: Path, attempt: int, scope: str,
+    path: OracleSource, attempt: int, scope: str,
 ) -> tuple[str, int, Counter[int], Counter[InplaceKey]]:
     """Parse status/required/multi/inplace facts omitted by the legacy tuple."""
     # Keep split AIC/AIV names distinct while joining semantic buffer IDs.
@@ -93,7 +102,7 @@ def parse_oracle_contract(
     applied_inplace_expected = 0
     applied_inplace_dumped = False
     ub_oracle_complete = False
-    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for raw_line in oracle_lines(path):
         fields = raw_line.split("\t")
         if not fields:
             continue
@@ -150,8 +159,15 @@ def parse_oracle_contract(
     ) else "overflow"
     if status == "success" and required == 0:
         required = planned_required or storage_required or peak
+    # The model reports the buffers that participate in the selected
+    # PlanMemory plan.  PLANMEM_EXACT_BUFFER additionally includes UB
+    # allocations that liveness discovered but PlanMemory did not place
+    # (for example an unused allocation with lifetime -1/-1).  Do not let
+    # those non-plan buffers alter the multi-buffer cardinality or the
+    # normalized event ranks used to identify applied inplace pairs.
+    planned_buffers = set(planned_offsets)
     multi: Counter[int] = collections.Counter(
-        multi_by_buffer.get(buffer, 1) for buffer in ub_buffers)
+        multi_by_buffer.get(buffer, 1) for buffer in planned_buffers)
     if applied_inplace_dumped and len(applied_inplace_ids) != \
             applied_inplace_expected:
         raise ValueError("oracle applied inplace dump is incomplete")
@@ -159,11 +175,13 @@ def parse_oracle_contract(
         applied_inplace_ids if applied_inplace_dumped else initial_inplace_ids
     )
     event_ranks: dict[str, dict[int, int]] = {}
-    for function in {key[0] for key in ub_buffers}:
+    for function in {key[0] for key in planned_buffers}:
         times = sorted({
             time
-            for (life_function, _), (_, alloc, free) in buffer_lives.items()
-            if life_function == function
+            for (life_function, buffer_id), (_, alloc, free) in
+            buffer_lives.items()
+            if (life_function == function and
+                (life_function, buffer_id) in planned_buffers)
             for time in (alloc, free)
         })
         event_ranks[function] = {
@@ -173,7 +191,10 @@ def parse_oracle_contract(
     for function, first_id, second_id in selected_inplace_ids:
         first_key = (function, first_id)
         second_key = (function, second_id)
-        if first_key not in buffer_lives or second_key not in buffer_lives:
+        if (first_key not in planned_buffers or
+                second_key not in planned_buffers or
+                first_key not in buffer_lives or
+                second_key not in buffer_lives):
             continue
         first_extent, first_alloc, first_free = buffer_lives[first_key]
         second_extent, second_alloc, second_free = buffer_lives[second_key]
@@ -250,7 +271,7 @@ def normalized_lifetimes_from_model(payload: dict) -> Counter[LifetimeKey]:
 
 
 def parse_oracle(
-    path: Path, attempt: int | None, scope: str,
+    path: OracleSource, attempt: int | None, scope: str,
 ) -> tuple[int, int | None, Counter[PlanKey], Counter[LifetimeKey]]:
     success_attempts: list[int] = []
     peaks: dict[int, int] = {}
@@ -262,7 +283,7 @@ def parse_oracle(
     function_for_attempt: dict[int, str] = {}
     current_function = ""
 
-    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for raw_line in oracle_lines(path):
         fields = raw_line.split("\t")
         if not fields:
             continue
@@ -302,14 +323,15 @@ def parse_oracle(
         selected = success_attempts[0] if success_attempts else 0
     oracle_lifetimes: Counter[LifetimeKey] = collections.Counter()
     functions = {
-        function for function, line_attempt, _ in buffer_lives
+        function for function, line_attempt, _ in planned_offsets
         if line_attempt == selected
     }
     for function in functions:
         lives = {
             buffer_id: life
             for (life_function, line_attempt, buffer_id), life in buffer_lives.items()
-            if life_function == function and line_attempt == selected
+            if (life_function == function and line_attempt == selected and
+                (life_function, line_attempt, buffer_id) in planned_offsets)
         }
         event_times = sorted({time for _, gen, kill in lives.values()
                               for time in (gen, kill)})
@@ -330,7 +352,7 @@ def parse_oracle(
 
 
 def parse_oracle_retry(
-    path: Path, scope: str,
+    path: OracleSource, scope: str,
 ) -> tuple[dict[str, int], int, Counter[PlanKey], Counter[LifetimeKey]]:
     current_function = ""
     successful: dict[str, int] = {}
@@ -338,7 +360,7 @@ def parse_oracle_retry(
     peaks: dict[tuple[str, int], int] = {}
     lives: dict[tuple[str, int, str], tuple[int, int, int]] = {}
     offsets: dict[tuple[str, int, str], list[int]] = collections.defaultdict(list)
-    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for raw_line in oracle_lines(path):
         fields = raw_line.split("\t")
         if not fields:
             continue
@@ -377,7 +399,8 @@ def parse_oracle_retry(
         function_lives = {
             buffer_id: life
             for (life_function, attempt, buffer_id), life in lives.items()
-            if life_function == function and attempt == selected
+            if (life_function == function and attempt == selected and
+                (life_function, attempt, buffer_id) in offsets)
         }
         event_times = sorted({time for _, gen, kill in function_lives.values()
                               for time in (gen, kill)})

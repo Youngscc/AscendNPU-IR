@@ -15,10 +15,42 @@ needs_rebuild() {
     if [[ "${source_file}" -nt "${output}" ]]; then
       return 0
     fi
-  done < <(find "${module_dir}/src" -type f \
+  done < <(find "${module_dir}/src" "${module_dir}/include" -type f \
       \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' \))
 
   return 1
+}
+
+artifact_needs_rebuild() {
+  local output="$1"
+  local module_dir="$2"
+
+  if [[ "${FORCE_REBUILD:-0}" == "1" || ! -e "${output}" ]]; then
+    return 0
+  fi
+
+  while IFS= read -r source_file; do
+    if [[ "${source_file}" -nt "${output}" ]]; then
+      return 0
+    fi
+  done < <(find "${module_dir}/src" "${module_dir}/include" -type f \
+      \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' \))
+
+  return 1
+}
+
+compile_object_if_needed() {
+  local source="$1"
+  local output="$2"
+  local module_dir="$3"
+  local compiler="${CXX:-c++}"
+
+  mkdir -p "$(dirname "${output}")"
+  if artifact_needs_rebuild "${output}" "${module_dir}"; then
+    "${compiler}" -std=c++17 -O3 -Wall -Wextra -Wpedantic -Wconversion \
+      -Wshadow -Werror -I"${module_dir}/include" \
+      -c "${source}" -o "${output}"
+  fi
 }
 
 compile_if_needed() {

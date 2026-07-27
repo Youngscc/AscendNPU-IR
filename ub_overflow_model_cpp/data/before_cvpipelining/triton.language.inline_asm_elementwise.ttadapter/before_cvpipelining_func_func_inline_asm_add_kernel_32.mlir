@@ -1,3 +1,6 @@
+#map = affine_map<()[s0] -> (s0 + 128)>
+#map1 = affine_map<()[s0, s1] -> (s0, s1)>
+#map2 = affine_map<()[s0, s1] -> (s0 - s1)>
 "builtin.module"() ({
   "func.func"() <{arg_attrs = [{hacc.arg_type = #hacc.arg_type<ffts_base_address>}, {hacc.arg_type = #hacc.arg_type<sync_block_lock>}, {hacc.arg_type = #hacc.arg_type<workspace>}, {tt.divisibility = 16 : i32, tt.tensor_kind = 0 : i32}, {tt.divisibility = 16 : i32, tt.tensor_kind = 0 : i32}, {tt.divisibility = 16 : i32, tt.tensor_kind = 1 : i32}, {tt.divisibility = 16 : i32}, {}, {}, {}], function_type = (i64, memref<?xi8>, memref<?xi8>, memref<?xi64>, memref<?xi64>, memref<?xi64>, i32, i32, i32, i32) -> (), sym_name = "inline_asm_add_kernel"}> ({
   ^bb0(%arg0: i64, %arg1: memref<?xi8>, %arg2: memref<?xi8>, %arg3: memref<?xi64>, %arg4: memref<?xi64>, %arg5: memref<?xi64>, %arg6: i32, %arg7: i32, %arg8: i32, %arg9: i32):
@@ -135,7 +138,7 @@
     "hivm.hir.set_mask_norm"() : () -> ()
     %131 = "arith.muli"(%arg7, %arg8) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
     %132 = "arith.muli"(%131, %arg9) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
-    "annotation.mark"(%132) {logical_block_num} : (i32) -> ()
+    "annotation.mark"(%132) <{effects = ["write"]}> {logical_block_num} : (i32) -> ()
     %133 = "hivm.hir.get_block_idx"() : () -> i64
     %134 = "arith.trunci"(%133) : (i64) -> i32
     %135 = "arith.muli"(%arg9, %arg8) <{overflowFlags = #arith.overflow<none>}> : (i32, i32) -> i32
@@ -145,21 +148,21 @@
     %139 = "arith.index_cast"(%138) : (i32) -> index
     %140 = "memref.reinterpret_cast"(%arg3, %139) <{operandSegmentSizes = array<i32: 1, 1, 0, 0>, static_offsets = array<i64: -9223372036854775808>, static_sizes = array<i64: 128>, static_strides = array<i64: 1>}> : (memref<?xi64>, index) -> memref<128xi64, strided<[1], offset: ?>>
     %141 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<128xi64>
-    %142 = "arith.addi"(%139, %1) <{overflowFlags = #arith.overflow<none>}> : (index, index) -> index
+    %142 = "affine.apply"(%139) <{map = #map}> : (index) -> index
     %143 = "arith.index_cast"(%arg6) : (i32) -> index
-    %144 = "arith.maxsi"(%139, %143) : (index, index) -> index
-    %145 = "arith.minsi"(%142, %144) : (index, index) -> index
-    %146 = "arith.subi"(%145, %139) <{overflowFlags = #arith.overflow<none>}> : (index, index) -> index
+    %144 = "affine.max"(%139, %143) <{map = #map1}> : (index, index) -> index
+    %145 = "affine.min"(%142, %144) <{map = #map1}> : (index, index) -> index
+    %146 = "affine.apply"(%145, %139) <{map = #map2}> : (index, index) -> index
     %147 = "arith.cmpi"(%146, %1) <{predicate = 2 : i64}> : (index, index) -> i1
     %148 = "memref.subview"(%140, %146) <{operandSegmentSizes = array<i32: 1, 0, 1, 0>, static_offsets = array<i64: 0>, static_sizes = array<i64: -9223372036854775808>, static_strides = array<i64: 1>}> : (memref<128xi64, strided<[1], offset: ?>>, index) -> memref<?xi64, strided<[1], offset: ?>>
     %149 = "memref.subview"(%141, %146) <{operandSegmentSizes = array<i32: 1, 0, 1, 0>, static_offsets = array<i64: 0>, static_sizes = array<i64: -9223372036854775808>, static_strides = array<i64: 1>}> : (memref<128xi64>, index) -> memref<?xi64, strided<[1]>>
-    "hivm.hir.load"(%148, %149, %0, %129, %147) <{init_out_buffer = true, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 1>, pad_mode = #hivm.padmode<PadValue>, tcoretype = #hivm.tcore_type<VECTOR>}> : (memref<?xi64, strided<[1], offset: ?>>, memref<?xi64, strided<[1]>>, i64, index, i1) -> ()
+    "hivm.hir.load"(%148, %149, %0, %129, %147) <{eviction_policy = #hivm.eviction_policy<EvictFirst>, init_out_buffer = true, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 1>, pad_mode = #hivm.padmode<PadValue>, tcoretype = #hivm.tcore_type<VECTOR>}> : (memref<?xi64, strided<[1], offset: ?>>, memref<?xi64, strided<[1]>>, i64, index, i1) -> ()
     %150 = "bufferization.to_tensor"(%141) <{restrict, writable}> : (memref<128xi64>) -> tensor<128xi64>
     %151 = "memref.reinterpret_cast"(%arg4, %139) <{operandSegmentSizes = array<i32: 1, 1, 0, 0>, static_offsets = array<i64: -9223372036854775808>, static_sizes = array<i64: 128>, static_strides = array<i64: 1>}> : (memref<?xi64>, index) -> memref<128xi64, strided<[1], offset: ?>>
     %152 = "memref.alloc"() <{operandSegmentSizes = array<i32: 0, 0>}> : () -> memref<128xi64>
     %153 = "memref.subview"(%151, %146) <{operandSegmentSizes = array<i32: 1, 0, 1, 0>, static_offsets = array<i64: 0>, static_sizes = array<i64: -9223372036854775808>, static_strides = array<i64: 1>}> : (memref<128xi64, strided<[1], offset: ?>>, index) -> memref<?xi64, strided<[1], offset: ?>>
     %154 = "memref.subview"(%152, %146) <{operandSegmentSizes = array<i32: 1, 0, 1, 0>, static_offsets = array<i64: 0>, static_sizes = array<i64: -9223372036854775808>, static_strides = array<i64: 1>}> : (memref<128xi64>, index) -> memref<?xi64, strided<[1]>>
-    "hivm.hir.load"(%153, %154, %0, %129, %147) <{init_out_buffer = true, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 1>, pad_mode = #hivm.padmode<PadValue>, tcoretype = #hivm.tcore_type<VECTOR>}> : (memref<?xi64, strided<[1], offset: ?>>, memref<?xi64, strided<[1]>>, i64, index, i1) -> ()
+    "hivm.hir.load"(%153, %154, %0, %129, %147) <{eviction_policy = #hivm.eviction_policy<EvictFirst>, init_out_buffer = true, may_implicit_transpose_with_last_axis = false, operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 1>, pad_mode = #hivm.padmode<PadValue>, tcoretype = #hivm.tcore_type<VECTOR>}> : (memref<?xi64, strided<[1], offset: ?>>, memref<?xi64, strided<[1]>>, i64, index, i1) -> ()
     %155 = "bufferization.to_tensor"(%152) <{restrict, writable}> : (memref<128xi64>) -> tensor<128xi64>
     %156 = "tensor.extract"(%150, %129) : (tensor<128xi64>, index) -> i64
     %157 = "tensor.extract"(%150, %128) : (tensor<128xi64>, index) -> i64
@@ -552,5 +555,5 @@
     "hivm.hir.store"(%542, %543) : (tensor<?xi64>, memref<?xi64, strided<[1], offset: ?>>) -> ()
     "func.return"() : () -> ()
   }) {SyncBlockLockArgIdx = 0 : i64, WorkspaceArgIdx = 1 : i64, func_dyn_memref_args = dense<[false, true, true, true, true, true, false, false, false, false]> : vector<10xi1>, hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<AIV>, mix_mode = "aiv", parallel_mode = "simd"} : () -> ()
-}) {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #hacc.target_device_spec<#dlti.dl_entry<"AI_CORE_COUNT", 24 : i32>, #dlti.dl_entry<"CUBE_CORE_COUNT", 24 : i32>, #dlti.dl_entry<"VECTOR_CORE_COUNT", 48 : i32>, #dlti.dl_entry<"UB_SIZE", 1572864 : i32>, #dlti.dl_entry<"L1_SIZE", 4194304 : i32>, #dlti.dl_entry<"L0A_SIZE", 524288 : i32>, #dlti.dl_entry<"L0B_SIZE", 524288 : i32>, #dlti.dl_entry<"L0C_SIZE", 1048576 : i32>, #dlti.dl_entry<"UB_ALIGN_SIZE", 256 : i32>, #dlti.dl_entry<"L1_ALIGN_SIZE", 256 : i32>, #dlti.dl_entry<"L0C_ALIGN_SIZE", 4096 : i32>>>, hacc.hivmc_compatible_print = false, hacc.hivmc_version = #hacc.hivmc_version<"0.0.0">, hivm.module_core_type = #hivm.module_core_type<AIV>} : () -> ()
+}) {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #hacc.target_device_spec<#dlti.dl_entry<"AI_CORE_COUNT", 24 : i32>, #dlti.dl_entry<"CUBE_CORE_COUNT", 24 : i32>, #dlti.dl_entry<"VECTOR_CORE_COUNT", 48 : i32>, #dlti.dl_entry<"UB_SIZE", 1572864 : i32>, #dlti.dl_entry<"L1_SIZE", 4194304 : i32>, #dlti.dl_entry<"L0A_SIZE", 524288 : i32>, #dlti.dl_entry<"L0B_SIZE", 524288 : i32>, #dlti.dl_entry<"L0C_SIZE", 1048576 : i32>, #dlti.dl_entry<"UB_ALIGN_SIZE", 256 : i32>, #dlti.dl_entry<"L1_ALIGN_SIZE", 256 : i32>, #dlti.dl_entry<"L0C_ALIGN_SIZE", 4096 : i32>>>, hacc.hivmc_compatible_print = false, hacc.hivmc_version = #hacc.hivmc_version<"0.0.0">, hacc.target = #hacc.target<"Ascend910B1">, hivm.module_core_type = #hivm.module_core_type<AIV>} : () -> ()
 

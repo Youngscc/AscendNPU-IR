@@ -32,7 +32,7 @@ completed = subprocess.run(
         "--debug-entry=after-cvpipelining",
         f"--after-cvpipelining-ir={FIXTURE}",
         "--format=json",
-        "--random-seed=0",
+        "--plan-memory-seed=0",
     ],
     text=True,
     capture_output=True,
@@ -61,7 +61,7 @@ inplace = subprocess.run(
         str(MODEL),
         f"--before-cvpipelining-ir={VECTOR_ADD}",
         "--format=json",
-        "--random-seed=0",
+        "--plan-memory-seed=0",
     ],
     text=True,
     capture_output=True,
@@ -86,7 +86,7 @@ timed = subprocess.run(
         str(MODEL),
         f"--before-cvpipelining-ir={VECTOR_ADD}",
         "--format=json",
-        "--random-seed=0",
+        "--plan-memory-seed=0",
         "--show-runtime-timing",
     ],
     text=True,
@@ -113,7 +113,7 @@ attention_overflow = subprocess.run(
         str(MODEL),
         f"--before-cvpipelining-ir={ATTENTION_OVERFLOW}",
         "--format=json",
-        "--random-seed=0",
+        "--plan-memory-seed=0",
     ],
     text=True,
     capture_output=True,
@@ -134,7 +134,7 @@ attention_seed_nine = subprocess.run(
         str(MODEL),
         f"--before-cvpipelining-ir={ATTENTION_OVERFLOW}",
         "--format=json",
-        "--random-seed=9",
+        "--plan-memory-seed=9",
     ],
     text=True,
     capture_output=True,
@@ -153,7 +153,7 @@ assert len(seed_nine_function["buffers"]) == 44, attention_seed_nine_report
 seed_nine_buffers = {
     buffer["name"]: buffer for buffer in seed_nine_function["buffers"]
 }
-assert seed_nine_buffers["%base_0"]["free_time"] == 222, \
+assert seed_nine_buffers["%base_0"]["free_time"] == 225, \
     attention_seed_nine_report
 assert seed_nine_buffers["%base_29"]["offsets_bytes"] == [0], \
     attention_seed_nine_report
@@ -167,7 +167,7 @@ triton_attention_overflow = subprocess.run(
         str(MODEL),
         f"--before-cvpipelining-ir={ATTENTION_OVERFLOW}",
         "--format=json",
-        "--random-seed=0",
+        "--plan-memory-seed=0",
         "--enable-triton-kernel-compile",
     ],
     text=True,
@@ -191,7 +191,7 @@ subset_hoisting = subprocess.run(
         str(MODEL),
         f"--before-cvpipelining-ir={SUBSET_HOISTING}",
         "--format=json",
-        "--random-seed=0",
+        "--plan-memory-seed=0",
     ],
     text=True,
     capture_output=True,
@@ -213,7 +213,7 @@ wrapped = subprocess.run(
         str(ROOT / "ub_overflow_model_cpp/scripts/plan_before_cvpipelining_ub.py"),
         f"--before-cvpipelining-ir={VECTOR_ADD}",
         "--format=json",
-        "--random-seed=0",
+        "--plan-memory-seed=0",
     ],
     text=True,
     capture_output=True,

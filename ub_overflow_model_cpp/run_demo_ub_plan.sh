@@ -86,7 +86,7 @@ Remaining suffix / PlanMemory options:
   --suffix-disable-enable-stride-align true|false
   --suffix-disable-infer-hivm-data-layout true|false
   --restrict-inplace-as-isa true|false
-  --random-seed N        # omit for PlanMemory retry mode
+  --plan-memory-seed N   # -1 keeps PlanMemory retry mode
 EOF
 }
 
@@ -138,8 +138,8 @@ while [[ $# -gt 0 ]]; do
     --suffix-mix-multi-buffer-strategy) MULTIBUFFER_MIX_STRATEGY="$2"; shift 2 ;;
     --restrict-inplace-as-isa=*) RESTRICT_INPLACE_AS_ISA="${1#*=}"; shift ;;
     --restrict-inplace-as-isa) RESTRICT_INPLACE_AS_ISA="$2"; shift 2 ;;
-    --random-seed=*) RANDOM_SEED="${1#*=}"; shift ;;
-    --random-seed) RANDOM_SEED="$2"; shift 2 ;;
+    --plan-memory-seed=*) RANDOM_SEED="${1#*=}"; shift ;;
+    --plan-memory-seed) RANDOM_SEED="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[ERROR] unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -195,9 +195,7 @@ model_args=(
   --suffix-tile-mix-vector-loop="${SUFFIX_TILE_MIX_VECTOR_LOOP}"
   --suffix-enable-ubuf-saving="${SUFFIX_ENABLE_UBUF_SAVING}"
   --suffix-enable-triton-kernel-compile="${SUFFIX_ENABLE_TRITON_KERNEL_COMPILE}"
-  --suffix-disable-align-alloc-size="${SUFFIX_DISABLE_ALIGN_ALLOC_SIZE}"
-  --suffix-disable-enable-stride-align="${SUFFIX_DISABLE_ENABLE_STRIDE_ALIGN}"
-  --suffix-disable-infer-hivm-data-layout="${SUFFIX_DISABLE_INFER_HIVM_DATA_LAYOUT}"
+  --suffix-enable-hivm-auto-storage-align="true"
   --suffix-local-multi-buffer-strategy="${MULTIBUFFER_LOCAL_STRATEGY}"
   --suffix-mix-multi-buffer-strategy="${MULTIBUFFER_MIX_STRATEGY}"
   --format=json
@@ -207,7 +205,7 @@ if [[ "${RESTRICT_INPLACE_AS_ISA}" == "true" || "${RESTRICT_INPLACE_AS_ISA}" == 
   model_args+=(--restrict-inplace-as-isa)
 fi
 if [[ -n "${RANDOM_SEED}" ]]; then
-  model_args+=(--random-seed="${RANDOM_SEED}")
+  model_args+=(--plan-memory-seed="${RANDOM_SEED}")
 fi
 model_log="$(dirname "${DEMO_JSON}")/model_stdout.log"
 MODEL_OVERFLOW=false

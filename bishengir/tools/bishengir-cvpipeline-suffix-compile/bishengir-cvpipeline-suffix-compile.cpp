@@ -92,6 +92,21 @@ using namespace mlir;
 using namespace mlir::hivm;
 
 namespace {
+#if defined(BISHENGIR_CV2PM_FULL_PIPELINE)
+static constexpr bool isFullCV2PMCompiler = true;
+static constexpr llvm::StringLiteral toolName = "cv2pm-bishengir-compile";
+static constexpr llvm::StringLiteral toolDescription =
+    "BiShengIR full CVPipelining-before to local PlanMemory compiler\n\n";
+static constexpr llvm::StringLiteral timingComponent = "cv2pm_bisheng_compile";
+#else
+static constexpr bool isFullCV2PMCompiler = false;
+static constexpr llvm::StringLiteral toolName =
+    "bishengir-cvpipeline-suffix-compile";
+static constexpr llvm::StringLiteral toolDescription =
+    "BiShengIR CVPipeline suffix compile tool\n\n";
+static constexpr llvm::StringLiteral timingComponent = "suffix_compile";
+#endif
+
 class RuntimePassTimingState {
 public:
   using Clock = std::chrono::steady_clock;
@@ -121,11 +136,12 @@ public:
 
   template <typename Duration>
   void Print(raw_ostream &output, Duration total) const {
-    output << "CVPIPELINE_TIMING\t1\tsuffix_compile\tTOTAL\t-\t0\t"
+    output << "CVPIPELINE_TIMING\t1\t" << timingComponent
+           << "\tTOTAL\t-\t0\t"
            << ToNanoseconds(total) << '\n';
     std::map<std::string, size_t> occurrences;
     for (const Record &record : records)
-      output << "CVPIPELINE_TIMING\t1\tsuffix_compile\tPASS\t"
+      output << "CVPIPELINE_TIMING\t1\t" << timingComponent << "\tPASS\t"
              << record.name << '\t' << ++occurrences[record.name] << '\t'
              << record.nanoseconds << '\n';
   }
@@ -198,7 +214,7 @@ struct DumpIRBeforeLocalPlanMemoryPass
       markAllAnalysesPreserved();
       return;
     }
-    getOperation().print(os);
+    getOperation().print(os, OpPrintingFlags().printGenericOpForm());
     os << "\n";
     markAllAnalysesPreserved();
   }
@@ -206,6 +222,12 @@ struct DumpIRBeforeLocalPlanMemoryPass
 
 static std::unique_ptr<Pass> createDumpIRBeforeLocalPlanMemoryPass() {
   return std::make_unique<DumpIRBeforeLocalPlanMemoryPass>();
+}
+
+static bool stopBeforeLocalPlanMemoryRequested() {
+  const char *value =
+      std::getenv("BISHENGIR_STOP_BEFORE_LOCAL_PLAN_MEMORY");
+  return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
 }
 
 static std::unique_ptr<llvm::MemoryBuffer> upgradeLegacyOracleInput(
@@ -490,7 +512,7 @@ static llvm::cl::opt<bool> allowUnregisteredDialects(
 static llvm::cl::opt<bool> enableMemoryDisplay(
     "enable-memory-display",
     llvm::cl::desc("Enable PlanMemory memory_info*.json output"),
-    llvm::cl::init(true));
+    llvm::cl::init(!isFullCV2PMCompiler));
 
 static llvm::cl::opt<bool> showRuntimeTiming(
     "show-runtime-timing",
@@ -576,10 +598,14 @@ static llvm::cl::opt<bool> disableAutoCVWorkSpaceManage(
     llvm::cl::desc("Disable the CV workspace manage suffix pieces"),
     llvm::cl::init(false));
 
+#if defined(BISHENGIR_CV2PM_FULL_PIPELINE)
+static constexpr bool disableCVPipelining = false;
+#else
 static llvm::cl::opt<bool> disableCVPipelining(
     "disable-cv-pipelining",
     llvm::cl::desc("Disable createCVPipeliningPass in the suffix"),
     llvm::cl::init(false));
+#endif
 
 static llvm::cl::opt<bool> disableAutoCVGlobalWorkspacePlan(
     "disable-auto-cv-global-workspace-plan",
@@ -619,10 +645,17 @@ static llvm::cl::opt<int> cvPipelineDepth(
     llvm::cl::desc("Set CVPipelining unroll depth; -1 keeps automatic depth"),
     llvm::cl::init(-1));
 
+#if defined(BISHENGIR_CV2PM_FULL_PIPELINE)
+static llvm::cl::opt<bool> enableCVLazyLoading(
+    "enable-lazy-loading",
+    llvm::cl::desc("Mirror the production EnableLazyLoading option"),
+    llvm::cl::init(false));
+#else
 static llvm::cl::opt<bool> enableCVLazyLoading(
     "enable-cv-lazy-loading",
     llvm::cl::desc("Enable CVPipelining lazy loading"),
     llvm::cl::init(false));
+#endif
 
 static llvm::cl::opt<bool> enableCodeMotion(
     "enable-code-motion",
@@ -718,10 +751,11 @@ static void addOracleStageSnapshot(OpPassManager &pm, StringRef phase,
     if (record.phase == phase)
       ++ordinal;
   oracleStageRecords.push_back({phase.str(), name.str()});
-  // Always register the no-op snapshot pass so the textual pipeline hash is
-  // independent of whether snapshot files are requested on this invocation.
   if (dumpStageOracleDir.empty()) {
+#if !defined(BISHENGIR_CV2PM_FULL_PIPELINE)
+    // Preserve the experimental oracle's stable textual pipeline hash.
     pm.addPass(std::make_unique<DumpC1SemanticOraclePass>("", ""));
+#endif
     return;
   }
   const std::string stem = oracleStageStem(phase, ordinal, name);
@@ -814,8 +848,14 @@ static void addBufferizationPipeline(OpPassManager &pm) {
         tensor::createOptimizeDpsOpWithYieldedInsertSlicePass());
     pm.nest<func::FuncOp>().addPass(createCloneTensorEmptyPass());
   }
-  if (enableUbufSaving)
+  if (enableUbufSaving) {
+#if defined(BISHENGIR_CV2PM_FULL_PIPELINE)
+    // Keep the production bufferizationPipeline ordering exactly: the clone
+    // makes each sink candidate independent before it is moved.
+    pm.nest<func::FuncOp>().addPass(createCloneTensorEmptyPass());
+#endif
     pm.nest<func::FuncOp>().addPass(createSinkOpToConsumerInLoopPass());
+  }
 
   bufferization::OneShotBufferizationOptions oneShotOptions;
   oneShotOptions.bufferizeFunctionBoundaries = true;
@@ -823,6 +863,19 @@ static void addBufferizationPipeline(OpPassManager &pm) {
       bufferization::LayoutMapOption::IdentityLayoutMap);
   oneShotOptions.allowReturnAllocsFromLoops = true;
   oneShotOptions.allowUnknownOps = true;
+#if defined(BISHENGIR_CV2PM_FULL_PIPELINE)
+  // This is part of the production bufferization contract.  Without it,
+  // unknown tensor types may acquire dynamic layouts and reach PlanMemory
+  // with different physical sizes.
+  oneShotOptions.unknownTypeConverterFn =
+      [=](Value value, Attribute memorySpace,
+          const bufferization::BufferizationOptions &) {
+        auto tensorType = cast<TensorType>(value.getType());
+        return bufferization::getMemRefTypeWithStaticIdentityLayout(
+            tensorType, memorySpace);
+      };
+#endif
+  addOracleStageSnapshot(pm, "suffix", "BeforeOneShotBufferize");
   pm.addPass(bufferization::createOneShotBufferizePass(oneShotOptions));
   addOracleStageSnapshot(pm, "suffix", "OneShotBufferize");
   addCanonicalizationHIVMPipeline(pm);
@@ -935,13 +988,24 @@ static void addPostBufferizationToLocalPlanMemoryPipeline(OpPassManager &pm) {
   pm.nest<func::FuncOp>().addPass(
       createMarkMultiBufferPass(multiBufferOptions));
   addOracleStageSnapshot(pm, "suffix", "MarkMultiBuffer");
-  if (!excludeDumpLayersForRuntimeTiming())
+  const char *beforePlanMemoryDump =
+      std::getenv("BISHENGIR_DUMP_BEFORE_PLAN_MEMORY");
+  if (!excludeDumpLayersForRuntimeTiming() &&
+      (!isFullCV2PMCompiler ||
+       (beforePlanMemoryDump != nullptr && beforePlanMemoryDump[0] != '\0')))
     pm.addPass(createDumpIRBeforeLocalPlanMemoryPass());
   addOracleStageSnapshot(pm, "suffix", "PlanMemoryInputBridge");
+  if (stopBeforeLocalPlanMemoryRequested())
+    return;
 
   PlanMemoryOptions planMemoryOption;
+  // Production cv2pm runs keep memory display disabled by default.  Oracle
+  // mode still needs PlanMemory to materialize the failed placement when UB
+  // overflows; otherwise the real compiler only reports PLANMEM_REQUIRED and
+  // an exact model/oracle peak and plan comparison is impossible.
   planMemoryOption.enableMemoryDisplay =
-      enableMemoryDisplay && !excludeDumpLayersForRuntimeTiming();
+      (enableMemoryDisplay || ubOracleOnly) &&
+      !excludeDumpLayersForRuntimeTiming();
   planMemoryOption.restrictInplaceAsISA = restrictInplaceAsISA;
   planMemoryOption.ubOracleOnly = ubOracleOnly;
   pm.nest<func::FuncOp>().addPass(createPlanMemoryPass(planMemoryOption));
@@ -953,7 +1017,8 @@ static void buildSuffixPipeline(OpPassManager &pm) {
       pm.addPass(createDumpIRBeforeLocalPlanMemoryPass());
     PlanMemoryOptions planMemoryOption;
     planMemoryOption.enableMemoryDisplay =
-        enableMemoryDisplay && !excludeDumpLayersForRuntimeTiming();
+        (enableMemoryDisplay || ubOracleOnly) &&
+        !excludeDumpLayersForRuntimeTiming();
     planMemoryOption.restrictInplaceAsISA = restrictInplaceAsISA;
     planMemoryOption.ubOracleOnly = ubOracleOnly;
     pm.nest<func::FuncOp>().addPass(createPlanMemoryPass(planMemoryOption));
@@ -963,10 +1028,20 @@ static void buildSuffixPipeline(OpPassManager &pm) {
   if (!disableAutoCVWorkSpaceManage && !disableCVPipelining) {
     CVPipeliningOptions pipelineOptions;
     pipelineOptions.enableSkewMode = enablePreload;
+#if !defined(BISHENGIR_CV2PM_FULL_PIPELINE)
     pipelineOptions.setDepthInUnrollMode = cvPipelineDepth;
     pipelineOptions.enableLazyLoading = enableCVLazyLoading;
+#endif
     pm.nest<func::FuncOp>().addPass(createCVPipeliningPass(pipelineOptions));
   }
+#if defined(BISHENGIR_CV2PM_FULL_PIPELINE)
+  // The production pipeline runs this pair immediately after CVPipelining in
+  // addition to the bufferization-time Clone/Sink pair.
+  if (enableUbufSaving) {
+    pm.nest<func::FuncOp>().addPass(createCloneTensorEmptyPass());
+    pm.nest<func::FuncOp>().addPass(createSinkOpToConsumerInLoopPass());
+  }
+#endif
   if (!excludeDumpLayersForRuntimeTiming() &&
       !dumpIRAfterCVPipelining.empty())
     pm.addPass(
@@ -1007,17 +1082,28 @@ static void buildSuffixPipeline(OpPassManager &pm) {
 
   if (enableTritonKernelCompile)
     pm.addPass(createInsertInferTaskTypeFuncPass());
+#if defined(BISHENGIR_CV2PM_FULL_PIPELINE)
+  pm.nest<func::FuncOp>().addPass(createMarkTightlyCoupledBufferPass());
+  pm.nest<func::FuncOp>().addPass(createHoistTightlyCoupledAllocPass());
+#else
   // Temporarily disabled until the lightweight model reproduces the
   // Ascend950 tightly-coupled buffer semantics exactly.
   // pm.nest<func::FuncOp>().addPass(createMarkTightlyCoupledBufferPass());
   // pm.nest<func::FuncOp>().addPass(createHoistTightlyCoupledAllocPass());
+#endif
   if (!disableSplitMixKernel)
     pm.addPass(createSplitMixKernelPass());
   addOracleStageSnapshot(pm, "post", "SplitMixKernelAIVProjection");
   pm.addPass(scope::createInlineScopePass());
   addOracleStageSnapshot(pm, "post", "InlineScope");
+#if defined(BISHENGIR_CV2PM_FULL_PIPELINE)
+  TileAndBindSubBlockOptions tileOptions;
+  tileOptions.enableTile = enableAutoBindSubBlock;
+  pm.addPass(createTileAndBindSubBlockPass(tileOptions));
+#else
   if (enableAutoBindSubBlock)
     pm.addPass(createTileAndBindSubBlockPass());
+#endif
   addOracleStageSnapshot(pm, "post", "TileAndBindSubBlock");
   pm.nest<func::FuncOp>().addPass(tensor::createFoldTensorEmptyPass());
   addOracleStageSnapshot(pm, "post", "FoldTensorEmpty");
@@ -1040,9 +1126,7 @@ static void buildSuffixPipeline(OpPassManager &pm) {
 }
 
 static void printVersion(llvm::raw_ostream &os) {
-  os << bishengir::getBiShengIRToolFullVersion(
-            "bishengir-cvpipeline-suffix-compile")
-     << '\n';
+  os << bishengir::getBiShengIRToolFullVersion(toolName) << '\n';
 }
 
 static bool isPlanMemoryOracleDumpEnabled() {
@@ -1069,10 +1153,26 @@ int main(int argc, char **argv) {
   bishengir::registerPassManagerCLOptions();
   mlir::registerPassManagerCLOptions();
   llvm::cl::SetVersionPrinter(printVersion);
-  llvm::cl::ParseCommandLineOptions(
-      argc, argv,
-      "BiShengIR CVPipeline suffix compile tool\n\n"
-      "Input must be an MLIR dump immediately before createCVPipeliningPass.\n");
+  const std::string commandOverview =
+      (Twine(toolDescription) +
+       "Input must be an MLIR dump immediately before "
+       "createCVPipeliningPass.\n")
+          .str();
+  llvm::cl::ParseCommandLineOptions(argc, argv, commandOverview);
+
+  if (isFullCV2PMCompiler &&
+      (stopAfterCVPipelining ||
+       disableAutoCVGlobalWorkspacePlan || disableSplitMixKernel ||
+       disableAlignAllocSize || disableEnableStrideAlign ||
+       disableInferHIVMDataLayout || cvPipelineDepth != -1 ||
+       disableCVPipelining)) {
+    llvm::errs()
+        << "[ERROR] " << toolName
+        << " only accepts the unabridged production CV-to-PlanMemory pass "
+           "sequence; experimental pass-skipping/depth/lazy options are not "
+           "allowed\n";
+    return EXIT_FAILURE;
+  }
 
   if (planMemorySeed < -1 || planMemorySeed >= 20) {
     llvm::errs() << "[ERROR] --plan-memory-seed must be -1 or in [0, 19]\n";
@@ -1135,7 +1235,7 @@ int main(int argc, char **argv) {
                  << "\tlocal_plan_memory_only\t"
                  << static_cast<int>(localPlanMemoryOnly.getValue())
                  << "\tdisable_cv_pipelining\t"
-                 << static_cast<int>(disableCVPipelining.getValue())
+                 << static_cast<int>(static_cast<bool>(disableCVPipelining))
                  << "\tenable_preload\t"
                  << static_cast<int>(enablePreload.getValue())
                  << "\tcv_pipeline_depth\t" << cvPipelineDepth.getValue()
@@ -1221,8 +1321,8 @@ int main(int argc, char **argv) {
   if (failed(pipelineResult)) {
     if (dumpPlanMemoryOracle)
       llvm::errs() << "PLANMEM_RUN_RESULT\tfailure\n";
-    llvm::errs()
-        << "[ERROR] Failed to run CVPipeline suffix to local PlanMemory\n";
+    llvm::errs() << "[ERROR] Failed to run " << toolName
+                 << " to local PlanMemory\n";
     return EXIT_FAILURE;
   }
 

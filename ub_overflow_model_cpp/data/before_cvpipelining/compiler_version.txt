@@ -1,4 +1,4 @@
-bishengir-compile 1.1.0 (git@github.com:Youngscc/AscendNPU-IR.git 3ebab07a803f 2026-07-01) 
+bishengir-compile 1.2.0 (git@github.com:Youngscc/AscendNPU-IR.git 1297a5a779df 2026-07-23)
 llvm 19.1.7 cd708029e0b2
 Release build
 

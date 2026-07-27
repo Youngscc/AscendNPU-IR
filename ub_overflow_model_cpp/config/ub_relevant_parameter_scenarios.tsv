@@ -1,0 +1,28 @@
+scenario_id	kernel_scope	input_contract	pre_cv_profile	purpose	disable_auto_cv_workspace_manage	enable_preload	enable_code_motion	enable_auto_bind_sub_block	enable_hivm_auto_storage_align	enable_ubuf_saving	tile_mix_cube_loop	tile_mix_vector_loop	enable_auto_multi_buffer	limit_auto_multi_buffer_only_for_local_buffer	limit_auto_multi_buffer_of_local_buffer	limit_auto_multi_buffer_buffer	set_workspace_multibuffer	enable_hivm_cross_core_gss	enable_hivm_inject_block_all_sync	disable_auto_inject_block_sync
+production_default	all	reuse_before_cv	base_default	Production defaults and reference result	0	0	1	1	1	0	2	2	0	0	no-l0c	only-cube	4	1	0	0
+preload	mix	reuse_before_cv	base_default	Exercise CVPipelining skew/preload scheduling	0	1	1	1	1	0	2	2	0	0	no-l0c	only-cube	4	1	0	0
+code_motion_off	all	reuse_before_cv	base_default	Expose lifetime changes caused by LICM and subset hoisting	0	0	0	1	1	0	2	2	0	0	no-l0c	only-cube	4	1	0	0
+auto_bind_off	all	reuse_before_cv	base_default	Exercise the untiled TileAndBindSubBlock branch	0	0	1	0	1	0	2	2	0	0	no-l0c	only-cube	4	1	0	0
+storage_align_off	all	reuse_before_cv	base_default	Measure physical allocation changes from stride alignment	0	0	1	1	0	0	2	2	0	0	no-l0c	only-cube	4	1	0	0
+ubuf_saving	vector|mix	reuse_before_cv	base_default	Exercise clone and sink lifetime shortening	0	0	1	1	1	1	2	2	0	0	no-l0c	only-cube	4	1	0	0
+tile_mix_off	mix	reuse_before_cv	base_default	Disable post-CV MIX tiling with the 1x1 control	0	0	1	1	1	0	1	1	0	0	no-l0c	only-cube	4	1	0	0
+tile_cube_heavy	mix	reuse_before_cv	base_default	Asymmetric maximum Cube tiling with normal Vector tiling	0	0	1	1	1	0	8	2	0	0	no-l0c	only-cube	4	1	0	0
+tile_vector_heavy	mix	reuse_before_cv	base_default	Asymmetric maximum Vector tiling with normal Cube tiling	0	0	1	1	1	0	2	8	0	0	no-l0c	only-cube	4	1	0	0
+auto_mb_default	all	regenerate_before_cv	mb_default_ws4	Enable the production-default multi-buffer policy and workspace depth 4	0	0	1	1	1	0	2	2	1	0	no-l0c	only-cube	4	1	0	0
+auto_mb_workspace_2	mix	regenerate_before_cv	mb_default_ws2	Isolate workspace pipeline depth 2 versus the default depth 4	0	0	1	1	1	0	2	2	1	0	no-l0c	only-cube	2	1	0	0
+auto_mb_local_only	mix	regenerate_before_cv	mb_local_only	Suppress pre-CV workspace multi-buffer while retaining final local marking	0	0	1	1	1	0	2	2	1	1	no-l0c	only-cube	4	1	0	0
+auto_mb_with_l0c	cube|mix	regenerate_before_cv	mb_l0c_ws4	Allow L0C multi-buffer in addition to the default Cube policy	0	0	1	1	1	0	2	2	1	0	no-limit	only-cube	4	1	0	0
+auto_mb_vector_only	mix	regenerate_before_cv	mb_vector_ws4	Select the Vector side of a MIX kernel for multi-buffer	0	0	1	1	1	0	2	2	1	0	no-l0c	only-vector	4	1	0	0
+auto_mb_unrestricted	mix	regenerate_before_cv	mb_unrestricted_ws4	Enable both Cube and Vector local multi-buffer paths	0	0	1	1	1	0	2	2	1	0	no-limit	no-limit	4	1	0	0
+preload_auto_mb	mix	regenerate_before_cv	mb_default_ws4	Cover the interaction between CV skew scheduling and replicated buffers	0	1	1	1	1	0	2	2	1	0	no-l0c	only-cube	4	1	0	0
+ubuf_saving_auto_mb	vector|mix	regenerate_before_cv	mb_default_ws4	Cover lifetime shortening against multi-buffer expansion	0	0	1	1	1	1	2	2	1	0	no-l0c	only-cube	4	1	0	0
+tile_balanced_high_auto_mb	mix	regenerate_before_cv	mb_unrestricted_ws4	Stress both MIX loop tiling dimensions with multi-buffer enabled	0	0	1	1	1	0	8	8	1	0	no-limit	no-limit	4	1	0	0
+tile_cube_heavy_auto_mb	mix	regenerate_before_cv	mb_l0c_ws4	Stress Cube-heavy tiling with Cube-side multi-buffer	0	0	1	1	1	0	8	2	1	0	no-limit	only-cube	4	1	0	0
+tile_vector_heavy_auto_mb	mix	regenerate_before_cv	mb_vector_ws4	Stress Vector-heavy tiling with Vector-side multi-buffer	0	0	1	1	1	0	2	8	1	0	no-l0c	only-vector	4	1	0	0
+cv_workspace_manage_off	mix	regenerate_before_cv	cv_manage_off	Exercise the production branch that skips CV and workspace management together	1	0	1	1	1	0	2	2	0	0	no-l0c	only-cube	4	1	0	0
+cv_workspace_manage_off_auto_mb	mix	regenerate_before_cv	cv_manage_off	Isolate final local multi-buffer behavior without CV or workspace management	1	0	1	1	1	0	2	2	1	0	no-l0c	only-cube	4	1	0	0
+inject_block_normal	mix	reuse_before_cv	base_default	Select native automatic InjectBlockSync instead of CrossCoreGSS	0	0	1	1	1	0	2	2	0	0	no-l0c	only-cube	4	0	0	0
+inject_block_preload	mix	reuse_before_cv	base_default	Exercise automatic InjectBlockSync across preload and skewed CV loops	0	1	1	1	1	0	2	2	0	0	no-l0c	only-cube	4	0	0	0
+inject_block_auto_mb	mix	regenerate_before_cv	mb_default_ws4	Exercise automatic InjectBlockSync with replicated local and workspace values	0	0	1	1	1	0	2	2	1	0	no-l0c	only-cube	4	0	0	0
+inject_block_all	mix	reuse_before_cv	base_default	Force the native block-all sequence and verify it overrides CrossCoreGSS	0	0	1	1	1	0	2	2	0	0	no-l0c	only-cube	4	1	1	0
+inject_block_disabled	mix	reuse_before_cv	base_default	Disable automatic block synchronization while retaining SetFFTSBaseAddr	0	0	1	1	1	0	2	2	0	0	no-l0c	only-cube	4	1	0	1

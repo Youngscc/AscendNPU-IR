@@ -1,0 +1,45 @@
+# Canonical failure taxonomy shared by cv2pm and the lightweight UB model.
+#
+# cv2pm and the model report pre-PlanMemory failures in different vocabularies:
+# cv2pm emits MLIR diagnostics ("loc(...): error: 'op' op message"), the model
+# throws "stage[function]: operation: reason".  Comparing them at the highest
+# tier -- same failure reason class, not merely "both failed" -- requires
+# mapping both vocabularies onto one canonical class id.
+#
+# Columns:
+#   class_id     canonical failure class; the unit that must match
+#   side         cv2pm | model | both   (which producer the pattern applies to)
+#   severity     fatal | info | cascade
+#                Only `fatal` classes participate in the comparison.
+#                `info`    a pass notice that is not itself a failure and that
+#                          only one side ever emits; comparing it would make
+#                          every affected case report a spurious sequence
+#                          difference.
+#                `cascade` a downstream consequence of an earlier fatal failure
+#                          (typically corruption after a failed rollback, which
+#                          then trips an assertion).  It is not an independent
+#                          reason, and a model that lacks the underlying
+#                          compiler bug cannot reproduce it, so requiring it to
+#                          match would be an unreachable bar.
+#                Both are still shown in the reported raw diagnostics.
+#   pattern      Python regex matched against a NORMALIZED diagnostic line
+#                (see normalize_diagnostic_line in validation_common.py:
+#                loc() prefixes, temp paths, addresses and numbers are already
+#                stripped before matching)
+#   description  human note; not used by the comparator
+#
+# A diagnostic line matching no pattern is classified as "unclassified:<line>",
+# which never compares equal to anything else.  That is deliberate: an unknown
+# failure must show up as a mismatch and force a taxonomy update, rather than
+# being silently bucketed with a known class.
+class_id	side	severity	pattern	description
+copy.cbuf_to_cbuf	cv2pm	fatal	'hivm\.hir\.copy' op Unsupported copy from cbuf to cbuf	CBUF-to-CBUF copy rejected by HIVM
+copy.cbuf_to_cbuf	model	fatal	CopyLowering.*unsupported cbuf to cbuf	model counterpart once implemented
+store.rank_mismatch	cv2pm	fatal	'memref\.store' op store index operand count not equal to memref rank	store index count disagrees with memref rank
+store.rank_mismatch	model	fatal	(?:store|Store).*index operand count not equal to memref rank	model counterpart once implemented
+tiling.collect_vector_loop_info	cv2pm	fatal	'scope\.scope' op Failed to collect vector loop tiling info	TileCubeVectorLoop could not collect tiling info for a scope loop
+tiling.collect_vector_loop_info	model	fatal	TileCubeVectorLoop.*(?:Failed to collect vector loop tiling info|collect_vector_loop_info)	model counterpart once implemented
+tiling.vector_loop_op_unsupported	cv2pm	fatal	'[^']+' op Collect vector loop tiling info only support ForOp and ScopeOp	tiling info collection reached an unsupported loop op
+replace.out_operands_numresults_mismatch	cv2pm	cascade	out operands and numResults mismatch when replacing results	corruption after a failed tiling rollback; reads uninitialized memory and precedes SIGABRT
+pipeline.failure_wrapper	cv2pm	cascade	(?:\[ERROR\] )?Failed to run BiSheng(?:HIR|IR) pipeline	generic driver/pass-manager wrapper; the following MLIR diagnostic carries the actual failure reason
+bind_sub_block.revert_no_tiled_store	cv2pm	info	\[hivm-bind-sub-block\] revert .*: no store/copy op was tiled	revert notice emitted by cv2pm only; not a failure

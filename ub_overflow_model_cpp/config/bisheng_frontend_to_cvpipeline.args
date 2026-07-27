@@ -1,0 +1,11 @@
+# Arguments used by the real BiSheng compiler to lower a .ttadapter input to
+# the CVPipelining boundary. Keep one complete command-line argument per line.
+#
+# The capture-only MLIR flags (--mlir-print-ir-*) are intentionally not stored
+# here: they do not configure the compilation pipeline and are added by
+# dump_before_cvpipelining_dataset.py.
+--enable-hfusion-compile
+--enable-hivm-compile
+--enable-triton-kernel-compile
+--enable-memory-display
+--mlir-disable-threading
