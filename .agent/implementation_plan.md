@@ -311,6 +311,15 @@ descendants、CFG 和 metadata cache 的工作。
 
 一个独立基础设施提交；若需要迁移多个 pass，后续按 pass 分提交。
 
+状态（2026-07-28）：最低可用 revisioned manager 已完成。topology、def-use、
+type/attribute/effect、CFG、hierarchy 和 buffer-feature revision 独立推进；operand replacement
+只更新 delta users/use-count，不再使 definitions/type/enclosing/descendants 全量索引失效。
+默认关闭的计数器记录 full builds/scans、incremental updates 和 synthetic nodes，单测断言增量
+结果与 rebuild oracle 一致且 replacement 后 full-index build 数不增长。完整测试与 140 个
+embedded fixed-seed attempt 通过。160-input × 3 相对同轮阶段 0 的 internal ratio 为
+`0.95028`，阶段 2 为 `0.95118`；总体收益很小但没有回退，mutation-heavy 路径已消除已知的
+重复全量 rebuild。
+
 ## 9. 阶段 4：入口前移、改造已有 AutoBlockify 并补齐到 CV
 
 这是基础设施完成后的第一项功能扩展，也是后续所有性能数字的新产品边界。

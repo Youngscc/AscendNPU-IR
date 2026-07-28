@@ -615,6 +615,17 @@ void TestGenericRewriterIncrementalReplaceAllUses() {
   rewriter.appendToBlock(block, user);
   Check(analysis.useCount(from) == 2,
         "incremental use-list must observe created operands");
+  int existingValue = -1;
+  for (const cvub::GenericOperation &operation : module.operations)
+    if (!operation.results.empty()) {
+      existingValue = operation.results.front();
+      break;
+    }
+  Check(existingValue >= 0, "revision test requires an existing definition");
+  (void)analysis.definingOperationId(existingValue);
+  const uint64_t buildsBeforeReplace =
+      analysis.diagnostics().fullIndexBuilds;
+  const uint64_t defUseRevisionBefore = analysis.revisions().defUse;
   rewriter.replaceAllUses(from, to);
   Check(analysis.useCount(from) == 0 && analysis.useCount(to) == 2,
         "replaceAllUses must update the incremental use-list");
@@ -622,6 +633,12 @@ void TestGenericRewriterIncrementalReplaceAllUses() {
             userOperation.dpsInputs == std::vector<int>({to}) &&
             userOperation.dpsInits == std::vector<int>({to}),
         "replaceAllUses must update operands and cached DPS projections");
+  (void)analysis.definingOperationId(existingValue);
+  Check(analysis.diagnostics().fullIndexBuilds == buildsBeforeReplace,
+        "operand replacement must not rebuild definition/type indexes");
+  Check(analysis.revisions().defUse > defUseRevisionBefore &&
+            analysis.diagnostics().incrementallyUpdatedUses == 2,
+        "operand replacement must advance only the incremental def-use path");
   rewriter.removeFromBlock(block, user);
   Check(analysis.useCount(to) == 0,
         "detaching an operation must remove its operands from the use-list");

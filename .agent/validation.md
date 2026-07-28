@@ -159,6 +159,17 @@ internal ratio        0.95118
 启动噪声支配；该轮没有模型 unavailable，fast-path 命中仍为每轮 147/160。报告位于本地
 `output/performance/stage2-final-160x3.*`，不提交。
 
+## 2026-07-28 阶段 3 revisioned analysis 结果
+
+完整测试通过，包含 operand replacement 后 full-index build 计数不增加、增量 use-list 与从头
+扫描一致的断言；140 个代表 embedded fixed-seed attempt 再次全部 matched。
+
+160-input × 3 production retry-only 中，阶段 3 与同轮阶段 0 的 internal total 分别为
+`1893.580 ms` 与 `1992.655 ms`，ratio `0.95028`；阶段 2 ratio 为 `0.95118`。全 corpus
+增益约 `0.09%`，主要价值是 mutation wave 不再触发 definitions/type/hierarchy 的等价重建；
+process wall 为 `12211.104 ms`，峰值 RSS `44.35 MB`。报告位于本地
+`output/performance/stage3-final-160x3.*`，不提交。
+
 160 个去重 before-CVPipelining 输入，production-default，retry-only，O3，开启 stage
 timing，三轮结果：
 

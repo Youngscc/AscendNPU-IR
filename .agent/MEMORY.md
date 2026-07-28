@@ -109,6 +109,13 @@ MarkRealCoreType/SplitMix/canonicalization projection 复制未修改节点时�
 `0.96160` 降至 `0.95118`，归一化再快约 `1.08%`。阶段 3 应在此基础上统一 revisioned
 incremental analysis，不能重新引入 module-wide scan。
 
+阶段 3 的最低可用 revisioned analysis manager 已完成：topology、def-use、type/attribute/effect、
+CFG、hierarchy、buffer features 分 revision；operand replacement 精确更新 users/use-count，
+不再使 definitions/type/enclosing/descendants 索引失效。诊断计数器默认不输出。140 个代表
+fixed-seed attempt 全匹配；相对阶段 0 的 internal ratio 为 `0.95028`，较阶段 2 的
+`0.95118` 仅有约 `0.09%` corpus 总收益，但单测已证明已知的 replacement 全量 rebuild 被
+消除。
+
 2026-07-28 在同机、O3、production-default、真实 retry-only、160 个去重
 before-CVPipelining 输入上，开启 stage timing 后连续三轮：
 

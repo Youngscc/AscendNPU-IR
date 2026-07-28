@@ -377,6 +377,23 @@ inline GenericOperationKind ClassifyGenericOperation(
 // relation may have changed.
 class PipelineAnalysisContext final : public GenericMutationListener {
 public:
+  struct Revisions {
+    uint64_t topology = 0;
+    uint64_t defUse = 0;
+    uint64_t typeAttributeEffect = 0;
+    uint64_t cfg = 0;
+    uint64_t hierarchy = 0;
+    uint64_t bufferFeatures = 0;
+  };
+
+  struct Diagnostics {
+    uint64_t fullIndexBuilds = 1;
+    uint64_t fullUseScans = 1;
+    uint64_t fullUserScans = 1;
+    uint64_t incrementallyUpdatedUses = 0;
+    uint64_t syntheticOperations = 0;
+  };
+
   explicit PipelineAnalysisContext(
       GenericModule &inputModule,
       unsigned requestedAnalysisIndexes = kGenericAnalysisAll)
@@ -429,6 +446,9 @@ public:
     return uses.useCount(value);
   }
 
+  const Revisions &revisions() const { return revisions_; }
+  const Diagnostics &diagnostics() const { return diagnostics_; }
+
   GenericOperationKind operationKind(int operation) const {
     if (operation < 0 ||
         static_cast<size_t>(operation) >= module.operations.size())
@@ -445,6 +465,12 @@ public:
   }
 
   void operationCreated(const GenericOperation &operation) override {
+    ++revisions_.topology;
+    ++revisions_.defUse;
+    ++revisions_.typeAttributeEffect;
+    ++revisions_.hierarchy;
+    ++revisions_.bufferFeatures;
+    ++diagnostics_.syntheticOperations;
     indexesDirty = true;
     if (!usesDirty)
       for (int operand : operation.operands)
@@ -462,6 +488,10 @@ public:
   }
 
   void operationWillModify(const GenericOperation &operation) override {
+    ++revisions_.defUse;
+    ++revisions_.typeAttributeEffect;
+    ++revisions_.cfg;
+    ++revisions_.bufferFeatures;
     indexesDirty = true;
     usesDirty = true;
     usersDirty = true;
@@ -473,7 +503,12 @@ public:
 
   void operandReplaced(int operation, size_t, int oldValue,
                        int newValue) override {
-    indexesDirty = true;
+    // Definitions, value types and enclosing topology do not change when an
+    // operand is replaced. Keep the immutable indexes alive and update only
+    // the two delta use structures consumed by later passes.
+    ++revisions_.defUse;
+    ++revisions_.bufferFeatures;
+    ++diagnostics_.incrementallyUpdatedUses;
     if (!usesDirty) {
       if (uses.useCount(oldValue) == 0)
         usesDirty = true;
@@ -498,7 +533,14 @@ public:
   }
 
   void operationMoved(int operation, int oldBlock, int newBlock) override {
-    indexesDirty = true;
+    ++revisions_.topology;
+    ++revisions_.hierarchy;
+    ++revisions_.cfg;
+    ++revisions_.bufferFeatures;
+    if ((requestedIndexes &
+         (kGenericAnalysisEnclosingFunctions |
+          kGenericAnalysisFunctionDescendants)) != 0)
+      indexesDirty = true;
     if ((oldBlock < 0) == (newBlock < 0))
       return;
     const GenericOperation &record =
@@ -545,14 +587,25 @@ public:
       for (int operand : record.operands)
         addUser(operand, operation);
   }
-  void regionCreated(const GenericRegion &) override { indexesDirty = true; }
-  void blockCreated(const GenericBlock &) override { indexesDirty = true; }
+  void regionCreated(const GenericRegion &) override {
+    ++revisions_.topology;
+    ++revisions_.hierarchy;
+    ++revisions_.cfg;
+    indexesDirty = true;
+  }
+  void blockCreated(const GenericBlock &) override {
+    ++revisions_.topology;
+    ++revisions_.hierarchy;
+    ++revisions_.cfg;
+    indexesDirty = true;
+  }
 
 private:
   void ensureIndexes() const {
     if (!indexesDirty)
       return;
     indexes.Build(module, requestedIndexes);
+    ++diagnostics_.fullIndexBuilds;
     indexesDirty = false;
   }
 
@@ -560,6 +613,7 @@ private:
     if (!usesDirty)
       return;
     uses.BuildActive(module);
+    ++diagnostics_.fullUseScans;
     usesDirty = false;
   }
 
@@ -567,6 +621,7 @@ private:
     if (!usersDirty)
       return;
     rebuildUsers();
+    ++diagnostics_.fullUserScans;
     usersDirty = false;
   }
 
@@ -649,6 +704,8 @@ private:
   mutable bool indexesDirty = false;
   mutable bool usesDirty = false;
   mutable bool usersDirty = false;
+  Revisions revisions_;
+  mutable Diagnostics diagnostics_;
 };
 
 // Convenience view for pass-local analyses. Immutable pipeline states should
