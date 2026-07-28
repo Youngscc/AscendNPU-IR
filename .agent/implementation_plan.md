@@ -139,6 +139,10 @@ RetriablePassManager attempt 保存 MLIR 指针。跨 fallback 复用只能保�
 
 本阶段通常不产生产品提交；必要的纯计时修复单独提交，不与后续架构代码混合。
 
+状态（2026-07-28）：已完成。冻结了 160-input production retry-only 三轮时间/RSS 基线、
+140-attempt embedded fixed-seed 正确性基线和 160-input AutoBlockify 基线；新增默认关闭、不会
+运行 validation/native suffix 的可重复测量工具。详细数字见 `validation.md`。
+
 ## 6. 阶段 1：删除生产文本边界，直接读取 ModuleOp
 
 ### 目标

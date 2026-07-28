@@ -117,6 +117,7 @@ ub_overflow_model_cpp/config/known_timeout_pairs.tsv  已知原生长尾
 ub_overflow_model_cpp/config/failure_taxonomy.tsv     稳定失败分类
 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py
 ub_overflow_model_cpp/scripts/plan_memory_contract.py  两侧 PlanMemory 合同解析
+ub_overflow_model_cpp/scripts/measure_embedded_model.py  production 单轮 A/B 与 RSS
 ub_overflow_model_cpp/tests/test_bisheng_embedded_matrix.py
 ub_overflow_model_cpp/tests/run_tests.sh
 ```
@@ -198,6 +199,19 @@ build/bin/bishengir-compile ADAPTER.ttadapter \
 fast path；此时 peak/required/selected_seed 为 unknown 是有意的窄合同，不是信息丢失。
 
 普通产品运行默认不应设置 validation、dump、flow trace 或 machine-result 环境变量。
+
+160-input production retry-only 单轮性能测量：
+
+```bash
+.venv/bin/python3 ub_overflow_model_cpp/scripts/measure_embedded_model.py \
+  --variant current=build/bin/bishengir-compile \
+  --rounds 3 \
+  --report ub_overflow_model_cpp/output/performance/current.tsv \
+  --summary ub_overflow_model_cpp/output/performance/current.json
+```
+
+工具只为测量显式打开 machine result 和 prediction 后停止边界；不会打开 validation、dump 或
+原生 PlanMemory。
 
 ## 本地生成物
 

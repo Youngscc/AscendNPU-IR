@@ -1,7 +1,7 @@
 # AscendNPU-IR 项目记忆
 
-最后核实：2026-07-28，分支 `codex/ub-overflow-model-product`，基线提交
-`f04f71786`。本文件是 `.agent` 的唯一入口；事实与当前源码或新测量冲突时，应重新核实
+最后核实：2026-07-28，分支 `codex/ub-overflow-model-product`，阶段 0 模型基线提交
+`75809a33d`。本文件是 `.agent` 的唯一入口；事实与当前源码或新测量冲突时，应重新核实
 并直接更新当前结论，不在这里堆叠多代任务流水账。
 
 ## 当前唯一目标
@@ -74,6 +74,25 @@ MLIR-backed read-only input
 模拟变换由轻量 overlay 表达，不能污染真实 pipeline 的输入。
 
 ## 当前性能基线
+
+阶段 0 已增加 `scripts/measure_embedded_model.py`，通过真实 BiSheng prefix 调用 production
+`evaluate()`，关闭 validation/dump，在 prediction 后用默认关闭的环境边界停止。160 个与
+before-CV corpus 配对的 adapter、真实 retry-only、O3、三轮结果为：
+
+```text
+prediction total: 741.444 / 725.845 / 722.965 ms
+model total:      715.850 / 700.471 / 697.682 ms
+serialize total:   25.595 /  25.373 /  25.283 ms
+process wall:    4719.278 / 4580.319 / 4625.515 ms
+per-input prediction median / mean / p95 / max:
+                   1.598 / 4.563 / 15.415 / 90.005 ms
+peak RSS:          44.4 MB
+fast-path hits:    147 / 160 per round
+```
+
+本地报告位于 `output/performance/stage0/`，不提交。代表 embedded 20-seed 基线共 140 个
+attempt，结果 `140 matched / 0 different / 0 unavailable / 0 timeout`；AutoBlockify 独立
+160-input 验证全部通过。
 
 2026-07-28 在同机、O3、production-default、真实 retry-only、160 个去重
 before-CVPipelining 输入上，开启 stage timing 后连续三轮：

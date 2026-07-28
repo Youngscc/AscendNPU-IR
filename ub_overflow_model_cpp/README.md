@@ -262,6 +262,20 @@ BISHENGIR_UB_MODEL_EMIT_RESULT=1 \
   -o /tmp/output.o 2>/tmp/bisheng-timing.log
 ```
 
+测量完整的 160-input production retry-only 单轮模型成本并保存逐输入 TSV：
+
+```bash
+.venv/bin/python3 ub_overflow_model_cpp/scripts/measure_embedded_model.py \
+  --variant current=build/bin/bishengir-compile \
+  --rounds 3 \
+  --report ub_overflow_model_cpp/output/performance/current.tsv \
+  --summary ub_overflow_model_cpp/output/performance/current.json
+```
+
+该工具运行真实 prefix，但在 prediction 后停止；不会打开 validation、dump 或原生
+PlanMemory。报告包含 `model_ns`、旧文本边界的 `serialize_ns`、二者之和、process wall 和
+峰值 RSS。
+
 测量单个 non-overflow candidate 的真实增量时，使用同一 adapter 和参数交替运行下面两种
 模式，并在本地 PlanMemory 后停止；取多轮 paired median，不能比较一次冷启动：
 

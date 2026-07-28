@@ -97,6 +97,25 @@ timeout                                         0
 
 ## 2026-07-28 当前基线
 
+阶段 0 新增了直接测量 embedded production `evaluate()` 的同口径基线。输入为 160 个与
+before-CV corpus 配对的 adapter，production-default，retry-only，O3，validation/dump/stage
+timing 全关闭；真实 prefix 后在 prediction pass 边界停止。三轮为：
+
+```text
+round       prediction total    model total    serialize total    process wall    peak RSS
+1                741.444 ms      715.850 ms         25.595 ms       4719.278 ms     44.35 MB
+2                725.845 ms      700.471 ms         25.373 ms       4580.319 ms     44.40 MB
+3                722.965 ms      697.682 ms         25.283 ms       4625.515 ms     44.25 MB
+```
+
+480 个样本的 prediction 每输入 median/mean/p95/max 为
+`1.598/4.563/15.415/90.005 ms`，每轮 147/160 命中 exact non-overflow fast path。报告在本地
+`output/performance/stage0/`，不提交。
+
+阶段 0 代表正确性共 140 个独立 fixed-seed attempt：production-default 四类输入 80、
+auto-MB 20、UB-saving 20、InjectBlockSync 20，结果全部 matched；AutoBlockify 独立 160-input
+验证也全部通过。
+
 160 个去重 before-CVPipelining 输入，production-default，retry-only，O3，开启 stage
 timing，三轮结果：
 

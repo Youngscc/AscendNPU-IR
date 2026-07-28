@@ -115,10 +115,7 @@ static bool stopAfterLocalPlanMemoryRequested() {
 static bool stopAfterUBOverflowPredictionRequested() {
   const char *value =
       std::getenv("BISHENGIR_STOP_AFTER_UB_OVERFLOW_PREDICTION");
-  const char *validation = std::getenv("BISHENGIR_UB_MODEL_VALIDATION");
-  return value != nullptr && value[0] != '\0' && StringRef(value) != "0" &&
-         validation != nullptr && validation[0] != '\0' &&
-         StringRef(validation) != "0";
+  return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
 }
 
 static bool isUBOverflowPredictionActive(const HIVMPipelineOptions &options) {
@@ -501,9 +498,8 @@ static void hivmPreBufferizationOptimizationPipeline(
         predictionConfig(hivmPipelineOptions, pipelineOptions,
                          traceAttempt)));
   }
-  // Validation cache replay still runs the real BiSheng prefix and embedded
-  // pass, but deliberately omits the native suffix whose contract is loaded
-  // from cache. This environment-only boundary has no production effect.
+  // The opt-in measurement/validation boundary deliberately omits the native
+  // suffix. It is disabled in production and does not change pass semantics.
   if (predictionActive && stopAfterUBOverflowPredictionRequested())
     return;
   if (!hivmPipelineOptions.disableAutoCVWorkSpaceManage) {
