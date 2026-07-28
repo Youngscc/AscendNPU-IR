@@ -18,7 +18,7 @@ from validation_common import (  # noqa: E402
     cluster_by_difference,
     compare_failure,
     counter_evidence,
-    cv2pm_failure_signature,
+    bisheng_failure_signature,
     diagnostic_lines,
     model_failure_signature,
     normalize_diagnostic_line,
@@ -46,7 +46,7 @@ assert "/tmp/" not in first
 
 # The driver's own trailer carries no failure-reason information.
 assert diagnostic_lines(
-    "[ERROR] Failed to run cv2pm-bishengir-compile to local PlanMemory\n"
+    "[ERROR] Failed to run bishengir-compile to local PlanMemory\n"
 ) == []
 
 # Stack dumps are machine specific and must not reach the classifier.
@@ -61,7 +61,7 @@ assert crash == ["'scope.scope' op Failed to collect vector loop tiling info"], 
 
 
 # --- taxonomy ------------------------------------------------------------
-signature = cv2pm_failure_signature(
+signature = bisheng_failure_signature(
     {
         "returncode": 1,
         "timeout": False,
@@ -70,7 +70,7 @@ signature = cv2pm_failure_signature(
             "op was tiled\n"
             "loc(\"a\"(\"/tmp/x.py\":105:20)): error: 'hivm.hir.copy' op "
             "Unsupported copy from cbuf to cbuf!\n"
-            "[ERROR] Failed to run cv2pm-bishengir-compile to local PlanMemory\n"
+            "[ERROR] Failed to run bishengir-compile to local PlanMemory\n"
         ),
     },
     TAXONOMY,
@@ -80,7 +80,7 @@ assert signature.termination == "error"
 # the primary reason.
 assert signature.primary == "copy.cbuf_to_cbuf", signature.classes
 
-aborted = cv2pm_failure_signature(
+aborted = bisheng_failure_signature(
     {
         "returncode": -6,
         "timeout": False,
@@ -104,7 +104,7 @@ assert aborted.primary == "tiling.collect_vector_loop_info"
 # ... but it is still retained for display.
 assert any("numResults mismatch" in entry for entry in aborted.raw), aborted.raw
 
-wrapped = cv2pm_failure_signature(
+wrapped = bisheng_failure_signature(
     {
         "returncode": 1,
         "timeout": False,
@@ -120,7 +120,7 @@ wrapped = cv2pm_failure_signature(
 assert wrapped.classes == ("tiling.collect_vector_loop_info",), wrapped.classes
 
 # An unknown diagnostic must never be bucketed with a known class.
-unknown = cv2pm_failure_signature(
+unknown = bisheng_failure_signature(
     {"returncode": 1, "timeout": False,
      "stderr": "loc(\"a\"): error: 'x.y' op brand new failure\n"},
     TAXONOMY,
@@ -150,7 +150,7 @@ tail = FailureSignature(
 )
 assert compare_failure(tail, signature) == ["failure_sequence"]
 
-# The model has no crash path, so a cv2pm SIGABRT with the same primary reason
+# The model has no crash path, so a BiSheng SIGABRT with the same primary reason
 # must still match a model "error": termination kind is reported, not compared.
 model_error = FailureSignature("error", ("tiling.collect_vector_loop_info",))
 assert compare_failure(model_error, aborted) == []
@@ -172,7 +172,7 @@ evidence = counter_evidence(
     collections.Counter({(256, 64): 2, (65536, 20512): 1}),
 )
 assert "model_only[65536/12320]" in evidence, evidence
-assert "cv2pm_only[65536/20512]" in evidence, evidence
+assert "bisheng_only[65536/20512]" in evidence, evidence
 # Entries present on both sides are not evidence of anything.
 assert "256/64" not in evidence, evidence
 

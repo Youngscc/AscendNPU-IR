@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Shared helpers for cv2pm/model validation: failure parity and diff evidence.
+"""Shared helpers for native-BiSheng/model validation.
 
 Two facilities live here because both the matrix validator and the standalone
 diagnosis tools need them:
 
-1. Pre-PlanMemory failure parity.  cv2pm failing before PlanMemory is a
+1. Pre-PlanMemory failure parity.  Native BiSheng failing before PlanMemory is a
    deterministic, comparable output, not a case to skip.  The comparison is
    done at the highest tier: the canonical failure *reason class* must match,
    not merely the fact that both sides failed.
@@ -121,7 +121,7 @@ class FailureTaxonomy:
                 if len(fields) < 4:
                     raise ValueError(f"malformed taxonomy row: {line!r}")
                 class_id, side, severity, pattern = fields[:4]
-                if side not in ("cv2pm", "model", "both"):
+                if side not in ("bisheng", "model", "both"):
                     raise ValueError(f"unknown taxonomy side {side!r}")
                 if severity not in ("fatal", "info", "cascade"):
                     raise ValueError(
@@ -150,7 +150,7 @@ class FailureTaxonomy:
         """Classify diagnostics, keeping only the independently comparable ones.
 
         Dropped: informational pass notices such as "[hivm-bind-sub-block]
-        revert ...: no store/copy op was tiled", which cv2pm alone emits, and
+        revert ...: no store/copy op was tiled", which BiSheng alone emits, and
         cascade failures such as the numResults mismatch that follows a failed
         tiling rollback.  Keeping either would make every affected case report a
         spurious failure_sequence difference against a model that cannot
@@ -201,7 +201,7 @@ def _termination_for(returncode: int, timeout: bool) -> str:
     return "abort" if returncode < 0 else "error"
 
 
-def cv2pm_failure_signature(
+def bisheng_failure_signature(
     pipeline: dict[str, Any], taxonomy: FailureTaxonomy
 ) -> FailureSignature:
     termination = _termination_for(
@@ -211,7 +211,7 @@ def cv2pm_failure_signature(
         return FailureSignature("none")
     lines = diagnostic_lines(str(pipeline.get("stderr", "")))
     return FailureSignature(
-        termination, taxonomy.classify(lines, "cv2pm"), tuple(lines)
+        termination, taxonomy.classify(lines, "bisheng"), tuple(lines)
     )
 
 
@@ -223,7 +223,7 @@ def model_failure_signature(
 ) -> FailureSignature:
     """Classify the model's own refusal to produce an exact plan.
 
-    The model never crashes on purpose, so a cv2pm SIGABRT can only ever be
+    The model never crashes on purpose, so a native BiSheng SIGABRT can only be
     matched by a model "error" termination.  Termination kind is therefore
     reported but compared leniently; the reason class is compared strictly.
     """
@@ -295,7 +295,7 @@ def counter_evidence(
     only_model = model - oracle
     only_oracle = oracle - model
     parts: list[str] = []
-    for label, counter in (("model", only_model), ("cv2pm", only_oracle)):
+    for label, counter in (("model", only_model), ("bisheng", only_oracle)):
         items = sorted(counter.items(), key=lambda pair: str(pair[0]))
         if not items:
             continue
@@ -310,7 +310,7 @@ def counter_evidence(
 
 
 def scalar_evidence(name: str, model: Any, oracle: Any) -> str:
-    return f"{name}: model={model} cv2pm={oracle}"
+    return f"{name}: model={model} bisheng={oracle}"
 
 
 def added_difference_fields(previous: str, current: str) -> tuple[str, ...]:
@@ -328,7 +328,7 @@ def added_difference_fields(previous: str, current: str) -> tuple[str, ...]:
 
 @dataclass
 class ComparisonOutcome:
-    """Result of comparing one (scenario, adapter, seed) against cv2pm."""
+    """Result of comparing one (scenario, adapter, seed) against BiSheng."""
 
     differences: list[str] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)

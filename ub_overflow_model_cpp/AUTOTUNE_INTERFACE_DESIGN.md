@@ -278,7 +278,7 @@ ubuf-saving × multi-buffer、MIX tiling × multi-buffer，以及关闭 CV/works
 
 输出按 `/<pre_cv_profile>/<adapter>/before_cvpipelining.mlirbc` 组织。这里必须使用 bytecode，
 因为文本 MLIR 不能保存 CVPipelining 会观察到的 SSA use-list 顺序。测试 27 组场景时，
-先按场景 TSV 的 `pre_cv_profile` 选择输入，再把该行边界之后的有效参数传给 cv2pm。
+先按场景 TSV 的 `pre_cv_profile` 选择输入，再把该行边界之后的有效参数传给原生 BiSheng。
 
 ## 6. 完整 BiShengIR 编译输入清单
 
@@ -481,6 +481,11 @@ struct Result {
   uint64_t capacityBits;
   std::optional<uint32_t> selectedSeed;
   uint64_t totalTimeNs;
+  // true 表示 evaluate() 通过保守上界证明了 non-overflow，并在
+  // PlanMemoryInput/PlanMemory 前返回；此时没有具体内存方案。
+  bool decisionOnlyNonOverflow;
+  // MarkMultiBuffer 后按独立分配计算的保守 UB 上界。
+  std::optional<uint64_t> conservativeUpperBoundBits;
   std::string modelBuildId;
   std::string compilerPipelineFingerprint;
   std::string inputDigest;
@@ -502,6 +507,9 @@ struct DebugModelControls {
   bool disableInferHIVMDataLayout;
 };
 
+Result evaluateForDebug(const Request &request,
+                        const DebugModelControls &controls) noexcept;
+
 } // namespace cvub
 ```
 
@@ -509,6 +517,18 @@ struct DebugModelControls {
 `effectiveOptionsDigest` 必须覆盖 target、profile 和 16 个字段，`inputDigest` 必须覆盖实际传入的 Generic
 MLIR 文本。`compilerPipelineFingerprint` 至少绑定 BiShengIR commit、目标 pipeline 类型和
 从 CVPipelining 到本地 PlanMemory 的 pass manifest；未知 fingerprint 必须 blocker。
+
+`Result` 有两种 exact non-overflow 形态：
+
+- `decisionOnlyNonOverflow=true`：`conservativeUpperBoundBits` 必须存在且不超过
+  `capacityBits`；因为没有运行 PlanMemory，`ubPeakBits`、`requiredBits`、`selectedSeed` 和
+  具体 function/buffer plan 均不得伪造。
+- `decisionOnlyNonOverflow=false`：模型执行了完整 PlanMemory，返回真实 peak、required、seed
+  和详细方案。`evaluateForDebug()` 总是使用这条路径；若同时存在
+  `conservativeUpperBoundBits`，表示它观察到了提前证明，但为了验证仍继续完成了规划。
+
+这两个字段只描述 non-overflow 结果的来源，不改变 `Exact + Overflow` 才允许剪枝、其他失败
+一律 fail-open 的调用合同。
 
 ### 7.1 调用方与被调用方责任
 

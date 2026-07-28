@@ -1,14 +1,14 @@
-# Canonical failure taxonomy shared by cv2pm and the lightweight UB model.
+# Canonical failure taxonomy shared by native BiSheng and the lightweight model.
 #
-# cv2pm and the model report pre-PlanMemory failures in different vocabularies:
-# cv2pm emits MLIR diagnostics ("loc(...): error: 'op' op message"), the model
+# BiSheng and the model report pre-PlanMemory failures in different vocabularies:
+# BiSheng emits MLIR diagnostics ("loc(...): error: 'op' op message"), the model
 # throws "stage[function]: operation: reason".  Comparing them at the highest
 # tier -- same failure reason class, not merely "both failed" -- requires
 # mapping both vocabularies onto one canonical class id.
 #
 # Columns:
 #   class_id     canonical failure class; the unit that must match
-#   side         cv2pm | model | both   (which producer the pattern applies to)
+#   side         bisheng | model | both   (which producer the pattern applies to)
 #   severity     fatal | info | cascade
 #                Only `fatal` classes participate in the comparison.
 #                `info`    a pass notice that is not itself a failure and that
@@ -33,13 +33,13 @@
 # failure must show up as a mismatch and force a taxonomy update, rather than
 # being silently bucketed with a known class.
 class_id	side	severity	pattern	description
-copy.cbuf_to_cbuf	cv2pm	fatal	'hivm\.hir\.copy' op Unsupported copy from cbuf to cbuf	CBUF-to-CBUF copy rejected by HIVM
+copy.cbuf_to_cbuf	bisheng	fatal	'hivm\.hir\.copy' op Unsupported copy from cbuf to cbuf	CBUF-to-CBUF copy rejected by HIVM
 copy.cbuf_to_cbuf	model	fatal	CopyLowering.*unsupported cbuf to cbuf	model counterpart once implemented
-store.rank_mismatch	cv2pm	fatal	'memref\.store' op store index operand count not equal to memref rank	store index count disagrees with memref rank
+store.rank_mismatch	bisheng	fatal	'memref\.store' op store index operand count not equal to memref rank	store index count disagrees with memref rank
 store.rank_mismatch	model	fatal	(?:store|Store).*index operand count not equal to memref rank	model counterpart once implemented
-tiling.collect_vector_loop_info	cv2pm	fatal	'scope\.scope' op Failed to collect vector loop tiling info	TileCubeVectorLoop could not collect tiling info for a scope loop
+tiling.collect_vector_loop_info	bisheng	fatal	'scope\.scope' op Failed to collect vector loop tiling info	TileCubeVectorLoop could not collect tiling info for a scope loop
 tiling.collect_vector_loop_info	model	fatal	TileCubeVectorLoop.*(?:Failed to collect vector loop tiling info|collect_vector_loop_info)	model counterpart once implemented
-tiling.vector_loop_op_unsupported	cv2pm	fatal	'[^']+' op Collect vector loop tiling info only support ForOp and ScopeOp	tiling info collection reached an unsupported loop op
-replace.out_operands_numresults_mismatch	cv2pm	cascade	out operands and numResults mismatch when replacing results	corruption after a failed tiling rollback; reads uninitialized memory and precedes SIGABRT
-pipeline.failure_wrapper	cv2pm	cascade	(?:\[ERROR\] )?Failed to run BiSheng(?:HIR|IR) pipeline	generic driver/pass-manager wrapper; the following MLIR diagnostic carries the actual failure reason
-bind_sub_block.revert_no_tiled_store	cv2pm	info	\[hivm-bind-sub-block\] revert .*: no store/copy op was tiled	revert notice emitted by cv2pm only; not a failure
+tiling.vector_loop_op_unsupported	bisheng	fatal	'[^']+' op Collect vector loop tiling info only support ForOp and ScopeOp	tiling info collection reached an unsupported loop op
+replace.out_operands_numresults_mismatch	bisheng	cascade	out operands and numResults mismatch when replacing results	corruption after a failed tiling rollback; reads uninitialized memory and precedes SIGABRT
+pipeline.failure_wrapper	bisheng	cascade	(?:\[ERROR\] )?Failed to run BiSheng(?:HIR|IR) pipeline	generic driver/pass-manager wrapper; the following MLIR diagnostic carries the actual failure reason
+bind_sub_block.revert_no_tiled_store	bisheng	info	\[hivm-bind-sub-block\] revert .*: no store/copy op was tiled	revert notice emitted by BiSheng only; not a failure

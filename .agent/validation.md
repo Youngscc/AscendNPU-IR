@@ -6,8 +6,8 @@
 
 1. 从 adapter 运行真实 prefix。
 2. CVPipelining 前运行 embedded model，传入本轮真实 resolved options。
-3. 验证模式固定一个 seed；提前 non-overflow 判定照常执行并记录，但只作为 observe-only，
-   不得提前返回，模型继续输出完整 plan。
+3. 每次验证独立固定一个 seed，完整正确性结论必须覆盖 seeds 0～19；提前 non-overflow 判定
+   照常执行并记录，但只作为 observe-only，不得提前返回，模型继续输出完整 plan。
 4. 主 pipeline 继续到原生本地 PlanMemory，并在该边界后停止。
 5. 比较 status、required、peak、buffer extent/offset、lifetime、multi-buffer 和 applied
    inplace；稳定失败按 taxonomy 比较。
@@ -23,32 +23,19 @@
 把 20 seeds 顺序塞进同一进程会改变 allocator/pointer 历史，不能代表严格的单-seed
 生产合同。
 
-### 两级 embedded 验证
+2026-07-28 对 `ascend_tutorial_01-vector-add.ttadapter`、`production_default` 做了重构后的
+现场 20-seed smoke：`20 matched / 0 different / 0 unavailable / 0 timeout`；20 行均为
+`non_overflow_upper_bound_proven=true`、
+`decision_paths=full_plan_after_non_overflow_upper_bound`、
+`native_plan_memory_observed=true`、
+`non_overflow_proof_verified=true`。这证明提前判定命中后仍完成两侧方案验证，但不替代后续
+更大现场矩阵。
 
-权威路线仍是现场模式：一个 `bishengir-compile` attempt 内先运行当前 embedded model，再
-继续真实 CVPipelining 到本地 PlanMemory，并比较完整合同。
+### embedded 现场验证
 
-重复开发循环可以启用 read-through cache：
-
-```bash
-.venv/bin/python3 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py \
-  --seeds 0-19 --jobs 12 \
-  --oracle-cache-dir ub_overflow_model_cpp/output/bisheng_embedded_oracle_cache
-```
-
-- miss：现场执行 model + native PlanMemory，比较并写入原生合同；
-- hit：仍从 adapter 运行真实 BiSheng prefix 和当前 embedded model，在 prediction 后停止，
-  再与缓存原生合同对比；
-- stale：实际 pre-CV IR digest、resolved-options digest、seed、完整参数或 pipeline fingerprint
-  任一不一致，自动回到现场并刷新；
-- fallback/multi-attempt：不 replay 单 attempt 缓存，始终现场运行；
-- cached mismatch/unavailable：自动再跑现场 oracle 并刷新，最终差异必须来自现场确认；
-- 发布前或原生后缀语义变化后：去掉 cache 参数现场全量，或先使用
-  `--refresh-oracle-cache` 重建，不能把 cache hit 数当作现场 oracle 数。
-
-2026-07-28 warm smoke：production-default/vector-add/seed 0 首次现场约 `2.311 s`，缓存命中
-约 `21.9 ms`，两次均 matched；重链接后的首次冷启动曾约 `1.50 s`，随后回到 `23.6 ms`。
-该比值仅证明机制有效，不能外推为全矩阵加速比。
+一个 `bishengir-compile` attempt 内先运行当前 embedded model，再继续真实 CVPipelining 到
+本地 PlanMemory，并比较完整合同。脚本不提供原生结果 cache 或 prediction 后提前停止模式；
+这样每一个报告行都同时验证提前判定信号、完整轻量模型计划和真实原生计划。
 
 以下开关只用于验证，默认必须关闭：
 
@@ -71,7 +58,7 @@ MIX 代表输入；历史 post-P0 代表矩阵中 required/peak/overflow 差异�
 以及没有稳定 UB 观测的 unavailable 项。
 
 此前停止的 embedded 全量不能被记为“86400 全通过”。当前新的大规模基础设施修改在合入
-前仍必须重新执行 embedded 正确性矩阵，不能引用旧 cv2pm cache 代替。
+前仍必须重新执行 embedded 正确性矩阵。
 
 2026-07-28 代表子集现场验证覆盖 8 个算子、27 场景、20 seeds，共 4320 组：
 
@@ -95,18 +82,18 @@ timeout                                         0
 结束且没有稳定可比较诊断。报告位于本地可再生成的
 `output/bisheng_embedded_representative_8x27x20.tsv`，不提交仓库。
 
-历史 cv2pm schema-2 曾得到 27 场景下 `84852/84852` 可比较结果匹配；它证明模型开发阶段
-达到过完整后缀等价，但从 2026-07-27 起不再是当前 oracle。suffix 更早退出当前验证体系。
-
 ## 性能测量规则
 
-- 产品性能只测未固定 seed 的真实 retry-only。
+- 性能只比较轻量原模型和新模型自身的单轮速度，使用未固定 seed 的真实 retry-only；不评估
+  autotune 总收益，也不计算原生 compiler 被剪枝后节省的时间。
 - 默认关闭 dump、validation、stage artifact、memory display 和逐 pass IR 序列化。
 - stage timing 只用于拆分热点；它本身有开销，不能替代 production wall/API timing。
-- standalone 进程墙钟包含每个 kernel 的启动成本；embedded 产品判断优先看
-  `Result::totalTimeNs`/`model_ns`，同时报告 `serialize_ns` 或 direct-import 成本。
+- standalone 进程墙钟包含每个 kernel 的启动成本；主指标是同一输入集合的每输入
+  `Result::totalTimeNs`、单轮 internal total、process wall 和峰值 RSS。
 - 比较优化前后时使用同一 build、同一输入、同一参数、预热后交替运行，并取多轮中位数。
 - 性能测试使用 O3 Release；正确性依旧使用明确的 20 seeds，二者不能互相替代。
+- 入口从 before-CV 前移到 before-AutoBlockify 后，新模型增加了实际语义工作；报告必须同时
+  给出新增前缀的阶段耗时，并说明原模型/新模型并非严格同工作量。
 
 ## 2026-07-28 当前基线
 
@@ -204,39 +191,23 @@ embedded validation 计算同一证明但继续完整模型；若完整 PlanMemo
 `398 matched / 0 different / 34 unavailable / 0 timeout`；34 项仍是两套 workspace-manage-off
 无模型观测（32）和 preload+matrix-multiplication 原生 abort（2）。
 
-同日 compile-only autotune 性能实验使用 5 个代表 adapter、每个 4 个配置、5 次交替重复、
-单线程、O3、真实 retry-only、停止在本地 PlanMemory 后：
-
-```text
-paired non-overflow runs                 80
-average added cost per safe candidate    14.366 ms / 20.42%
-baseline per-repeat median               2.4216 s
-prune per-repeat median                  2.3349 s
-five-repeat cumulative saving            438.35 ms / 3.61%
-speedup                                  1.037x
-```
-
-单独对 python fused-attention 交替测量 21 轮，baseline/fast-path 中位数为
-`125.174/151.485 ms`，paired overhead 中位数 `26.490 ms`；机器摘要中模型中位
-`25.640 ms`、Generic MLIR 序列化 `0.424 ms`。本地可再生成报告为
-`output/performance/autotune_fastpath_20260728/summary.json`，不提交。
+此前的 compile-only autotune 和 compiler baseline/shadow/prune 数据只保留历史诊断价值，
+不再用于当前性能验收。后续报告不得用这些外部节省抵消模型自身的单轮回退。
 
 ## 每个性能阶段的验证门槛
 
 1. 修改后先运行相关单测和 `tests/run_tests.sh`。
 2. 选择 simple、MIX、attention overflow、late-seed success、auto-MB、InjectBlockSync、
    UB-saving 和稳定失败输入，执行 embedded 固定 seed 全字段对比。
-3. 数据结构、ordering、PlanMemory 或 fast-path 合同发生变化时，日常迭代可先跑缓存矩阵，
-   随后运行 27 场景 × 160 输入 × 20 seeds 的无缓存 embedded 矩阵；known
-   timeout/unavailable 必须单列，不能算通过。
-4. 性能回归使用 production retry-only；至少 3 轮，报告中位数、stage 分布、最慢 kernel
-   和 overflow kernel。
+3. 数据结构、ordering、PlanMemory 或 fast-path 合同发生变化时，运行 27 场景 × 160 输入 ×
+   20 seeds 的现场 embedded 矩阵；known timeout/unavailable 必须单列，不能算通过。
+4. 性能回归使用原模型/新模型交替的 production retry-only；至少 3 轮，报告每输入分布、
+   单轮 total、峰值 RSS、stage 分布、最慢 kernel 和 overflow kernel。
 5. fast path 除完整 plan 验证外，还要单独统计命中率、fall-through 数和 decision parity。
 
 ## 禁止的验证捷径
 
-- 用 suffix 或 cv2pm cache 替代当前 embedded oracle；
-- 把 embedded cache hit 报告冒充发布前现场原生 PlanMemory 全量；
+- 用任何缓存替代当前 embedded 原生 PlanMemory；
 - 把 exact mismatch 改成 blocker/incomplete；
 - 只比较 peak/overflow，忽略 fixed-seed 完整 plan 回归；
 - 将 timeout、SIGABRT 或无稳定 UB 观测计为 matched；

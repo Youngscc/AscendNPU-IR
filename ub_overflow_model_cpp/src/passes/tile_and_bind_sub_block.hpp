@@ -5143,7 +5143,7 @@ inline GenericModule RunTileAndBindSubBlock(GenericModule module,
   if (aivFunctions.empty())
     return module;
 
-  // The production cv2pm pipeline always runs TileAndBindSubBlock.  Turning
+  // The production BiSheng pipeline always runs TileAndBindSubBlock.  Turning
   // auto binding off disables only the tiling attempt: early canonicalization
   // above still runs, and every unsliced store/copy must be restricted to
   // sub-block 0.  The experimental suffix used to omit the whole pass here.

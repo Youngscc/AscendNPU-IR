@@ -410,10 +410,10 @@ int main() {
   };
   Check(stage("CloneTensorEmptyAfterCVPipelining") <
             stage("SinkOpToConsumerInLoopAfterCVPipelining"),
-        "cv2pm must clone before the early UB-saving sink");
+        "BiSheng must clone before the early UB-saving sink");
   Check(stage("CloneTensorEmptyBeforeUbufSavingSink") <
             stage("SinkOpToConsumerInLoop"),
-        "cv2pm must clone again immediately before the bufferization sink");
+        "BiSheng must clone again immediately before the bufferization sink");
 
   const std::vector<cvub::OneShotOpOperandDecision> nestedDecisions =
       cvub::ModelOneShotAnalysis(NestedReadBeforeWriteModule());
@@ -439,7 +439,7 @@ int main() {
 
   std::cout << "[PASS] module plans AIV functions independently\n";
   std::cout << "[PASS] conservative non-overflow proof is decision-only\n";
-  std::cout << "[PASS] cv2pm UB-saving clone/sink order is preserved\n";
+  std::cout << "[PASS] BiSheng UB-saving clone/sink order is preserved\n";
   std::cout << "[PASS] OneShot nested read ordering mirrors DominanceInfo\n";
   std::cout << "[PASS] PlanMemory normalization mirrors dominance-aware CSE\n";
   std::cout << "[PASS] FlattenOps collapse composition reuses equivalent views\n";

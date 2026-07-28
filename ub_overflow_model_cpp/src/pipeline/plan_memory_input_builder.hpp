@@ -3662,7 +3662,7 @@ private:
         // which it was created.  Use the same structural identity as the
         // collapse(expand_shape) composition above so an ordinary flatten and
         // an equivalent composed flatten share the dominating view exactly as
-        // they do after cv2pm's ExtendedCanonicalizer/createCSEPass.
+        // they do after BiSheng's ExtendedCanonicalizer/createCSEPass.
         operation.normalizationKey = cseKey;
       }
       result.operations.push_back(std::move(operation));

@@ -130,8 +130,13 @@ void emitMachineResult(const cvub::Result &result, uint64_t serializeNs,
       << (result.selectedSeed ? std::to_string(*result.selectedSeed)
                               : "unknown")
       << " decision_path="
-      << (result.decisionOnlyNonOverflow ? "non_overflow_upper_bound"
-                                         : "full_plan")
+      << (result.decisionOnlyNonOverflow
+              ? "non_overflow_upper_bound"
+              : (result.conservativeUpperBoundBits
+                     ? "full_plan_after_non_overflow_upper_bound"
+                     : "full_plan"))
+      << " non_overflow_upper_bound_proven="
+      << (result.conservativeUpperBoundBits ? "true" : "false")
       << " conservative_upper_bound_bits="
       << (result.conservativeUpperBoundBits
               ? std::to_string(*result.conservativeUpperBoundBits)

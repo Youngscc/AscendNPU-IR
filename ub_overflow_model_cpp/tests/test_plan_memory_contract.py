@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ub_overflow_model_cpp/scripts"))
 
-from compare_ub_plan_with_suffix_oracle import (  # noqa: E402
+from plan_memory_contract import (  # noqa: E402
     model_multi_and_inplace,
     normalized_lifetimes_from_model,
     parse_oracle,

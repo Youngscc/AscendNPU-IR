@@ -1,7 +1,6 @@
 # 当前代码与命令
 
-本文件只记录当前产品和新的性能目标。历史 suffix/cv2pm 路线不再展开；需要追溯时使用
-Git 历史。
+本文件只记录当前产品和新的性能目标；已删除的旧后缀工具只通过 Git 历史追溯。
 
 ## 产品调用路径
 
@@ -117,19 +116,17 @@ ub_overflow_model_cpp/config/ub_relevant_parameter_scenarios.tsv
 ub_overflow_model_cpp/config/known_timeout_pairs.tsv  已知原生长尾
 ub_overflow_model_cpp/config/failure_taxonomy.tsv     稳定失败分类
 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py
+ub_overflow_model_cpp/scripts/plan_memory_contract.py  两侧 PlanMemory 合同解析
 ub_overflow_model_cpp/tests/test_bisheng_embedded_matrix.py
 ub_overflow_model_cpp/tests/run_tests.sh
-ub_overflow_model_cpp/output/bisheng_embedded_oracle_cache/  本地可再生成缓存
 ```
 
 当前正确性入口从 adapter 启动真实 `bishengir-compile`，在同一个 attempt 中比较 embedded
 model 与原生 PlanMemory。`data/before_cvpipelining` 适合 standalone 性能分析，不替代
 embedded 正确性 oracle。
 
-`run_bisheng_embedded_matrix.py --oracle-cache-dir` 是 read-through 模式：miss 在同进程执行
-model + native PlanMemory 并写缓存；hit 仍运行真实 prefix 和 embedded pass，但通过
-`BISHENGIR_STOP_AFTER_UB_OVERFLOW_PREDICTION` 在 prediction 后停止并读取原生合同。只缓存
-单 attempt 参考；fallback/multi-attempt 始终现场运行，cache mismatch 也自动现场确认。
+`run_bisheng_embedded_matrix.py` 不读取原生结果缓存：每个选中的 seed 都从 adapter 启动真实
+编译，在模型之后继续到原生本地 PlanMemory，再比较完整合同。
 
 ## 常用命令
 
@@ -168,13 +165,13 @@ ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
   --format=json
 ```
 
-单个 embedded 固定 seed 对比：
+单个 embedded 输入的完整 20-seed 对比：
 
 ```bash
 .venv/bin/python3 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py \
   --config production_default \
   --input ADAPTER.ttadapter \
-  --seeds 0 \
+  --seeds 0-19 \
   --jobs 1
 ```
 
@@ -185,18 +182,6 @@ ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
   --seeds 0-19 \
   --jobs 12
 ```
-
-重复开发验证使用 embedded native cache：
-
-```bash
-.venv/bin/python3 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py \
-  --seeds 0-19 \
-  --jobs 12 \
-  --oracle-cache-dir ub_overflow_model_cpp/output/bisheng_embedded_oracle_cache
-```
-
-强制现场刷新同一缓存增加 `--refresh-oracle-cache`。重大边界和发布前最终验证应去掉
-`--oracle-cache-dir`，不能把 cache hit 报告当作现场全量。
 
 手工查看 embedded 模型结果和耗时：
 
@@ -224,6 +209,3 @@ ub_overflow_model_cpp/output/
 __pycache__/
 临时 dump、cache、runtime TSV 和 profile 报告
 ```
-
-历史兼容文件可能仍包含 suffix/cv2pm 名称，但它们不属于当前优化任务。不要为了清理命名
-顺手修改工作正常的历史工具；只有当前实现依赖造成歧义或性能成本时才处理。

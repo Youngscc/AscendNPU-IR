@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare model UB plan JSON with suffix-compile PlanMemory dump output."""
+"""Parse and compare lightweight-model and native BiSheng PlanMemory contracts."""
 
 from __future__ import annotations
 
@@ -217,7 +217,7 @@ def parse_oracle_contract(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare modeled UB offsets/peak against suffix-compile oracle TSV.")
+        description="Compare modeled UB offsets/peak against native PlanMemory TSV.")
     parser.add_argument("--model-json", required=True, type=Path)
     parser.add_argument("--oracle-tsv", required=True, type=Path)
     parser.add_argument("--scope", default="6",
@@ -472,7 +472,7 @@ def main() -> int:
     multi_match = oracle_multi == model_multi
     inplace_match = oracle_inplace == model_inplace
 
-    print("Suffix-Compile Oracle Comparison")
+    print("Native PlanMemory Contract Comparison")
     print("----------------------------------------------------------------------------")
     print(f"attempt        : {oracle_attempt}")
     print(f"scope          : {args.scope}")

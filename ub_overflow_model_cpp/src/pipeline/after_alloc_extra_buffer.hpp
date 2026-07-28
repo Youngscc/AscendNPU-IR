@@ -143,7 +143,7 @@ TryStaticBufferBits(const std::string &type,
 //
 // Since min(base + tileSize, other) <= base + tileSize, the closed upper
 // bound is tileSize. Support both the value-based form produced by the model's
-// ConvertArithToAffine projection and the raw affine_map form dumped by cv2pm.
+// ConvertArithToAffine projection and the raw affine_map form from BiSheng.
 inline std::optional<int64_t> ConstantizeBufferSizeUpperBound(
     int value, const GenericModule &module,
     const GenericModuleAnalysisIndexes &analysis) {
@@ -176,7 +176,7 @@ inline std::optional<int64_t> ConstantizeBufferSizeUpperBound(
         return std::nullopt;
     }
   } else {
-    // Existing cv2pm dumps can already contain affine.apply operations instead
+    // Captured native IR can already contain affine.apply operations instead
     // of the arith operations converted by this model.  Preserve the same
     // ValueBounds relation for the canonical two-operand difference map.
     std::string map = FindDictionaryValue(definition->properties, "map");
@@ -216,13 +216,13 @@ inline std::optional<int64_t> ConstantizeBufferSizeUpperBound(
       if (!std::isspace(static_cast<unsigned char>(character)))
         compact.push_back(character);
     // affine.min/max with an identity result list represents min/max of its
-    // operands. This is one form emitted by cv2pm after affine lowering.
+    // operands. This is one form emitted by BiSheng after affine lowering.
     if (minDefinition->operands.size() == 2 &&
         (compact.find("->(s0,s1)") != std::string::npos ||
          compact.find("->(d0,d1)") != std::string::npos))
       candidateValues = minDefinition->operands;
     else if (minDefinition->operands.size() == 2) {
-      // The other raw cv2pm form keeps the tile bound in the affine map:
+      // The other native form keeps the tile bound in the affine map:
       //   min(base + tileSize, other) - base
       // ValueBoundsConstraintSet proves the same `<= tileSize` relation. Map
       // sN/dN back to the real operands instead of treating symbols as model
@@ -1214,7 +1214,7 @@ ModelConnectedAllocExtraBuffer(const PostBufferizationRewriteState &postBufferiz
         // Keep the logical memref view passed to the generated operation, but
         // model utils::traceToAllocMaxSize through its backing allocation.
         // Decomposition commonly creates memref<?xT> views backed by a
-        // statically bounded UB allocation; cv2pm traces through that view
+        // statically bounded UB allocation; the native pipeline traces through that view
         // before querying ExtraBufferOpInterface.
         physical.push_back(GeneratedBufferAllocationTypeForTrace(
             postBufferization, buffer, bufferIndex, type, metadata));

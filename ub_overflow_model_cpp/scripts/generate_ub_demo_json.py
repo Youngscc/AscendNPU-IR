@@ -25,11 +25,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cv-disable-pipelining", action="store_true")
     parser.add_argument("--cv-enable-preload", action="store_true")
     parser.add_argument("--cv-enable-lazy-loading", action="store_true")
-    parser.add_argument("--suffix-enable-auto-multi-buffer", action="store_true")
-    parser.add_argument("--suffix-enable-triton-kernel-compile",
+    parser.add_argument("--enable-auto-multi-buffer", action="store_true")
+    parser.add_argument("--enable-triton-kernel-compile",
                         action="store_true")
-    parser.add_argument("--suffix-local-multi-buffer-strategy", default="no-l0c")
-    parser.add_argument("--suffix-mix-multi-buffer-strategy", default="only-cube")
+    parser.add_argument("--local-multi-buffer-strategy", default="no-l0c")
+    parser.add_argument("--mix-multi-buffer-strategy", default="only-cube")
     parser.add_argument("--restrict-inplace-as-isa", action="store_true")
     parser.add_argument("--plan-memory-seed", default=None)
     return parser.parse_args()
@@ -49,10 +49,10 @@ def main() -> int:
         f"--cv-disable-pipelining={str(args.cv_disable_pipelining).lower()}",
         f"--cv-enable-preload={str(args.cv_enable_preload).lower()}",
         f"--cv-enable-lazy-loading={str(args.cv_enable_lazy_loading).lower()}",
-        f"--suffix-enable-auto-multi-buffer={str(args.suffix_enable_auto_multi_buffer).lower()}",
-        f"--suffix-enable-triton-kernel-compile={str(args.suffix_enable_triton_kernel_compile).lower()}",
-        f"--suffix-local-multi-buffer-strategy={args.suffix_local_multi_buffer_strategy}",
-        f"--suffix-mix-multi-buffer-strategy={args.suffix_mix_multi_buffer_strategy}",
+        f"--enable-auto-multi-buffer={str(args.enable_auto_multi_buffer).lower()}",
+        f"--enable-triton-kernel-compile={str(args.enable_triton_kernel_compile).lower()}",
+        f"--local-multi-buffer-strategy={args.local_multi_buffer_strategy}",
+        f"--mix-multi-buffer-strategy={args.mix_multi_buffer_strategy}",
         "--format=json",
     ]
     if args.restrict_inplace_as_isa:

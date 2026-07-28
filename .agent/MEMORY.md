@@ -1,7 +1,7 @@
 # AscendNPU-IR 项目记忆
 
 最后核实：2026-07-28，分支 `codex/ub-overflow-model-product`，基线提交
-`4e1053359`。本文件是 `.agent` 的唯一入口；事实与当前源码或新测量冲突时，应重新核实
+`f04f71786`。本文件是 `.agent` 的唯一入口；事实与当前源码或新测量冲突时，应重新核实
 并直接更新当前结论，不在这里堆叠多代任务流水账。
 
 ## 当前唯一目标
@@ -18,9 +18,18 @@ ModuleOp before CVPipelining
        `-> incomplete/blocker: 不剪枝，继续真实 compiler
 ```
 
-当前阶段优先优化真实产品路径的速度，允许模型依赖 LLVM/MLIR。目标不是缩短测试时间，
-也不是继续完善 suffix/cv2pm；测试只用于证明优化没有改变 overflow 和完整 PlanMemory
-语义。
+当前阶段优先优化真实产品路径的速度，允许模型依赖 LLVM/MLIR。测试只用于证明优化没有改变
+overflow 和完整 PlanMemory 语义。
+
+下一产品边界已经确定：在 direct-MLIR、stable-ID shadow overlay 和最小增量分析基础设施
+完成后，把 prediction pass 从 before-CVPipelining 前移到 before-AutoBlockify，并复刻
+AutoBlockify、CV 前 MarkMultiBuffer、canonicalizationHIVMPipeline、InlineOTFBroadcast 到
+CVPipelining 的真实语义。完整执行顺序和验收门槛见
+[implementation_plan.md](implementation_plan.md)。
+
+轻量 AutoBlockify 已经存在于仓库，后续应基于现有实现改造到新基础设施并接入主链路，不能
+无理由从零重写。实施方案的每个阶段完成代码和测试后，都必须向用户报告一次临时正确性、
+性能、工作树状态、遗留风险和下一步；若出现差异、回退或需要触碰原生逻辑，先暂停征询。
 
 ## 当前产品关系
 
@@ -28,11 +37,10 @@ ModuleOp before CVPipelining
 - `bishengir/lib/Dialect/HIVM/Pipelines/UBOverflowPrediction.cpp` 是生产接入 pass，位于真实
   CVPipelining 之前。
 - 生产正确性 oracle 是同一 `bishengir-compile` attempt 中继续执行得到的原生本地
-  PlanMemory，不是 suffix，也不是 cv2pm cache。重复开发验证可以读取 embedded native
-  cache，但 cache miss、fallback、多 attempt 和发布前最终验证仍走现场 oracle。
-- `bishengir-cvpipeline-suffix-compile` 已退出当前任务。
-- `cv2pm-bishengir-compile` 及 schema-2 cache 只保留历史诊断价值；除非用户明确要求追溯
-  历史，不再围绕它们新增任务、缓存或门禁。
+  PlanMemory。旧的两个独立后缀编译器及其脚本、配置和缓存已删除；需要追溯只能查看 Git
+  历史。
+- 正确性脚本不读取原生结果缓存。每个场景和输入必须执行 seeds 0～19，并且每个 seed 都在
+  同一次真实 BiSheng 执行中完成 embedded model 与原生本地 PlanMemory 的完整合同对比。
 
 ## 当前实现与待实现边界
 
@@ -61,8 +69,8 @@ MLIR-backed read-only input
   -> integer-ID PlanMemory
 ```
 
-不推荐把完整 `ModuleOp` 再 clone 一次并运行原生 MLIR/BiSheng pass；那会退化为接近
-cv2pm 的成本。MLIR 应提供只读 `Operation/Value/Type/Attribute`、原始 use-list 和接口；
+不推荐把完整 `ModuleOp` 再 clone 一次并运行原生 MLIR/BiSheng pass；那会退化为完整后缀
+编译的成本。MLIR 应提供只读 `Operation/Value/Type/Attribute`、原始 use-list 和接口；
 模拟变换由轻量 overlay 表达，不能污染真实 pipeline 的输入。
 
 ## 当前性能基线
@@ -91,8 +99,8 @@ two canonicalization pipelines           6.39%
 OneShotBufferize                         3.00%
 ```
 
-历史同口径 cv2pm/model 对比为 `3.309 s / 0.886 s`，模型内部约快 `3.74x`；这是历史
-性能参照，不是当前正确性 oracle。
+历史完整后缀/模型对比为 `3.309 s / 0.886 s`，模型内部约快 `3.74x`；这里只作为旧性能
+参照，不是当前正确性 oracle。
 
 ## 新性能结论与目标
 
@@ -121,19 +129,11 @@ plan；debug/embedded validation 观察同一个证明但强制继续完整模�
 overflow”的矛盾。真实 compiler 在 non-overflow 时仍继续后续编译，提前返回只发生在
 轻量模型内部。
 
-同日性能口径：O3、关闭 validation/dump、真实 retry-only，compile-only autotune 使用 5 个
-代表 adapter、每个 4 个配置、baseline/shadow/prune 交替、5 轮、单线程：
-
-```text
-单轮成功 fused-attention：baseline 125.174 ms，fast-path 151.485 ms
-  paired overhead median 26.490 ms；model 25.640 ms；serialize 0.424 ms
-80 个 paired non-overflow candidate：平均模型增量 14.366 ms（20.42%）
-每轮 20 candidate：baseline 中位 2.4216 s，prune 中位 2.3349 s
-5 轮累计：12.1469 s -> 11.7085 s，节省 438.35 ms / 3.61%，1.037x
-```
-
-其中 80 个成功 candidate 中 60 个命中 conservative upper-bound fast path；20 个最终
-overflow candidate 仍执行完整模型及 BiSheng fallback，并在 prune 模式避免进入原生后缀。
+当前性能目标只比较轻量模型自身的单轮速度，不再评估 autotune 总收益或原生 compiler 被
+剪枝后节省的时间。统一口径为同一输入集合、同一 resolved options、O3、关闭
+validation/dump、真实 retry-only，交替测量原模型和新模型的每输入 `totalTimeNs`、单轮
+internal total、process wall 和峰值 RSS。入口前移后实际工作量增加时必须单列，不能把不同
+边界的总时间包装成严格 A/B 加速比。
 
 允许依赖 LLVM/MLIR 后，当前整体目标为：
 
@@ -164,11 +164,12 @@ overflow candidate 仍执行完整模型及 BiSheng fallback，并在 prune 模�
 - 禁止为了让模型通过而修改原生 BiSheng pass、buffer plan、遍历顺序或 fallback 语义。
 - 使用 `DenseMap`、`SmallPtrSet` 等无序结构时，只能用于查找；任何影响 operation、buffer、
   RNG 或 PlanMemory 顺序的遍历必须来自显式有序容器。
-- 正确性优化后仍以 embedded model 对同进程原生 PlanMemory 为准；性能使用真实
-  retry-only，关闭 dump、validation 和逐 pass 快照。
-- embedded native cache 只加速模型开发循环。cache identity 必须覆盖实际 pre-CV IR digest、
-  resolved-options digest、seed、完整参数和 pipeline fingerprint；多 attempt/fallback 不得用
-  单-attempt replay，cache mismatch 必须自动现场确认，发布前必须执行不读缓存的现场矩阵。
+- 正确性优化后仍以 embedded model 对同进程原生 PlanMemory 为准；性能使用原模型/新模型
+  同机交替的真实 retry-only 单轮测量，关闭 dump、validation 和逐 pass 快照；不再使用
+  autotune 或 compiler 剪枝收益作为性能验收指标。
+- 正确性验证禁止使用缓存代替原生 PlanMemory。提前 non-overflow 证明在验证模式中只作为
+  信号，模型仍生成完整计划，真实 BiSheng 仍执行到本地 PlanMemory；二者按 seed 比较最终
+  完整合同。
 - 性能数字必须说明日期、构建模式、输入集合、参数、seed/retry 模式和 timing 是否开启。
 - `Output/`、`ub_overflow_model_cpp/output/`、dump、cache 和临时报告均为可再生成产物，
   不提交。
@@ -178,3 +179,5 @@ overflow candidate 仍执行完整模型及 BiSheng fallback，并在 prune 模�
 1. [code_map.md](code_map.md)：当前实现、热点路径和命令。
 2. [workflow.md](workflow.md)：新的性能重构阶段和提交纪律。
 3. [validation.md](validation.md)：当前 oracle、正确性门槛和性能测量方法。
+4. [implementation_plan.md](implementation_plan.md)：交给后续实现者的逐阶段任务、执行方式和
+   验收标准。

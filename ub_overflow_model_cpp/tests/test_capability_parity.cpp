@@ -367,7 +367,7 @@ void TestRawAffineDynamicExtentUpperBound() {
   const std::optional<int64_t> bound = cvub::ConstantizeBufferSizeUpperBound(
       extent->results.front(), module, analysis);
   Check(bound && *bound == 32,
-        "raw cv2pm affine chain must have the closed upper bound 32");
+        "raw BiSheng affine chain must have the closed upper bound 32");
 }
 
 void TestRawInlineAffineDynamicExtentUpperBound() {
@@ -385,7 +385,7 @@ void TestRawInlineAffineDynamicExtentUpperBound() {
   const std::optional<int64_t> bound = cvub::ConstantizeBufferSizeUpperBound(
       extent->results.front(), module, analysis);
   Check(bound && *bound == 32,
-        "raw cv2pm min(base + tile, other) map must preserve the tile bound");
+        "raw BiSheng min(base + tile, other) map must preserve the tile bound");
 }
 
 void TestOTFExtraUsersBlockBeforePlanning() {
@@ -563,7 +563,7 @@ void TestTask7NestedSubviewPreservesOtherParentUsers() {
             newParent->second->resultTypes.front().find("memref<32x128x") ==
                 0 &&
             child.resultTypes.front().find("memref<4x128x") == 0,
-        "nested view bubble-up must reproduce cv2pm's 64 -> 32 -> 4 tiling");
+        "nested view bubble-up must reproduce BiSheng's 64 -> 32 -> 4 tiling");
 }
 
 void TestGenericRewriterAssignsRegionOrdinals() {
@@ -925,7 +925,7 @@ int main() {
   std::cout << "[PASS] yy pipeline retains default vector tiling semantics\n";
   TestVectorTilingIgnoresScalarAxisOperands();
   std::cout << "[PASS] TileCubeVectorLoop ignores scalar axis operands like "
-               "cv2pm\n";
+               "BiSheng\n";
   TestInferBufferSizeComposesCVPipelineTripCount();
   std::cout << "[PASS] InferAndSetBufferSize composes CVPipelining bounds\n";
   TestExistingAffineMapFoldsConstantOperands();
@@ -945,15 +945,15 @@ int main() {
   TestSplitMixDeadRegionIgnoresInternalYieldUses();
   std::cout << "[PASS] SplitMix dead-region cleanup ignores internal yields\n";
   TestSplitMixCubeFoldsEmptyInsertSlice();
-  std::cout << "[PASS] SplitMix Cube folds empty insert_slice like cv2pm\n";
+  std::cout << "[PASS] SplitMix Cube folds empty insert_slice like BiSheng\n";
   TestAscend950TightlyCoupledBufferBlocks();
   std::cout << "[PASS] Ascend950 tightly-coupled buffers fail closed\n";
   TestA3TightlyCoupledPassesAreUBNoOp();
   std::cout << "[PASS] A2/A3 tightly-coupled passes are UB no-ops\n";
   TestRawAffineDynamicExtentUpperBound();
-  std::cout << "[PASS] raw cv2pm affine dynamic extent has a closed bound\n";
+  std::cout << "[PASS] raw BiSheng affine dynamic extent has a closed bound\n";
   TestRawInlineAffineDynamicExtentUpperBound();
-  std::cout << "[PASS] raw inline cv2pm affine extent has a closed bound\n";
+  std::cout << "[PASS] raw inline BiSheng affine extent has a closed bound\n";
   TestOTFExtraUsersBlockBeforePlanning();
   std::cout << "[PASS] OTF concat extra users fail closed\n";
   TestOTFSubbyteIsAlignedNoOp();
@@ -989,7 +989,7 @@ int main() {
   TestVShLUsesReviewedDestinationStyleSemantics();
   std::cout << "[PASS] VShL uses reviewed destination-style semantics\n";
   TestTileCubeVectorLoopLiftsMemRefLoadLikeRealPass();
-  std::cout << "[PASS] TileCubeVectorLoop lifts memref loads like cv2pm\n";
+  std::cout << "[PASS] TileCubeVectorLoop lifts memref loads like BiSheng\n";
   TestInjectBlockSyncNativeBranches();
   std::cout << "[PASS] InjectBlockSync native disabled and block-all branches\n";
   TestInjectBlockSyncCVUnrollSelectorPlacement();

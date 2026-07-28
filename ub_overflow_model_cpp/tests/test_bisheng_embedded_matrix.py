@@ -6,7 +6,6 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import sys
-import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +28,7 @@ assert len(MODULE.load_adapters(
     MODULE.DEFAULT_ADAPTER_ROOT,
     {"triton.language.extra.cann.extension.index_put.ttadapter"}, 0,
 )) == 1
+assert MODULE.selected_seeds("0-19") == list(range(20))
 arguments = MODULE.compiler_arguments(rows[0])
 assert "--enable-ub-overflow-prediction=true" in arguments
 assert "--prune-predicted-ub-overflow=false" in arguments
@@ -40,7 +40,7 @@ BISHENGIR_UB_MODEL_VALIDATION_BEGIN\t0
 BISHENGIR_UB_MODEL_FUNCTION\t0\tkernel\tsuccess\t32768\t32768\t13
 BISHENGIR_UB_MODEL_BUFFER\t0\tkernel\t%buffer\t32768\t1\t10\t20\t0
 BISHENGIR_UB_MODEL_VALIDATION_END\t0\t1
-BISHENGIR_UB_MODEL_RESULT contract_version=1 status=success precision=exact overflow=false ub_peak_bits=32768 required_bits=32768 capacity_bits=1572864 selected_seed=13 serialize_ns=1 model_ns=2 input_digest=x options_digest=y pipeline_fingerprint=pipeline-v1 diagnostic_category=none validation_id=0
+BISHENGIR_UB_MODEL_RESULT contract_version=1 status=success precision=exact overflow=false ub_peak_bits=32768 required_bits=32768 capacity_bits=1572864 selected_seed=13 decision_path=full_plan_after_non_overflow_upper_bound non_overflow_upper_bound_proven=true conservative_upper_bound_bits=65536 serialize_ns=1 model_ns=2 input_digest=x options_digest=y pipeline_fingerprint=pipeline-v1 diagnostic_category=none validation_id=0
 PLANMEM_LIVENESS_ATTEMPT\tkernel\t0\t13
 PLANMEM_EXACT_BUFFER\t13\t0\t32768\t6\t0\t10\t20
 PLANMEM_EXACT_MULTI\t13\t0\t1
@@ -56,8 +56,30 @@ assert MODULE.split_validation_segments(segment) == [segment]
 payload = MODULE.parse_model_payload(segment)
 assert payload["validation_id"] == "0"
 assert payload["result"]["functions"][0]["buffers"][0]["offsets_bytes"] == [0]
+assert payload["result"]["non_overflow_upper_bound_proven"] is True
+assert payload["result"]["decision_path"] == \
+    "full_plan_after_non_overflow_upper_bound"
+assert payload["result"]["conservative_upper_bound_bits"] == 65536
+assert payload["result"]["functions"], \
+    "fast non-overflow validation must still materialize a full model plan"
 status, differences, evidence = MODULE.compare_segment(segment, 13)
 assert status == "matched", (differences, evidence)
+summary = MODULE.summarize_observation(
+    rows[0], Path("sample.ttadapter"), 13, segment, 0, False, 0.01
+)
+assert summary["non_overflow_upper_bound_proven"] == "true"
+assert summary["decision_paths"] == \
+    "full_plan_after_non_overflow_upper_bound"
+assert summary["native_plan_memory_observed"] == "true"
+assert summary["non_overflow_proof_verified"] == "true"
+
+incorrectly_pruned = segment.replace(
+    "decision_path=full_plan_after_non_overflow_upper_bound",
+    "decision_path=non_overflow_upper_bound",
+)
+status, differences, _ = MODULE.compare_segment(incorrectly_pruned, 13)
+assert status == "different"
+assert differences == ["validation-pruned-after-non-overflow-proof"]
 
 different = segment.replace(
     "PLANMEM_PEAK\t13\t6\t32768", "PLANMEM_PEAK\t13\t6\t65536"
@@ -132,30 +154,35 @@ status, differences, evidence = MODULE.compare_segment(aligned_failure, 13)
 assert status == "different", (differences, evidence)
 assert differences == ["precision"]
 
-scenario = rows[0]
-identity = MODULE.cache_identity(segment, scenario, "sample.ttadapter", 13)
-assert identity is not None
-assert identity["input_digest"] == "x"
-assert identity["options_digest"] == "y"
-assert identity["pipeline_fingerprint"] == "pipeline-v1"
-assert "BISHENGIR_UB_MODEL_RESULT" in MODULE.model_projection(segment)
-assert "PLANMEM_PEAK" not in MODULE.model_projection(segment)
-assert "BISHENGIR_UB_MODEL_RESULT" not in MODULE.native_projection(segment)
-assert "PLANMEM_PEAK" in MODULE.native_projection(segment)
-with tempfile.TemporaryDirectory(prefix="embedded-cache-test-") as temporary:
-    path = Path(temporary) / "record.json.gz"
-    MODULE.write_oracle_cache_record(path, identity, [segment], 0)
-    record = MODULE.matching_cache_record(path, identity)
-    assert record is not None
-    synthetic = (
-        MODULE.model_projection(segment) + record["native_segments"][0]
+captured: dict[str, object] = {}
+
+
+class Completed:
+    stderr = segment
+    returncode = 0
+
+
+def fake_run(command: list[str], **kwargs: object) -> Completed:
+    captured["command"] = command
+    captured["env"] = kwargs["env"]
+    return Completed()
+
+
+original_run = MODULE.subprocess.run
+try:
+    MODULE.subprocess.run = fake_run
+    observation = MODULE.execute_compiler(
+        Path("/compiler"), Path("/input.ttadapter"), rows[0], 7, 10
     )
-    status, differences, evidence = MODULE.compare_segment(synthetic, 13)
-    assert status == "matched", (differences, evidence)
-    stale = dict(identity)
-    stale["input_digest"] = "changed"
-    assert MODULE.matching_cache_record(path, stale) is None
-    MODULE.write_oracle_cache_record(path, identity, [segment, segment], 0)
-    assert MODULE.replayable_cache_record(path) is None
+finally:
+    MODULE.subprocess.run = original_run
+env = captured["env"]
+assert isinstance(env, dict)
+assert env["BISHENGIR_UB_MODEL_VALIDATION"] == "1"
+assert env["BISHENGIR_PLAN_MEMORY_FORCE_SEED"] == "7"
+assert env["BISHENGIR_DUMP_PLAN_MEMORY_ATTEMPTS"] == "1"
+assert env["BISHENGIR_STOP_AFTER_LOCAL_PLAN_MEMORY"] == "1"
+assert "BISHENGIR_STOP_AFTER_UB_OVERFLOW_PREDICTION" not in env
+assert observation["returncode"] == 0
 
 print("[PASS] same-process BiSheng validation parser")

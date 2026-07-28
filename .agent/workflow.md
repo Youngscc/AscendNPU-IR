@@ -13,8 +13,8 @@ checkpoint，但只有语义和验证完整后才整理为产品提交。
 - 构建必须确认 Release `-O3 -DNDEBUG`，并等待进程真实退出。
 - 保存当前 160-input retry-only 基线和代表 kernel 分阶段数据。
 - 正确性使用 embedded 原生 PlanMemory；性能使用 production retry-only。
-- 日常迭代可用 embedded native read-through cache；cache miss 自动现场建标，fallback/
-  multi-attempt 保持现场验证，主要边界和发布前验证关闭缓存。
+- 正确性验证始终现场执行 seeds 0～19；即使提前证明 non-overflow，也继续完整模型和原生
+  PlanMemory，禁止用缓存替代最终方案对比。
 - 新计时默认不加入 dump、validation 或 artifact 成本。
 
 ## 阶段 1：exact decision fast path
@@ -109,9 +109,9 @@ PlanMemoryInputSemanticIR
 - outline 从分散 list node 改为 index-based arena，保持 splice/rollback 顺序；
 - scratch capacity 在一个 evaluation 的 seed 间复用。
 
-默认优先吞吐量，保持串行 retry。只有明确需要单 kernel 低延迟时，才评估 seed 0 失败后
-并行 seed 1～19；并行模式必须选择与串行相同的 overflow 布尔值，且避免与 autotune
-外层并行造成过度订阅。
+默认优先单轮模型吞吐量，保持串行 retry。只有明确需要单 kernel 低延迟时，才评估 seed 0
+失败后并行 seed 1～19；并行模式必须选择与串行相同的 overflow 布尔值，并显式控制外层
+调用并发以避免过度订阅。
 
 ## 阶段 6：跨 fallback 和构建优化
 
@@ -119,7 +119,7 @@ PlanMemoryInputSemanticIR
   snapshot。
 - cache key 必须覆盖输入结构、所有分叉前有效参数和模型 build identity；不能保存上一个
   attempt 的 `Operation*`。
-- 架构稳定后再测试 ThinLTO/Full LTO 和真实 autotune corpus PGO。
+- 架构稳定后再测试 ThinLTO/Full LTO 和代表模型输入 corpus PGO。
 - 不优先投入 `-fno-exceptions`、目标 CPU 特化或完整原生 pass clone。
 
 ## 每轮修改流程
@@ -127,9 +127,9 @@ PlanMemoryInputSemanticIR
 1. 先用计时和源码确认热点，不为测试 corpus 写特例。
 2. 明确哪些数据和顺序必须保持，写针对性回归。
 3. 实现一项基础设施变化，避免同时混入 UB 逻辑调整。
-4. 运行相关单测和代表 embedded fixed-seed 对比；日常循环可读 embedded native cache。
+4. 运行相关单测和代表 embedded 20-seed 现场对比；单 seed 只用于定位。
 5. 比较同机 A/B 性能；收益不稳定或回退时先定位，不用更大矩阵掩盖。
-6. 重大边界完成后运行不读缓存的 embedded 20-seed 全量；缓存结果不能冒充现场运行。
+6. 重大边界完成后运行 embedded 20-seed 全量。
 7. 更新 `.agent` 的当前基线和已实现状态；删除被新事实覆盖的旧任务描述。
 
 ## Git 和临时产物

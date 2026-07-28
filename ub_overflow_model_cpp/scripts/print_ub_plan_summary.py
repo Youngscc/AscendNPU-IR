@@ -57,7 +57,7 @@ def main() -> int:
     result = payload.get("result", {})
     options = payload.get("options", {})
     cvpipelining = options.get("cvpipelining", {})
-    suffix = options.get("suffix_plan_memory", {})
+    planning = options.get("ub_planning", {})
     plan = result.get("plan", [])
 
     status = "OVERFLOW" if result.get("overflow") else (
@@ -85,14 +85,14 @@ def main() -> int:
     print(f"enable_preload     : {bool_text(cvpipelining.get('enable_preload'))}")
     print(f"enable_lazy_loading: {bool_text(cvpipelining.get('enable_lazy_loading'))}")
     print()
-    print("Suffix / PlanMemory options")
+    print("UB planning options")
     print(divider())
-    print(f"auto_multi_buffer  : {bool_text(suffix.get('enable_auto_multi_buffer'))}")
-    print(f"triton_compile     : {bool_text(suffix.get('enable_triton_kernel_compile'))}")
-    print(f"local_strategy     : {suffix.get('local_multi_buffer_strategy')}")
-    print(f"mix_strategy       : {suffix.get('mix_multi_buffer_strategy')}")
-    print(f"random_seed input  : {suffix.get('random_seed')}")
-    print(f"restrict_inplace   : {bool_text(suffix.get('restrict_inplace_as_isa'))}")
+    print(f"auto_multi_buffer  : {bool_text(planning.get('enable_auto_multi_buffer'))}")
+    print(f"triton_compile     : {bool_text(planning.get('enable_triton_kernel_compile'))}")
+    print(f"local_strategy     : {planning.get('local_multi_buffer_strategy')}")
+    print(f"mix_strategy       : {planning.get('mix_multi_buffer_strategy')}")
+    print(f"plan_memory_seed   : {planning.get('plan_memory_seed')}")
+    print(f"restrict_inplace   : {bool_text(planning.get('restrict_inplace_as_isa'))}")
     print()
 
     if not plan:

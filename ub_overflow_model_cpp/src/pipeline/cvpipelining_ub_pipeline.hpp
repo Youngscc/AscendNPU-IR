@@ -210,7 +210,7 @@ inline GenericModule RunPassesAfterPostSplitCanonicalization(
     trace->Pass("CloneTensorEmptyBeforeBufferize", {{"executed", 0}});
   }
   if (options.enableUbufSaving) {
-    // cv2pm's production bufferizationPipeline clones again immediately
+    // BiSheng's production bufferizationPipeline clones again immediately
     // before sinking.  This is distinct from the unconditional post-split
     // clone and the Triton DPS clone above.
     module = MeasureStage(trace,
@@ -301,7 +301,7 @@ inline GenericModule RunPassesBeforeLoopInvariantCodeMotion(
     return RunMarkRealCoreType(std::move(module), true);
   });
   TraceGenericPass(trace, "MarkRealCoreType", module);
-  // cv2pm runs these two passes before SplitMixKernel.  They are proven
+  // BiSheng runs these two passes before SplitMixKernel.  They are proven
   // no-ops for the supported A2/A3 profile; the guard keeps that path exact
   // while failing closed if an Ascend950 UB/L1 allocation reaches the model.
   module = RequireExactStage(
@@ -346,7 +346,7 @@ inline GenericModule RunPassesBeforeOneShotBufferize(
 }
 
 // SplitMixKernel keeps only the AIV projection in the lightweight pipeline,
-// but cv2pm later bufferizes both projections.  Reproduce the verifier-visible
+// but BiSheng later bufferizes both projections.  Reproduce the verifier-visible
 // CopyOp failures of the discarded AIC projection before dropping it.  This
 // follows the same projection preflight already used for
 // InferHIVMDataLayout's AIC-only failures.

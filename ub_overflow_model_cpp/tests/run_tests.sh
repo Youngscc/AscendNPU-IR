@@ -49,10 +49,6 @@ ub_overflow_model_cpp/output/tests/test_checked_math
 ub_overflow_model_cpp/output/tests/test_auto_blockify_parallel_loop
 
 python3 ub_overflow_model_cpp/tests/test_validation_common.py
-python3 ub_overflow_model_cpp/tests/test_stage_divergence.py
-python3 ub_overflow_model_cpp/tests/test_capability_manifest.py
 python3 ub_overflow_model_cpp/tests/test_merged_report.py
-python3 ub_overflow_model_cpp/tests/test_oracle_comparison.py
-python3 ub_overflow_model_cpp/tests/test_compile_default_sync.py
-python3 ub_overflow_model_cpp/tests/test_corpus_matrix.py
+python3 ub_overflow_model_cpp/tests/test_plan_memory_contract.py
 python3 ub_overflow_model_cpp/tests/test_bisheng_embedded_matrix.py
