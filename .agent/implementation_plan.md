@@ -261,14 +261,16 @@ attempt 全部 matched。阶段 2 仍需消除 direct import 后为旧核心生�
 可拆为两个产品提交：基础 overlay primitives；首批 pass 迁移。不得把未验证的一半 pass 切换
 为默认产品路径。
 
-状态（2026-07-28）：已完成。基础 primitives 包含强类型 stable IDs、借用 base
+进展（2026-07-28）：基础设施和首批 payload 迁移已完成，但阶段尚未完成。基础 primitives 包含强类型 stable IDs、借用 base
 payload、append-only synthetic arenas、有序 block IDs、tombstone，以及 create/move/erase、
 operand/use replacement、semantic clone 和 type/attribute/effect override。生产 MLIR view 已使用
 强类型 ID/base active record；Attribute payload 由 MLIR uniqued handle 延迟格式化，projection、
 canonicalization 和 clone 复制时使用精确 copy-on-write，修改时才 detach。结构 digest 使用
 MLIR 结构哈希，不会强制 materialize 字符串。完整测试和 140-attempt embedded fixed-seed 均
 通过。相对同轮阶段 0 的 160-input × 3 internal ratio 从阶段 1 的 `0.96160` 降到
-`0.95118`，归一化后比阶段 1 再降约 `1.08%`；下一阶段进入 revisioned analysis manager。
+`0.95118`，归一化后比阶段 1 再降约 `1.08%`。当前生产路径仍会从 view 物化完整
+`GenericModule`，多处 pass 仍执行 `CompactGenericModule`；必须继续迁移结构变换、去掉该完整
+过渡表示后，阶段 2 才能关闭。
 
 ## 8. 阶段 3：revisioned 增量 analysis manager
 
@@ -311,7 +313,8 @@ descendants、CFG 和 metadata cache 的工作。
 
 一个独立基础设施提交；若需要迁移多个 pass，后续按 pass 分提交。
 
-状态（2026-07-28）：最低可用 revisioned manager 已完成。topology、def-use、
+进展（2026-07-28）：最低可用 revisioned manager 已实现并验证，但由于阶段 2 产品迁移尚未
+完成，按阶段门槛暂不标记阶段 3 完成。topology、def-use、
 type/attribute/effect、CFG、hierarchy 和 buffer-feature revision 独立推进；operand replacement
 只更新 delta users/use-count，不再使 definitions/type/enclosing/descendants 全量索引失效。
 默认关闭的计数器记录 full builds/scans、incremental updates 和 synthetic nodes，单测断言增量
