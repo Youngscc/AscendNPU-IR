@@ -181,6 +181,9 @@ process wall 为 `12211.104 ms`，峰值 RSS `44.35 MB`。报告位于本地
 - 撤销 COW 后的 160-input × 3 现场 A/B 两侧均为 `480/480 observed`、fast-path
   `441/480`，internal total 分别为 `1854.3 ms` 与 `1856.6 ms`（约 `+0.12%`，视为噪声），
   RSS 回到约 `44.3 MB`。本轮报告仅在 `/tmp`，不提交。
+- 只借用整数 stable-ID 列表、显式 `mutate()` 的缩小实验同样被否决：同口径 internal total
+  从 `1838.2 ms` 增至 `1922.5 ms`（约 `+4.6%`），峰值 RSS 约增加 `0.4 MB`；代码已完整
+  撤销。它证明即使避免误触发 COW，全流水 vector facade 的读取分支仍会吞掉投影复制收益。
 
 160 个去重 before-CVPipelining 输入，production-default，retry-only，O3，开启 stage
 timing，三轮结果：

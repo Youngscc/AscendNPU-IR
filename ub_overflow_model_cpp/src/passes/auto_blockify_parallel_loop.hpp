@@ -547,14 +547,24 @@ inline void AutoBlockifyOneFunction(GenericShadowOverlay &module,
   module.replaceUsesExcept(blockIdxResult, castedValue, {blockIdTrunc});
 }
 
-inline GenericModule RunAutoBlockifyParallelLoop(GenericModule module) {
-  GenericShadowOverlay overlay(module);
+// Native shadow entry used by a chained lightweight pipeline. It deliberately
+// does not materialize a GenericModule; callers can run subsequent migrated
+// stages on the same stable IDs and synthetic arena.
+inline void RunAutoBlockifyParallelLoop(GenericShadowOverlay &overlay) {
   std::vector<OpId> functions;
   for (OpId operation : overlay.activeOperations())
     if (overlay.name(operation) == "func.func")
       functions.push_back(operation);
   for (OpId function : functions)
     AutoBlockifyOneFunction(overlay, function);
+}
+
+// Compatibility boundary for legacy consumers. New production stages should
+// use the overload above and materialize only when they reach an unmigrated
+// pass.
+inline GenericModule RunAutoBlockifyParallelLoop(GenericModule module) {
+  GenericShadowOverlay overlay(module);
+  RunAutoBlockifyParallelLoop(overlay);
   return overlay.materializeLegacyGenericModule();
 }
 

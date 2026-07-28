@@ -282,6 +282,16 @@ override、synthetic arena、ordered block 和 tombstone。160 个 before-CV cor
 生产 CVPipelining、canonicalization 和 MarkRealCoreType 尚未切换，完整导入桥仍在，因此本阶段
 继续保持“未完成”。
 
+同日又否决了两种把兼容 `GenericModule` 全局伪装成 shadow 的方案。第一种给所有 payload
+vector 增加通用 COW/shared ownership，160-input × 3 回退约 5.1%；第二种只让整数 ID 列表借用
+module arena，并把写操作改成显式 `mutate()`，仍回退约 4.6% 且 RSS 增加约 0.4 MB。两者均已
+完整撤销。结论是后续不能在每一次普通 ID 读取上增加间接层；必须让已迁移 pass 直接使用
+stable-ID overlay，并保持未迁移只读路径零额外成本。
+
+AutoBlockify 现已同时提供不物化的 `GenericShadowOverlay &` 原生入口和兼容
+`GenericModule -> GenericModule` wrapper；单测证明两条入口序列化结果一致。后续 migrated pass
+必须串接前者，不能在每个 pass 末尾调用 compatibility materializer。
+
 ## 8. 阶段 3：revisioned 增量 analysis manager
 
 ### 目标

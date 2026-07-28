@@ -53,6 +53,13 @@ int main() {
       "ub_overflow_model_cpp/tests/fixtures/auto_blockify_grid_parallel.mlir",
       false);
   const cvub::GenericModule after = cvub::RunAutoBlockifyParallelLoop(before);
+  cvub::GenericShadowOverlay overlay(before);
+  cvub::RunAutoBlockifyParallelLoop(overlay);
+  const cvub::GenericModule chained =
+      overlay.materializeLegacyGenericModule();
+  Check(cvub::SerializeGenericModule(after) ==
+            cvub::SerializeGenericModule(chained),
+        "shadow-native AutoBlockify entry changed the compatibility result");
   const cvub::GenericModule legacy =
       cvub::RunAutoBlockifyParallelLoopLegacy(before);
   Check(cvub::SerializeGenericModule(after) ==
