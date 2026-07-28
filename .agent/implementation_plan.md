@@ -261,6 +261,11 @@ attempt 全部 matched。阶段 2 仍需消除 direct import 后为旧核心生�
 可拆为两个产品提交：基础 overlay primitives；首批 pass 迁移。不得把未验证的一半 pass 切换
 为默认产品路径。
 
+进展（2026-07-28）：基础 primitives 已实现并通过测试，包含强类型 stable IDs、借用 base
+payload、append-only synthetic arenas、有序 block IDs、tombstone，以及 create/move/erase、
+operand/use replacement、semantic clone 和 type/attribute/effect override。尚未切换默认产品
+pass，阶段 2 仍未完成；下一步必须迁移首批结构变换并通过性能门槛。
+
 ## 8. 阶段 3：revisioned 增量 analysis manager
 
 ### 目标

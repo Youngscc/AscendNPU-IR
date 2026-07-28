@@ -38,6 +38,12 @@ ub_overflow_model_cpp/output/tests/test_capability_parity
 
 "${compiler}" -std=c++17 -O0 -g -Wall -Wextra -Wpedantic -Wconversion \
   -Wshadow -Werror \
+  ub_overflow_model_cpp/tests/test_shadow_overlay.cpp \
+  -o ub_overflow_model_cpp/output/tests/test_shadow_overlay
+ub_overflow_model_cpp/output/tests/test_shadow_overlay
+
+"${compiler}" -std=c++17 -O0 -g -Wall -Wextra -Wpedantic -Wconversion \
+  -Wshadow -Werror \
   ub_overflow_model_cpp/tests/test_checked_math.cpp \
   -o ub_overflow_model_cpp/output/tests/test_checked_math
 ub_overflow_model_cpp/output/tests/test_checked_math
