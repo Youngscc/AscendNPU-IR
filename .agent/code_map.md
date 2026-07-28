@@ -24,9 +24,10 @@ bishengir/lib/Tools/RetriablePassManager/RetriablePassManager.cpp
 bishengir/include/bishengir/Tools/RetriablePassManager/UbOverflowRetryPolicy.h
 ```
 
-当前文本边界位于 `UBOverflowPrediction.cpp`：`ModuleOp` 以 generic form 打印到
-`std::string`，随后传给模型 API。新的 direct-MLIR/overlay 方案应替换这条生产路径，但保留
-文本 API 供 standalone CLI 和兼容测试使用。
+生产边界已经由 `UBOverflowPrediction.cpp` 同步调用 `evaluateModule(ModuleOp, Request)`；普通
+产品路径不再打印/解析完整 Generic MLIR。文本 API 只供兼容测试使用。当前剩余桥接位于
+`MLIRModuleView::materializeLegacyGenericModule()`：它仍为尚未迁移的主链 passes 投影完整
+`GenericModule`，阶段 2 的后续工作应删除这层桥，而不是重新引入文本边界。
 
 ## 模型入口和公共接口
 

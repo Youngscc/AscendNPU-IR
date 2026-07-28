@@ -170,6 +170,18 @@ internal ratio        0.95118
 process wall 为 `12211.104 ms`，峰值 RSS `44.35 MB`。报告位于本地
 `output/performance/stage3-final-160x3.*`，不提交。
 
+## 2026-07-28 阶段 2 后续 overlay 迁移
+
+- stable-ID AutoBlockify 与保留的 legacy 实现在单元 fixture 上逐字节结构一致；
+- `verify_auto_blockify.py` 对 160 个 before-CV 输入与原生 pass 差分为 `160 PASS / 0 FAIL`；
+- 完整 `tests/run_tests.sh` 通过；
+- rejected 通用 COW 实验在修复悬空 definition 指针后正确性恢复，但 160-input × 3 相对迁移前
+  internal total 从约 `615～619 ms/round` 回退到 `640～651 ms/round`，RSS 从约
+  `44.2 MB` 增至约 `45.6 MB`，因此未保留；
+- 撤销 COW 后的 160-input × 3 现场 A/B 两侧均为 `480/480 observed`、fast-path
+  `441/480`，internal total 分别为 `1854.3 ms` 与 `1856.6 ms`（约 `+0.12%`，视为噪声），
+  RSS 回到约 `44.3 MB`。本轮报告仅在 `/tmp`，不提交。
+
 160 个去重 before-CVPipelining 输入，production-default，retry-only，O3，开启 stage
 timing，三轮结果：
 

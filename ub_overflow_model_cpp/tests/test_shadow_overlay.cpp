@@ -41,6 +41,7 @@ cvub::GenericModule makeModule() {
   module.operations[3].name = "test.consume";
   module.operations[3].operands = {0};
   module.operations[3].operandTypes = {"i32"};
+  module.operations[3].dpsInputs = {0};
 
   module.regions[0].id = 0;
   module.regions[0].parentOperation = 0;
@@ -74,6 +75,8 @@ void testMutationPrimitives() {
   overlay.replaceAllUses(oldValue, cvub::ValueId::fromIndex(1));
   require(overlay.operands(consumer).front().raw() == 1,
           "replaceAllUses must update the operand overlay");
+  require(overlay.dpsInputs(consumer).front().raw() == 1,
+          "replaceAllUses must update semantic DPS uses");
   require(overlay.users(oldValue).empty(),
           "replaceAllUses must update the delta use-list");
 
@@ -92,6 +95,26 @@ void testMutationPrimitives() {
           "typed field overrides must be isolated in the overlay");
   require(module.operations[3].attributes.empty(),
           "overlay must not mutate its immutable base module");
+
+  cvub::GenericModule materialized =
+      overlay.materializeLegacyGenericModule();
+  require(materialized.operations.size() == 4,
+          "materialization must remove tombstones at one boundary");
+  const cvub::GenericOperation *materializedConsumer = nullptr;
+  const cvub::GenericOperation *materializedConstant = nullptr;
+  for (const cvub::GenericOperation &operation : materialized.operations)
+    if (operation.name == "test.consume")
+      materializedConsumer = &operation;
+    else if (operation.name == "arith.constant")
+      materializedConstant = &operation;
+  require(materializedConsumer &&
+              materializedConstant &&
+              materializedConsumer->operands.front() ==
+                  materializedConstant->results.front() &&
+              materializedConsumer->dpsInputs.front() ==
+                  materializedConstant->results.front() &&
+              materializedConsumer->attributes == "{tag = true}",
+          "materialization must preserve structural and field overrides");
 }
 
 void testNestedAndCloneSemantics() {

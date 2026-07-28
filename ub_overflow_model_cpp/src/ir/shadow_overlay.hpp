@@ -1,7 +1,7 @@
 #ifndef UB_OVERFLOW_MODEL_CPP_SHADOW_OVERLAY_HPP
 #define UB_OVERFLOW_MODEL_CPP_SHADOW_OVERLAY_HPP
 
-#include "generic_ir.hpp"
+#include "generic_rewriter.hpp"
 #include "stable_id.hpp"
 
 #include <algorithm>
@@ -25,14 +25,20 @@ public:
     kResultTypes = 1U << 1,
     kAttributes = 1U << 2,
     kEffects = 1U << 3,
+    kDpsInputs = 1U << 4,
+    kDpsInits = 1U << 5,
   };
+
+  enum class UseKind : uint8_t { Operand, DpsInput, DpsInit };
 
   struct Use {
     OpId operation;
-    size_t operand = 0;
+    size_t index = 0;
+    UseKind kind = UseKind::Operand;
 
     friend bool operator==(const Use &lhs, const Use &rhs) {
-      return lhs.operation == rhs.operation && lhs.operand == rhs.operand;
+      return lhs.operation == rhs.operation && lhs.index == rhs.index &&
+             lhs.kind == rhs.kind;
     }
   };
 
@@ -47,6 +53,8 @@ public:
     RegionId region;
     BlockId block;
     std::vector<ValueId> operandOverride;
+    std::vector<ValueId> dpsInputOverride;
+    std::vector<ValueId> dpsInitOverride;
     std::vector<std::string> resultTypeOverride;
     std::string attributeOverride;
     std::string effectOverride;
@@ -55,6 +63,7 @@ public:
   struct RegionState {
     RegionId id;
     OpId parent;
+    int ordinal = 0;
     const GenericRegion *base = nullptr;
     bool active = true;
     std::vector<BlockId> blocks;
@@ -63,6 +72,7 @@ public:
   struct BlockState {
     BlockId id;
     RegionId region;
+    int ordinal = 0;
     const GenericBlock *base = nullptr;
     bool active = true;
     std::vector<ValueId> arguments;
@@ -99,6 +109,7 @@ public:
       RegionState state;
       state.id = RegionId::fromIndex(static_cast<size_t>(region.id));
       state.parent = idOrInvalid<OpId>(region.parentOperation);
+      state.ordinal = region.ordinal;
       state.base = &region;
       for (int block : region.blocks)
         state.blocks.push_back(BlockId::fromIndex(static_cast<size_t>(block)));
@@ -108,6 +119,7 @@ public:
       BlockState state;
       state.id = BlockId::fromIndex(static_cast<size_t>(block.id));
       state.region = RegionId::fromIndex(static_cast<size_t>(block.regionId));
+      state.ordinal = block.ordinal;
       state.base = &block;
       for (int argument : block.arguments) {
         state.arguments.push_back(
@@ -147,6 +159,31 @@ public:
     return payload(op(operation)).name;
   }
 
+  std::vector<OpId> activeOperations() const {
+    std::vector<OpId> result;
+    result.reserve(operations_.size());
+    for (const OperationState &state : operations_)
+      if (state.active)
+        result.push_back(state.id);
+    return result;
+  }
+
+  std::vector<ValueId> results(OpId operation) const {
+    std::vector<ValueId> result;
+    for (int value : payload(op(operation)).results)
+      result.push_back(ValueId::fromIndex(static_cast<size_t>(value)));
+    return result;
+  }
+
+  std::vector<RegionId> regions(OpId operation) const {
+    std::vector<RegionId> result;
+    for (int region : payload(op(operation)).regions)
+      if (region >= 0 && static_cast<size_t>(region) < regions_.size() &&
+          regions_[static_cast<size_t>(region)].active)
+        result.push_back(RegionId::fromIndex(static_cast<size_t>(region)));
+    return result;
+  }
+
   std::vector<ValueId> operands(OpId operation) const {
     const OperationState &state = op(operation);
     if ((state.overrides & kOperands) != 0)
@@ -162,6 +199,34 @@ public:
     return (state.overrides & kResultTypes) != 0
                ? state.resultTypeOverride
                : payload(state).resultTypes;
+  }
+
+  const std::vector<std::string> &operandTypes(OpId operation) const {
+    return payload(op(operation)).operandTypes;
+  }
+
+  const std::string &properties(OpId operation) const {
+    return payload(op(operation)).properties.get();
+  }
+
+  std::vector<ValueId> dpsInputs(OpId operation) const {
+    const OperationState &state = op(operation);
+    if ((state.overrides & kDpsInputs) != 0)
+      return state.dpsInputOverride;
+    std::vector<ValueId> result;
+    for (int value : payload(state).dpsInputs)
+      result.push_back(ValueId::fromIndex(static_cast<size_t>(value)));
+    return result;
+  }
+
+  std::vector<ValueId> dpsInits(OpId operation) const {
+    const OperationState &state = op(operation);
+    if ((state.overrides & kDpsInits) != 0)
+      return state.dpsInitOverride;
+    std::vector<ValueId> result;
+    for (int value : payload(state).dpsInits)
+      result.push_back(ValueId::fromIndex(static_cast<size_t>(value)));
+    return result;
   }
 
   const std::string &attributes(OpId operation) const {
@@ -184,7 +249,10 @@ public:
 
   OpId createOperation(BlockId block, const std::string &name,
                        const std::vector<std::string> &resultTypes,
-                       const std::vector<ValueId> &operands = {}) {
+                       const std::vector<ValueId> &operands = {},
+                       const std::vector<std::string> &operandTypes = {},
+                       const std::string &properties = "",
+                       const std::string &attributes = "{}") {
     const BlockState &destination = blockState(block);
     GenericOperation synthetic;
     synthetic.id = static_cast<int>(operations_.size());
@@ -193,6 +261,9 @@ public:
     synthetic.blockId = toLegacy(block);
     synthetic.name = name;
     synthetic.resultTypes = resultTypes;
+    synthetic.operandTypes = operandTypes;
+    synthetic.properties = properties;
+    synthetic.attributes = attributes;
     for (ValueId value : operands)
       synthetic.operands.push_back(toLegacy(value));
     for (size_t index = 0; index < resultTypes.size(); ++index)
@@ -217,6 +288,7 @@ public:
     RegionState state;
     state.id = RegionId::fromIndex(regions_.size());
     state.parent = parent;
+    state.ordinal = static_cast<int>(payload(owner).regions.size());
     regions_.push_back(std::move(state));
     mutablePayload(owner).regions.push_back(
         static_cast<int>(regions_.back().id.raw()));
@@ -228,6 +300,7 @@ public:
     BlockState state;
     state.id = BlockId::fromIndex(blocks_.size());
     state.region = region;
+    state.ordinal = static_cast<int>(regionState(region).blocks.size());
     state.argumentTypes = argumentTypes;
     for (size_t index = 0; index < argumentTypes.size(); ++index)
       state.arguments.push_back(ValueId::fromIndex(nextValue_++));
@@ -295,9 +368,9 @@ public:
     const ValueId previous = values[operand];
     if (previous == replacement)
       return;
-    eraseUse(previous, Use{operation, operand});
+    eraseUse(previous, Use{operation, operand, UseKind::Operand});
     values[operand] = replacement;
-    addUse(replacement, Use{operation, operand});
+    addUse(replacement, Use{operation, operand, UseKind::Operand});
   }
 
   void replaceAllUses(ValueId from, ValueId to) {
@@ -311,7 +384,7 @@ public:
     const std::vector<Use> snapshot = users(from);
     for (const Use &use : snapshot)
       if (isActive(use.operation) && excluded.count(use.operation) == 0)
-        replaceOperand(use.operation, use.operand, to);
+        replaceUse(use, to);
   }
 
   OpId cloneSemanticNode(OpId source, BlockId destination) {
@@ -331,6 +404,7 @@ public:
     const std::vector<int> sourceSuccessors = sourcePayload.successors;
     const OpId clone = createOperation(destination, sourceName,
                                        sourceResultTypes, sourceOperands);
+    removeOperationUses(clone);
     OperationState &cloneState = op(clone);
     cloneState.projectionSource = projectionSource;
     GenericOperation &clonePayload = mutablePayload(cloneState);
@@ -341,6 +415,7 @@ public:
     clonePayload.dpsInputs = sourceDpsInputs;
     clonePayload.dpsInits = sourceDpsInits;
     clonePayload.successors = sourceSuccessors;
+    addOperationUses(clone);
     return clone;
   }
 
@@ -366,6 +441,87 @@ public:
     OperationState &state = op(operation);
     state.effectOverride = std::move(replacement);
     state.overrides |= kEffects;
+  }
+
+  // Compatibility boundary for a pass that has migrated to the shadow
+  // mutation API while its downstream consumer still expects GenericModule.
+  // Stable IDs/tombstones remain untouched during the pass and are compacted
+  // once, here, rather than after every mutation wave.
+  GenericModule materializeLegacyGenericModule() const {
+    if (!baseModule_)
+      throw std::runtime_error("shadow overlay has no base module");
+    GenericModule result = *baseModule_;
+    result.operations.resize(operations_.size());
+    result.regions.resize(regions_.size());
+    result.blocks.resize(blocks_.size());
+
+    for (const OperationState &state : operations_) {
+      GenericOperation operation = payload(state);
+      operation.id = toLegacy(state.id);
+      operation.projectionSourceId = toLegacy(state.projectionSource);
+      operation.parentId = toLegacy(state.parent);
+      operation.regionId = toLegacy(state.region);
+      operation.blockId = toLegacy(state.block);
+      if ((state.overrides & kOperands) != 0) {
+        operation.operands.clear();
+        for (ValueId value : state.operandOverride)
+          operation.operands.push_back(toLegacy(value));
+      }
+      if ((state.overrides & kResultTypes) != 0)
+        operation.resultTypes = state.resultTypeOverride;
+      if ((state.overrides & kAttributes) != 0)
+        operation.attributes = state.attributeOverride;
+      if ((state.overrides & kEffects) != 0)
+        operation.effects = state.effectOverride;
+      if ((state.overrides & kDpsInputs) != 0) {
+        operation.dpsInputs.clear();
+        for (ValueId value : state.dpsInputOverride)
+          operation.dpsInputs.push_back(toLegacy(value));
+      }
+      if ((state.overrides & kDpsInits) != 0) {
+        operation.dpsInits.clear();
+        for (ValueId value : state.dpsInitOverride)
+          operation.dpsInits.push_back(toLegacy(value));
+      }
+      std::vector<int> activeRegions;
+      for (int region : operation.regions)
+        if (region >= 0 && static_cast<size_t>(region) < regions_.size() &&
+            regions_[static_cast<size_t>(region)].active)
+          activeRegions.push_back(region);
+      operation.regions = std::move(activeRegions);
+      result.operations[state.id.index()] = std::move(operation);
+    }
+
+    for (const RegionState &state : regions_) {
+      GenericRegion region = state.base ? *state.base : GenericRegion{};
+      region.id = toLegacy(state.id);
+      region.parentOperation = toLegacy(state.parent);
+      region.ordinal = state.ordinal;
+      region.blocks.clear();
+      if (state.active)
+        for (BlockId block : state.blocks)
+          if (blocks_.at(block.index()).active)
+            region.blocks.push_back(toLegacy(block));
+      result.regions[state.id.index()] = std::move(region);
+    }
+
+    for (const BlockState &state : blocks_) {
+      GenericBlock block = state.base ? *state.base : GenericBlock{};
+      block.id = toLegacy(state.id);
+      block.regionId = toLegacy(state.region);
+      block.ordinal = state.ordinal;
+      block.arguments.clear();
+      for (ValueId argument : state.arguments)
+        block.arguments.push_back(toLegacy(argument));
+      block.argumentTypes = state.argumentTypes;
+      block.operations.clear();
+      if (state.active)
+        for (OpId operation : state.operations)
+          if (operations_.at(operation.index()).active)
+            block.operations.push_back(toLegacy(operation));
+      result.blocks[state.id.index()] = std::move(block);
+    }
+    return CompactGenericModule(std::move(result));
   }
 
 private:
@@ -408,6 +564,45 @@ private:
     return state.operandOverride;
   }
 
+  std::vector<ValueId> &mutableDpsInputs(OperationState &state) {
+    if ((state.overrides & kDpsInputs) == 0) {
+      for (int value : payload(state).dpsInputs)
+        state.dpsInputOverride.push_back(
+            ValueId::fromIndex(static_cast<size_t>(value)));
+      state.overrides |= kDpsInputs;
+    }
+    return state.dpsInputOverride;
+  }
+
+  std::vector<ValueId> &mutableDpsInits(OperationState &state) {
+    if ((state.overrides & kDpsInits) == 0) {
+      for (int value : payload(state).dpsInits)
+        state.dpsInitOverride.push_back(
+            ValueId::fromIndex(static_cast<size_t>(value)));
+      state.overrides |= kDpsInits;
+    }
+    return state.dpsInitOverride;
+  }
+
+  void replaceUse(const Use &use, ValueId replacement) {
+    if (use.kind == UseKind::Operand) {
+      replaceOperand(use.operation, use.index, replacement);
+      return;
+    }
+    OperationState &state = op(use.operation);
+    std::vector<ValueId> &values =
+        use.kind == UseKind::DpsInput ? mutableDpsInputs(state)
+                                     : mutableDpsInits(state);
+    if (use.index >= values.size())
+      throw std::out_of_range("shadow overlay semantic use index");
+    const ValueId previous = values[use.index];
+    if (previous == replacement)
+      return;
+    eraseUse(previous, use);
+    values[use.index] = replacement;
+    addUse(replacement, use);
+  }
+
   void detachFromBlock(BlockId block, OpId operation) {
     BlockState &source = blockState(block);
     const auto position =
@@ -426,13 +621,25 @@ private:
   void addOperationUses(OpId operation) {
     const std::vector<ValueId> values = operands(operation);
     for (size_t index = 0; index < values.size(); ++index)
-      addUse(values[index], Use{operation, index});
+      addUse(values[index], Use{operation, index, UseKind::Operand});
+    const std::vector<ValueId> inputs = dpsInputs(operation);
+    for (size_t index = 0; index < inputs.size(); ++index)
+      addUse(inputs[index], Use{operation, index, UseKind::DpsInput});
+    const std::vector<ValueId> inits = dpsInits(operation);
+    for (size_t index = 0; index < inits.size(); ++index)
+      addUse(inits[index], Use{operation, index, UseKind::DpsInit});
   }
 
   void removeOperationUses(OpId operation) {
     const std::vector<ValueId> values = operands(operation);
     for (size_t index = 0; index < values.size(); ++index)
-      eraseUse(values[index], Use{operation, index});
+      eraseUse(values[index], Use{operation, index, UseKind::Operand});
+    const std::vector<ValueId> inputs = dpsInputs(operation);
+    for (size_t index = 0; index < inputs.size(); ++index)
+      eraseUse(inputs[index], Use{operation, index, UseKind::DpsInput});
+    const std::vector<ValueId> inits = dpsInits(operation);
+    for (size_t index = 0; index < inits.size(); ++index)
+      eraseUse(inits[index], Use{operation, index, UseKind::DpsInit});
   }
 
   void addUse(ValueId value, Use use) {

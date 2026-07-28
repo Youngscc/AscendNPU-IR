@@ -44,6 +44,7 @@
 // which is a separate step.
 
 #include "../ir/generic_rewriter.hpp"
+#include "../ir/shadow_overlay.hpp"
 #include "../pipeline/buffer_topology.hpp"
 
 #include <optional>
@@ -120,8 +121,9 @@ AutoBlockifyPhysicalBlockNum(const std::string &coreType,
 // Apply the rewrite to one func. No-op unless the func is a grid-parallel
 // device entry; throws (fail closed) on a grid-parallel entry whose blockify
 // parameters cannot be modeled exactly.
-inline void AutoBlockifyOneFunction(GenericModule &module,
-                                    GenericRewriter &rewriter, int funcId) {
+inline void AutoBlockifyOneFunctionLegacy(GenericModule &module,
+                                          GenericRewriter &rewriter,
+                                          int funcId) {
   const std::string coreKind = AutoBlockifyEnumInner(FindDictionaryValue(
       module.operations.at(static_cast<size_t>(funcId)).attributes,
       "hacc.function_kind"));
@@ -345,15 +347,215 @@ inline void AutoBlockifyOneFunction(GenericModule &module,
   }
 }
 
-inline GenericModule RunAutoBlockifyParallelLoop(GenericModule module) {
+inline GenericModule RunAutoBlockifyParallelLoopLegacy(GenericModule module) {
   std::vector<int> functionIds;
   for (const GenericOperation &operation : module.operations)
     if (operation.name == "func.func")
       functionIds.push_back(operation.id);
   GenericRewriter rewriter(module);
   for (int functionId : functionIds)
-    AutoBlockifyOneFunction(module, rewriter, functionId);
+    AutoBlockifyOneFunctionLegacy(module, rewriter, functionId);
   return CompactGenericModule(std::move(module));
+}
+
+inline std::string AutoBlockifyFunctionName(const GenericShadowOverlay &module,
+                                            OpId function) {
+  std::string name =
+      FindDictionaryValue(module.properties(function), "sym_name");
+  if (name.empty())
+    name = FindDictionaryValue(module.attributes(function), "sym_name");
+  if (name.size() >= 2 && name.front() == '"' && name.back() == '"')
+    name = name.substr(1, name.size() - 2);
+  return name;
+}
+
+// Stable-ID implementation of loopOnLogicBlock.  It intentionally follows
+// AutoBlockifyOneFunctionLegacy statement-for-statement, but all structural
+// edits go through the shared overlay so moves and replacements do not rebuild
+// or renumber the module after each wave.
+inline void AutoBlockifyOneFunction(GenericShadowOverlay &module,
+                                    OpId function) {
+  const std::string coreKind = AutoBlockifyEnumInner(FindDictionaryValue(
+      module.attributes(function), "hacc.function_kind"));
+  const bool isEntry =
+      AutoBlockifyHasAttr(module.attributes(function), "hacc.entry");
+  if (coreKind != "DEVICE" || !isEntry)
+    return;
+
+  const std::vector<RegionId> functionRegions = module.regions(function);
+  if (functionRegions.empty())
+    return;
+  const RegionId entryRegion = functionRegions.front();
+  if (module.region(entryRegion).blocks.empty())
+    return;
+  const BlockId entryBlock = module.region(entryRegion).blocks.front();
+  const std::vector<OpId> original = module.block(entryBlock).operations;
+
+  std::set<OpId> logicalMarks;
+  OpId getBlockIdx;
+  OpId returnOperation;
+  ValueId logicalValue;
+  ValueId blockIdxResult;
+  for (OpId operation : original) {
+    if (module.name(operation) == "annotation.mark" &&
+        AutoBlockifyHasAttr(module.attributes(operation),
+                            "logical_block_num")) {
+      logicalMarks.insert(operation);
+      const std::vector<ValueId> operands = module.operands(operation);
+      if (!operands.empty())
+        logicalValue = operands.front();
+      continue;
+    }
+    if (module.name(operation) == "hivm.hir.get_block_idx") {
+      getBlockIdx = operation;
+      const std::vector<ValueId> results = module.results(operation);
+      if (!results.empty())
+        blockIdxResult = results.front();
+    }
+    if (module.name(operation) == "func.return")
+      returnOperation = operation;
+  }
+
+  const std::string functionName =
+      AutoBlockifyFunctionName(module, function);
+  if (logicalMarks.empty() || !logicalValue)
+    throw std::runtime_error(
+        "AutoBlockifyParallelLoop: logical_block_num mark not found in " +
+        functionName);
+  if (!getBlockIdx)
+    return;
+  if (!blockIdxResult)
+    throw std::runtime_error(
+        "AutoBlockifyParallelLoop: get_block_idx has no result in " +
+        functionName);
+
+  const std::string coreType = AutoBlockifyEnumInner(FindDictionaryValue(
+      module.attributes(function), "hivm.func_core_type"));
+  const std::optional<int64_t> physical = AutoBlockifyPhysicalBlockNum(
+      coreType, module.attributes(OpId::fromIndex(0)));
+  if (!physical)
+    throw std::runtime_error(
+        "AutoBlockifyParallelLoop: physical block num cannot be inferred for " +
+        functionName + " (core=" + coreType + ")");
+
+  int64_t blockifyNum = 1;
+  const std::string blockifyAttr = FindDictionaryValue(
+      module.attributes(function), "auto_blockify_size");
+  if (!blockifyAttr.empty()) {
+    try {
+      blockifyNum = std::stoll(blockifyAttr);
+    } catch (const std::exception &) {
+      throw std::runtime_error(
+          "AutoBlockifyParallelLoop: unparseable auto_blockify_size in " +
+          functionName);
+    }
+  }
+
+  std::map<ValueId, OpId> definitions;
+  for (OpId operation : module.activeOperations())
+    for (ValueId result : module.results(operation))
+      definitions[result] = operation;
+  std::set<OpId> exceptions = {getBlockIdx};
+  std::vector<ValueId> worklist = {logicalValue};
+  std::set<ValueId> visited;
+  while (!worklist.empty()) {
+    const ValueId value = worklist.back();
+    worklist.pop_back();
+    if (!visited.insert(value).second)
+      continue;
+    const auto found = definitions.find(value);
+    if (found == definitions.end())
+      continue;
+    exceptions.insert(found->second);
+    for (ValueId operand : module.operands(found->second))
+      worklist.push_back(operand);
+  }
+
+  std::vector<OpId> operationsToMove;
+  for (OpId operation : original)
+    if (operation != returnOperation && logicalMarks.count(operation) == 0 &&
+        exceptions.count(operation) == 0)
+      operationsToMove.push_back(operation);
+
+  auto create = [&](BlockId block, const std::string &name,
+                    const std::vector<std::string> &resultTypes,
+                    const std::vector<ValueId> &operands = {},
+                    const std::vector<std::string> &operandTypes = {},
+                    const std::string &properties = "",
+                    const std::string &attributes = "{}") {
+    return module.createOperation(block, name, resultTypes, operands,
+                                  operandTypes, properties, attributes);
+  };
+  const std::string physicalConstantAttr =
+      "{value = " + std::to_string(*physical) + " : i32}";
+  const std::string blockifyConstantAttr =
+      "{value = " + std::to_string(blockifyNum) + " : i32}";
+  const OpId physicalConst =
+      create(entryBlock, "arith.constant", {"i32"}, {}, {},
+             physicalConstantAttr, physicalConstantAttr);
+  const OpId blockifyConst =
+      create(entryBlock, "arith.constant", {"i32"}, {}, {},
+             blockifyConstantAttr, blockifyConstantAttr);
+  const ValueId blockifyValue = module.results(blockifyConst).front();
+  ValueId upperBoundValue = logicalValue;
+  OpId upperBoundOperation;
+  if (blockifyNum > 1) {
+    upperBoundOperation =
+        create(entryBlock, "arith.ceildivsi", {"i32"},
+               {logicalValue, blockifyValue}, {"i32", "i32"});
+    upperBoundValue = module.results(upperBoundOperation).front();
+  }
+  const OpId blockIdTrunc = create(entryBlock, "arith.trunci", {"i32"},
+                                   {blockIdxResult}, {"i64"});
+  const ValueId physicalValue = module.results(physicalConst).front();
+  const ValueId blockIdValue = module.results(blockIdTrunc).front();
+  const OpId loop = create(entryBlock, "scf.for", {},
+                           {blockIdValue, upperBoundValue, physicalValue},
+                           {"i32", "i32", "i32"}, "",
+                           std::string("{") + kAutoBlockifySubloopAttr + "}");
+  const RegionId loopRegion = module.createRegion(loop);
+  const BlockId loopBlock = module.createBlock(loopRegion, {"i32"});
+  const ValueId inductionValue = module.block(loopBlock).arguments.front();
+
+  const std::string noOverflowAttr =
+      "{overflowFlags = #arith.overflow<none>}";
+  const OpId multiply = create(
+      loopBlock, "arith.muli", {"i32"}, {inductionValue, blockifyValue},
+      {"i32", "i32"}, noOverflowAttr, noOverflowAttr);
+  const ValueId multiplyValue = module.results(multiply).front();
+  const OpId extend = create(loopBlock, "arith.extsi", {"i64"},
+                             {multiplyValue}, {"i32"});
+  const ValueId castedValue = module.results(extend).front();
+
+  for (OpId operation : operationsToMove)
+    module.appendToBlock(loopBlock, operation);
+  create(loopBlock, "scf.yield", {});
+
+  const std::vector<OpId> outside = module.block(entryBlock).operations;
+  size_t insertion = outside.size();
+  const auto returnPosition =
+      std::find(outside.begin(), outside.end(), returnOperation);
+  if (returnPosition != outside.end())
+    insertion = static_cast<size_t>(returnPosition - outside.begin());
+  module.insertToBlock(entryBlock, insertion++, physicalConst);
+  module.insertToBlock(entryBlock, insertion++, blockifyConst);
+  if (upperBoundOperation)
+    module.insertToBlock(entryBlock, insertion++, upperBoundOperation);
+  module.insertToBlock(entryBlock, insertion++, blockIdTrunc);
+  module.insertToBlock(entryBlock, insertion, loop);
+
+  module.replaceUsesExcept(blockIdxResult, castedValue, {blockIdTrunc});
+}
+
+inline GenericModule RunAutoBlockifyParallelLoop(GenericModule module) {
+  GenericShadowOverlay overlay(module);
+  std::vector<OpId> functions;
+  for (OpId operation : overlay.activeOperations())
+    if (overlay.name(operation) == "func.func")
+      functions.push_back(operation);
+  for (OpId function : functions)
+    AutoBlockifyOneFunction(overlay, function);
+  return overlay.materializeLegacyGenericModule();
 }
 
 } // namespace cvub

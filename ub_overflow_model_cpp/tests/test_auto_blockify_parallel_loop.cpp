@@ -53,6 +53,12 @@ int main() {
       "ub_overflow_model_cpp/tests/fixtures/auto_blockify_grid_parallel.mlir",
       false);
   const cvub::GenericModule after = cvub::RunAutoBlockifyParallelLoop(before);
+  const cvub::GenericModule legacy =
+      cvub::RunAutoBlockifyParallelLoopLegacy(before);
+  Check(cvub::SerializeGenericModule(after) ==
+            cvub::SerializeGenericModule(legacy),
+        "stable-ID AutoBlockify must exactly match the reviewed legacy "
+        "projection");
 
   // Exactly one blockify loop is introduced (the plain kernel gets none).
   std::vector<int> subloops;

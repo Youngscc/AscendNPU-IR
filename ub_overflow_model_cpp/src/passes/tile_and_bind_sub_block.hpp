@@ -1704,13 +1704,17 @@ inline bool RunBufferizationBubbleUpStrategy(
 
     std::vector<std::optional<int64_t>> tileShape = sourceType->shape;
     tileShape[tilingDim] = tileSize;
+    // createOperation may grow the operation arena. Do not retain a
+    // pointer returned by DefiningOperations across that append.
+    const std::string sourceResultType =
+        sourceDefinition->second->resultTypes.front();
     const std::string tiledSourceType = ReplaceTileAndBindShapeDimension(
-        sourceDefinition->second->resultTypes.front(), tilingDim, tileSize);
+        sourceResultType, tilingDim, tileSize);
     const int sourceSubview = rewriter.createOperation(
         loadSnapshot.parentId, loadSnapshot.regionId, loadSnapshot.blockId,
         "memref.subview", {tiledSourceType},
         {loadSnapshot.operands.front(), offsetValue},
-        {sourceDefinition->second->resultTypes.front(), "index"},
+        {sourceResultType, "index"},
         TileAndBindSliceProperties(tileShape, tilingDim));
     rewriter.insertToBlock(loadSnapshot.blockId,
                            static_cast<size_t>(loadSnapshot.ordinal),
@@ -1781,6 +1785,12 @@ inline bool RunBufferizationBubbleUpStrategy(
         !sourceParentType->shape[tilingDim])
       continue;
 
+    // The two nested rewrites below may append operations. Preserve every
+    // field read from the definition index before that mutation invalidates
+    // its operation pointers.
+    const std::string sourceParentTypeText =
+        reinterpretDefinition->second->resultTypes.front();
+
     if (!HandleTileAndBindExtractOfExtract(
             module, rewriter, destinationSubview.id, tilingDim, offsetValue,
             tileSize) ||
@@ -1792,14 +1802,13 @@ inline bool RunBufferizationBubbleUpStrategy(
     std::vector<std::optional<int64_t>> tileShape = sourceParentType->shape;
     tileShape[tilingDim] = tileSize;
     const std::string tiledSourceParentType =
-        ReplaceTileAndBindShapeDimension(
-            reinterpretDefinition->second->resultTypes.front(), tilingDim,
-            tileSize);
+        ReplaceTileAndBindShapeDimension(sourceParentTypeText, tilingDim,
+                                         tileSize);
     const int parentSubview = rewriter.createOperation(
         sourceSubview.parentId, sourceSubview.regionId, sourceSubview.blockId,
         "memref.subview", {tiledSourceParentType},
         {sourceSubview.operands.front(), offsetValue},
-        {reinterpretDefinition->second->resultTypes.front(), "index"},
+        {sourceParentTypeText, "index"},
         TileAndBindSliceProperties(tileShape, tilingDim));
     const GenericOperation &currentSourceSubview =
         module.operations.at(static_cast<size_t>(sourceSubview.id));

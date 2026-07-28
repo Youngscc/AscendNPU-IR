@@ -272,6 +272,16 @@ MLIR 结构哈希，不会强制 materialize 字符串。完整测试和 140-att
 `GenericModule`，多处 pass 仍执行 `CompactGenericModule`；必须继续迁移结构变换、去掉该完整
 过渡表示后，阶段 2 才能关闭。
 
+后续增量（2026-07-28）：`AutoBlockifyParallelLoop` 已按真实实现逐句迁移到 stable-ID overlay，
+默认 standalone 模型只在 pass 结束时物化一次兼容 `GenericModule`；旧实现暂保留为单元差分
+oracle。overlay use-list 现同时维护普通 operand、DPS input 和 DPS init，物化边界覆盖 typed field
+override、synthetic arena、ordered block 和 tombstone。160 个 before-CV corpus 与原生
+`-auto-blockify-parallel-loop` 的结构差分全部通过。曾实验把全部 Generic payload 改为通用
+`shared_ptr` COW vector；160-input × 3 同机 A/B 显示 internal total 回退约 5.1% 且 RSS 增加，
+已完整撤销，后续只迁移真实 projection/mutation 热点，不向普通读取路径收取共享指针成本。
+生产 CVPipelining、canonicalization 和 MarkRealCoreType 尚未切换，完整导入桥仍在，因此本阶段
+继续保持“未完成”。
+
 ## 8. 阶段 3：revisioned 增量 analysis manager
 
 ### 目标
