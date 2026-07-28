@@ -3,6 +3,7 @@
 
 #include "semantic_ir.hpp"
 #include "generic_op_semantics.hpp"
+#include "cow_string.hpp"
 
 #include <iomanip>
 #include <istream>
@@ -26,10 +27,10 @@ struct GenericOperation {
   std::vector<int> operands;
   std::vector<std::string> resultTypes;
   std::vector<std::string> operandTypes;
-  std::string properties;
-  std::string attributes;
+  CowString properties;
+  CowString attributes;
   std::vector<int> successors;
-  std::string effects = "none";
+  CowString effects = "none";
   std::vector<int> dpsInputs;
   std::vector<int> dpsInits;
   std::vector<int> regions;

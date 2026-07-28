@@ -101,6 +101,14 @@ attempt，结果 `140 matched / 0 different / 0 unavailable / 0 timeout`；AutoB
 43.89 MB；140 个代表 fixed-seed attempt 再次全部 matched。下一阶段应消除为旧核心构建完整
 `GenericModule` 的过渡投影，而不是继续优化文本入口。
 
+阶段 2 已增加强类型 stable IDs 和 base/synthetic shadow rewriter；MLIR base record 只借用
+原节点，synthetic append-only，erase 使用 tombstone，有序 block vector 不依赖哈希遍历。
+生产 `GenericOperation` 的属性/effect payload 使用延迟 materialization 和 copy-on-write，因而
+MarkRealCoreType/SplitMix/canonicalization projection 复制未修改节点时不再深拷贝属性字符串。
+140 个代表 fixed-seed attempt 全匹配；相对同轮阶段 0 的 internal ratio 从阶段 1 的
+`0.96160` 降至 `0.95118`，归一化再快约 `1.08%`。阶段 3 应在此基础上统一 revisioned
+incremental analysis，不能重新引入 module-wide scan。
+
 2026-07-28 在同机、O3、production-default、真实 retry-only、160 个去重
 before-CVPipelining 输入上，开启 stage timing 后连续三轮：
 

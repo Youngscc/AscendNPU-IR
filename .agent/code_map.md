@@ -128,6 +128,7 @@ direct-MLIR 边界：
 ub_overflow_model_cpp/src/ir/mlir_module_view.hpp        同步只读 ModuleOp view/import
 ub_overflow_model_cpp/src/ir/stable_id.hpp               强类型稳定 ID
 ub_overflow_model_cpp/src/ir/shadow_overlay.hpp          base/synthetic shadow 与 rewriter
+ub_overflow_model_cpp/src/ir/cow_string.hpp              MLIR 属性延迟格式化/COW override
 ub_overflow_model_cpp/src/mlir_main.cpp                  MLIR parser standalone 边界
 ub_overflow_model_cpp/include/ub_overflow_model/api.hpp  evaluateModule 同步 API
 ```

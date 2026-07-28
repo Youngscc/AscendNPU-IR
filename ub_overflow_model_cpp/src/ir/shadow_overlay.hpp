@@ -166,15 +166,16 @@ public:
 
   const std::string &attributes(OpId operation) const {
     const OperationState &state = op(operation);
-    return (state.overrides & kAttributes) != 0
-               ? state.attributeOverride
-               : payload(state).attributes;
+    if ((state.overrides & kAttributes) != 0)
+      return state.attributeOverride;
+    return payload(state).attributes.get();
   }
 
   const std::string &effects(OpId operation) const {
     const OperationState &state = op(operation);
-    return (state.overrides & kEffects) != 0 ? state.effectOverride
-                                             : payload(state).effects;
+    if ((state.overrides & kEffects) != 0)
+      return state.effectOverride;
+    return payload(state).effects.get();
   }
 
   const std::vector<Use> &users(ValueId value) const {

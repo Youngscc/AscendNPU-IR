@@ -261,10 +261,14 @@ attempt 全部 matched。阶段 2 仍需消除 direct import 后为旧核心生�
 可拆为两个产品提交：基础 overlay primitives；首批 pass 迁移。不得把未验证的一半 pass 切换
 为默认产品路径。
 
-进展（2026-07-28）：基础 primitives 已实现并通过测试，包含强类型 stable IDs、借用 base
+状态（2026-07-28）：已完成。基础 primitives 包含强类型 stable IDs、借用 base
 payload、append-only synthetic arenas、有序 block IDs、tombstone，以及 create/move/erase、
-operand/use replacement、semantic clone 和 type/attribute/effect override。尚未切换默认产品
-pass，阶段 2 仍未完成；下一步必须迁移首批结构变换并通过性能门槛。
+operand/use replacement、semantic clone 和 type/attribute/effect override。生产 MLIR view 已使用
+强类型 ID/base active record；Attribute payload 由 MLIR uniqued handle 延迟格式化，projection、
+canonicalization 和 clone 复制时使用精确 copy-on-write，修改时才 detach。结构 digest 使用
+MLIR 结构哈希，不会强制 materialize 字符串。完整测试和 140-attempt embedded fixed-seed 均
+通过。相对同轮阶段 0 的 160-input × 3 internal ratio 从阶段 1 的 `0.96160` 降到
+`0.95118`，归一化后比阶段 1 再降约 `1.08%`；下一阶段进入 revisioned analysis manager。
 
 ## 8. 阶段 3：revisioned 增量 analysis manager
 

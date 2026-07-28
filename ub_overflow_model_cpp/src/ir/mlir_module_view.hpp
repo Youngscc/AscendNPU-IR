@@ -2,11 +2,13 @@
 #define UB_OVERFLOW_MODEL_CPP_MLIR_MODULE_VIEW_HPP
 
 #include "generic_ir.hpp"
+#include "stable_id.hpp"
 
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Block.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Operation.h"
+#include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/Types.h"
 #include "mlir/IR/Value.h"
 #include "llvm/ADT/DenseMap.h"
@@ -35,11 +37,12 @@ public:
 
   struct OperationRecord {
     mlir::Operation *base = nullptr;
-    int id = -1;
-    int parent = -1;
-    int region = -1;
-    int block = -1;
+    OpId id;
+    OpId parent;
+    RegionId region;
+    BlockId block;
     int ordinal = 0;
+    bool active = true;
     mlir::OperationName name;
     mlir::Attribute properties;
     mlir::DictionaryAttr attributes;
@@ -47,16 +50,18 @@ public:
 
   struct BlockRecord {
     mlir::Block *base = nullptr;
-    int id = -1;
-    int region = -1;
+    BlockId id;
+    RegionId region;
     int ordinal = 0;
+    bool active = true;
   };
 
   struct RegionRecord {
     mlir::Region *base = nullptr;
-    int id = -1;
-    int parentOperation = -1;
+    RegionId id;
+    OpId parentOperation;
     int ordinal = 0;
+    bool active = true;
   };
 
   explicit MLIRModuleView(mlir::ModuleOp module) { build(module); }
@@ -74,6 +79,7 @@ public:
     result.regions.reserve(regionRecords.size());
     result.blocks.reserve(blockRecords.size());
     llvm::DenseMap<mlir::Type, std::string> typeText;
+    llvm::DenseMap<mlir::Attribute, CowString> attributeText;
     uint64_t hash = 14695981039346656037ULL;
     auto mix = [&](llvm::StringRef value) {
       for (char raw : value) {
@@ -94,14 +100,49 @@ public:
       output.flush();
       return typeText.try_emplace(type, std::move(text)).first->second;
     };
+    auto deferredAttribute = [&](mlir::Attribute attribute)
+        -> const CowString & {
+      static const CowString empty;
+      if (!attribute)
+        return empty;
+      auto found = attributeText.find(attribute);
+      if (found != attributeText.end())
+        return found->second;
+      CowString text = CowString::Deferred([attribute] {
+        std::string result;
+        llvm::raw_string_ostream output(result);
+        attribute.print(output);
+        output.flush();
+        return result;
+      });
+      return attributeText.try_emplace(attribute, std::move(text))
+          .first->second;
+    };
 
     for (const OperationRecord &view : operationRecords) {
       mlir::Operation *source = view.base;
+      const llvm::hash_code operationHash =
+          mlir::OperationEquivalence::computeHash(
+              source,
+              [&](mlir::Value value) {
+                return llvm::hash_value(valueId(value));
+              },
+              [&](mlir::Value value) {
+                return llvm::hash_value(valueId(value));
+              },
+              mlir::OperationEquivalence::IgnoreLocations);
+      const uint64_t rawOperationHash =
+          static_cast<uint64_t>(static_cast<size_t>(operationHash));
+      for (unsigned shift = 0; shift != 64; shift += 8) {
+        hash ^= static_cast<unsigned char>(rawOperationHash >> shift);
+        hash *= 1099511628211ULL;
+      }
       GenericOperation operation;
-      operation.id = view.id;
-      operation.parentId = view.parent;
-      operation.regionId = view.region;
-      operation.blockId = view.block;
+      operation.id = toLegacy(view.id);
+      operation.projectionSourceId = operation.id;
+      operation.parentId = toLegacy(view.parent);
+      operation.regionId = toLegacy(view.region);
+      operation.blockId = toLegacy(view.block);
       operation.ordinal = view.ordinal;
       operation.name = view.name.getStringRef().str();
       mix(view.name.getStringRef());
@@ -110,55 +151,51 @@ public:
       for (mlir::Value value : source->getResults()) {
         operation.results.push_back(valueId(value));
         operation.resultTypes.push_back(printType(value.getType()));
-        mix(operation.resultTypes.back());
       }
       operation.operands.reserve(source->getNumOperands());
       operation.operandTypes.reserve(source->getNumOperands());
       for (mlir::Value value : source->getOperands()) {
         operation.operands.push_back(valueId(value));
         operation.operandTypes.push_back(printType(value.getType()));
-        mix(std::to_string(operation.operands.back()));
       }
-      operation.properties = printAttribute(view.properties);
+      operation.properties = deferredAttribute(view.properties);
       mlir::NamedAttrList mergedAttributes;
       if (auto properties =
               llvm::dyn_cast_if_present<mlir::DictionaryAttr>(view.properties))
         mergedAttributes.append(properties.getValue());
       for (mlir::NamedAttribute attribute : view.attributes)
         mergedAttributes.set(attribute.getName(), attribute.getValue());
-      operation.attributes = printAttribute(
+      operation.attributes = deferredAttribute(
           mergedAttributes.getDictionary(source->getContext()));
-      mix(operation.properties);
-      mix(operation.attributes);
       operation.successors.reserve(source->getNumSuccessors());
       for (mlir::Block *successor : source->getSuccessors()) {
         auto found = blockIds.find(successor);
         if (found == blockIds.end())
           throw std::runtime_error(
               "MLIRModuleView: successor block is outside the module view");
-        operation.successors.push_back(found->second);
+        operation.successors.push_back(toLegacy(found->second));
       }
       operation.regions.reserve(source->getNumRegions());
       for (mlir::Region &region : source->getRegions())
-        operation.regions.push_back(regionIds.lookup(&region));
+        operation.regions.push_back(toLegacy(regionIds.lookup(&region)));
       result.operations.push_back(std::move(operation));
     }
 
     for (const RegionRecord &view : regionRecords) {
       GenericRegion region;
-      region.id = view.id;
-      region.parentOperation = view.parentOperation;
+      region.id = toLegacy(view.id);
+      region.parentOperation = toLegacy(view.parentOperation);
       region.ordinal = view.ordinal;
       region.blocks.reserve(view.base->getBlocks().size());
       for (mlir::Block &block : *view.base)
-        region.blocks.push_back(blockIds.lookup(&block));
+        region.blocks.push_back(toLegacy(blockIds.lookup(&block)));
       result.regions.push_back(std::move(region));
     }
 
     for (const BlockRecord &view : blockRecords) {
       GenericBlock block;
-      block.id = view.id;
-      block.regionId = view.region;
+      block.id = toLegacy(view.id);
+      block.regionId = toLegacy(view.region);
       block.ordinal = view.ordinal;
       block.arguments.reserve(view.base->getNumArguments());
       block.argumentTypes.reserve(view.base->getNumArguments());
@@ -168,7 +205,7 @@ public:
       }
       block.operations.reserve(view.base->getOperations().size());
       for (mlir::Operation &operation : *view.base)
-        block.operations.push_back(operationIds.lookup(&operation));
+        block.operations.push_back(toLegacy(operationIds.lookup(&operation)));
       result.blocks.push_back(std::move(block));
     }
 
@@ -181,14 +218,8 @@ public:
   }
 
 private:
-  static std::string printAttribute(mlir::Attribute attribute) {
-    if (!attribute)
-      return "";
-    std::string text;
-    llvm::raw_string_ostream output(text);
-    attribute.print(output);
-    output.flush();
-    return text;
+  template <typename Id> static int toLegacy(Id id) {
+    return id ? static_cast<int>(id.raw()) : -1;
   }
 
   int valueId(mlir::Value value) const {
@@ -196,45 +227,46 @@ private:
     if (found == valueIds.end())
       throw std::runtime_error(
           "MLIRModuleView: operand value is outside the module view");
-    return found->second;
+    return toLegacy(found->second);
   }
 
   void build(mlir::ModuleOp module) {
     if (!module)
       throw std::runtime_error("MLIRModuleView: null ModuleOp");
-    addOperation(module.getOperation(), -1, -1, -1, 0);
+    addOperation(module.getOperation(), OpId(), RegionId(), BlockId(), 0);
   }
 
-  int addOperation(mlir::Operation *operation, int parent, int region,
-                   int block, int ordinal) {
-    const int id = static_cast<int>(operationRecords.size());
+  OpId addOperation(mlir::Operation *operation, OpId parent, RegionId region,
+                    BlockId block, int ordinal) {
+    const OpId id = OpId::fromIndex(operationRecords.size());
     operationIds.try_emplace(operation, id);
     for (mlir::Value result : operation->getResults())
-      valueIds.try_emplace(result, nextValue++);
+      valueIds.try_emplace(result, ValueId::fromIndex(nextValue++));
     operationRecords.push_back({
-        operation, id, parent, region, block, ordinal, operation->getName(),
+        operation, id, parent, region, block, ordinal, true,
+        operation->getName(),
         operation->getPropertiesAsAttribute(), operation->getAttrDictionary(),
     });
 
     int regionOrdinal = 0;
     for (mlir::Region &sourceRegion : operation->getRegions()) {
-      const int regionId = static_cast<int>(regionRecords.size());
+      const RegionId regionId = RegionId::fromIndex(regionRecords.size());
       regionIds.try_emplace(&sourceRegion, regionId);
       regionRecords.push_back(
-          {&sourceRegion, regionId, id, regionOrdinal++});
+          {&sourceRegion, regionId, id, regionOrdinal++, true});
 
       int blockOrdinal = 0;
       for (mlir::Block &sourceBlock : sourceRegion) {
-        const int blockId = static_cast<int>(blockRecords.size());
+        const BlockId blockId = BlockId::fromIndex(blockRecords.size());
         blockIds.try_emplace(&sourceBlock, blockId);
         blockRecords.push_back(
-            {&sourceBlock, blockId, regionId, blockOrdinal++});
+            {&sourceBlock, blockId, regionId, blockOrdinal++, true});
         for (mlir::BlockArgument argument : sourceBlock.getArguments())
-          valueIds.try_emplace(argument, nextValue++);
+          valueIds.try_emplace(argument, ValueId::fromIndex(nextValue++));
       }
       for (mlir::Block &sourceBlock : sourceRegion) {
         int operationOrdinal = 0;
-        const int blockId = blockIds.lookup(&sourceBlock);
+        const BlockId blockId = blockIds.lookup(&sourceBlock);
         for (mlir::Operation &child : sourceBlock)
           addOperation(&child, id, regionId, blockId, operationOrdinal++);
       }
@@ -245,11 +277,11 @@ private:
   std::vector<OperationRecord> operationRecords;
   std::vector<BlockRecord> blockRecords;
   std::vector<RegionRecord> regionRecords;
-  llvm::DenseMap<mlir::Operation *, int> operationIds;
-  llvm::DenseMap<mlir::Region *, int> regionIds;
-  llvm::DenseMap<mlir::Block *, int> blockIds;
-  llvm::DenseMap<mlir::Value, int> valueIds;
-  int nextValue = 0;
+  llvm::DenseMap<mlir::Operation *, OpId> operationIds;
+  llvm::DenseMap<mlir::Region *, RegionId> regionIds;
+  llvm::DenseMap<mlir::Block *, BlockId> blockIds;
+  llvm::DenseMap<mlir::Value, ValueId> valueIds;
+  size_t nextValue = 0;
 };
 
 } // namespace cvub

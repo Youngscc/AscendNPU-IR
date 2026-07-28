@@ -139,6 +139,26 @@ change                 -3.84%                -0.57%       -100.0%         -0.61%
 调用同一个 `evaluateModule()`，并在销毁输入 ModuleOp 后使用拥有所有权的 Result，作为同步
 借用生命周期检查。
 
+## 2026-07-28 阶段 2 stable-ID/COW 结果
+
+阶段 2 完整测试通过；与阶段 0 相同的 140 个独立 fixed-seed embedded attempt 为
+`140 matched / 0 different / 0 unavailable / 0 timeout`，另有 direct/text 入口 20-seed
+逐字段检查通过。
+
+160-input production retry-only 三轮交错结果：
+
+```text
+variant       prediction total    process wall    median/input    peak RSS
+stage 0            1987.189 ms     12026.759 ms        1.404 ms     44.27 MB
+stage 2            1890.174 ms     12188.317 ms        1.285 ms     44.43 MB
+internal ratio        0.95118
+```
+
+同一台机器上阶段 1 的 direct/stage-0 internal ratio 为 `0.96160`，因此消除阶段间机器漂移后，
+阶段 2 相对阶段 1 再下降约 `1.08%`。process wall 约 `+1.34%`，主要被每输入真实 prefix/进程
+启动噪声支配；该轮没有模型 unavailable，fast-path 命中仍为每轮 147/160。报告位于本地
+`output/performance/stage2-final-160x3.*`，不提交。
+
 160 个去重 before-CVPipelining 输入，production-default，retry-only，O3，开启 stage
 timing，三轮结果：
 

@@ -128,12 +128,31 @@ void testReplaceUsesExcept() {
           "replaceUsesExcept must preserve excluded users");
 }
 
+void testLazyCopyOnWritePayload() {
+  int materializations = 0;
+  cvub::CowString original = cvub::CowString::Deferred([&] {
+    ++materializations;
+    return std::string("{value = 1 : i32}");
+  });
+  cvub::CowString projection = original;
+  require(materializations == 0,
+          "copying a base payload must not materialize MLIR text");
+  require(projection.find("value") != std::string::npos &&
+              materializations == 1,
+          "shared deferred payload must materialize exactly once");
+  projection.replace(9, 1, "2");
+  require(original.find("1 : i32") != std::string::npos &&
+              projection.find("2 : i32") != std::string::npos,
+          "mutating a projection must detach from the base payload");
+}
+
 } // namespace
 
 int main() {
   testMutationPrimitives();
   testNestedAndCloneSemantics();
   testReplaceUsesExcept();
+  testLazyCopyOnWritePayload();
   std::cout << "[PASS] stable-ID shadow overlay mutation primitives\n";
   return 0;
 }

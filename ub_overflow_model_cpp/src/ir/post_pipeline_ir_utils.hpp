@@ -555,7 +555,7 @@ ReferencedSymbols(const GenericModule &module, int operationId) {
   std::function<void(int)> visit = [&](int id) {
     const GenericOperation &operation =
         module.operations.at(static_cast<size_t>(id));
-    for (const std::string *dictionary :
+    for (const CowString *dictionary :
          {&operation.properties, &operation.attributes})
       for (std::sregex_iterator found(dictionary->begin(), dictionary->end(),
                                       reference),
