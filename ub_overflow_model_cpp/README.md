@@ -147,6 +147,13 @@ A2/A3 Triton membase 路径默认在 `CVPipelining` 前运行轻量模型。模�
 fallback 会先关闭 code motion，仍失败时再关闭 auto multi-buffer。模型返回 success、
 blocker 或 internal error 时，真实 pipeline 继续运行。
 
+普通产品 `evaluate()` 在 `MarkMultiBuffer` 后还会尝试证明 exact non-overflow：按函数累加
+每个存活 UB buffer 的 `AlignUp(bits, 256) * multiBufferNum`，不利用 lifetime reuse 或
+inplace。这个独立分配上界仍不超过容量时，模型直接返回 non-overflow，不再构造
+PlanMemoryInput 或运行 PlanMemory。机器摘要会显示
+`decision_path=non_overflow_upper_bound`；此结果只承诺 overflow 判定，不伪造 peak、required、
+selected seed 或完整 plan。验证模式观察同一判定但继续完整模型和原生 PlanMemory。
+
 普通编译不打印模型中间日志。需要手工观察控制流时设置：
 
 ```bash
@@ -200,6 +207,9 @@ python3 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py \
 ```
 
 报告比较 status、required、peak、buffer plan、lifetime、multi-buffer 和 inplace。
+验证模式不会根据模型结论剪枝：即使轻量模型命中可证明 non-overflow 的提前判定，也只记录
+该判定，随后继续执行轻量模型完整规划和原生 PlanMemory。只有普通产品模式才允许提前结束
+轻量模型自身的后续计算。
 
 ## 6. 矩阵对比
 
@@ -221,6 +231,38 @@ python3 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py \
 ```
 
 完整矩阵去掉 `--config` 和 `--max-inputs`。长任务可以加 `--resume` 继续已有报告。
+
+反复修改轻量模型时，可以启用原生 PlanMemory read-through cache：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py \
+  --config production_default \
+  --max-inputs 10 \
+  --seeds 0-19 \
+  --jobs 8 \
+  --oracle-cache-dir ub_overflow_model_cpp/output/bisheng_embedded_oracle_cache \
+  --report /tmp/ub-model-cached.tsv
+```
+
+第一次运行的 cache miss 仍在同一个 `bishengir-compile` 中执行 embedded model 和原生
+PlanMemory，并写入标准结果；再次执行相同命令时，cache hit 仍从 adapter 运行真实 BiSheng
+prefix 和 embedded model，但在 prediction pass 后停止，再与缓存的原生合同比较。报告中的
+`oracle_source` 会明确标记 `live` 或 `cache`。
+
+缓存会核对实际 before-CVPipelining IR digest、resolved-options digest、固定 seed、完整编译
+参数和 pipeline fingerprint。发生不匹配时自动现场运行并刷新；参考运行触发 BiSheng
+fallback 时也保持现场验证，不使用单-attempt 缓存；缓存比较出现差异时会自动再跑一次现场
+oracle，最终报告不会直接采用未经现场确认的缓存差异。强制重建缓存使用：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py \
+  --oracle-cache-dir ub_overflow_model_cpp/output/bisheng_embedded_oracle_cache \
+  --refresh-oracle-cache \
+  --seeds 0-19 \
+  --jobs 8
+```
+
+缓存用于缩短模型开发循环，不替代发布前不带 `--oracle-cache-dir` 的现场 embedded 全量验证。
 
 ## 7. 时间测量
 
@@ -245,5 +287,28 @@ BISHENGIR_UB_MODEL_EMIT_RESULT=1 \
   -o /tmp/output.o 2>/tmp/bisheng-timing.log
 ```
 
-开发期的 cv2pm、缓存、差异定位和历史验证方法保留在 `.agent/validation.md`；它们不是产品
-使用入口。
+测量单个 non-overflow candidate 的真实增量时，使用同一 adapter 和参数交替运行下面两种
+模式，并在本地 PlanMemory 后停止；取多轮 paired median，不能比较一次冷启动：
+
+```bash
+BISHENGIR_STOP_AFTER_LOCAL_PLAN_MEMORY=1 \
+build/bin/bishengir-compile INPUT.ttadapter \
+  --enable-hfusion-compile=true \
+  --enable-triton-kernel-compile=true \
+  --enable-ub-overflow-prediction=false \
+  --prune-predicted-ub-overflow=false -o /tmp/baseline.o
+
+BISHENGIR_STOP_AFTER_LOCAL_PLAN_MEMORY=1 \
+BISHENGIR_UB_MODEL_EMIT_RESULT=1 \
+build/bin/bishengir-compile INPUT.ttadapter \
+  --enable-hfusion-compile=true \
+  --enable-triton-kernel-compile=true -o /tmp/prediction.o
+```
+
+整个 autotune 的收益必须在同一候选集合上配对比较 baseline、shadow 和 prune，总 wall time
+才是正式结论。Triton-Ascend 的 compile-only harness 会统一生成候选、交错执行三种模式，
+并输出 `no_overflow_model_overhead` 与 `overall_prune_speedup`；性能运行允许命中上述
+non-overflow fast path，正确性矩阵则始终执行完整模型。
+
+历史 cv2pm 和差异定位方法保留在 `.agent/validation.md`；它们不是产品使用入口。当前
+embedded 原生结果缓存也只属于开发验证，不参与普通编译和 autotune 产品路径。

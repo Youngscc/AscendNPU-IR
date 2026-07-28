@@ -9,7 +9,7 @@
 #include <stdexcept>
 
 #ifndef CVUB_MODEL_BUILD_ID
-#define CVUB_MODEL_BUILD_ID "cvub-api-v2"
+#define CVUB_MODEL_BUILD_ID "cvub-api-v3"
 #endif
 
 namespace cvub {
@@ -253,8 +253,9 @@ const char *toString(CompilerProfile profile) noexcept {
   return "unknown";
 }
 
-Result EvaluateImpl(const Request &request,
-                    const DebugModelControls &debug) noexcept {
+Result EvaluateImpl(const Request &request, const DebugModelControls &debug,
+                    bool enableDecisionOnlyNonOverflow,
+                    bool observeConservativeNonOverflow) noexcept {
   const Clock::time_point started = Clock::now();
   Result result;
   try {
@@ -287,8 +288,14 @@ Result EvaluateImpl(const Request &request,
     GenericModule module = MeasureStage(tracePointer, "ParseGenericIR", [&] {
       return ParseGenericIRText(request.beforeCVPipeliningGenericMLIR, false);
     });
+    CVPipeliningUBPipelineOptions pipelineOptions =
+        PipelineOptions(request, debug, tracePointer);
+    pipelineOptions.enableDecisionOnlyNonOverflow =
+        enableDecisionOnlyNonOverflow;
+    pipelineOptions.observeConservativeNonOverflow =
+        observeConservativeNonOverflow;
     const ModulePlanResult plan = RunCVPipeliningUBModulePipeline(
-        std::move(module), PipelineOptions(request, debug, tracePointer));
+        std::move(module), pipelineOptions);
     if (plan.precision != ModulePlanPrecision::Exact) {
       SetFailure(result, Status::Blocker, "model_blocker",
                  "the UB model could not produce an exact result");
@@ -298,13 +305,18 @@ Result EvaluateImpl(const Request &request,
       result.precision = Precision::Exact;
       result.status = plan.overflow ? Status::Overflow : Status::Success;
       result.overflow = plan.overflow;
-      result.ubPeakBits = plan.peakBits;
-      result.requiredBits = plan.requiredBits;
       result.capacityBits = plan.capacityBits;
-      result.functions.reserve(plan.functions.size());
-      for (const cvub::FunctionPlanResult &function : plan.functions)
-        result.functions.push_back(ConvertFunction(function));
-      if (!result.functions.empty()) {
+      result.decisionOnlyNonOverflow = plan.decisionOnlyNonOverflow;
+      result.conservativeUpperBoundBits =
+          plan.conservativeUpperBoundBits;
+      if (!plan.decisionOnlyNonOverflow) {
+        result.ubPeakBits = plan.peakBits;
+        result.requiredBits = plan.requiredBits;
+        result.functions.reserve(plan.functions.size());
+        for (const cvub::FunctionPlanResult &function : plan.functions)
+          result.functions.push_back(ConvertFunction(function));
+      }
+      if (!plan.decisionOnlyNonOverflow && !result.functions.empty()) {
         const uint32_t selected = result.functions.front().selectedSeed;
         bool sameSeed = true;
         for (const FunctionResult &function : result.functions)
@@ -347,12 +359,12 @@ Result EvaluateImpl(const Request &request,
 }
 
 Result evaluate(const Request &request) noexcept {
-  return EvaluateImpl(request, DebugModelControls{});
+  return EvaluateImpl(request, DebugModelControls{}, true, false);
 }
 
 Result evaluateForDebug(const Request &request,
                         const DebugModelControls &controls) noexcept {
-  return EvaluateImpl(request, controls);
+  return EvaluateImpl(request, controls, false, true);
 }
 
 } // namespace cvub

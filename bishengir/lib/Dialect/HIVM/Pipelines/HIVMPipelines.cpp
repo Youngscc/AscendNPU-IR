@@ -112,6 +112,21 @@ static bool stopAfterLocalPlanMemoryRequested() {
   return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
 }
 
+static bool stopAfterUBOverflowPredictionRequested() {
+  const char *value =
+      std::getenv("BISHENGIR_STOP_AFTER_UB_OVERFLOW_PREDICTION");
+  const char *validation = std::getenv("BISHENGIR_UB_MODEL_VALIDATION");
+  return value != nullptr && value[0] != '\0' && StringRef(value) != "0" &&
+         validation != nullptr && validation[0] != '\0' &&
+         StringRef(validation) != "0";
+}
+
+static bool isUBOverflowPredictionActive(const HIVMPipelineOptions &options) {
+  return options.enableUBOverflowPrediction &&
+         options.enableTritonKernelCompile &&
+         !options.disableAutoCVWorkSpaceManage;
+}
+
 struct DumpIRBeforeLocalPlanMemoryPass
     : public PassWrapper<DumpIRBeforeLocalPlanMemoryPass,
                          OperationPass<ModuleOp>> {
@@ -479,13 +494,18 @@ static void hivmPreBufferizationOptimizationPipeline(
   const bool traceEnabled = isUBFlowTraceEnabled();
   const uint64_t traceAttempt =
       traceEnabled ? nextUBFlowTraceAttempt() : 0;
-  if (hivmPipelineOptions.enableUBOverflowPrediction &&
-      hivmPipelineOptions.enableTritonKernelCompile &&
-      !hivmPipelineOptions.disableAutoCVWorkSpaceManage) {
+  const bool predictionActive =
+      isUBOverflowPredictionActive(hivmPipelineOptions);
+  if (predictionActive) {
     pm.addPass(createUBOverflowPredictionPass(
         predictionConfig(hivmPipelineOptions, pipelineOptions,
                          traceAttempt)));
   }
+  // Validation cache replay still runs the real BiSheng prefix and embedded
+  // pass, but deliberately omits the native suffix whose contract is loaded
+  // from cache. This environment-only boundary has no production effect.
+  if (predictionActive && stopAfterUBOverflowPredictionRequested())
+    return;
   if (!hivmPipelineOptions.disableAutoCVWorkSpaceManage) {
     // Software pipelining Cube and Vector operations
     pm.nest<func::FuncOp>().addPass(createCVPipeliningPass(pipelineOptions));
@@ -692,6 +712,9 @@ void buildOptimizeHIVMPipeline(OpPassManager &pm,
   pm.nest<func::FuncOp>().addPass(createInitEntryKernelPass());
   if (!options.disableHIVMTensorCompile) {
     hivmPreBufferizationOptimizationPipeline(pm, options);
+    if (isUBOverflowPredictionActive(options) &&
+        stopAfterUBOverflowPredictionRequested())
+      return;
     bufferizationPipeline(pm, options);
   }
   hivmPostBufferizationOptimizationPipeline(pm, options);

@@ -1,56 +1,142 @@
-# 工作与修复纪律
+# 当前工作流：嵌入式 UB 判定性能重构
 
-## 先确认方法，再实现
+## 工作原则
 
-当用户明确说“先不着急修改”、要求分析或评审方案时，只做只读调研：复述目标、指出
-验证盲区和风险、给出有依据的推荐；用户拍板后再实现。没有这类限制且任务明确要求
-修改时，可以直接推进正常实现和验证。
+当前唯一开发目标是降低 embedded lightweight model 的产品耗时。允许依赖 LLVM/MLIR，
+但优化对象仍是轻量判定器，不能把它替换成克隆 Module 后运行完整原生 pass pipeline。
 
-## 修复 model/cv2pm 差异
+用户要求分析时只做只读调研；用户要求实现时，按下面阶段推进。每个阶段可以建立本地
+checkpoint，但只有语义和验证完整后才整理为产品提交。
 
-1. 用同一 profile input、scenario 和 seed 复现。
-2. 确认 cv2pm oracle/cache 是 schema 2 的 `full_cv2pm_per_seed` 单进程结果，身份有效且
-   输出稳定；禁止使用拆分后缀和 PlanMemory 进程的旧缓存。
-3. 从前向后比较对应 pass 边界，找到第一个语义差异；不要从最终 peak 倒推规则。
-4. 阅读 cv2pm 调用的 BiSheng/MLIR pass 源码，实现同一条通用语义。
-5. 构建命令必须等到编译进程真实退出，再检查模型二进制时间戳不早于改动源码；不能在
-   增量构建仍运行时启动验证，否则会误测旧二进制。
-6. 先跑定向样例和相关单测，再扩大到相关场景，最终跑 160×27×20 非超时全量。
-7. 同时报告 exact 覆盖、mismatch、确定性失败对齐和 timeout 覆盖盲区。
+## 阶段 0：保持可测基线
 
-禁止：
+- 构建必须确认 Release `-O3 -DNDEBUG`，并等待进程真实退出。
+- 保存当前 160-input retry-only 基线和代表 kernel 分阶段数据。
+- 正确性使用 embedded 原生 PlanMemory；性能使用 production retry-only。
+- 日常迭代可用 embedded native read-through cache；cache miss 自动现场建标，fallback/
+  multi-attempt 保持现场验证，主要边界和发布前验证关闭缓存。
+- 新计时默认不加入 dump、validation 或 artifact 成本。
 
-- adapter/kernel/seed/SSA 名/buffer 数量特例；
-- 修改生产 pass 遍历顺序或其他 Bisheng 核心语义来消除差异；
-- 把 exact mismatch 改成 blocker/incomplete；
-- 只比较 peak 而忽略 required、plan、lifetime、multi-buffer 和 inplace；
-- 用 suffix 结果代替 cv2pm oracle。
+## 阶段 1：exact decision fast path
 
-## 性能优化边界
+状态：2026-07-28 已实现并完成代表正确性与性能测量。后续优化必须保留这里的证明合同和
+observe-only 验证路径。
 
-允许优化实现方式和公共基础设施，例如缓存不随 seed 改变的事实、复用索引、合并重复
-遍历、减少 IR 转换和避免重复 canonicalization。不得改变 buffer plan、retry、遍历语义
-或任何会影响最终 UB 分布的策略。每轮优化后先做快速定向验证，最终用 20 seeds 全量
-确认正确性。
+在 `AfterMarkMultiBuffer` 后增加保守的独立分配上界：
 
-## 临时产物
+```text
+sum(AlignUp(buffer.constBits, 256) * multiBufferNum) <= capacity
+```
 
-- 每轮诊断使用独立 `mktemp -d`，避免覆盖上一轮产物。
-- 全量验证完成前保留本任务生成的 dump；收尾时只清理本任务创建的临时目录。
-- `Output/`、`ub_overflow_model_cpp/output/`、`__pycache__/` 等生成物不提交。
-- 用户已明确：为了避免睡眠期间审批阻塞，中途可以不清理 tmp；结束前再统一处理。
+满足时只能证明 `overflow=false`；不要伪造完整 buffer plan。实现时：
 
-## 未完成工作与 Git
+- production request 使用 decision-only 路径，命中后可提前结束轻量模型自身的后续计算；
+- debug/fixed-seed/full-plan validation 同样执行提前判定并输出 observe-only 结果，但强制
+  fall through 到轻量模型完整 plan，再继续原生 PlanMemory；
+- incomplete size/owner/address-space 信息一律 fall through；
+- 保持当前完整 PlanMemory 实现不变，作为 slow path 和 oracle。
 
-- 不要求把半成品作为正式产品提交。需要定位回归或保护现场时，在 `codex/` 本地分支
-  创建明确标注 `checkpoint(...)` 的本地提交；它不等于完成，也不必 push。
-- 完成后按逻辑整理正式提交；不要把缓存、dump、Output 或本地备份混入提交。
-- 工作树有用户修改时必须保留，不能使用 destructive reset/checkout 覆盖。
+阶段完成条件：单元证明、代表 embedded parity、全场景 decision parity、命中率和 A/B
+性能报告。
 
-## 维护本目录
+## 阶段 2：删除生产文本边界
 
-- `MEMORY.md` 只放当前架构、当前状态和长期约束；不要复制长篇源码说明。
-- `code_map.md` 只放仍存在的路径和可执行命令。
-- `validation.md` 中所有数字必须带日期，并区分“当前重新运行”与“历史保留报告”。
-- 结论过时后直接更新，不在入口文件堆叠多代状态；需要追溯时使用 Git 历史。
-- 新规则优先合并进现有主题文件，避免为一句话再创建一个 Markdown。
+新增 BiSheng/MLIR adapter，直接从当前 `ModuleOp` 构造模型输入：
+
+- 读取 `Operation`、`Value`、`Type`、`Attribute`、Region/Block 顺序；
+- 不修改原始 IR，不额外 clone 完整 Module；
+- standalone Generic MLIR 文本 API 保留为兼容入口；
+- 两种入口必须生成同一模型语义和确定顺序。
+
+不要只把 MLIR 转成旧的全字符串 `GenericOperation` 后就结束；adapter API 应能承接后续
+stable-ID/typed IR，避免二次重写。
+
+## 阶段 3：stable-ID shadow IR
+
+目标结构：
+
+```text
+base Operation* + stable OpId/ValueId
+override bitmask + synthetic node arena
+explicit ordered block lists
+projection active BitVector
+revisioned analysis manager
+```
+
+要求：
+
+- 所有 mutation 经过统一 rewriter，精确失效 topology/uses/types/attrs 分析；
+- 原始 Type/Attribute/OperationName 使用 MLIRContext 句柄；
+- `DenseMap`/`SmallPtrSet` 不得提供语义遍历顺序；
+- 删除操作使用 active bit/tombstone，避免每个 pass 全量 compaction；
+- 只在明确边界生成一次确定性序号。
+
+优先迁移 ParseGenericIR、canonicalization、MarkRealCoreType 和 AIC/AIV projection，因为它们
+能同时验证 direct input、analysis invalidation 和 projection overlay。
+
+## 阶段 4：统一 Buffer/Plan IR
+
+把以下嵌套状态合并为单一 `UBBufferProgram`：
+
+```text
+BufferizedSemanticIR
+PostBufferizationRewriteState
+AfterAllocExtraBufferState
+AfterInlineLoadCopyState
+AfterMarkMultiBufferState
+PlanMemoryInputSemanticIR
+```
+
+正常路径直接产生 typed `PlanProgram`：
+
+- BufferId/ValueId/OperationId 均为整数；
+- op kind、effects、pipe、broadcast/transpose/reduce/cum dims、stride align、multi-buffer 等均为
+  typed 字段；
+- 不生成或读取 `OperationRecord::text`；
+- 文本只在 debug serializer 和兼容 file parser 中存在。
+
+`AlignStorageAndAllocExtraBuffer` 应改为 typed query，避免逐 operation 复制完整
+`GenericOperation` 并重新解析/格式化类型。
+
+## 阶段 5：PlanMemory 实现优化
+
+保持原生算法、顺序和布尔结论，优化基础设施：
+
+- string buffer/value identity 改为整数 ID；
+- seed-independent alias/CFG/event program 在 retry 外构建；
+- 每个 seed 只重放 seed-sensitive kill 顺序和计划状态；
+- storage conflict 使用紧凑矩阵/BitVector；
+- outline 从分散 list node 改为 index-based arena，保持 splice/rollback 顺序；
+- scratch capacity 在一个 evaluation 的 seed 间复用。
+
+默认优先吞吐量，保持串行 retry。只有明确需要单 kernel 低延迟时，才评估 seed 0 失败后
+并行 seed 1～19；并行模式必须选择与串行相同的 overflow 布尔值，且避免与 autotune
+外层并行造成过度订阅。
+
+## 阶段 6：跨 fallback 和构建优化
+
+- RetriablePassManager 的 UB fallback 通常只改变 code motion；可缓存分叉前的无指针紧凑
+  snapshot。
+- cache key 必须覆盖输入结构、所有分叉前有效参数和模型 build identity；不能保存上一个
+  attempt 的 `Operation*`。
+- 架构稳定后再测试 ThinLTO/Full LTO 和真实 autotune corpus PGO。
+- 不优先投入 `-fno-exceptions`、目标 CPU 特化或完整原生 pass clone。
+
+## 每轮修改流程
+
+1. 先用计时和源码确认热点，不为测试 corpus 写特例。
+2. 明确哪些数据和顺序必须保持，写针对性回归。
+3. 实现一项基础设施变化，避免同时混入 UB 逻辑调整。
+4. 运行相关单测和代表 embedded fixed-seed 对比；日常循环可读 embedded native cache。
+5. 比较同机 A/B 性能；收益不稳定或回退时先定位，不用更大矩阵掩盖。
+6. 重大边界完成后运行不读缓存的 embedded 20-seed 全量；缓存结果不能冒充现场运行。
+7. 更新 `.agent` 的当前基线和已实现状态；删除被新事实覆盖的旧任务描述。
+
+## Git 和临时产物
+
+- 半成品不必进入产品历史；需要保存现场时，在 `codex/` 分支做明确的本地
+  `checkpoint(...)` 提交，不必 push。
+- 产品提交按基础设施/功能/验证拆分，不能混入 cache、dump、Output、runtime TSV 或备份。
+- 保留用户已有修改，禁止 destructive reset/checkout。
+- 调试使用独立 `mktemp -d`；长验证结束前可保留本任务 tmp，收尾时只删除本任务产物。
+- `.agent` 只保存当前目标、基线和长期约束；过时流水账使用 Git 历史追溯，不再长期保留。

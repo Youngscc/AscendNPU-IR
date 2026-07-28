@@ -1,152 +1,157 @@
 # 当前代码与命令
 
-当前正确性路线是 embedded model—原生 BiSheng PlanMemory；cv2pm 仅是历史诊断工具。
-命令均在仓库根目录
-`/Users/YokeLove/huawei/AscendNPU-IR` 执行。
+本文件只记录当前产品和新的性能目标。历史 suffix/cv2pm 路线不再展开；需要追溯时使用
+Git 历史。
 
-## 核心实现
-
-### 真实 BiSheng 与 cv2pm
+## 产品调用路径
 
 ```text
-bishengir/lib/Tools/bishengir-compile/PassPipeline.cpp
-bishengir/lib/Tools/bishengir-compile/BiShengIRCompileMain.cpp
+adapter
+  -> bishengir-compile
+       -> HIVM prefix
+       -> UBOverflowPrediction module pass
+            -> cvub::evaluate()
+       -> real CVPipelining and HIVM pipeline when not pruned
+       -> real local PlanMemory
+```
+
+生产接入：
+
+```text
+bishengir/lib/Dialect/HIVM/Pipelines/UBOverflowPrediction.cpp
+bishengir/lib/Dialect/HIVM/Pipelines/UBOverflowPrediction.h
 bishengir/lib/Dialect/HIVM/Pipelines/HIVMPipelines.cpp
-bishengir/lib/Dialect/HIVM/Transforms/          真实 pass 实现
-bishengir/tools/bishengir-cvpipeline-suffix-compile/
-                                                  cv2pm 驱动当前所在目录
-build/bin/bishengir-compile
-build/bin/cv2pm-bishengir-compile
+bishengir/lib/Tools/RetriablePassManager/RetriablePassManager.cpp
+bishengir/include/bishengir/Tools/RetriablePassManager/UbOverflowRetryPolicy.h
 ```
 
-cv2pm 虽与历史 suffix 共用部分驱动源码，但由
-`BISHENGIR_CV2PM_FULL_PIPELINE=1` 构建为独立目标。判断模型语义时只看 cv2pm 分支及其
-调用的生产 pass，不能因为文件名仍含 suffix 就把历史 suffix 当成 oracle。
+当前文本边界位于 `UBOverflowPrediction.cpp`：`ModuleOp` 以 generic form 打印到
+`std::string`，随后传给模型 API。新的 direct-MLIR/overlay 方案应替换这条生产路径，但保留
+文本 API 供 standalone CLI 和兼容测试使用。
 
-重点真实 pass：
-
-```text
-CVPipelining                 bishengir/lib/Dialect/HIVM/Transforms/CVPipelining.cpp
-TileCubeVectorLoop           bishengir/lib/Dialect/HIVM/Transforms/TileCubeVectorLoop.cpp
-SplitMixKernel               bishengir/lib/Dialect/HIVM/Transforms/SplitMixKernel.cpp
-TileAndBindSubBlock          bishengir/lib/Dialect/HIVM/Transforms/TileAndBindSubBlock.cpp
-CloneTensorEmpty             bishengir/lib/Dialect/HIVM/Transforms/CloneTensorEmpty.cpp
-HIVMDecomposeOp              bishengir/lib/Dialect/HIVM/Transforms/HIVMDecomposeOp.cpp
-InferHIVMMemScope            bishengir/lib/Dialect/HIVM/Transforms/InferHIVMMemScope.cpp
-AlignAllocSize               bishengir/lib/Dialect/HIVM/Transforms/AlignBuffer/HIVMAlignAllocSize.cpp
-MarkStrideAlign              bishengir/lib/Dialect/HIVM/Transforms/AlignBuffer/MarkStrideAlign.cpp
-EnableStrideAlign            bishengir/lib/Dialect/HIVM/Transforms/AlignBuffer/EnableStrideAlign.cpp
-AllocExtraBuffer             bishengir/lib/Dialect/HIVM/Transforms/AllocExtraBuffer.cpp
-InlineLoadCopy               bishengir/lib/Dialect/HIVM/Transforms/InlineLoadCopy.cpp
-MarkMultiBuffer              bishengir/lib/Dialect/HIVM/Transforms/MarkMultiBuffer.cpp
-PlanMemory                   bishengir/lib/Dialect/HIVM/Transforms/PlanMemory.cpp
-OneShotBufferize             third-party/llvm-project/mlir/lib/Dialect/Bufferization/Transforms/
-LoopInvariantCodeMotion      third-party/llvm-project/mlir/lib/Transforms/LoopInvariantCodeMotion.cpp
-```
-
-### 轻量模型
+## 模型入口和公共接口
 
 ```text
 ub_overflow_model_cpp/include/ub_overflow_model/api.hpp
+ub_overflow_model_cpp/src/api.cpp
 ub_overflow_model_cpp/src/main.cpp
-ub_overflow_model_cpp/src/pipeline/cvpipelining_ub_pipeline.hpp
-ub_overflow_model_cpp/src/pipeline/plan_memory_input_semantic_ir.hpp
-ub_overflow_model_cpp/src/pipeline/plan_memory_input_builder.hpp
-ub_overflow_model_cpp/src/passes/cross_core_gss.hpp
-ub_overflow_model_cpp/src/passes/inject_block_sync.hpp
-ub_overflow_model_cpp/src/passes/
-ub_overflow_model_cpp/src/passes/plan_memory/
-ub_overflow_model_cpp/src/ir/
-ub_overflow_model_cpp/src/analysis/
-ub_overflow_model_cpp/src/support/
+ub_overflow_model_cpp/CMakeLists.txt
+ub_overflow_model_cpp/build.sh
 ```
 
-生产可执行文件是：
+生产 CMake target 是 `BiShengIRUBOverflowModel`。当前 build 为 Release，模型和接入 pass
+均使用 `-O3 -DNDEBUG`；后续不能把普通 O3 切换当作主要优化收益。
+
+standalone 可执行文件：
 
 ```text
 ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model
 ```
 
-`cvpipeline_ub_model` 目前只是指向该文件的兼容符号链接，不是另一个模型。
-
-cross-core 同步分支的三个逐请求有效参数是：
+## 当前核心流水
 
 ```text
---enable-hivm-cross-core-gss
---enable-hivm-inject-block-all-sync
---disable-auto-inject-block-sync
+ub_overflow_model_cpp/src/pipeline/cvpipelining_ub_pipeline.hpp
+ub_overflow_model_cpp/src/pipeline/bufferized_semantic_ir.hpp
+ub_overflow_model_cpp/src/passes/post_bufferization_rewrites.hpp
+ub_overflow_model_cpp/src/pipeline/after_alloc_extra_buffer.hpp
+ub_overflow_model_cpp/src/pipeline/after_inline_load_copy.hpp
+ub_overflow_model_cpp/src/pipeline/after_mark_multi_buffer.hpp
+ub_overflow_model_cpp/src/pipeline/plan_memory_input_semantic_ir.hpp
+ub_overflow_model_cpp/src/pipeline/plan_memory_input_builder.hpp
+ub_overflow_model_cpp/src/passes/plan_memory/
 ```
 
-原生条件只在 `cross-core-gss=true && block-all=false && disable-auto=false`
-时走 `CrossCoreGSS`，其余组合走 `InjectBlockSync`。禁用自动注入时仍必须插入
-`SetFFTSBaseAddr`。进程内 options 版本为 4，prediction pass 从真实
-`HIVMPipelineOptions` 逐字段传入这三个值。
+生产 decision-only fast path 位于
+`src/pipeline/cvpipelining_ub_pipeline.hpp::ProveConservativeNonOverflow`。
+它在 MarkMultiBuffer 后按 AIV 函数累加所有存活 UB buffer 的独立对齐物理大小；生产命中后
+跳过 PlanMemoryInput/PlanMemory，debug 路径只观察证明并继续完整计划。
 
-生产集成 pass 位于：
+当前高耗时和基础设施：
 
 ```text
-bishengir/lib/Dialect/HIVM/Pipelines/UBOverflowPrediction.cpp
-bishengir/lib/Dialect/HIVM/Pipelines/UBOverflowPrediction.h
+src/ir/generic_ir.hpp                         string-heavy GenericOperation
+src/ir/generic_rewriter.hpp                   mutation + CompactGenericModule
+src/ir/generic_analysis.hpp                   dense read-only indexes
+src/analysis/pipeline_metadata_cache.hpp      stage-local type/attr parsing cache
+src/passes/mark_real_core_type.hpp            MIX combined projection
+src/passes/tile_and_bind_sub_block.hpp        large transformation stage
+src/pipeline/after_alloc_extra_buffer.hpp      typed/layout reconstruction hotspot
+src/pipeline/plan_memory_input_builder.hpp     normal-path bridge hotspot
+src/passes/plan_memory/mem_liveness_analysis.hpp
+src/passes/plan_memory/mem_plan.hpp
 ```
 
-它紧邻真实 `createCVPipeliningPass` 之前执行，并与真实 pass 共用一个 resolved
-`CVPipeliningOptions`。A2/A3 Triton membase 的 prediction 与 prune 默认开启；exact overflow
-终止当前 attempt，并保留 BiSheng 原有 UB fallback 可识别的 `ub overflow` 诊断文本。普通
-运行不输出模型中间记录；`BISHENGIR_UB_MODEL_EMIT_RESULT=1` 显式输出版本化机器记录，
-`BISHENGIR_UB_FLOW_TRACE=1` 显式输出输入、effective options 和两个阶段标识。同进程
-validation 自动输出机器记录。
+## 目标基础设施位置
 
-同进程正确性验证入口：
+后续命名可以在实现时调整，但职责应保持清楚：
 
 ```text
+MLIR adapter（BiSheng 侧）
+  读取 ModuleOp/Operation/Value/Type/Attribute，不修改原 IR
+
+shadow IR（模型侧）
+  stable OpId/ValueId、base Operation*、局部 override、synthetic node arena
+
+analysis manager（模型侧）
+  revisioned def-use/CFG/enclosing-function/block-order/feature summary
+
+UBBufferProgram（模型侧）
+  统一 allocation/access/alias/layout/multi-buffer 状态
+
+Typed PlanProgram（模型侧）
+  PlanMemory 正常路径不生成也不读取 OperationRecord::text
+```
+
+原始 `Operation*` 只在一次同步 pass 调用期间有效。RetriablePassManager 的下一个 attempt 会
+clone 新 module；跨 fallback 缓存必须保存无指针的紧凑 snapshot，不能保存旧 attempt 的
+MLIR 指针。
+
+## 数据和验证入口
+
+```text
+ub_overflow_model_cpp/data/adapter/                  真实 compiler 起点
+ub_overflow_model_cpp/data/before_cvpipelining/      160 个去重性能/开发输入
+ub_overflow_model_cpp/config/ub_relevant_parameter_scenarios.tsv
+                                                      27 个有意义场景
+ub_overflow_model_cpp/config/known_timeout_pairs.tsv  已知原生长尾
+ub_overflow_model_cpp/config/failure_taxonomy.tsv     稳定失败分类
 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py
 ub_overflow_model_cpp/tests/test_bisheng_embedded_matrix.py
+ub_overflow_model_cpp/tests/run_tests.sh
+ub_overflow_model_cpp/output/bisheng_embedded_oracle_cache/  本地可再生成缓存
 ```
 
-它从 adapter 启动真实 `bishengir-compile`，让 embedded model 与主 pipeline 使用同一
-固定 seed，并在真实本地 PlanMemory 后比较完整 UB 合同。
+当前正确性入口从 adapter 启动真实 `bishengir-compile`，在同一个 attempt 中比较 embedded
+model 与原生 PlanMemory。`data/before_cvpipelining` 适合 standalone 性能分析，不替代
+embedded 正确性 oracle。
 
-## 数据、场景与结果
-
-```text
-ub_overflow_model_cpp/data/adapter/                  163 个 adapter 源文件
-ub_overflow_model_cpp/data/before_cvpipelining/      矩阵使用的 160 个基础输入
-Output/before_cvpipelining_profiles/                 8 套生成 profile
-ub_overflow_model_cpp/config/ub_relevant_parameter_scenarios.tsv
-                                                     27 个场景定义（含 5 个 InjectBlockSync 场景）
-ub_overflow_model_cpp/config/failure_taxonomy.tsv    稳定失败分类
-ub_overflow_model_cpp/output/cv2pm_oracle_cache/     cv2pm schema 2 20-seed 缓存；当前为
-                                                     4320/4320 条单一快照完整记录，
-                                                     包含 23 条已缓存非 primary 合同
-ub_overflow_model_cpp/output/cv2pm_model_validation.tsv
-                                                     84852/84852 matched 模型对比报告
-```
-
-`Output/` 和 `ub_overflow_model_cpp/output/` 是可重新生成的本地产物，不应提交。
-`data/adapter/` 中另有 3 个未进入当前 160-input 矩阵的定向输入：
-`gather_out_to_ub`、`index_put`、`scatter_ub_to_out`。
+`run_bisheng_embedded_matrix.py --oracle-cache-dir` 是 read-through 模式：miss 在同进程执行
+model + native PlanMemory 并写缓存；hit 仍运行真实 prefix 和 embedded pass，但通过
+`BISHENGIR_STOP_AFTER_UB_OVERFLOW_PREDICTION` 在 prediction 后停止并读取原生合同。只缓存
+单 attempt 参考；fallback/multi-attempt 始终现场运行，cache mismatch 也自动现场确认。
 
 ## 常用命令
 
-构建轻量模型：
+构建模型和静态库：
 
 ```bash
 bash ub_overflow_model_cpp/build.sh
 ```
 
-构建 cv2pm：
+构建带 embedded pass 的真实 compiler：
 
 ```bash
-cmake --build build --target cv2pm-bishengir-compile -j8
+cmake --build build --target bishengir-compile -j8
 ```
 
-快速单元/集成测试：
+完整模型单元/集成测试：
 
 ```bash
 bash ub_overflow_model_cpp/tests/run_tests.sh
 ```
 
-单独运行模型，默认执行真实 retry：
+standalone 真实 retry-only：
 
 ```bash
 ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
@@ -154,16 +159,16 @@ ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
   --format=json
 ```
 
-固定一个 seed 只用于定位某次 attempt：
+单输入 stage timing（只用于性能诊断）：
 
 ```bash
 ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
   --before-cvpipelining-ir=INPUT.mlir \
-  --plan-memory-seed=5 \
+  --show-runtime-timing \
   --format=json
 ```
 
-单个原生 BiSheng 同进程对比：
+单个 embedded 固定 seed 对比：
 
 ```bash
 .venv/bin/python3 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py \
@@ -173,7 +178,7 @@ ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
   --jobs 1
 ```
 
-全量 20-seed 正确性验证：
+主要阶段完成后的 20-seed 正确性矩阵：
 
 ```bash
 .venv/bin/python3 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py \
@@ -181,37 +186,44 @@ ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
   --jobs 12
 ```
 
-历史 cv2pm 缓存生成（不再用于当前正确性测试）：
+重复开发验证使用 embedded native cache：
 
 ```bash
-.venv/bin/python3 ub_overflow_model_cpp/scripts/build_cv2pm_oracle_cache.py \
+.venv/bin/python3 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py \
+  --seeds 0-19 \
   --jobs 12 \
-  --pipeline-timeout 360 \
-  --plan-timeout 120
+  --oracle-cache-dir ub_overflow_model_cpp/output/bisheng_embedded_oracle_cache
 ```
 
-只有需要重新计算现有 timeout/旧记录时才加 `--refresh`。
+强制现场刷新同一缓存增加 `--refresh-oracle-cache`。重大边界和发布前最终验证应去掉
+`--oracle-cache-dir`，不能把 cache hit 报告当作现场全量。
 
-验证 cv2pm 与真实 BiSheng 前缀：
+手工查看 embedded 模型结果和耗时：
 
 ```bash
-.venv/bin/python3 ub_overflow_model_cpp/scripts/compare_bisheng_cv2pm_matrix.py \
-  --jobs 12 \
-  --timeout 180 \
-  --output-root /tmp/bisheng-cv2pm-compare
+BISHENGIR_UB_MODEL_EMIT_RESULT=1 \
+BISHENGIR_STOP_AFTER_LOCAL_PLAN_MEMORY=1 \
+build/bin/bishengir-compile ADAPTER.ttadapter \
+  --enable-hfusion-compile=true \
+  --enable-triton-kernel-compile=true \
+  -o /tmp/ub-model-probe.o
 ```
 
-## 遗留命名
+机器摘要中的 `decision_path=non_overflow_upper_bound` 表示模型使用了 exact non-overflow
+fast path；此时 peak/required/selected_seed 为 unknown 是有意的窄合同，不是信息丢失。
 
-以下内容仍可能因兼容性或复用 parser 而存在，但不是当前验证入口：
+普通产品运行默认不应设置 validation、dump、flow trace 或 machine-result 环境变量。
+
+## 本地生成物
+
+以下路径不提交：
 
 ```text
-bishengir-cvpipeline-suffix-compile
-scripts/run_corpus_oracle.py
-scripts/compare_ub_plan_with_suffix_oracle.py
-run_demo_ub_plan.sh 中的 suffix 路径
+Output/
+ub_overflow_model_cpp/output/
+__pycache__/
+临时 dump、cache、runtime TSV 和 profile 报告
 ```
 
-`run_corpus_matrix.py` 当前仍从 legacy-named comparator 导入解析函数。这只是代码复用，
-它自身属于旧 cv2pm 缓存流程。当前入口 `run_bisheng_embedded_matrix.py` 也暂时复用同一
-parser，但 oracle 是同进程真实 PlanMemory；后续可以重命名公共 parser 来消除歧义。
+历史兼容文件可能仍包含 suffix/cv2pm 名称，但它们不属于当前优化任务。不要为了清理命名
+顺手修改工作正常的历史工具；只有当前实现依赖造成歧义或性能成本时才处理。

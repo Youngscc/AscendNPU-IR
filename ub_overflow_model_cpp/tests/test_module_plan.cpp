@@ -364,6 +364,35 @@ int main() {
   Check(result.functions[0].function != result.functions[1].function,
         "function plans must retain distinct identities");
 
+  const cvub::ModulePlanResult fastResult =
+      cvub::RunUBModuleFromAfterCVPipelining(
+          module, {}, std::nullopt, false, nullptr, cvub::kUBCapacityBits,
+          true, false);
+  Check(fastResult.decisionOnlyNonOverflow &&
+            fastResult.conservativeUpperBoundBits &&
+            *fastResult.conservativeUpperBoundBits <=
+                fastResult.capacityBits &&
+            fastResult.functions.empty(),
+        "the conservative upper bound must prove a safe module without "
+        "materializing PlanMemory");
+
+  const cvub::ModulePlanResult smallCapacity =
+      cvub::RunUBModuleFromAfterCVPipelining(
+          module, {}, std::nullopt, false, nullptr, 1, true, false);
+  Check(!smallCapacity.decisionOnlyNonOverflow && smallCapacity.overflow &&
+            !smallCapacity.functions.empty(),
+        "an upper bound above capacity must fall through to full overflow "
+        "planning");
+
+  const cvub::ModulePlanResult observed =
+      cvub::RunUBModuleFromAfterCVPipelining(
+          module, {}, std::nullopt, false, nullptr, cvub::kUBCapacityBits,
+          false, true);
+  Check(!observed.decisionOnlyNonOverflow &&
+            observed.conservativeUpperBoundBits &&
+            observed.functions.size() == result.functions.size(),
+        "validation must observe the same proof and retain full plans");
+
   cvub::UBAffectingPassOptions ubSavingOptions;
   ubSavingOptions.enableUbufSaving = true;
   ubSavingOptions.enableTritonKernelCompile = true;
@@ -409,6 +438,7 @@ int main() {
   TestSavingUBUnitAttributeDetection();
 
   std::cout << "[PASS] module plans AIV functions independently\n";
+  std::cout << "[PASS] conservative non-overflow proof is decision-only\n";
   std::cout << "[PASS] cv2pm UB-saving clone/sink order is preserved\n";
   std::cout << "[PASS] OneShot nested read ordering mirrors DominanceInfo\n";
   std::cout << "[PASS] PlanMemory normalization mirrors dominance-aware CSE\n";

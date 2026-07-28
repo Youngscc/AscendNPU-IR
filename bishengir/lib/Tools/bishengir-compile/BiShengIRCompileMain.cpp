@@ -63,6 +63,15 @@ bool stopAfterLocalPlanMemoryRequested() {
   return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
 }
 
+bool stopAfterUBOverflowPredictionRequested() {
+  const char *value =
+      std::getenv("BISHENGIR_STOP_AFTER_UB_OVERFLOW_PREDICTION");
+  const char *validation = std::getenv("BISHENGIR_UB_MODEL_VALIDATION");
+  return value != nullptr && value[0] != '\0' && StringRef(value) != "0" &&
+         validation != nullptr && validation[0] != '\0' &&
+         StringRef(validation) != "0";
+}
+
 /// Get the lib directory path (../lib relative to bishengir-compile
 /// executable). Returns canonical absolute path without ".." or ".".
 std::string getLibDirFromExecutable(StringRef executablePath) {
@@ -334,7 +343,8 @@ bishengir::runBiShengIRPipeline(ModuleOp mod,
                                             /*compilationSucceeded=*/true);
 
   if (stopBeforeLocalPlanMemoryRequested() ||
-      stopAfterLocalPlanMemoryRequested())
+      stopAfterLocalPlanMemoryRequested() ||
+      stopAfterUBOverflowPredictionRequested())
     return OwningModuleRef(mod);
 
   if (config.shouldEnableCPURunner()) {

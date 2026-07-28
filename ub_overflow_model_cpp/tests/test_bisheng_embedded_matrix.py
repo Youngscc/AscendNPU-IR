@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import sys
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,7 +40,7 @@ BISHENGIR_UB_MODEL_VALIDATION_BEGIN\t0
 BISHENGIR_UB_MODEL_FUNCTION\t0\tkernel\tsuccess\t32768\t32768\t13
 BISHENGIR_UB_MODEL_BUFFER\t0\tkernel\t%buffer\t32768\t1\t10\t20\t0
 BISHENGIR_UB_MODEL_VALIDATION_END\t0\t1
-BISHENGIR_UB_MODEL_RESULT contract_version=1 status=success precision=exact overflow=false ub_peak_bits=32768 required_bits=32768 capacity_bits=1572864 selected_seed=13 serialize_ns=1 model_ns=2 input_digest=x options_digest=y diagnostic_category=none validation_id=0
+BISHENGIR_UB_MODEL_RESULT contract_version=1 status=success precision=exact overflow=false ub_peak_bits=32768 required_bits=32768 capacity_bits=1572864 selected_seed=13 serialize_ns=1 model_ns=2 input_digest=x options_digest=y pipeline_fingerprint=pipeline-v1 diagnostic_category=none validation_id=0
 PLANMEM_LIVENESS_ATTEMPT\tkernel\t0\t13
 PLANMEM_EXACT_BUFFER\t13\t0\t32768\t6\t0\t10\t20
 PLANMEM_EXACT_MULTI\t13\t0\t1
@@ -95,7 +96,7 @@ assert status == "matched", (differences, evidence)
 cube_only = """\
 BISHENGIR_UB_MODEL_VALIDATION_BEGIN\t0
 BISHENGIR_UB_MODEL_VALIDATION_END\t0\t0
-BISHENGIR_UB_MODEL_RESULT contract_version=1 status=success precision=exact overflow=false ub_peak_bits=0 required_bits=0 capacity_bits=1572864 selected_seed=unknown serialize_ns=1 model_ns=2 input_digest=x options_digest=y diagnostic_category=none validation_id=0
+BISHENGIR_UB_MODEL_RESULT contract_version=1 status=success precision=exact overflow=false ub_peak_bits=0 required_bits=0 capacity_bits=1572864 selected_seed=unknown serialize_ns=1 model_ns=2 input_digest=x options_digest=y pipeline_fingerprint=pipeline-v1 diagnostic_category=none validation_id=0
 PLANMEM_LIVENESS_ATTEMPT\tcube_kernel\t0\t13
 PLANMEM_EXACT_BUFFER\t13\t0\t32768\t5\t0\t1\t2
 PLANMEM_LIVENESS_ATTEMPT_END\t13
@@ -111,7 +112,7 @@ aligned_failure = """\
 BISHENGIR_UB_MODEL_VALIDATION_BEGIN\t0
 BISHENGIR_UB_MODEL_DIAGNOSTIC\t0\tmodel_blocker\tTileCubeVectorLoop: scope.scope: Failed to collect vector loop tiling info
 BISHENGIR_UB_MODEL_VALIDATION_END\t0\t0
-BISHENGIR_UB_MODEL_RESULT contract_version=1 status=blocker precision=incomplete overflow=unknown ub_peak_bits=unknown required_bits=unknown capacity_bits=1572864 selected_seed=unknown serialize_ns=1 model_ns=2 input_digest=x options_digest=y diagnostic_category=model_blocker validation_id=0
+BISHENGIR_UB_MODEL_RESULT contract_version=1 status=blocker precision=incomplete overflow=unknown ub_peak_bits=unknown required_bits=unknown capacity_bits=1572864 selected_seed=unknown serialize_ns=1 model_ns=2 input_digest=x options_digest=y pipeline_fingerprint=pipeline-v1 diagnostic_category=model_blocker validation_id=0
 loc("test.mlir":1:1): error: 'scope.scope' op Failed to collect vector loop tiling info
 """
 status, differences, evidence = MODULE.compare_segment(
@@ -130,5 +131,31 @@ assert "without a stable comparable diagnostic" in evidence[0]
 status, differences, evidence = MODULE.compare_segment(aligned_failure, 13)
 assert status == "different", (differences, evidence)
 assert differences == ["precision"]
+
+scenario = rows[0]
+identity = MODULE.cache_identity(segment, scenario, "sample.ttadapter", 13)
+assert identity is not None
+assert identity["input_digest"] == "x"
+assert identity["options_digest"] == "y"
+assert identity["pipeline_fingerprint"] == "pipeline-v1"
+assert "BISHENGIR_UB_MODEL_RESULT" in MODULE.model_projection(segment)
+assert "PLANMEM_PEAK" not in MODULE.model_projection(segment)
+assert "BISHENGIR_UB_MODEL_RESULT" not in MODULE.native_projection(segment)
+assert "PLANMEM_PEAK" in MODULE.native_projection(segment)
+with tempfile.TemporaryDirectory(prefix="embedded-cache-test-") as temporary:
+    path = Path(temporary) / "record.json.gz"
+    MODULE.write_oracle_cache_record(path, identity, [segment], 0)
+    record = MODULE.matching_cache_record(path, identity)
+    assert record is not None
+    synthetic = (
+        MODULE.model_projection(segment) + record["native_segments"][0]
+    )
+    status, differences, evidence = MODULE.compare_segment(synthetic, 13)
+    assert status == "matched", (differences, evidence)
+    stale = dict(identity)
+    stale["input_digest"] = "changed"
+    assert MODULE.matching_cache_record(path, stale) is None
+    MODULE.write_oracle_cache_record(path, identity, [segment, segment], 0)
+    assert MODULE.replayable_cache_record(path) is None
 
 print("[PASS] same-process BiSheng validation parser")

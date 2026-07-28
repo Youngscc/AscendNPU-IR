@@ -36,7 +36,24 @@ int main() {
   cvub::Request request;
   request.beforeCVPipeliningGenericMLIR = ir;
   request.requestId = "api-test-candidate";
-  const cvub::Result result = cvub::evaluate(request);
+  const cvub::Result productionResult = cvub::evaluate(request);
+
+  Check(productionResult.precision == cvub::Precision::Exact &&
+            productionResult.status == cvub::Status::Success &&
+            productionResult.overflow && !*productionResult.overflow,
+        "the production API must prove vector-add non-overflow exactly");
+  Check(productionResult.decisionOnlyNonOverflow &&
+            productionResult.conservativeUpperBoundBits &&
+            *productionResult.conservativeUpperBoundBits <=
+                productionResult.capacityBits,
+        "the production API must expose its conservative fast-path proof");
+  Check(!productionResult.ubPeakBits && !productionResult.requiredBits &&
+            !productionResult.selectedSeed &&
+            productionResult.functions.empty(),
+        "a decision-only proof must not fabricate a concrete plan");
+
+  const cvub::Result result =
+      cvub::evaluateForDebug(request, cvub::DebugModelControls{});
 
   Check(ir == original, "evaluate must not mutate the caller's IR text");
   Check(result.precision == cvub::Precision::Exact,
@@ -62,9 +79,14 @@ int main() {
             cvub::kA3MembasePipelineFingerprint,
         "the compiler pipeline fingerprint must round-trip");
   Check(result.stageTimings.empty() && result.totalTimeNs > 0,
-        "the production API must avoid detailed timing overhead");
+        "the default debug API must avoid detailed timing overhead");
   Check(result.requestId == "api-test-candidate",
         "request ID must round-trip as owned result data");
+  Check(!result.decisionOnlyNonOverflow &&
+            result.conservativeUpperBoundBits &&
+            *result.conservativeUpperBoundBits <= result.capacityBits,
+        "the differential API must observe the proof but materialize the "
+        "full plan");
 
   const std::string cubeOnlyIR = ReadFile(
       "ub_overflow_model_cpp/data/before_cvpipelining/"

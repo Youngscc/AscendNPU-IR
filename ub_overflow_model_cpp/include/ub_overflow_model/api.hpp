@@ -129,6 +129,12 @@ struct Result {
   uint64_t capacityBits = 0;
   std::optional<uint32_t> selectedSeed;
   uint64_t totalTimeNs = 0;
+  // Production evaluate() may prove non-overflow from the sum of all
+  // independently allocated, aligned UB buffers after MarkMultiBuffer.  That
+  // proof deliberately does not fabricate an exact peak, plan, lifetime, or
+  // selected seed; callers can distinguish the narrow decision result here.
+  bool decisionOnlyNonOverflow = false;
+  std::optional<uint64_t> conservativeUpperBoundBits;
 
   std::string requestId;
   std::string modelBuildId;

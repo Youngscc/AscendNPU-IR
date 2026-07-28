@@ -129,10 +129,18 @@ void emitMachineResult(const cvub::Result &result, uint64_t serializeNs,
       << " selected_seed="
       << (result.selectedSeed ? std::to_string(*result.selectedSeed)
                               : "unknown")
+      << " decision_path="
+      << (result.decisionOnlyNonOverflow ? "non_overflow_upper_bound"
+                                         : "full_plan")
+      << " conservative_upper_bound_bits="
+      << (result.conservativeUpperBoundBits
+              ? std::to_string(*result.conservativeUpperBoundBits)
+              : "unknown")
       << " serialize_ns=" << serializeNs
       << " model_ns=" << result.totalTimeNs
       << " input_digest=" << result.inputDigest
       << " options_digest=" << result.effectiveOptionsDigest
+      << " pipeline_fingerprint=" << result.compilerPipelineFingerprint
       << " diagnostic_category="
       << (result.diagnostics.empty() ? "none"
                                      : result.diagnostics.front().category);

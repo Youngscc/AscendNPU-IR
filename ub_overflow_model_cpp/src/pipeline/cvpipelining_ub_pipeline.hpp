@@ -385,10 +385,10 @@ inline void ValidateDiscardedAICBufferizedCopiesOnProjection(
   ValidateBufferizedCopyAddressSpaces(postBufferization, scopes);
 }
 
-inline PlanMemoryInput BuildPlanMemoryInputFromBeforeOneShotBufferize(
+inline AfterMarkMultiBufferState
+BuildAfterMarkMultiBufferFromBeforeOneShotBufferize(
     GenericModule module,
-    const UBAffectingPassOptions &options = {}, DebugTrace *trace = nullptr,
-    const std::string &targetFunction = {}) {
+    const UBAffectingPassOptions &options = {}, DebugTrace *trace = nullptr) {
   BufferizedSemanticIR oneShotBufferizeOutput =
       MeasureStage(trace, "OneShotBufferize", [&] {
         module = RunPostOneShotScalarCSEProjection(std::move(module));
@@ -513,6 +513,16 @@ inline PlanMemoryInput BuildPlanMemoryInputFromBeforeOneShotBufferize(
       return SerializeAfterMarkMultiBufferState(markMultiBufferOutput);
     });
   }
+  return markMultiBufferOutput;
+}
+
+inline PlanMemoryInput BuildPlanMemoryInputFromBeforeOneShotBufferize(
+    GenericModule module,
+    const UBAffectingPassOptions &options = {}, DebugTrace *trace = nullptr,
+    const std::string &targetFunction = {}) {
+  AfterMarkMultiBufferState markMultiBufferOutput =
+      BuildAfterMarkMultiBufferFromBeforeOneShotBufferize(
+          std::move(module), options, trace);
   return MeasureStage(trace, "BuildPlanMemoryInput", [&] {
     return BuildPlanMemoryInput(std::move(markMultiBufferOutput),
                                 targetFunction, trace);
@@ -552,9 +562,78 @@ struct ModulePlanResult {
   uint64_t peakBits = 0;
   uint64_t requiredBits = 0;
   uint64_t capacityBits = kUBCapacityBits;
+  bool decisionOnlyNonOverflow = false;
+  std::optional<uint64_t> conservativeUpperBoundBits;
   std::vector<FunctionPlanResult> functions;
   std::vector<std::string> diagnostics;
 };
+
+struct ConservativeNonOverflowProof {
+  bool proven = false;
+  uint64_t maxFunctionUpperBoundBits = 0;
+};
+
+// A successful PlanMemory placement cannot require more space than assigning
+// every surviving UB buffer an independent 256-bit-aligned extent.  Applying
+// the final multi-buffer multiplicity before any lifetime reuse or inplace
+// merge therefore gives a conservative upper bound.  If every AIV function's
+// bound fits, non-overflow is exact even though the concrete plan is unknown.
+inline ConservativeNonOverflowProof ProveConservativeNonOverflow(
+    const AfterMarkMultiBufferState &state, uint64_t capacityBits) {
+  ConservativeNonOverflowProof result;
+  const AfterInlineLoadCopyState &afterInline = state.afterInlineLoadCopy;
+  const AfterAllocExtraBufferState &afterAlloc =
+      afterInline.afterAllocExtraBuffer;
+  const BufferizedSemanticIR &bufferized =
+      afterAlloc.postBufferization.bufferized;
+  const GenericModule &module = bufferized.logicalModule;
+  const GenericModuleAnalysisIndexes &analysis =
+      bufferized.logicalContext.analysis;
+  analysis.ensureCompatible(module);
+
+  std::map<int, uint64_t> functionUpperBounds;
+  for (const GenericOperation &operation : module.operations) {
+    if (operation.name == "func.func" && IsAIVFunction(operation))
+      functionUpperBounds.emplace(operation.id, 0);
+  }
+  if (functionUpperBounds.empty())
+    return result;
+
+  for (const LocalBufferRecord &buffer : afterInline.buffers) {
+    if (buffer.addressSpace != AddressSpace::UB)
+      continue;
+    const int owner = BufferOwnerOperation(afterAlloc, buffer);
+    if (owner < 0 || static_cast<size_t>(owner) >= module.operations.size())
+      return result;
+    const int function = analysis.enclosingFunctionId(owner);
+    auto functionBound = functionUpperBounds.find(function);
+    if (functionBound == functionUpperBounds.end())
+      continue;
+    uint32_t multiBufferNum = 1;
+    const auto multi =
+        state.markMultiBuffer.buffer2MultiNum.find(buffer.sourceIdentity);
+    if (multi != state.markMultiBuffer.buffer2MultiNum.end()) {
+      if (multi->second == 0)
+        return result;
+      multiBufferNum = multi->second;
+    }
+    const uint64_t alignedBits = AlignUp(buffer.constBits, 256);
+    const uint64_t physicalBits =
+        CheckedMul(alignedBits, multiBufferNum,
+                   "conservative non-overflow multi-buffer extent");
+    functionBound->second =
+        CheckedAdd(functionBound->second, physicalBits,
+                   "conservative non-overflow function upper bound");
+    if (functionBound->second > capacityBits)
+      return result;
+  }
+
+  for (const auto &function : functionUpperBounds)
+    result.maxFunctionUpperBoundBits =
+        std::max(result.maxFunctionUpperBoundBits, function.second);
+  result.proven = true;
+  return result;
+}
 
 inline std::vector<std::string>
 AIVFunctionNames(const GenericModule &module) {
@@ -575,19 +654,47 @@ inline ModulePlanResult RunUBModuleFromAfterCVPipelining(
     const UBAffectingPassOptions &options = {},
     std::optional<uint32_t> planMemorySeed = std::nullopt,
     bool restrictInplaceAsISA = false, DebugTrace *trace = nullptr,
-    uint64_t capacityBits = kUBCapacityBits) {
+    uint64_t capacityBits = kUBCapacityBits,
+    bool enableDecisionOnlyNonOverflow = false,
+    bool observeConservativeNonOverflow = false) {
   GenericModule projected =
       RunPassesBeforeOneShotBufferize(std::move(module), options, trace);
   const std::vector<std::string> functions = AIVFunctionNames(projected);
   ModulePlanResult result;
   result.capacityBits = capacityBits;
+  std::optional<AfterMarkMultiBufferState> decisionState;
+  if ((enableDecisionOnlyNonOverflow || observeConservativeNonOverflow) &&
+      !functions.empty()) {
+    GenericModule decisionModule =
+        functions.size() == 1 ? std::move(projected) : projected;
+    decisionState = BuildAfterMarkMultiBufferFromBeforeOneShotBufferize(
+        std::move(decisionModule), options, trace);
+    const ConservativeNonOverflowProof proof =
+        ProveConservativeNonOverflow(*decisionState, capacityBits);
+    if (proof.proven) {
+      result.conservativeUpperBoundBits =
+          proof.maxFunctionUpperBoundBits;
+      if (enableDecisionOnlyNonOverflow) {
+        result.decisionOnlyNonOverflow = true;
+        return result;
+      }
+    }
+  }
   for (size_t functionIndex = 0; functionIndex < functions.size();
        ++functionIndex) {
     const std::string &function = functions[functionIndex];
-    GenericModule functionModule =
-        functions.size() == 1 ? std::move(projected) : projected;
-    const PlanMemoryInput input = BuildPlanMemoryInputFromBeforeOneShotBufferize(
-        std::move(functionModule), options, trace, function);
+    PlanMemoryInput input;
+    if (functions.size() == 1 && decisionState) {
+      input = MeasureStage(trace, "BuildPlanMemoryInput", [&] {
+        return BuildPlanMemoryInput(std::move(*decisionState), function,
+                                    trace);
+      });
+    } else {
+      GenericModule functionModule =
+          functions.size() == 1 ? std::move(projected) : projected;
+      input = BuildPlanMemoryInputFromBeforeOneShotBufferize(
+          std::move(functionModule), options, trace, function);
+    }
     PlanMemoryModelResult plan = MeasureStage(trace, "PlanMemory", [&] {
       return planMemorySeed
                  ? PlanLocalMemoryForSeed(input, *planMemorySeed,
@@ -603,6 +710,9 @@ inline ModulePlanResult RunUBModuleFromAfterCVPipelining(
     result.requiredBits = std::max(result.requiredBits, plan.requiredBits);
     result.functions.push_back({function, std::move(plan)});
   }
+  if (result.conservativeUpperBoundBits && result.overflow)
+    throw std::runtime_error(
+        "conservative non-overflow proof contradicted full PlanMemory");
   return result;
 }
 
@@ -625,6 +735,8 @@ struct CVPipeliningUBPipelineOptions {
   bool restrictInplaceAsISA = false;
   uint64_t capacityBits = kUBCapacityBits;
   DebugTrace *debugTrace = nullptr;
+  bool enableDecisionOnlyNonOverflow = false;
+  bool observeConservativeNonOverflow = false;
 };
 
 inline ModulePlanResult RunCVPipeliningUBModulePipeline(
@@ -641,7 +753,8 @@ inline ModulePlanResult RunCVPipeliningUBModulePipeline(
   return RunUBModuleFromAfterCVPipelining(
       std::move(module), options.ubAffectingPasses, options.planMemorySeed,
       options.restrictInplaceAsISA, options.debugTrace,
-      options.capacityBits);
+      options.capacityBits, options.enableDecisionOnlyNonOverflow,
+      options.observeConservativeNonOverflow);
 }
 
 inline ModulePlanResult RunCVPipeliningUBModulePipeline(

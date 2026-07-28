@@ -120,6 +120,8 @@ for field in (
     "required_bits=",
     "capacity_bits=",
     "selected_seed=",
+    "decision_path=",
+    "conservative_upper_bound_bits=",
     "serialize_ns=",
     "model_ns=",
     "input_digest=",
