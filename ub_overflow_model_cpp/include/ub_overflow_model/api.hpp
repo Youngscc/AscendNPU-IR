@@ -8,9 +8,13 @@
 #include <utility>
 #include <vector>
 
+namespace mlir {
+class ModuleOp;
+}
+
 namespace cvub {
 
-inline constexpr uint32_t kInProcessAPIVersion = 1;
+inline constexpr uint32_t kInProcessAPIVersion = 2;
 inline constexpr uint32_t kUBRelevantCompileOptionsVersion = 4;
 inline constexpr uint32_t kBeforeCVPipeliningInputContractVersion = 1;
 inline constexpr uint32_t kSubprocessResultContractVersion = 1;
@@ -56,7 +60,8 @@ struct UBRelevantCompileOptions {
 };
 
 // Development/oracle controls are deliberately separate from the production
-// request. The BiShengIR prediction pass must call evaluate(), not this API.
+// request. The BiShengIR prediction pass must call evaluateModule(), not a
+// debug entry.
 struct DebugModelControls {
   std::optional<uint32_t> fixedPlanMemorySeed;
   std::optional<uint64_t> capacityOverrideBits;
@@ -79,8 +84,9 @@ struct Request {
   std::string_view compilerPipelineFingerprint =
       kA3MembasePipelineFingerprint;
   std::string_view target = "Ascend910_9382";
-  // Generic MLIR text owned by the caller, never a file path. The view only
-  // needs to remain valid for the synchronous evaluate() call.
+  // Compatibility text input owned by the caller, never a file path. Embedded
+  // production callers leave this empty and pass a borrowed ModuleOp to
+  // evaluateModule(). The view only needs to remain valid for evaluate().
   std::string_view beforeCVPipeliningGenericMLIR;
   UBRelevantCompileOptions options;
   std::string_view requestId;
@@ -154,6 +160,14 @@ Result evaluate(const Request &request) noexcept;
 // facts through this entry point. Production prediction passes must not.
 Result evaluateForDebug(const Request &request,
                         const DebugModelControls &controls) noexcept;
+
+// Embedded BiSheng entry. The ModuleOp is borrowed for this synchronous call
+// and is never modified or retained. The text field in Request is ignored.
+Result evaluateModule(mlir::ModuleOp module,
+                      const Request &request) noexcept;
+Result evaluateModuleForDebug(
+    mlir::ModuleOp module, const Request &request,
+    const DebugModelControls &controls) noexcept;
 
 const char *toString(Precision precision) noexcept;
 const char *toString(Status status) noexcept;

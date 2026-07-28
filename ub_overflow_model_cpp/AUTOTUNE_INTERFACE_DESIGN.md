@@ -1,23 +1,22 @@
 # UB Overflow Model Autotune 进程内接口规范
 
-状态：进程内模型 API 已实现；BiShengIR prediction pass 接入待完成
+状态：ModuleOp 进程内 API 与 BiShengIR prediction pass 已实现
 
-版本：In-Process API v1；UBRelevantCompileOptions v4
+版本：In-Process API v2；UBRelevantCompileOptions v4
 
-更新时间：2026-07-24
+更新时间：2026-07-28
 
 当前实现位置：
 
 ```text
-include/ub_overflow_model/api.hpp        稳定公共 DTO 和 evaluate() 声明
-src/api.cpp                              内存 IR、参数适配、诊断、摘要和计时实现
+include/ub_overflow_model/api.hpp        稳定公共 DTO 和同步 ModuleOp/evaluate 声明
+src/api.cpp                              MLIR view、参数适配、诊断、摘要和计时实现
 output/lib/libub_overflow_model.a        build.sh 生成的可链接静态库
 tests/test_in_process_api.cpp             接口契约回归
 ```
 
-当前结论：现有 API 的调用形态可以保留，但 `EffectiveCompileOptions v1` 尚不足以对所有
-真实 pipeline 分支声明峰值完全一致。在本文要求的 options v4、prediction pass 和
-differential Exact 认证完成前，只允许 shadow/fail-open，不允许据此 prune candidate。
+当前生产入口为同步 `evaluateModule()`：借用调用者的 `ModuleOp`，不修改、不持有，也不再
+打印并解析完整 Generic MLIR。文本 `evaluate()` 仅作为兼容入口保留。
 
 ## 1. 目标与边界
 
@@ -495,6 +494,10 @@ struct Result {
 
 Result evaluate(const Request &request) noexcept;
 
+// 生产 embedded 入口。ModuleOp 仅在同步调用期间借用。
+Result evaluateModule(mlir::ModuleOp module,
+                      const Request &request) noexcept;
+
 // 仅供 standalone/oracle；prediction pass 禁止调用该入口。
 struct DebugModelControls {
   std::optional<uint32_t> fixedPlanMemorySeed;
@@ -509,13 +512,17 @@ struct DebugModelControls {
 
 Result evaluateForDebug(const Request &request,
                         const DebugModelControls &controls) noexcept;
+Result evaluateModuleForDebug(mlir::ModuleOp module,
+                              const Request &request,
+                              const DebugModelControls &controls) noexcept;
 
 } // namespace cvub
 ```
 
 `evaluate()` 不允许异常越过库边界。内部异常转换为 `InternalError`，调用方 fail-open。
-`effectiveOptionsDigest` 必须覆盖 target、profile 和 16 个字段，`inputDigest` 必须覆盖实际传入的 Generic
-MLIR 文本。`compilerPipelineFingerprint` 至少绑定 BiShengIR commit、目标 pipeline 类型和
+`effectiveOptionsDigest` 必须覆盖 target、profile 和 16 个字段。ModuleOp 入口的
+`inputDigest` 由一次只读导入过程中计算的结构摘要生成，不得为 digest 再打印完整 IR；文本
+兼容入口仍覆盖传入字节。`compilerPipelineFingerprint` 至少绑定 BiShengIR commit、目标 pipeline 类型和
 从 CVPipelining 到本地 PlanMemory 的 pass manifest；未知 fingerprint 必须 blocker。
 
 `Result` 有两种 exact non-overflow 形态：
@@ -686,13 +693,6 @@ pm.nest<func::FuncOp>().addPass(createCVPipeliningPass(cvOptions));
 ```cpp
 static cvub::Result evaluateCurrentModule(
     mlir::ModuleOp module, const PredictionConfig &config) {
-  std::string ir;
-  llvm::raw_string_ostream os(ir);
-  mlir::OpPrintingFlags flags;
-  flags.printGenericOpForm();
-  module.print(os, flags);
-  os.flush();
-
   cvub::Request request;
   request.apiVersion = cvub::kInProcessAPIVersion;
   request.optionsVersion = cvub::kUBRelevantCompileOptionsVersion;
@@ -700,27 +700,14 @@ static cvub::Result evaluateCurrentModule(
   request.compilerProfile = config.profile;
   request.compilerPipelineFingerprint = config.pipelineFingerprint;
   request.target = config.target;
-  request.beforeCVPipeliningGenericMLIR = ir;
   request.options = config.ubOptions;
   request.requestId = config.requestId;
-  return cvub::evaluate(request);
+  return cvub::evaluateModule(module, request);
 }
 ```
 
-必须固定与 input contract 绑定的 printing flags。除 Generic form 外，还要保证不启用
-`elideLargeElementsAttrs`、debug-info 注入或本地化打印。输入 digest 应对 `ir` 的实际
-字节计算。
-
-若只需最小打印示例，核心代码是：
-
-```cpp
-std::string ir;
-llvm::raw_string_ostream os(ir);
-mlir::OpPrintingFlags flags;
-flags.printGenericOpForm();
-module.print(os, flags);
-os.flush();
-```
+只有显式的 `BISHENGIR_UB_MODEL_COMPARE_TEXT_ENTRY=1` 验证模式才打印同一 ModuleOp 并调用旧
+文本入口，逐字段检查双入口。该模式默认关闭，不属于产品耗时。
 
 prediction pass 的插入点必须紧邻 `createCVPipeliningPass`，中间不能再有未纳入 input
 contract 的 pass。测试必须同时 dump prediction pass 实际传给 API 的文本和真实 compiler

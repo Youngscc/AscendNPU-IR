@@ -122,6 +122,14 @@ ub_overflow_model_cpp/tests/test_bisheng_embedded_matrix.py
 ub_overflow_model_cpp/tests/run_tests.sh
 ```
 
+direct-MLIR 边界：
+
+```text
+ub_overflow_model_cpp/src/ir/mlir_module_view.hpp        同步只读 ModuleOp view/import
+ub_overflow_model_cpp/src/mlir_main.cpp                  MLIR parser standalone 边界
+ub_overflow_model_cpp/include/ub_overflow_model/api.hpp  evaluateModule 同步 API
+```
+
 当前正确性入口从 adapter 启动真实 `bishengir-compile`，在同一个 attempt 中比较 embedded
 model 与原生 PlanMemory。`data/before_cvpipelining` 适合 standalone 性能分析，不替代
 embedded 正确性 oracle。
@@ -131,10 +139,16 @@ embedded 正确性 oracle。
 
 ## 常用命令
 
-构建模型和静态库：
+构建兼容模型和静态库：
 
 ```bash
 bash ub_overflow_model_cpp/build.sh
+```
+
+构建与 embedded 路径共用 ModuleOp API 的 standalone：
+
+```bash
+cmake --build build --target bishengir-ub-overflow-model -j8
 ```
 
 构建带 embedded pass 的真实 compiler：
@@ -152,12 +166,12 @@ bash ub_overflow_model_cpp/tests/run_tests.sh
 standalone 真实 retry-only：
 
 ```bash
-ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
-  --before-cvpipelining-ir=INPUT.mlir \
+build/bin/bishengir-ub-overflow-model \
+  INPUT.mlir \
   --format=json
 ```
 
-单输入 stage timing（只用于性能诊断）：
+兼容文本入口的单输入 stage timing（只用于性能诊断）：
 
 ```bash
 ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \

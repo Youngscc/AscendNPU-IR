@@ -2,6 +2,10 @@
 
 #include "pipeline/cvpipelining_ub_pipeline.hpp"
 
+#ifdef CVUB_ENABLE_MLIR_API
+#include "ir/mlir_module_view.hpp"
+#endif
+
 #include <chrono>
 #include <iomanip>
 #include <new>
@@ -9,7 +13,7 @@
 #include <stdexcept>
 
 #ifndef CVUB_MODEL_BUILD_ID
-#define CVUB_MODEL_BUILD_ID "cvub-api-v3"
+#define CVUB_MODEL_BUILD_ID "cvub-api-v4-direct-mlir"
 #endif
 
 namespace cvub {
@@ -87,7 +91,8 @@ std::optional<uint64_t> CapacityForTarget(std::string_view target) {
 }
 
 std::optional<Diagnostic>
-ValidateRequest(const Request &request, const DebugModelControls &debug) {
+ValidateRequest(const Request &request, const DebugModelControls &debug,
+                bool hasInput) {
   if (request.apiVersion != kInProcessAPIVersion)
     return Diagnostic{"unsupported_api_version",
                       "unsupported UB model in-process API version"};
@@ -105,7 +110,7 @@ ValidateRequest(const Request &request, const DebugModelControls &debug) {
       kA3MembasePipelineFingerprint)
     return Diagnostic{"unsupported_pipeline_fingerprint",
                       "compiler pipeline has not been certified"};
-  if (request.beforeCVPipeliningGenericMLIR.empty())
+  if (!hasInput)
     return Diagnostic{"invalid_request", "before-CVPipelining IR is empty"};
   if (request.target.empty())
     return Diagnostic{"invalid_effective_options", "target is empty"};
@@ -253,9 +258,16 @@ const char *toString(CompilerProfile profile) noexcept {
   return "unknown";
 }
 
+struct PreparedInput {
+  GenericModule module;
+  std::string digest;
+};
+
+template <typename PrepareInput>
 Result EvaluateImpl(const Request &request, const DebugModelControls &debug,
                     bool enableDecisionOnlyNonOverflow,
-                    bool observeConservativeNonOverflow) noexcept {
+                    bool observeConservativeNonOverflow, bool hasInput,
+                    PrepareInput &&prepareInput) noexcept {
   const Clock::time_point started = Clock::now();
   Result result;
   try {
@@ -263,10 +275,6 @@ Result EvaluateImpl(const Request &request, const DebugModelControls &debug,
     result.modelBuildId = CVUB_MODEL_BUILD_ID;
     result.compilerPipelineFingerprint =
         std::string(request.compilerPipelineFingerprint);
-    result.inputDigest = StableDigest(
-        std::string("before-cvpipelining-v") +
-        std::to_string(request.inputContractVersion) + "\n" +
-        std::string(request.beforeCVPipeliningGenericMLIR));
     result.effectiveOptionsDigest = EffectiveOptionsDigest(request, debug);
     if (const std::optional<uint64_t> capacity =
             debug.capacityOverrideBits
@@ -274,7 +282,7 @@ Result EvaluateImpl(const Request &request, const DebugModelControls &debug,
                 : CapacityForTarget(request.target))
       result.capacityBits = *capacity;
     if (const std::optional<Diagnostic> invalid =
-            ValidateRequest(request, debug)) {
+            ValidateRequest(request, debug, hasInput)) {
       SetFailure(result, Status::Blocker, invalid->category, invalid->message);
       result.totalTimeNs = Nanoseconds(Clock::now() - started);
       return result;
@@ -285,9 +293,8 @@ Result EvaluateImpl(const Request &request, const DebugModelControls &debug,
     if (debug.collectStageTimings)
       trace.emplace(timingOutput, std::filesystem::path{}, false, true, false);
     DebugTrace *tracePointer = trace ? &*trace : nullptr;
-    GenericModule module = MeasureStage(tracePointer, "ParseGenericIR", [&] {
-      return ParseGenericIRText(request.beforeCVPipeliningGenericMLIR, false);
-    });
+    PreparedInput prepared = prepareInput(tracePointer);
+    result.inputDigest = std::move(prepared.digest);
     CVPipeliningUBPipelineOptions pipelineOptions =
         PipelineOptions(request, debug, tracePointer);
     pipelineOptions.enableDecisionOnlyNonOverflow =
@@ -295,7 +302,7 @@ Result EvaluateImpl(const Request &request, const DebugModelControls &debug,
     pipelineOptions.observeConservativeNonOverflow =
         observeConservativeNonOverflow;
     const ModulePlanResult plan = RunCVPipeliningUBModulePipeline(
-        std::move(module), pipelineOptions);
+        std::move(prepared.module), pipelineOptions);
     if (plan.precision != ModulePlanPrecision::Exact) {
       SetFailure(result, Status::Blocker, "model_blocker",
                  "the UB model could not produce an exact result");
@@ -359,12 +366,73 @@ Result EvaluateImpl(const Request &request, const DebugModelControls &debug,
 }
 
 Result evaluate(const Request &request) noexcept {
-  return EvaluateImpl(request, DebugModelControls{}, true, false);
+  return EvaluateImpl(
+      request, DebugModelControls{}, true, false,
+      !request.beforeCVPipeliningGenericMLIR.empty(),
+      [&](DebugTrace *trace) {
+        PreparedInput input;
+        input.digest = StableDigest(
+            std::string("before-cvpipelining-v") +
+            std::to_string(request.inputContractVersion) + "\n" +
+            std::string(request.beforeCVPipeliningGenericMLIR));
+        input.module = MeasureStage(trace, "ParseGenericIR", [&] {
+          return ParseGenericIRText(request.beforeCVPipeliningGenericMLIR,
+                                    false);
+        });
+        return input;
+      });
 }
 
 Result evaluateForDebug(const Request &request,
                         const DebugModelControls &controls) noexcept {
-  return EvaluateImpl(request, controls, false, true);
+  return EvaluateImpl(
+      request, controls, false, true,
+      !request.beforeCVPipeliningGenericMLIR.empty(),
+      [&](DebugTrace *trace) {
+        PreparedInput input;
+        input.digest = StableDigest(
+            std::string("before-cvpipelining-v") +
+            std::to_string(request.inputContractVersion) + "\n" +
+            std::string(request.beforeCVPipeliningGenericMLIR));
+        input.module = MeasureStage(trace, "ParseGenericIR", [&] {
+          return ParseGenericIRText(request.beforeCVPipeliningGenericMLIR,
+                                    false);
+        });
+        return input;
+      });
 }
+
+#ifdef CVUB_ENABLE_MLIR_API
+Result evaluateModule(mlir::ModuleOp module,
+                      const Request &request) noexcept {
+  return EvaluateImpl(
+      request, DebugModelControls{}, true, false, static_cast<bool>(module),
+      [&](DebugTrace *trace) {
+        return MeasureStage(trace, "ImportMLIRModule", [&] {
+          MLIRModuleView view(module);
+          MLIRModuleView::MaterializedModule imported =
+              view.materializeLegacyGenericModule();
+          return PreparedInput{std::move(imported.module),
+                               std::move(imported.structuralDigest)};
+        });
+      });
+}
+
+Result evaluateModuleForDebug(
+    mlir::ModuleOp module, const Request &request,
+    const DebugModelControls &controls) noexcept {
+  return EvaluateImpl(
+      request, controls, false, true, static_cast<bool>(module),
+      [&](DebugTrace *trace) {
+        return MeasureStage(trace, "ImportMLIRModule", [&] {
+          MLIRModuleView view(module);
+          MLIRModuleView::MaterializedModule imported =
+              view.materializeLegacyGenericModule();
+          return PreparedInput{std::move(imported.module),
+                               std::move(imported.structuralDigest)};
+        });
+      });
+}
+#endif
 
 } // namespace cvub

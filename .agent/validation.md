@@ -116,6 +116,29 @@ round       prediction total    model total    serialize total    process wall  
 auto-MB 20、UB-saving 20、InjectBlockSync 20，结果全部 matched；AutoBlockify 独立 160-input
 验证也全部通过。
 
+## 2026-07-28 阶段 1 direct-ModuleOp 结果
+
+阶段 1 使用同一 160-input production-default retry-only 集合，将阶段 0 冻结二进制与当前
+direct-ModuleOp 编译器交错运行三轮。480 个样本结果为：
+
+```text
+variant       prediction total    model/import total    serialize    process wall    peak RSS
+baseline           2047.247 ms           1979.956 ms     67.291 ms    12569.785 ms     44.29 MB
+direct             1968.624 ms           1968.624 ms      0.000 ms    12493.642 ms     43.89 MB
+change                 -3.84%                -0.57%       -100.0%         -0.61%
+```
+
+每输入 prediction median/mean/p95/max 从
+`1.448/4.265/14.711/85.453 ms` 下降到 `1.342/4.101/14.197/81.951 ms`。两侧每轮均有
+147/160 个 exact non-overflow fast-path 命中。报告位于本地
+`output/performance/stage1-direct-final-160x3.*`，不提交。
+
+完整 `tests/run_tests.sh` 通过；阶段 0 同一组 140 个独立 fixed-seed embedded attempt 再次为
+`140 matched / 0 different / 0 unavailable / 0 timeout`。直接入口与兼容文本入口还在代表配置
+上逐字段对比通过。新的 `build/bin/bishengir-ub-overflow-model` 用 MLIR parser 读取文件后
+调用同一个 `evaluateModule()`，并在销毁输入 ModuleOp 后使用拥有所有权的 Result，作为同步
+借用生命周期检查。
+
 160 个去重 before-CVPipelining 输入，production-default，retry-only，O3，开启 stage
 timing，三轮结果：
 

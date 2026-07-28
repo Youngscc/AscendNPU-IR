@@ -16,7 +16,7 @@ plan 即为 `success`，20 次全部失败才是 `overflow`。无法精确建模
 
 ## 1. 构建
 
-构建独立可执行文件和进程内静态库：
+构建不依赖 MLIR 的兼容 CLI 和进程内静态库：
 
 ```bash
 bash ub_overflow_model_cpp/build.sh
@@ -29,6 +29,15 @@ ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model
 ub_overflow_model_cpp/output/lib/libub_overflow_model.a
 ```
 
+构建直接解析 MLIR、与嵌入式路径共用 `ModuleOp` API 的产品 CLI：
+
+```bash
+cmake --build build --target bishengir-ub-overflow-model -j8
+```
+
+输出为 `build/bin/bishengir-ub-overflow-model`。下文单独使用模型时优先使用这个直接入口；
+`output/bin` 下的版本暂时保留为文本 API 兼容工具。
+
 构建带轻量模型的真实 BiSheng 编译器：
 
 ```bash
@@ -40,7 +49,7 @@ cmake --build build --target bishengir-compile -j8
 直接读取一个 before-CVPipelining MLIR：
 
 ```bash
-ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
+build/bin/bishengir-ub-overflow-model \
   ub_overflow_model_cpp/data/before_cvpipelining/vector_add_2x_bench.ttadapter/before_cvpipelining_func_func_add_kernel_32.mlir \
   --format=json
 ```
@@ -48,16 +57,14 @@ ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
 也可以通过标准输入传入 MLIR：
 
 ```bash
-ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
-  --before-cvpipelining-ir=- \
+build/bin/bishengir-ub-overflow-model - \
   --format=json < INPUT.mlir
 ```
 
 默认执行 seed-retry。只有在定位单个 PlanMemory attempt 时才固定 seed：
 
 ```bash
-ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
-  --before-cvpipelining-ir=INPUT.mlir \
+build/bin/bishengir-ub-overflow-model INPUT.mlir \
   --plan-memory-seed=5 \
   --format=json
 ```
@@ -66,7 +73,7 @@ ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
 
 | 参数 | 含义 |
 |---|---|
-| `--before-cvpipelining-ir=PATH` | 输入 Generic MLIR，`-` 表示 stdin |
+| 位置参数 `PATH` | 输入 Generic MLIR，`-` 表示 stdin |
 | `--format=json\|text` | 输出格式 |
 | `--plan-memory-seed=-1\|0..19` | `-1` 为真实 retry，0～19 为固定 seed |
 | `--disable-auto-cv-work-space-manage=BOOL` | 关闭自动 CV workspace 管理 |
@@ -85,19 +92,21 @@ ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model \
 | `--disable-auto-inject-block-sync=BOOL` | 关闭自动 block sync |
 | `--limit-auto-multi-buffer-of-local-buffer=STRATEGY` | local buffer multi-buffer 策略 |
 | `--limit-auto-multi-buffer-buffer=STRATEGY` | MIX buffer multi-buffer 策略 |
-| `--show-runtime-timing` | 输出总耗时和逐阶段耗时 |
-| `--verify-each` | 每个建模阶段后校验 IR |
 
 multi-buffer strategy 可取 `no-limit`、`only-cube`、`only-vector` 或 `no-l0c`。
 完整参数以以下命令为准：
 
 ```bash
-ub_overflow_model_cpp/output/bin/bishengir-ub-overflow-model --help
+build/bin/bishengir-ub-overflow-model --help
 ```
+
+逐阶段 timing 和 `--verify-each` 仍由 `output/bin` 下的兼容诊断 CLI 提供；它们不属于生产
+direct-ModuleOp 路径。
 
 ### 进程内 C++ 接口
 
-生产热路径应链接 `libub_overflow_model.a`，避免为每个 candidate 启动子进程。公共头文件为
+生产热路径通过 CMake target `BiShengIRUBOverflowModel` 链接模型，避免为每个 candidate 启动
+子进程。`build.sh` 生成的静态库只用于不依赖 MLIR 的文本兼容方。公共头文件为
 `ub_overflow_model_cpp/include/ub_overflow_model/api.hpp`。
 
 ```cpp
@@ -107,7 +116,7 @@ cvub::Request request;
 request.compilerProfile = cvub::CompilerProfile::TritonMembaseA2A3;
 request.compilerPipelineFingerprint = cvub::kA3MembasePipelineFingerprint;
 request.target = "Ascend910_9382";
-request.beforeCVPipeliningGenericMLIR = beforeCVPipeliningText;
+// embedded 路径无需序列化 ModuleOp；兼容 evaluate() 才填写文本字段。
 
 // 必须传入真实 HIVMPipelineOptions 解析默认值和别名后的最终有效值。
 request.options.disableAutoCVWorkSpaceManage = disableAutoCVWorkspaceManage;
@@ -129,7 +138,7 @@ request.options.localMultiBufferStrategy =
 request.options.mixMultiBufferStrategy =
     cvub::MultiBufferStrategy::OnlyCube;
 
-const cvub::Result result = cvub::evaluate(request);
+const cvub::Result result = cvub::evaluateModule(module, request);
 if (result.precision == cvub::Precision::Exact &&
     result.status == cvub::Status::Overflow) {
   // 淘汰当前 candidate。

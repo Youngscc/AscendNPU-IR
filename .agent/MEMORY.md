@@ -1,7 +1,7 @@
 # AscendNPU-IR 项目记忆
 
-最后核实：2026-07-28，分支 `codex/ub-overflow-model-product`，阶段 0 模型基线提交
-`75809a33d`。本文件是 `.agent` 的唯一入口；事实与当前源码或新测量冲突时，应重新核实
+最后核实：2026-07-28，分支 `codex/ub-overflow-model-product`，阶段 0 测量提交
+`2118af59f`（冻结的优化前模型二进制来自 `75809a33d`）。本文件是 `.agent` 的唯一入口；事实与当前源码或新测量冲突时，应重新核实
 并直接更新当前结论，不在这里堆叠多代任务流水账。
 
 ## 当前唯一目标
@@ -44,8 +44,9 @@ CVPipelining 的真实语义。完整执行顺序和验收门槛见
 
 ## 当前实现与待实现边界
 
-当前生产 pass 仍把 `ModuleOp` 打印成 Generic MLIR 文本，`evaluate()` 再解析为
-`GenericModule`。模型内部仍经过多层状态：
+阶段 1 已使生产 pass 直接调用同步 `evaluateModule(ModuleOp, Request)`；输入 ModuleOp 仅在
+本次调用中借用，不修改、不跨 attempt 保存，生产路径已不再打印/解析完整 Generic MLIR。
+当前 `MLIRModuleView` 仍会一次性投影出旧核心需要的 `GenericModule`，模型内部仍经过多层状态：
 
 ```text
 GenericModule
@@ -59,7 +60,7 @@ GenericModule
   -> PlanMemory
 ```
 
-新的目标架构尚未实现，计划为：
+stable-ID overlay 及后续目标架构尚未实现，计划为：
 
 ```text
 MLIR-backed read-only input
@@ -93,6 +94,12 @@ fast-path hits:    147 / 160 per round
 本地报告位于 `output/performance/stage0/`，不提交。代表 embedded 20-seed 基线共 140 个
 attempt，结果 `140 matched / 0 different / 0 unavailable / 0 timeout`；AutoBlockify 独立
 160-input 验证全部通过。
+
+阶段 1 direct-ModuleOp 同口径交错 A/B（160 inputs × 3）中，prediction internal total 从
+`2047.247 ms` 降到 `1968.624 ms`（`-3.84%`），process wall 从 `12569.785 ms` 降到
+`12493.642 ms`（`-0.61%`），serialize 从 `67.291 ms` 归零，峰值 RSS 从 44.29 MB 略降到
+43.89 MB；140 个代表 fixed-seed attempt 再次全部 matched。下一阶段应消除为旧核心构建完整
+`GenericModule` 的过渡投影，而不是继续优化文本入口。
 
 2026-07-28 在同机、O3、production-default、真实 retry-only、160 个去重
 before-CVPipelining 输入上，开启 stage timing 后连续三轮：

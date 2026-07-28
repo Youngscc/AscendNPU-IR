@@ -6,7 +6,6 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -16,14 +15,6 @@ namespace mlir {
 namespace hivm {
 namespace {
 
-using Clock = std::chrono::steady_clock;
-
-uint64_t nanoseconds(Clock::duration duration) {
-  const auto value =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
-  return value <= 0 ? 0 : static_cast<uint64_t>(value);
-}
-
 bool isEmbeddedValidationEnabled() {
   const char *value = std::getenv("BISHENGIR_UB_MODEL_VALIDATION");
   return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
@@ -31,6 +22,11 @@ bool isEmbeddedValidationEnabled() {
 
 bool isUBFlowTraceEnabled() {
   const char *value = std::getenv("BISHENGIR_UB_FLOW_TRACE");
+  return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
+}
+
+bool isTextEntryComparisonEnabled() {
+  const char *value = std::getenv("BISHENGIR_UB_MODEL_COMPARE_TEXT_ENTRY");
   return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
 }
 
@@ -56,6 +52,45 @@ std::string sourceFileForTrace(ModuleOp module) {
 
 void printBoolean(llvm::raw_ostream &output, bool value) {
   output << (value ? "true" : "false");
+}
+
+bool sameBuffer(const cvub::BufferResult &lhs,
+                const cvub::BufferResult &rhs) {
+  return lhs.name == rhs.name && lhs.extentBits == rhs.extentBits &&
+         lhs.multiBufferNum == rhs.multiBufferNum &&
+         lhs.offsetsBytes == rhs.offsetsBytes &&
+         lhs.allocTime == rhs.allocTime && lhs.freeTime == rhs.freeTime;
+}
+
+bool sameFunction(const cvub::FunctionResult &lhs,
+                  const cvub::FunctionResult &rhs) {
+  if (lhs.function != rhs.function || lhs.overflow != rhs.overflow ||
+      lhs.ubPeakBits != rhs.ubPeakBits ||
+      lhs.requiredBits != rhs.requiredBits ||
+      lhs.selectedSeed != rhs.selectedSeed ||
+      lhs.inplacePairs != rhs.inplacePairs ||
+      lhs.buffers.size() != rhs.buffers.size())
+    return false;
+  for (size_t index = 0; index < lhs.buffers.size(); ++index)
+    if (!sameBuffer(lhs.buffers[index], rhs.buffers[index]))
+      return false;
+  return true;
+}
+
+bool samePlanContract(const cvub::Result &lhs, const cvub::Result &rhs) {
+  if (lhs.precision != rhs.precision || lhs.status != rhs.status ||
+      lhs.overflow != rhs.overflow || lhs.ubPeakBits != rhs.ubPeakBits ||
+      lhs.requiredBits != rhs.requiredBits ||
+      lhs.capacityBits != rhs.capacityBits ||
+      lhs.selectedSeed != rhs.selectedSeed ||
+      lhs.decisionOnlyNonOverflow != rhs.decisionOnlyNonOverflow ||
+      lhs.conservativeUpperBoundBits != rhs.conservativeUpperBoundBits ||
+      lhs.functions.size() != rhs.functions.size())
+    return false;
+  for (size_t index = 0; index < lhs.functions.size(); ++index)
+    if (!sameFunction(lhs.functions[index], rhs.functions[index]))
+      return false;
+  return true;
 }
 
 std::optional<uint32_t> validationSeed() {
@@ -154,13 +189,14 @@ void emitMachineResult(const cvub::Result &result, uint64_t serializeNs,
   llvm::errs() << '\n';
 }
 
-void emitFlowTrace(ModuleOp module, StringRef genericMLIR,
-                   const cvub::Request &request,
+void emitFlowTrace(ModuleOp module, const cvub::Request &request,
                    const cvub::Result &result, uint64_t traceAttempt) {
+  size_t operationCount = 0;
+  module.walk([&](Operation *) { ++operationCount; });
   llvm::errs() << "[UB-FLOW][ATTEMPT " << traceAttempt
                << "][LIGHTWEIGHT_MODEL][RESULT]"
                << " input=" << sourceFileForTrace(module)
-      << " input_mlir_bytes=" << genericMLIR.size()
+      << " input_operations=" << operationCount
       << " status=" << cvub::toString(result.status)
       << " precision=" << cvub::toString(result.precision)
       << " overflow="
@@ -225,22 +261,12 @@ public:
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
-    const Clock::time_point serializeStarted = Clock::now();
-    std::string genericMLIR;
-    llvm::raw_string_ostream output(genericMLIR);
-    OpPrintingFlags flags;
-    flags.printGenericOpForm();
-    module.print(output, flags);
-    output.flush();
-    const uint64_t serializeNs =
-        nanoseconds(Clock::now() - serializeStarted);
 
     cvub::Request request;
     request.compilerProfile = cvub::CompilerProfile::TritonMembaseA2A3;
     request.compilerPipelineFingerprint =
         cvub::kA3MembasePipelineFingerprint;
     request.target = config.target;
-    request.beforeCVPipeliningGenericMLIR = genericMLIR;
     request.options = config.modelOptions;
 
     // Production always uses the narrow evaluate() contract.  The detailed
@@ -252,22 +278,40 @@ public:
     if (validationEnabled) {
       cvub::DebugModelControls controls;
       controls.fixedPlanMemorySeed = validationSeed();
-      result = cvub::evaluateForDebug(request, controls);
+      result = cvub::evaluateModuleForDebug(module, request, controls);
+      if (isTextEntryComparisonEnabled()) {
+        std::string genericMLIR;
+        llvm::raw_string_ostream output(genericMLIR);
+        OpPrintingFlags flags;
+        flags.printGenericOpForm();
+        module.print(output, flags);
+        output.flush();
+        cvub::Request textRequest = request;
+        textRequest.beforeCVPipeliningGenericMLIR = genericMLIR;
+        const cvub::Result textResult =
+            cvub::evaluateForDebug(textRequest, controls);
+        if (!samePlanContract(result, textResult)) {
+          module.emitError()
+              << "direct MLIR and compatibility text model entries differ";
+          signalPassFailure();
+          return;
+        }
+        llvm::errs() << "BISHENGIR_UB_MODEL_INPUT_PARITY\tmatched\n";
+      }
       validationId = nextValidationId();
       dumpValidationResult(validationId, result);
     } else {
-      result = cvub::evaluate(request);
+      result = cvub::evaluateModule(module, request);
     }
     if (shouldEmitMachineResult(validationEnabled))
-      emitMachineResult(result, serializeNs,
+      emitMachineResult(result, /*serializeNs=*/0,
                         validationEnabled
                             ? std::optional<uint64_t>(validationId)
                             : std::nullopt);
 
     const bool traceEnabled = isUBFlowTraceEnabled();
     if (traceEnabled)
-      emitFlowTrace(module, genericMLIR, request, result,
-                    config.traceAttempt);
+      emitFlowTrace(module, request, result, config.traceAttempt);
 
     if (config.pruneOnOverflow &&
         result.precision == cvub::Precision::Exact &&

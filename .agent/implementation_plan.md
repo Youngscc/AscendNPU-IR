@@ -202,6 +202,14 @@ ub_overflow_model_cpp/src/ir/generic_ir.hpp
 
 一个独立提交：`perf(ub-model): read embedded input directly from MLIR`。
 
+状态（2026-07-28）：实现和门槛验证已完成，待本阶段提交。生产 prediction pass 已改为同步
+借用 `ModuleOp`，不再打印/解析完整 Generic MLIR；新增只读 `MLIRModuleView`、MLIR parser
+standalone target 和默认关闭的双入口全字段差分。阶段 0 同口径 160-input × 3 轮 A/B 中，
+prediction internal total 从 `2047.247 ms` 降至 `1968.624 ms`（`-3.84%`），进程 wall 从
+`12569.785 ms` 降至 `12493.642 ms`（`-0.61%`），峰值 RSS 略降；140 个代表 fixed-seed
+attempt 全部 matched。阶段 2 仍需消除 direct import 后为旧核心生成完整 `GenericModule` 的
+过渡成本。
+
 ## 7. 阶段 2：stable-ID shadow overlay
 
 ### 目标
