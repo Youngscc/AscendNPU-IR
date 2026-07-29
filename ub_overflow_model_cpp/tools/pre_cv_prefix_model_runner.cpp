@@ -2,6 +2,7 @@
 #include "../src/passes/auto_blockify_parallel_loop.hpp"
 #include "../src/passes/affine_min_max_canonicalization.hpp"
 #include "../src/passes/outer_extended_canonicalizer.hpp"
+#include "../src/passes/canonicalization_hivm_pipeline.hpp"
 #include "../src/passes/pre_cv_mark_multi_buffer.hpp"
 
 #include <filesystem>
@@ -15,6 +16,7 @@ struct Options {
   bool applyModel = false;
   bool applyOuterCanonicalizer = false;
   bool applyArithToAffine = false;
+  bool applyCanonicalizeIterArg = false;
   cvub::AutoBlockifyPrefixOptions autoBlockify;
   cvub::PreCVMarkMultiBufferOptions markMultiBuffer;
   std::filesystem::path input;
@@ -42,6 +44,8 @@ Options ParseOptions(int argc, char **argv) {
       options.applyOuterCanonicalizer = true;
     else if (argument == "--apply-arith-to-affine")
       options.applyArithToAffine = true;
+    else if (argument == "--apply-canonicalize-iter-arg")
+      options.applyCanonicalizeIterArg = true;
     else if (argument == "--enable-auto-multi-buffer")
       options.markMultiBuffer.enableAuto = true;
     else if (argument == "--disable-auto-cv-workspace-manage")
@@ -79,6 +83,12 @@ int main(int argc, char **argv) {
   try {
     const Options options = ParseOptions(argc, argv);
     cvub::GenericModule module = cvub::ParseGenericIR(options.input, false);
+    // Parsed GenericOperation records intentionally start with conservative
+    // placeholder semantics.  Every standalone pass entry must see the same
+    // reviewed effects/types as a cumulative lightweight prefix; otherwise
+    // CanonicalizeIterArg's internal CSE can incorrectly merge reads or
+    // allocations only on the single-pass verification path.
+    cvub::ApplyOperationSemanticsToAll(module.operations);
     if (options.applyModel) {
       module = cvub::RunAutoBlockifyPrefixStage(
           std::move(module), options.autoBlockify);
@@ -89,8 +99,11 @@ int main(int argc, char **argv) {
       module = cvub::RunOuterExtendedCanonicalizer(std::move(module));
     if (options.applyArithToAffine)
       module = cvub::RunArithToAffineConversionPass(std::move(module));
+    if (options.applyCanonicalizeIterArg)
+      module = cvub::RunCanonicalizationHIVMAfterArithToAffine(
+          std::move(module));
     if (!options.applyModel && !options.applyOuterCanonicalizer &&
-        !options.applyArithToAffine) {
+        !options.applyArithToAffine && !options.applyCanonicalizeIterArg) {
       cvub::ApplyOperationSemanticsToAll(module.operations);
       module = cvub::CompactGenericModule(std::move(module));
     }

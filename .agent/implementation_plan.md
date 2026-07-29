@@ -281,7 +281,7 @@ InlineOTFBroadcast 清理冗余 1-to-1 broadcast，但真实行为来自全部�
 
 ## 9. 阶段 4：逐个实现九步 canonicalizationHIVMPipeline
 
-当前子阶段：**4.2 CanonicalizeIterArg**。
+当前子阶段：**4.3 ExtendedCanonicalizer（module）**。
 
 九个 pass 必须按下面九个子阶段依次实现和关闸。每个子阶段都执行：源码审阅→单元 fixture→
 单 pass checkpoint→从 AutoBlockify 开始的累积 checkpoint；通过后才进入下一个。
@@ -300,9 +300,17 @@ PlanMemory seeds `{0,13}` 为 `8/8 matched`。
 
 ### 4.2 CanonicalizeIterArg
 
+状态：**2026-07-30 已完成**。
+
 - 逐项覆盖 scf.for/scf.while、iteration-independent、dead iter arg、effect/speculation、
   result/yield/region-arg 一致置换；
 - 现有实现只作为起点，原生 1710 行源码是判定标准。
+
+完成证据：fixture 与真实 `bishengir-opt --scf-canonicalize-iter-arg` 精确一致，覆盖外部 tensor
+yield、嵌套 SCF unchanged、For/While dead channel 以及 vector-function backward gate；内部 CSE
+只在原生 For/While pattern 调用点执行，保守 `none` effect 不再被当成 pure。8 profiles × 160
+inputs 的 `04 -> 05` 单 pass及 `00 -> 05` 累计 checkpoint 为 `1280/1280 PASS`；完整测试通过；
+代表 PlanMemory seeds `{0,13}` 为 `8/8 matched`。
 
 ### 4.3 ExtendedCanonicalizer（module）
 

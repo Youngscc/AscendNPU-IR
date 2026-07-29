@@ -168,13 +168,20 @@ production/auto-MB × seeds `{0,13}` 的下游 embedded PlanMemory 为 `8/8 matc
 一致的标准 `affine_map`，覆盖 Add/Sub/Mul/CeilDiv/Div/Rem 与 signed/unsigned Min/Max 的 index
 分支，非 index arithmetic 保持不变。8 profiles × 160 inputs 的单 pass 与累计 checkpoint 为
 `1280/1280 PASS`；真实 `bishengir-opt --convert-arith-to-affine` fixture 完全一致；完整模型测试
-通过；代表下游 PlanMemory 为 `8/8 matched`。当前进入阶段 4.2：只实现
-`CanonicalizeIterArg`。
+通过；代表下游 PlanMemory 为 `8/8 matched`。
+
+阶段 4.2 已于 2026-07-30 完成：`CanonicalizeIterArg` 严格保留原生 greedy 驱动语义，覆盖
+tensor.empty folding、仅由 For/While pattern 触发的父函数 CSE、外部 tensor yield、直接及嵌套
+SCF unchanged channel、For/While dead channel、effect/use closure 和 vector-function 禁用 backward
+pattern。修正了把保守 `none` effect 当纯操作及无循环函数误跑 CSE 的旧聚合行为。fixture 与真实
+`bishengir-opt --scf-canonicalize-iter-arg` 结构完全一致；8 profiles × 160 inputs 的单 pass 与累计
+checkpoint 为 `1280/1280 PASS`；完整测试通过；代表 PlanMemory 为 `8/8 matched`。当前进入阶段
+4.3：只实现 canonicalization pipeline 内的 module-level `ExtendedCanonicalizer`。
 
 ## 当前实现优先级
 
-1. 从阶段 4.2 `CanonicalizeIterArg` 开始，依次补齐其余 `canonicalizationHIVMPipeline` 和
-   `InlineOTFBroadcast`；阶段 1～3 与阶段 4.1 ArithToAffine 已完成。
+1. 从阶段 4.3 module-level `ExtendedCanonicalizer` 开始，依次补齐其余
+   `canonicalizationHIVMPipeline` 和 `InlineOTFBroadcast`；阶段 1～3、4.1 和 4.2 已完成。
 2. 使用阶段 0 已建立的原生 checkpoint 做每个新增 pass 的差分；最终以同进程原生 local
    PlanMemory 做 seeds 0～19 完整合同验证。
 3. 对齐后把 production prediction pass 前移到 before-AutoBlockify；在完成代表与全量验证前

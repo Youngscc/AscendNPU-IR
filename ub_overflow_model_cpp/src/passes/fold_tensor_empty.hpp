@@ -128,7 +128,10 @@ inline void ReplaceWithTensorEmpty(GenericOperation &operation,
   operation.operandTypes.assign(operation.operands.size(), "index");
   operation.properties.clear();
   operation.attributes = "{}";
-  operation.effects = "none";
+  // tensor.empty implements MemoryEffectOpInterface and reports no effects.
+  // Newly created empty ops must therefore remain eligible for the same
+  // greedy CSE/DCE worklist as native replacements.
+  operation.effects.clear();
   operation.dpsInputs.clear();
   operation.dpsInits.clear();
 }

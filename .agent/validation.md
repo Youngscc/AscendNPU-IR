@@ -128,6 +128,19 @@ python3 ub_overflow_model_cpp/scripts/verify_arith_to_affine_pipeline.py \
 `8 profiles × 160 inputs = 1280/1280 PASS`；全运算 fixture 与真实
 `bishengir-opt --convert-arith-to-affine` 精确一致；代表下游 PlanMemory 为 `8/8 matched`。
 
+阶段 4.2 CanonicalizeIterArg：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/verify_canonicalize_iter_arg_pipeline.py \
+  --jobs 12 \
+  --json-report ub_overflow_model_cpp/output/canonicalize_iter_arg_phase4_2_final.json
+```
+
+2026-07-30 的单 pass `04 -> 05` 与累计 `00 -> 05` 同-attempt checkpoint 均为
+`8 profiles × 160 inputs = 1280/1280 PASS`；For/While/backward/vector gate fixture 与真实
+`bishengir-opt --scf-canonicalize-iter-arg` 精确一致；完整模型测试通过；代表下游 PlanMemory 为
+`8/8 matched`。
+
 ## 3. 正确性分类
 
 - `matched`：完整合同一致；

@@ -177,6 +177,19 @@ ub_overflow_model_cpp/scripts/verify_arith_to_affine_pipeline.py
 后续 canonicalization/CSE 的组合入口。验证脚本同时比较单 pass 和从 checkpoint `00` 开始的
 累计前缀，当前 8 profiles × 160 inputs 为 `1280/1280 PASS`。
 
+CanonicalizeIterArg 独立阶段实现与验证：
+
+```text
+ub_overflow_model_cpp/src/passes/canonicalization_hivm_pipeline.hpp
+ub_overflow_model_cpp/tests/fixtures/canonicalize_iter_arg.mlir
+ub_overflow_model_cpp/tests/test_canonicalize_iter_arg.cpp
+ub_overflow_model_cpp/scripts/verify_canonicalize_iter_arg_pipeline.py
+```
+
+`RunCanonicalizationHIVMAfterArithToAffine` 当前是 checkpoint `04 -> 05` 的严格阶段入口；其 CSE
+来自原生 `CanonicalizeIterArgPattern` 内部调用，不是无条件 standalone pass。验证脚本比较单 pass
+与从 checkpoint `00` 开始的累计前缀，当前 8 profiles × 160 inputs 为 `1280/1280 PASS`。
+
 ## 模型入口和公共接口
 
 ```text

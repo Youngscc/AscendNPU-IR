@@ -512,6 +512,354 @@ CanonicalizationIterationIndependentOps(const GenericModule &module,
   return mustDelete;
 }
 
+inline bool CanonicalizationOperationIsDescendantOf(
+    const GenericModule &module, int operationId, int ancestorId) {
+  int cursor = operationId;
+  while (cursor >= 0) {
+    if (cursor == ancestorId)
+      return true;
+    cursor = module.operations.at(static_cast<size_t>(cursor)).parentId;
+  }
+  return false;
+}
+
+inline bool CanonicalizationEnclosingFunctionIsVector(
+    const GenericModule &module, int operationId) {
+  int cursor = operationId;
+  while (cursor >= 0) {
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(cursor));
+    if (operation.name == "func.func")
+      return operation.attributes.get().find("hivm.vector_function") !=
+             std::string::npos;
+    cursor = operation.parentId;
+  }
+  return false;
+}
+
+inline bool CanonicalizationValueDefinedInsideOperation(
+    const GenericModule &module, int value, int operationId,
+    PipelineAnalysisContext &analysis,
+    const CanonicalizationTopology &topology) {
+  const int argumentBlock = topology.blockArgumentOwner(value);
+  if (argumentBlock >= 0) {
+    const int parent = module.regions
+                           .at(static_cast<size_t>(module.blocks
+                                                       .at(static_cast<size_t>(
+                                                           argumentBlock))
+                                                       .regionId))
+                           .parentOperation;
+    return CanonicalizationOperationIsDescendantOf(module, parent,
+                                                    operationId);
+  }
+  const int definition = analysis.definingOperationId(value);
+  return topology.isActive(definition) &&
+         CanonicalizationOperationIsDescendantOf(module, definition,
+                                                 operationId);
+}
+
+// isIterArgUnchanged proof for a for-loop channel.  The native implementation
+// follows only nested scf.if and LoopLikeOpInterface channels; encountering a
+// normal computation or a definition outside the checked loop fails the
+// proof.  Successful values are returned so every alias can be replaced by
+// the original init exactly as CanonicalizeIterArgPattern does.
+inline std::optional<std::set<int>> CanonicalizationUnchangedForAliases(
+    const GenericModule &module, const GenericOperation &outerLoop,
+    size_t outerChannel, int yielded, PipelineAnalysisContext &analysis,
+    const CanonicalizationTopology &topology) {
+  if (outerLoop.regions.size() != 1 ||
+      outerLoop.operands.size() < outerChannel + 4 ||
+      outerLoop.results.size() <= outerChannel)
+    return std::nullopt;
+  const GenericRegion &outerRegion =
+      module.regions.at(static_cast<size_t>(outerLoop.regions.front()));
+  if (outerRegion.blocks.size() != 1)
+    return std::nullopt;
+  const GenericBlock &outerBody =
+      module.blocks.at(static_cast<size_t>(outerRegion.blocks.front()));
+  if (outerBody.arguments.size() <= outerChannel + 1)
+    return std::nullopt;
+
+  const int init = outerLoop.operands[outerChannel + 3];
+  std::set<int> aliases = {init, outerLoop.results[outerChannel],
+                           outerBody.arguments[outerChannel + 1]};
+  std::vector<int> stack = {yielded};
+  while (!stack.empty()) {
+    const int value = stack.back();
+    stack.pop_back();
+    if (aliases.count(value) != 0)
+      continue;
+
+    int definition = analysis.definingOperationId(value);
+    const int argumentBlock = topology.blockArgumentOwner(value);
+    if (definition < 0 && argumentBlock >= 0)
+      definition = module.regions
+                       .at(static_cast<size_t>(module.blocks
+                                                   .at(static_cast<size_t>(
+                                                       argumentBlock))
+                                                   .regionId))
+                       .parentOperation;
+    if (!topology.isActive(definition) ||
+        !CanonicalizationOperationIsDescendantOf(module, definition,
+                                                 outerLoop.id) ||
+        definition == outerLoop.id)
+      return std::nullopt;
+    const GenericOperation &owner =
+        module.operations.at(static_cast<size_t>(definition));
+
+    if (owner.name == "scf.if") {
+      if (argumentBlock >= 0)
+        return std::nullopt;
+      const auto result =
+          std::find(owner.results.begin(), owner.results.end(), value);
+      if (result == owner.results.end())
+        return std::nullopt;
+      const size_t resultIndex = static_cast<size_t>(
+          std::distance(owner.results.begin(), result));
+      aliases.insert(value);
+      for (int regionId : owner.regions) {
+        const GenericRegion &region =
+            module.regions.at(static_cast<size_t>(regionId));
+        if (region.blocks.size() != 1)
+          return std::nullopt;
+        const GenericBlock &block =
+            module.blocks.at(static_cast<size_t>(region.blocks.front()));
+        if (block.operations.empty())
+          return std::nullopt;
+        const GenericOperation &terminator = module.operations.at(
+            static_cast<size_t>(block.operations.back()));
+        if (terminator.name != "scf.yield" ||
+            terminator.operands.size() <= resultIndex)
+          return std::nullopt;
+        stack.push_back(terminator.operands[resultIndex]);
+      }
+      continue;
+    }
+
+    if (owner.name != "scf.for" && owner.name != "scf.while")
+      return std::nullopt;
+    size_t channel = 0;
+    if (argumentBlock < 0) {
+      const auto result =
+          std::find(owner.results.begin(), owner.results.end(), value);
+      if (result == owner.results.end())
+        return std::nullopt;
+      channel = static_cast<size_t>(
+          std::distance(owner.results.begin(), result));
+    } else {
+      const GenericBlock &block =
+          module.blocks.at(static_cast<size_t>(argumentBlock));
+      const auto argument =
+          std::find(block.arguments.begin(), block.arguments.end(), value);
+      if (argument == block.arguments.end())
+        return std::nullopt;
+      channel = static_cast<size_t>(
+          std::distance(block.arguments.begin(), argument));
+      if (owner.name == "scf.for") {
+        if (channel == 0)
+          return std::nullopt;
+        --channel;
+      }
+    }
+    if (channel >= owner.results.size())
+      return std::nullopt;
+    aliases.insert(owner.results[channel]);
+    for (int regionId : owner.regions) {
+      const GenericRegion &region =
+          module.regions.at(static_cast<size_t>(regionId));
+      if (region.blocks.size() != 1)
+        return std::nullopt;
+      const GenericBlock &block =
+          module.blocks.at(static_cast<size_t>(region.blocks.front()));
+      const size_t argumentIndex =
+          owner.name == "scf.for" ? channel + 1 : channel;
+      if (block.arguments.size() <= argumentIndex || block.operations.empty())
+        return std::nullopt;
+      aliases.insert(block.arguments[argumentIndex]);
+      const GenericOperation &terminator = module.operations.at(
+          static_cast<size_t>(block.operations.back()));
+      const size_t operandIndex =
+          terminator.name == "scf.condition" ? channel + 1 : channel;
+      if ((terminator.name != "scf.yield" &&
+           terminator.name != "scf.condition") ||
+          terminator.operands.size() <= operandIndex)
+        return std::nullopt;
+      stack.push_back(terminator.operands[operandIndex]);
+    }
+    const size_t initIndex = owner.name == "scf.for" ? channel + 3 : channel;
+    if (owner.operands.size() <= initIndex)
+      return std::nullopt;
+    stack.push_back(owner.operands[initIndex]);
+  }
+  return aliases;
+}
+
+// CanonicalizeYieldValPattern<scf::ForOp>: a tensor yielded from outside the
+// loop body is invariant and can replace the tied loop result directly.
+inline bool CanonicalizeExternalForYields(
+    GenericModule &module, PipelineAnalysisContext &useLists,
+    const CanonicalizationTopology &topology) {
+  GenericRewriter rewriter(module, &useLists);
+  bool changed = false;
+  for (const GenericOperation &loop : module.operations) {
+    if (!topology.isActive(loop.id) || loop.name != "scf.for" ||
+        loop.regions.size() != 1 || loop.results.empty())
+      continue;
+    const GenericRegion &region =
+        module.regions.at(static_cast<size_t>(loop.regions.front()));
+    if (region.blocks.size() != 1)
+      continue;
+    const GenericBlock &body =
+        module.blocks.at(static_cast<size_t>(region.blocks.front()));
+    if (body.operations.empty())
+      continue;
+    const GenericOperation &yield = module.operations.at(
+        static_cast<size_t>(body.operations.back()));
+    if (yield.name != "scf.yield" ||
+        yield.operands.size() < loop.results.size())
+      continue;
+    for (size_t index = 0; index < loop.results.size(); ++index) {
+      if (!useLists.hasUsers(loop.results[index]))
+        continue;
+      const bool tensor =
+          index < yield.operandTypes.size() &&
+          GenericIsTensorType(yield.operandTypes[index]);
+      if (!tensor || CanonicalizationValueDefinedInsideOperation(
+                         module, yield.operands[index], loop.id, useLists,
+                         topology))
+        continue;
+      rewriter.replaceAllUses(loop.results[index], yield.operands[index]);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+inline bool CanonicalizationIterArgOnlyFeedsOwnTerminatorChannel(
+    const GenericModule &module, int iterArg, int bodyId,
+    const std::string &terminatorName, size_t operandOffset,
+    size_t channelIndex, PipelineAnalysisContext &useLists,
+    const CanonicalizationTopology &topology) {
+  for (int userId : useLists.users(iterArg)) {
+    if (!topology.isActive(userId))
+      continue;
+    const GenericOperation &user =
+        module.operations.at(static_cast<size_t>(userId));
+    for (size_t operandIndex = 0; operandIndex < user.operands.size();
+         ++operandIndex) {
+      if (user.operands[operandIndex] != iterArg)
+        continue;
+      if (user.name != terminatorName || user.blockId != bodyId ||
+          operandIndex != channelIndex + operandOffset)
+        return false;
+    }
+  }
+  return true;
+}
+
+inline void CanonicalizationEraseChannel(std::vector<int> &values,
+                                         size_t index) {
+  values.erase(values.begin() + static_cast<std::ptrdiff_t>(index));
+}
+
+inline void CanonicalizationEraseChannel(std::vector<std::string> &values,
+                                         size_t index) {
+  values.erase(values.begin() + static_cast<std::ptrdiff_t>(index));
+}
+
+// Exact projection of the backward while-pattern for the straight-line
+// before/after regions represented by GenericModule.  A channel is removable
+// only when its before argument feeds its own scf.condition slot and its after
+// argument/yield chain satisfies the same no-effect/use-closure proof as the
+// native helper.  Complex nested SCF remains untouched until that proof is
+// available; it is never guessed dead.
+inline bool CanonicalizeDeadWhileIterArgs(
+    GenericModule &module, PipelineAnalysisContext &useLists) {
+  bool changed = false;
+  GenericRewriter rewriter(module, &useLists);
+  CanonicalizationTopology topology(module);
+  for (GenericOperation &loop : module.operations) {
+    if (!topology.isActive(loop.id) || loop.name != "scf.while" ||
+        loop.regions.size() != 2 || loop.results.empty() ||
+        loop.operands.size() != loop.results.size())
+      continue;
+    if (CanonicalizationEnclosingFunctionIsVector(module, loop.id))
+      continue;
+    const GenericRegion &beforeRegion =
+        module.regions.at(static_cast<size_t>(loop.regions[0]));
+    const GenericRegion &afterRegion =
+        module.regions.at(static_cast<size_t>(loop.regions[1]));
+    if (beforeRegion.blocks.size() != 1 || afterRegion.blocks.size() != 1)
+      continue;
+    GenericBlock &before =
+        module.blocks.at(static_cast<size_t>(beforeRegion.blocks.front()));
+    GenericBlock &after =
+        module.blocks.at(static_cast<size_t>(afterRegion.blocks.front()));
+    if (before.arguments.size() != loop.results.size() ||
+        after.arguments.size() != loop.results.size() ||
+        before.operations.empty() || after.operations.empty())
+      continue;
+    GenericOperation &condition = module.operations.at(
+        static_cast<size_t>(before.operations.back()));
+    GenericOperation &yield =
+        module.operations.at(static_cast<size_t>(after.operations.back()));
+    if (condition.name != "scf.condition" || yield.name != "scf.yield" ||
+        condition.operands.size() != loop.results.size() + 1 ||
+        yield.operands.size() != loop.results.size())
+      continue;
+
+    std::vector<size_t> removable;
+    std::set<int> operationsToErase;
+    for (size_t index = 0; index < loop.results.size(); ++index) {
+      if (useLists.hasUsers(loop.results[index]) ||
+          !CanonicalizationIterArgOnlyFeedsOwnTerminatorChannel(
+              module, before.arguments[index], before.id, "scf.condition", 1,
+              index, useLists, topology))
+        continue;
+      const std::optional<std::set<int>> deadOperations =
+          CanonicalizationIterationIndependentOps(
+              module, after, after.arguments[index], yield.operands[index],
+              index, useLists, topology);
+      if (!deadOperations)
+        continue;
+      removable.push_back(index);
+      operationsToErase.insert(deadOperations->begin(), deadOperations->end());
+    }
+    if (removable.empty())
+      continue;
+    useLists.operationWillModify(loop);
+    useLists.operationWillModify(condition);
+    useLists.operationWillModify(yield);
+    for (auto iterator = removable.rbegin(); iterator != removable.rend();
+         ++iterator) {
+      const size_t index = *iterator;
+      CanonicalizationEraseChannel(loop.results, index);
+      CanonicalizationEraseChannel(loop.resultTypes, index);
+      CanonicalizationEraseChannel(loop.operands, index);
+      CanonicalizationEraseChannel(loop.operandTypes, index);
+      CanonicalizationEraseChannel(before.arguments, index);
+      CanonicalizationEraseChannel(before.argumentTypes, index);
+      CanonicalizationEraseChannel(after.arguments, index);
+      CanonicalizationEraseChannel(after.argumentTypes, index);
+      CanonicalizationEraseChannel(condition.operands, index + 1);
+      if (index + 1 < condition.operandTypes.size())
+        CanonicalizationEraseChannel(condition.operandTypes, index + 1);
+      CanonicalizationEraseChannel(yield.operands, index);
+      if (index < yield.operandTypes.size())
+        CanonicalizationEraseChannel(yield.operandTypes, index);
+    }
+    for (int operationId : operationsToErase)
+      if (topology.isActive(operationId)) {
+        const int blockId =
+            module.operations.at(static_cast<size_t>(operationId)).blockId;
+        rewriter.removeFromBlock(blockId, operationId);
+        topology.detach(operationId);
+      }
+    changed = true;
+  }
+  return changed;
+}
+
 // Projection of CanonicalizeIterArgPattern and RemoveDeadIterArgPattern from
 // CanonicalizeIterArg.cpp. The lightweight IR rewrites the existing scf.for
 // record instead of cloning it, but preserves the same result/init/iter/yield
@@ -550,6 +898,15 @@ inline bool CanonicalizeIterArgs(GenericModule &module,
         rewriter.replaceAllUses(loop.results[index], init);
         changed = true;
       }
+      if (const std::optional<std::set<int>> aliases =
+              CanonicalizationUnchangedForAliases(
+                  module, loop, index, yielded, useLists, topology)) {
+        for (int alias : *aliases)
+          if (alias != init && useLists.hasUsers(alias)) {
+            rewriter.replaceAllUses(alias, init);
+            changed = true;
+          }
+      }
     }
 
     std::vector<size_t> removable;
@@ -563,8 +920,19 @@ inline bool CanonicalizeIterArgs(GenericModule &module,
           CanonicalizationIterationIndependentOps(module, body, iterArg,
                                                    yielded, index, useLists,
                                                    topology);
-      if (!deadOperations)
+      if (!deadOperations) {
+        // RemoveDeadIterArgBackwardForPattern also drops a channel whose iter
+        // arg has no live use, even when the yielded replacement is defined
+        // outside the body (the simple forward proof intentionally rejects
+        // that shape).  No body operation needs deletion in this narrow case.
+        if (CanonicalizationEnclosingFunctionIsVector(module, loop.id) ||
+            !CanonicalizationIterArgOnlyFeedsOwnTerminatorChannel(
+                module, iterArg, body.id, "scf.yield", 0, index, useLists,
+                topology))
+          continue;
+        removable.push_back(index);
         continue;
+      }
       removable.push_back(index);
       operationsToErase.insert(deadOperations->begin(), deadOperations->end());
     }
@@ -699,17 +1067,35 @@ inline bool EliminateCanonicalizationDeadCode(
   for (auto iterator = module.operations.rbegin();
        iterator != module.operations.rend(); ++iterator) {
     const GenericOperation &operation = *iterator;
-    if (operation.blockId < 0 || operation.results.empty() ||
-        !operation.regions.empty() || IsCanonicalizationTerminator(operation))
+    if (operation.blockId < 0 || IsCanonicalizationTerminator(operation))
       continue;
     if (!topology.isActive(operation.id))
       continue;
     if (std::any_of(operation.results.begin(), operation.results.end(),
                     [&](int result) { return useLists.hasUsers(result); }))
       continue;
-    const bool noEffects = operation.effects.empty() ||
-                           operation.effects == "none" ||
-                           operation.name == "tensor.empty";
+    bool noEffects = operation.effects.empty();
+    if (!operation.regions.empty()) {
+      // Region ops implement recursive effects in MLIR.  Greedy DCE can erase
+      // a result-less scf loop only if every nested non-terminator operation
+      // is known effect-free.  Keep unknown/"none" effects conservative.
+      noEffects = operation.name == "scf.for" || operation.name == "scf.if" ||
+                  operation.name == "scf.while";
+      if (noEffects) {
+        for (const GenericOperation &nested : module.operations) {
+          if (nested.id == operation.id ||
+              !topology.isActive(nested.id) ||
+              !CanonicalizationOperationIsDescendantOf(
+                  module, nested.id, operation.id) ||
+              IsCanonicalizationTerminator(nested))
+            continue;
+          if (!nested.effects.empty()) {
+            noEffects = false;
+            break;
+          }
+        }
+      }
+    }
     if (!noEffects)
       continue;
     rewriter.removeFromBlock(operation.blockId, operation.id);
@@ -785,8 +1171,7 @@ inline void RunCanonicalizationCommonSubexpressionElimination(
         module.operations.at(static_cast<size_t>(operationId));
     if (snapshot.results.empty() || snapshot.blockId < 0 ||
         !snapshot.regions.empty() ||
-        (!snapshot.effects.empty() && snapshot.effects != "none" &&
-         snapshot.name != "tensor.empty"))
+        !snapshot.effects.empty())
       continue;
     const auto key = std::make_pair(
         enclosingFunctions.enclosingFunctionId(snapshot.id),
@@ -842,11 +1227,29 @@ RunCanonicalizationHIVMAfterArithToAffine(GenericModule module) {
   }
   PipelineAnalysisContext useLists(
       module, kGenericAnalysisDefinitions | kGenericAnalysisUsers);
+  // eliminateCommonSubExpressions is not a standalone step of this pass.  It
+  // is called from CanonicalizeIterArgPattern<For/While>, so functions with no
+  // loop never run CSE here.  Conversely, one loop invocation scans the whole
+  // parent function before checking its tied channels.
+  const bool hasLoop = std::any_of(
+      module.operations.begin(), module.operations.end(),
+      [](const GenericOperation &operation) {
+        return operation.name == "scf.for" || operation.name == "scf.while";
+      });
+  if (hasLoop)
+    RunCanonicalizationCommonSubexpressionElimination(module, useLists);
+  {
+    const CanonicalizationTopology topology(module);
+    CanonicalizeExternalForYields(module, useLists, topology);
+  }
   while (CanonicalizeIterArgs(module, useLists)) {
+  }
+  while (CanonicalizeDeadWhileIterArgs(module, useLists)) {
   }
   while (FoldCanonicalizationBooleanOps(module, useLists)) {
   }
-  RunCanonicalizationCommonSubexpressionElimination(module, useLists);
+  if (hasLoop)
+    RunCanonicalizationCommonSubexpressionElimination(module, useLists);
   while (FoldCanonicalizationBooleanOps(module, useLists)) {
   }
   while (EliminateCanonicalizationDeadCode(module, useLists)) {
