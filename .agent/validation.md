@@ -87,6 +87,22 @@ python3 ub_overflow_model_cpp/scripts/verify_auto_blockify_pipeline.py \
 2026-07-30 结果为 `160/160 PASS`；报告是可再生成本地产物，不提交。禁用 gate 另做原生
 before/after 字节一致和模型结构一致检查。
 
+阶段 2 pre-CV MarkMultiBuffer 使用 8 个真实 profile 同时检查单 pass 和累计前缀：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/verify_pre_cv_mark_multi_buffer_pipeline.py \
+  --jobs 12 \
+  --json-report ub_overflow_model_cpp/output/pre_cv_mark_mb_full.json
+```
+
+2026-07-30 结果为 `8 profiles × 160 inputs = 1280/1280 PASS`。每项同时比较
+`01_after_auto_blockify -> MarkMultiBuffer` 与
+`00_before_auto_blockify -> AutoBlockify -> MarkMultiBuffer` 到同一原生
+`02_after_pre_cv_mark_multi_buffer` checkpoint。fixture 另由真实 `bishengir-opt` 证明 local Load、
+Fixpipe 和 scope preload pattern 一致。代表下游 PlanMemory 小回归为 8/8 matched；该小回归证明
+当前既有 before-CV→PlanMemory 路径未回退，新增 prefix 的直接证明仍以同-attempt 结构完全一致
+为准。
+
 ## 3. 正确性分类
 
 - `matched`：完整合同一致；

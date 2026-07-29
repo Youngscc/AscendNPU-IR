@@ -54,6 +54,17 @@ ub_overflow_model_cpp/output/tests/test_checked_math
   -o ub_overflow_model_cpp/output/tests/test_auto_blockify_parallel_loop
 ub_overflow_model_cpp/output/tests/test_auto_blockify_parallel_loop
 
+"${compiler}" -std=c++17 -O0 -g -Wall -Wextra -Wpedantic -Wconversion \
+  -Wshadow -Werror \
+  ub_overflow_model_cpp/tests/test_pre_cv_mark_multi_buffer.cpp \
+  -o ub_overflow_model_cpp/output/tests/test_pre_cv_mark_multi_buffer
+ub_overflow_model_cpp/output/tests/test_pre_cv_mark_multi_buffer
+
+"${compiler}" -std=c++17 -O0 -g -Wall -Wextra -Wpedantic -Wconversion \
+  -Wshadow -Werror \
+  ub_overflow_model_cpp/tools/pre_cv_prefix_model_runner.cpp \
+  -o ub_overflow_model_cpp/output/tests/pre_cv_prefix_model_runner
+
 python3 ub_overflow_model_cpp/tests/test_validation_common.py
 python3 ub_overflow_model_cpp/tests/test_merged_report.py
 python3 ub_overflow_model_cpp/tests/test_plan_memory_contract.py

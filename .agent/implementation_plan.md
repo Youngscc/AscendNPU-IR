@@ -180,6 +180,8 @@ after-AutoBlockify checkpoint 完全对齐后才能开始 MarkMultiBuffer，不�
 
 ## 7. 阶段 2：实现 CV 前 MarkMultiBuffer
 
+状态：**2026-07-30 已完成**。
+
 ### 实现
 
 按原生文件逐个迁移下列语义：
@@ -215,6 +217,27 @@ disableAutoCVWorkSpaceManage
   preload scope、unsupported loop 全覆盖；
 - 比较 annotation 的位置、属性、source identity、operation 顺序和完整 checkpoint；
 - 通过后再执行 AutoBlockify+MarkMultiBuffer 累积差分。
+
+### 完成证据
+
+- `src/passes/pre_cv_mark_multi_buffer.hpp` 独立建模原生 pre-CV pass，没有复用阶段错误的
+  post-bufferization `ModelMarkMultiBuffer`；
+- 已覆盖 workspace `AllocWorkspace/ToTensor/ViewLike` traceback、local scf.for/scf.while/if
+  traceback、`getParentLoop` consumption/yield 传播、scope preload/V1-use、已有 mark 校验和全部
+  strategy/workspace 数量选项；
+- 原生 `applyPatternsGreedily` 隐含执行的 `muli/div/trunc(ext)` folding、dead arith 清理和
+  constant hoist/unique 被作为本 pass 的可观察语义复刻；
+- `pre_cv_mark_multi_buffer.mlir` 经真实 `bishengir-opt` 与模型比较，Load、Fixpipe、scope preload
+  的 mark source、数量、属性和插入位置完全一致；
+- 8 个相关 pre-CV profiles × 160 个去重 adapter 的单 pass 与
+  AutoBlockify+MarkMultiBuffer 累计同-attempt checkpoint 均为 `1280/1280 PASS`；
+- `ub_overflow_model_cpp/tests/run_tests.sh` 全部通过；
+- vector-add、attn-fwd × production-default/auto-MB × seeds `{0,13}` 的下游 embedded
+  PlanMemory 为 `matched=8, different=0, unavailable=0, timeout=0`。
+
+### 提交边界
+
+独立提交 `feat(ub-model): model pre-cv multi-buffer marking`，不混入 outer canonicalizer。
 
 ## 8. 阶段 3：实现外层 ExtendedCanonicalizer
 

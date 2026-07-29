@@ -123,6 +123,26 @@ python3 ub_overflow_model_cpp/scripts/verify_auto_blockify_pipeline.py \
 真实 compiler，并直接比较该 attempt 的 `00_before_auto_blockify` 经模型变换后的结构与
 `01_after_auto_blockify` 原生结构。
 
+pre-CV MarkMultiBuffer 实现与验证：
+
+```text
+ub_overflow_model_cpp/src/passes/pre_cv_mark_multi_buffer.hpp
+ub_overflow_model_cpp/tools/pre_cv_prefix_model_runner.cpp
+ub_overflow_model_cpp/tests/fixtures/pre_cv_mark_multi_buffer.mlir
+ub_overflow_model_cpp/tests/test_pre_cv_mark_multi_buffer.cpp
+ub_overflow_model_cpp/scripts/verify_pre_cv_mark_multi_buffer_pipeline.py
+```
+
+```bash
+python3 ub_overflow_model_cpp/scripts/verify_pre_cv_mark_multi_buffer_pipeline.py \
+  --jobs 12 \
+  --json-report ub_overflow_model_cpp/output/pre_cv_mark_mb_full.json
+```
+
+脚本读取 `config/pre_cv_profiles/*.args` 的 8 个相关 profile；每个 case 同时验证单 pass 与从
+before-AutoBlockify 开始的累计前缀，oracle 是同一 compiler attempt 的
+`02_after_pre_cv_mark_multi_buffer`。
+
 ## 模型入口和公共接口
 
 ```text

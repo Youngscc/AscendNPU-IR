@@ -146,13 +146,22 @@ CVPipelining 或更后的 pass。普通产品路径的 before-CV IR 与阶段 0 
 阶段 1 已于 2026-07-30 完成：已有 AutoBlockify stable-ID 实现通过最小条件入口接入新增轻量
 前缀，精确使用原生 `enableTritonKernelCompile && enableAutoBlockifyLoop` gate。同一次原生编译
 attempt 生成的 before/after checkpoint 在去重后的 160 个 adapter 上全部结构一致；禁用分支为
-精确 no-op；代表输入 seeds `{0,13}` 最终 PlanMemory 为 4/4 matched。当前进入阶段 2：只实现
-CV 前 MarkMultiBuffer。
+精确 no-op；代表输入 seeds `{0,13}` 最终 PlanMemory 为 4/4 matched。
+
+阶段 2 已于 2026-07-30 完成：新增独立的 pre-CV `MarkMultiBuffer` 模型，逐句复刻 local、
+workspace、scope preload、已有 mark 校验、memref traceback、parent-loop、MIX strategy 和
+workspace 数量语义，并保留原生 greedy driver 同时触发的 ordinary folding/DCE。8 个相关
+pre-CV profile × 160 inputs 的单 pass 与累计前缀同-attempt checkpoint 为 `1280/1280 PASS`；
+真实 `bishengir-opt` fixture 的 Load/Fixpipe/preload-scope 输出完全一致；完整模型测试通过；
+代表输入 × production/auto-MB × seeds `{0,13}` 的下游 embedded PlanMemory 为 `8/8 matched`。
+当前进入阶段 3：只实现 outer module-level `ExtendedCanonicalizer`，不得提前实现后续九步
+canonicalization pipeline。
 
 ## 当前实现优先级
 
-1. 实现 CV 前 `MarkMultiBuffer`，之后依次补齐外层 `ExtendedCanonicalizer`、九步
-   `canonicalizationHIVMPipeline` 和 `InlineOTFBroadcast`；阶段 1 的 AutoBlockify 已完成。
+1. 实现外层 `ExtendedCanonicalizer`，之后依次补齐九步
+   `canonicalizationHIVMPipeline` 和 `InlineOTFBroadcast`；阶段 1 AutoBlockify 与阶段 2
+   pre-CV MarkMultiBuffer 已完成。
 2. 使用阶段 0 已建立的原生 checkpoint 做每个新增 pass 的差分；最终以同进程原生 local
    PlanMemory 做 seeds 0～19 完整合同验证。
 3. 对齐后把 production prediction pass 前移到 before-AutoBlockify；在完成代表与全量验证前
