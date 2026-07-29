@@ -72,6 +72,13 @@ bishengir/lib/Dialect/MemRef/Transforms/DeadStoreElimination.cpp
 bishengir/lib/Dialect/HIVM/Transforms/InlineOTFBroadcast.cpp
 ```
 
+`ub_overflow_model_cpp/src/passes/pre_cv_cse.hpp`
+
+阶段 4.5 的 standalone module CSE 投影。实现与上游 `CSEDriver` 相同的 region scope、
+isolated-from-above、nested-region-first traversal、commutative/region operation equivalence、只读
+memory effect barrier 和 deferred erase。`verify_cse_pipeline.py` 同时验证 checkpoint `07 -> 08`
+和累计 `00 -> 08`；multi-block region 当前不在 160 输入支持域内并显式 blocker。
+
 现有可复用模型代码：
 
 ```text

@@ -168,6 +168,20 @@ python3 ub_overflow_model_cpp/scripts/verify_scf_for_loop_canonicalization_pipel
 nested/parallel/forall bounds，以及 iter-arg/loop-result shape-preserving dim folding；完整测试通过，
 代表下游 PlanMemory 为 `8/8 matched`。
 
+阶段 4.5 CSE：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/verify_cse_pipeline.py \
+  --jobs 12 \
+  --json-report ub_overflow_model_cpp/output/cse_phase4_5.json
+```
+
+2026-07-30 的单 pass `07 -> 08` 与累计 `00 -> 08` 同-attempt checkpoint 均为
+`8 profiles × 160 inputs = 1280/1280 PASS`。fixture 另外与真实 `bishengir-opt --cse` 比较，覆盖
+commutative CSE、nested visibility、sibling scope、read-only/write barrier、pure single-block
+region-op equivalence 和 trivially-dead erase；完整模型测试通过，代表下游 PlanMemory 为
+`8/8 matched`。
+
 ## 3. 正确性分类
 
 - `matched`：完整合同一致；

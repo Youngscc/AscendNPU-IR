@@ -4,6 +4,7 @@
 #include "../src/passes/module_extended_canonicalizer.hpp"
 #include "../src/passes/outer_extended_canonicalizer.hpp"
 #include "../src/passes/pre_cv_mark_multi_buffer.hpp"
+#include "../src/passes/pre_cv_cse.hpp"
 #include "../src/passes/scf_for_loop_canonicalization.hpp"
 
 #include <filesystem>
@@ -20,6 +21,7 @@ struct Options {
   bool applyCanonicalizeIterArg = false;
   bool applyModuleCanonicalizer = false;
   bool applySCFForLoopCanonicalization = false;
+  bool applyCSE = false;
   cvub::AutoBlockifyPrefixOptions autoBlockify;
   cvub::PreCVMarkMultiBufferOptions markMultiBuffer;
   std::filesystem::path input;
@@ -53,6 +55,8 @@ Options ParseOptions(int argc, char **argv) {
       options.applyModuleCanonicalizer = true;
     else if (argument == "--apply-scf-for-loop-canonicalization")
       options.applySCFForLoopCanonicalization = true;
+    else if (argument == "--apply-cse")
+      options.applyCSE = true;
     else if (argument == "--enable-auto-multi-buffer")
       options.markMultiBuffer.enableAuto = true;
     else if (argument == "--disable-auto-cv-workspace-manage")
@@ -113,10 +117,12 @@ int main(int argc, char **argv) {
       module = cvub::RunModuleExtendedCanonicalizer(std::move(module));
     if (options.applySCFForLoopCanonicalization)
       module = cvub::RunSCFForLoopCanonicalization(std::move(module));
+    if (options.applyCSE)
+      module = cvub::RunPreCVCSE(std::move(module));
     if (!options.applyModel && !options.applyOuterCanonicalizer &&
         !options.applyArithToAffine && !options.applyCanonicalizeIterArg &&
         !options.applyModuleCanonicalizer &&
-        !options.applySCFForLoopCanonicalization) {
+        !options.applySCFForLoopCanonicalization && !options.applyCSE) {
       cvub::ApplyOperationSemanticsToAll(module.operations);
       module = cvub::CompactGenericModule(std::move(module));
     }

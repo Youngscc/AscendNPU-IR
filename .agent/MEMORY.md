@@ -195,10 +195,19 @@ pattern，覆盖 tensor/memref 的 iter-arg/loop-result dim folding、`tensor.in
 checkpoint 为 `1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。当前进入阶段
 4.5 CSE。
 
+阶段 4.5 已于 2026-07-30 完成：新增独立 `RunPreCVCSE`，按上游 `CSEDriver` 保留 region
+scope、isolated-from-above、nested-region-first traversal、交换律 operation equivalence、只读操作
+同块且中间无 write/unknown 的限制，以及延迟 erase 的 DCE/CSE 顺序。定向 fixture 与真实
+`bishengir-opt --cse` 结构精确一致，覆盖纯操作、read/write barrier、嵌套/兄弟 region、region-op
+等价与 dead op；8 profiles × 160 inputs 的 `07 -> 08` 单 pass 与 `00 -> 08` 累计 checkpoint 为
+`1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。当前 160 输入只到达
+single-block structured region；multi-block SSACFG 保持显式 blocker，不做错误线性化。当前进入阶段
+4.6 func-scoped ExtendedCanonicalizer。
+
 ## 当前实现优先级
 
-1. 从阶段 4.5 CSE 开始，依次补齐其余 `canonicalizationHIVMPipeline` 和
-   `InlineOTFBroadcast`；阶段 1～3、4.1～4.4 已完成。
+1. 从阶段 4.6 func-scoped ExtendedCanonicalizer 开始，依次补齐其余
+   `canonicalizationHIVMPipeline` 和 `InlineOTFBroadcast`；阶段 1～3、4.1～4.5 已完成。
 2. 使用阶段 0 已建立的原生 checkpoint 做每个新增 pass 的差分；最终以同进程原生 local
    PlanMemory 做 seeds 0～19 完整合同验证。
 3. 对齐后把 production prediction pass 前移到 before-AutoBlockify；在完成代表与全量验证前

@@ -341,8 +341,16 @@ parallel/forall fixture 与真实 `bishengir-opt --scf-for-loop-canonicalization
 
 ### 4.5 CSE
 
+状态：**2026-07-30 已完成**。
+
 - 保持原生 dominance、region visibility、memory-effect 和 operation equivalence 条件；
 - 哈希结构只用于 lookup，替换顺序必须来自原生有序 traversal。
+
+完成证据：新增独立 `RunPreCVCSE`，复刻上游 nested-region-first、region-scoped known-values、
+isolated function、commutative equivalence、read-only/write barrier 和 deferred erase 行为。定向 fixture
+与真实 `bishengir-opt --cse` 精确一致；8 profiles × 160 inputs 的 `07 -> 08` 单 pass 与
+`00 -> 08` 累计 checkpoint 为 `1280/1280 PASS`；完整测试通过，代表 PlanMemory 为
+`8/8 matched`。当前支持域所有 region 均为 single block；multi-block SSACFG 显式 fail closed。
 
 ### 4.6 ExtendedCanonicalizer（func）
 
