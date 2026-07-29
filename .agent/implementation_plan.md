@@ -281,7 +281,7 @@ InlineOTFBroadcast 清理冗余 1-to-1 broadcast，但真实行为来自全部�
 
 ## 9. 阶段 4：逐个实现九步 canonicalizationHIVMPipeline
 
-当前子阶段：**4.4 SCFForLoopCanonicalization**。
+当前子阶段：**4.5 CSE**。
 
 九个 pass 必须按下面九个子阶段依次实现和关闸。每个子阶段都执行：源码审阅→单元 fixture→
 单 pass checkpoint→从 AutoBlockify 开始的累积 checkpoint；通过后才进入下一个。
@@ -327,8 +327,17 @@ semi-affine 重建以及相关 Arith/slice fold。fixture 覆盖 fresh-constant 
 
 ### 4.4 SCFForLoopCanonicalization
 
+状态：**2026-07-30 已完成**。
+
 - 按上游 `LoopCanonicalization.cpp` 的 pattern 集合迁移；
 - 独立验证 loop bounds、iter args、body replacement 和 erase 顺序。
+
+完成证据：逐句覆盖 tensor/memref 的 iter-arg 与 loop-result dim folder、递归
+`tensor.insert_slice`/nested `scf.for` shape-preserving proof，以及 affine.min/max 对 `scf.for`、
+`scf.parallel`、`scf.forall` 已知范围的约束化简。上游成功、部分化简、nested、no-change、
+parallel/forall fixture 与真实 `bishengir-opt --scf-for-loop-canonicalization` 精确一致；8 profiles ×
+160 inputs 的 `06 -> 07` 单 pass 与 `00 -> 07` 累计 checkpoint 为 `1280/1280 PASS`；完整测试
+通过，代表 PlanMemory 为 `8/8 matched`。
 
 ### 4.5 CSE
 

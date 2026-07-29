@@ -206,6 +206,20 @@ patterns，但额外执行此边界由 ArithToAffine/CanonicalizeIterArg 暴露�
 验证脚本比较单 pass 与从 checkpoint `00` 开始的累计前缀，当前 8 profiles × 160 inputs 为
 `1280/1280 PASS`。
 
+SCFForLoopCanonicalization：
+
+```text
+ub_overflow_model_cpp/src/passes/scf_for_loop_canonicalization.hpp
+ub_overflow_model_cpp/tests/fixtures/scf_for_loop_canonicalization.mlir
+ub_overflow_model_cpp/tests/test_scf_for_loop_canonicalization.cpp
+ub_overflow_model_cpp/scripts/verify_scf_for_loop_canonicalization_pipeline.py
+```
+
+`RunSCFForLoopCanonicalization` 是 checkpoint `06 -> 07` 的严格阶段入口；实现来自上游
+`LoopCanonicalization.cpp` 与 `AffineCanonicalizationUtils.cpp`，不能替换成普通 canonicalizer。
+验证脚本比较单 pass 与从 checkpoint `00` 开始的累计前缀，当前 8 profiles × 160 inputs 为
+`1280/1280 PASS`。
+
 ## 模型入口和公共接口
 
 ```text

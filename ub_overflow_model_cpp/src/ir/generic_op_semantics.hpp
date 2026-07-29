@@ -34,12 +34,14 @@ inline bool HasModeledOperationSemantics(const std::string &name) {
       "hivm.hir.vsqrt", "hivm.hir.vsub", "hivm.hir.vtranspose",
       "hivm.hir.vxor",
       "llvm.inline_asm", "llvm.intr.assume", "memref.alloc",
-      "memref.collapse_shape", "memref.load", "memref.store",
+      "memref.collapse_shape", "memref.dim", "memref.load", "memref.store",
       "memref.reinterpret_cast",
       "memref.subview", "memref.view", "memref_ext.alloc_workspace", "scf.condition",
-      "scf.for", "scf.if", "scf.while", "scf.yield", "scope.return",
+      "scf.for", "scf.forall", "scf.forall.in_parallel", "scf.if",
+      "scf.parallel", "scf.reduce", "scf.reduce.return", "scf.while",
+      "scf.yield", "scope.return",
       "scope.scope",
-      "tensor.collapse_shape", "tensor.empty", "tensor.expand_shape",
+      "tensor.collapse_shape", "tensor.dim", "tensor.empty", "tensor.expand_shape",
       "tensor.extract", "tensor.extract_slice", "tensor.from_elements",
       "tensor.insert", "tensor.insert_slice"};
   return startsWith(name, "arith.") || operations.count(name) != 0;

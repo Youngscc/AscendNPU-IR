@@ -86,6 +86,12 @@ ub_overflow_model_cpp/output/tests/test_module_extended_canonicalizer
 
 "${compiler}" -std=c++17 -O0 -g -Wall -Wextra -Wpedantic -Wconversion \
   -Wshadow -Werror \
+  ub_overflow_model_cpp/tests/test_scf_for_loop_canonicalization.cpp \
+  -o ub_overflow_model_cpp/output/tests/test_scf_for_loop_canonicalization
+ub_overflow_model_cpp/output/tests/test_scf_for_loop_canonicalization
+
+"${compiler}" -std=c++17 -O0 -g -Wall -Wextra -Wpedantic -Wconversion \
+  -Wshadow -Werror \
   ub_overflow_model_cpp/tools/pre_cv_prefix_model_runner.cpp \
   -o ub_overflow_model_cpp/output/tests/pre_cv_prefix_model_runner
 

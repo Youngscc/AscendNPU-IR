@@ -154,6 +154,20 @@ python3 ub_overflow_model_cpp/scripts/verify_module_extended_canonicalizer_pipel
 物化/CSE/hoist 和 semi-affine local 项顺序；阶段 4.2 的 1280 项回归、完整模型测试和代表下游
 PlanMemory `8/8 matched` 通过。
 
+阶段 4.4 SCFForLoopCanonicalization：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/verify_scf_for_loop_canonicalization_pipeline.py \
+  --jobs 12 \
+  --json-report ub_overflow_model_cpp/output/scf_for_loop_phase4_4.json
+```
+
+2026-07-30 的单 pass `06 -> 07` 与累计 `00 -> 07` 同-attempt checkpoint 均为
+`8 profiles × 160 inputs = 1280/1280 PASS`。fixture 另外与真实
+`bishengir-opt --scf-for-loop-canonicalization` 比较，覆盖 affine min/max 的 complete/partial/no-op、
+nested/parallel/forall bounds，以及 iter-arg/loop-result shape-preserving dim folding；完整测试通过，
+代表下游 PlanMemory 为 `8/8 matched`。
+
 ## 3. 正确性分类
 
 - `matched`：完整合同一致；

@@ -186,10 +186,19 @@ materialization、下一轮 OperationFolder CSE/hoist、DCE、Arith/slice fold �
 测试和代表 PlanMemory `8/8 matched` 通过。当前进入阶段 4.4
 `SCFForLoopCanonicalization`。
 
+阶段 4.4 已于 2026-07-30 完成：`RunSCFForLoopCanonicalization` 复刻上游六类 cross-dialect
+pattern，覆盖 tensor/memref 的 iter-arg/loop-result dim folding、`tensor.insert_slice` 与 nested
+`scf.for` 的递归 shape-preserving proof，以及 affine.min/max 在 `scf.for`、`scf.parallel`、
+`scf.forall` 常量可证范围内的化简。对于无法证明的动态/非纯 affine 情况保持原操作，不推测。
+上游 fixture 的成功、部分成功、nested、no-change、parallel/forall 分支均与真实
+`bishengir-opt` 精确一致；8 profiles × 160 inputs 的 `06 -> 07` 单 pass 与 `00 -> 07` 累计
+checkpoint 为 `1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。当前进入阶段
+4.5 CSE。
+
 ## 当前实现优先级
 
-1. 从阶段 4.4 `SCFForLoopCanonicalization` 开始，依次补齐其余
-   `canonicalizationHIVMPipeline` 和 `InlineOTFBroadcast`；阶段 1～3、4.1～4.3 已完成。
+1. 从阶段 4.5 CSE 开始，依次补齐其余 `canonicalizationHIVMPipeline` 和
+   `InlineOTFBroadcast`；阶段 1～3、4.1～4.4 已完成。
 2. 使用阶段 0 已建立的原生 checkpoint 做每个新增 pass 的差分；最终以同进程原生 local
    PlanMemory 做 seeds 0～19 完整合同验证。
 3. 对齐后把 production prediction pass 前移到 before-AutoBlockify；在完成代表与全量验证前

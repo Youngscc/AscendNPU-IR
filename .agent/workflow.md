@@ -11,8 +11,9 @@ BiSheng 执行，不复刻。
 
 阶段状态：checkpoint infrastructure、AutoBlockify、pre-CV MarkMultiBuffer、outer
 module-level ExtendedCanonicalizer、阶段 4.1 ArithToAffine、阶段 4.2 CanonicalizeIterArg 和阶段
-4.3 module-level ExtendedCanonicalizer 已于 2026-07-30 完成；当前只执行阶段 4.4
-SCFForLoopCanonicalization，其 after-pass checkpoint 未对齐前不得开始 CSE。
+4.3 module-level ExtendedCanonicalizer 和阶段 4.4 SCFForLoopCanonicalization 已于
+2026-07-30 完成；当前只执行阶段 4.5 CSE，其 after-pass checkpoint 未对齐前不得开始
+func-scoped ExtendedCanonicalizer。
 
 ## 每个 pass 的固定开发循环
 
