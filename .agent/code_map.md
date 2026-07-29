@@ -163,6 +163,20 @@ python3 ub_overflow_model_cpp/scripts/verify_outer_extended_canonicalizer_pipeli
 `00_before_auto_blockify -> AutoBlockify -> MarkMultiBuffer -> outer` 与同一真实 compiler attempt
 的 `03_after_outer_extended_canonicalizer`。当前 8 profiles × 160 inputs 为 `1280/1280 PASS`。
 
+ArithToAffine 独立阶段实现与验证：
+
+```text
+ub_overflow_model_cpp/src/passes/convert_arith_to_affine.hpp
+ub_overflow_model_cpp/src/passes/affine_min_max_canonicalization.hpp
+ub_overflow_model_cpp/tests/fixtures/arith_to_affine.mlir
+ub_overflow_model_cpp/tests/test_arith_to_affine.cpp
+ub_overflow_model_cpp/scripts/verify_arith_to_affine_pipeline.py
+```
+
+`RunArithToAffineConversionPass` 是 checkpoint `03 -> 04` 的严格 pass 入口；不得替换成会附带
+后续 canonicalization/CSE 的组合入口。验证脚本同时比较单 pass 和从 checkpoint `00` 开始的
+累计前缀，当前 8 profiles × 160 inputs 为 `1280/1280 PASS`。
+
 ## 模型入口和公共接口
 
 ```text

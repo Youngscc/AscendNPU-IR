@@ -116,6 +116,18 @@ python3 ub_overflow_model_cpp/scripts/verify_outer_extended_canonicalizer_pipeli
 到同一原生 `03_after_outer_extended_canonicalizer`。原生 `bishengir-opt --canonicalize-ext`
 fixture 结构完全一致；代表下游 PlanMemory 小回归为 `8/8 matched`。
 
+阶段 4.1 ArithToAffine：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/verify_arith_to_affine_pipeline.py \
+  --jobs 12 \
+  --json-report ub_overflow_model_cpp/output/arith_to_affine_phase4_1.json
+```
+
+2026-07-30 的单 pass `03 -> 04` 与累计 `00 -> 04` 同-attempt checkpoint 结果均为
+`8 profiles × 160 inputs = 1280/1280 PASS`；全运算 fixture 与真实
+`bishengir-opt --convert-arith-to-affine` 精确一致；代表下游 PlanMemory 为 `8/8 matched`。
+
 ## 3. 正确性分类
 
 - `matched`：完整合同一致；

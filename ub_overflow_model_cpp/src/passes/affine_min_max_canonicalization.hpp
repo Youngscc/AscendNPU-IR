@@ -597,13 +597,13 @@ inline GenericModule MaterializeArithToAffineConversion(
       operation.effects = "none";
       continue;
     }
+    const std::string nativeMap = NativeAffineMapText(operation, state);
     operation.name = replacement->second;
     operation.operands = state.replacementOperands.at(operation.id);
     for (int &operand : operation.operands)
       operand = resolveAlias(operand);
     operation.operandTypes.assign(operation.operands.size(), "index");
-    operation.properties =
-        "{map = " + AffineMapSemanticKey(operation, state) + "}";
+    operation.properties = "{map = " + nativeMap + "}";
     operation.attributes = operation.properties;
     operation.effects = "none";
   }

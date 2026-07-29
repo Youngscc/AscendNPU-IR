@@ -281,15 +281,22 @@ InlineOTFBroadcast 清理冗余 1-to-1 broadcast，但真实行为来自全部�
 
 ## 9. 阶段 4：逐个实现九步 canonicalizationHIVMPipeline
 
-当前子阶段：**4.1 ArithToAffine**。
+当前子阶段：**4.2 CanonicalizeIterArg**。
 
 九个 pass 必须按下面九个子阶段依次实现和关闸。每个子阶段都执行：源码审阅→单元 fixture→
 单 pass checkpoint→从 AutoBlockify 开始的累积 checkpoint；通过后才进入下一个。
 
 ### 4.1 ArithToAffine
 
+状态：**2026-07-30 已完成**。
+
 - 复核 affine legality、constant/index 处理和 canonicalization 顺序；
 - 优先复用 `RunArithToAffineConversion`，但必须证明 before-AutoBlockify 输入覆盖一致。
+
+完成证据：独立 pass 入口只执行原生 conversion 范围，不调用后续 affine canonicalization；
+fixture 与真实 `bishengir-opt --convert-arith-to-affine` 精确一致；8 profiles × 160 inputs 的
+`03 -> 04` 单 pass 与 `00 -> 04` 累计 checkpoint 为 `1280/1280 PASS`；完整测试通过；代表
+PlanMemory seeds `{0,13}` 为 `8/8 matched`。
 
 ### 4.2 CanonicalizeIterArg
 

@@ -617,6 +617,123 @@ inline std::string AffineMapSemanticKey(
   return name + "(" + JoinDelimited(canonical, ",") + ")";
 }
 
+inline uint64_t NativeAffineMagnitude(int64_t value) {
+  return value == std::numeric_limits<int64_t>::min()
+             ? uint64_t{1} << 63
+             : static_cast<uint64_t>(std::abs(value));
+}
+
+inline std::string NativeAffineLinearExpressionText(
+    const AffineLinearForm &form, const std::map<int, size_t> &symbols) {
+  std::vector<std::pair<size_t, int64_t>> ordered;
+  for (const auto &[term, coefficient] : form.coefficients) {
+    const std::optional<int> value = AffineValue(term);
+    if (!value || symbols.count(*value) == 0)
+      throw std::runtime_error(
+          "ConvertArithToAffine: affine expression references a missing "
+          "operand");
+    if (coefficient != 0)
+      ordered.emplace_back(symbols.at(*value), coefficient);
+  }
+  std::sort(ordered.begin(), ordered.end());
+
+  std::string result;
+  auto appendTerm = [&](const std::string &term, int64_t coefficient) {
+    const bool negative = coefficient < 0;
+    const uint64_t magnitude = NativeAffineMagnitude(coefficient);
+    std::string scaled = term;
+    if (magnitude != 1)
+      scaled += " * " + std::to_string(magnitude);
+    if (result.empty())
+      result = negative ? "-" + scaled : scaled;
+    else
+      result += negative ? " - " + scaled : " + " + scaled;
+  };
+  for (const auto &[symbol, coefficient] : ordered)
+    appendTerm("s" + std::to_string(symbol), coefficient);
+  if (form.constant != 0 || result.empty()) {
+    if (result.empty())
+      result = std::to_string(form.constant);
+    else if (form.constant < 0)
+      result += " - " + std::to_string(NativeAffineMagnitude(form.constant));
+    else
+      result += " + " + std::to_string(form.constant);
+  }
+  return result;
+}
+
+inline std::string NativeAffineExpressionText(
+    const std::string &expression, const std::map<int, size_t> &symbols) {
+  if (const std::optional<AffineLinearForm> linear =
+          FlattenAffineLinearExpression(expression)) {
+    const bool onlyDirectSymbols =
+        std::all_of(linear->coefficients.begin(), linear->coefficients.end(),
+                    [&](const auto &term) {
+                      const std::optional<int> value = AffineValue(term.first);
+                      return value && symbols.count(*value) != 0;
+                    });
+    if (onlyDirectSymbols)
+      return NativeAffineLinearExpressionText(*linear, symbols);
+  }
+  if (const std::optional<int64_t> constant =
+          AffineConstantValue(expression))
+    return std::to_string(*constant);
+  if (const std::optional<int> value = AffineValue(expression)) {
+    const auto found = symbols.find(*value);
+    if (found == symbols.end())
+      throw std::runtime_error(
+          "ConvertArithToAffine: affine value is not an operation operand");
+    return "s" + std::to_string(found->second);
+  }
+  for (const std::string &kind : {"mul", "add", "mod", "floordiv",
+                                  "ceildiv"}) {
+    const auto operands = AffineBinaryExpressionOperands(expression, kind);
+    if (!operands)
+      continue;
+    const std::string lhs =
+        NativeAffineExpressionText(operands->first, symbols);
+    const std::string rhs =
+        NativeAffineExpressionText(operands->second, symbols);
+    if (kind == "add")
+      return lhs + " + " + rhs;
+    if (kind == "mul")
+      return lhs + " * " + rhs;
+    return lhs + " " + kind + " " + rhs;
+  }
+  throw std::runtime_error(
+      "ConvertArithToAffine: unsupported native affine expression");
+}
+
+inline std::string NativeAffineMapText(
+    const GenericOperation &operation,
+    const ConvertArithToAffineState &state) {
+  const auto operandRecord = state.replacementOperands.find(operation.id);
+  const auto expressionRecord =
+      state.replacementMapExpressions.find(operation.id);
+  if (operandRecord == state.replacementOperands.end() ||
+      expressionRecord == state.replacementMapExpressions.end())
+    throw std::runtime_error(
+        "ConvertArithToAffine: missing native map materialization state");
+  std::map<int, size_t> symbols;
+  for (size_t index = 0; index < operandRecord->second.size(); ++index)
+    symbols[operandRecord->second[index]] = index;
+  std::ostringstream output;
+  output << "affine_map<()[";
+  for (size_t index = 0; index < operandRecord->second.size(); ++index) {
+    if (index != 0)
+      output << ", ";
+    output << 's' << index;
+  }
+  output << "] -> (";
+  for (size_t index = 0; index < expressionRecord->second.size(); ++index) {
+    if (index != 0)
+      output << ", ";
+    output << NativeAffineExpressionText(expressionRecord->second[index],
+                                         symbols);
+  }
+  return output.str() + ")>";
+}
+
 inline ConvertArithToAffineState
 RunConvertArithToAffine(const GenericModule &module,
                         bool composeConversionProducers = true) {
