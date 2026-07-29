@@ -354,8 +354,16 @@ isolated function、commutative equivalence、read-only/write barrier 和 deferr
 
 ### 4.6 ExtendedCanonicalizer（func）
 
+状态：**2026-07-30 已完成**。
+
 - 与 4.3 共用实现但使用 func scope；
 - 单独验证 scope 对 pattern worklist 和 region simplification 的影响。
+
+完成证据：新增独立 `RunFirstFuncExtendedCanonicalizer` 入口；源码证明共享实现的 folder 和 rewrite
+均按 enclosing function 隔离。双函数 fixture 与真实
+`builtin.module(func.func(canonicalize-ext))` 精确一致；8 profiles × 160 inputs 的 `08 -> 09`
+单 pass 与 `00 -> 09` 累计 checkpoint 为 `1280/1280 PASS`；完整测试通过，代表 PlanMemory
+为 `8/8 matched`。
 
 ### 4.7 HIVMOptSinglePoint
 

@@ -79,6 +79,13 @@ isolated-from-above、nested-region-first traversal、commutative/region operati
 memory effect barrier 和 deferred erase。`verify_cse_pipeline.py` 同时验证 checkpoint `07 -> 08`
 和累计 `00 -> 08`；multi-block region 当前不在 160 输入支持域内并显式 blocker。
 
+`ub_overflow_model_cpp/src/passes/func_extended_canonicalizer.hpp`
+
+阶段 4.6 第一次 func-scoped ExtendedCanonicalizer 的独立边界。它复用已验证的 module fixed-point
+实现，因为后者的 OperationFolder 与全部 modeled rewrite 已按 enclosing function 分区；双函数
+fixture 和 `verify_first_func_extended_canonicalizer_pipeline.py` 分别验证 scope 及 checkpoint
+`08 -> 09`/累计 `00 -> 09`。
+
 现有可复用模型代码：
 
 ```text

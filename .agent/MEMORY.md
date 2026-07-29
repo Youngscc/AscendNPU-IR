@@ -204,10 +204,18 @@ scope、isolated-from-above、nested-region-first traversal、交换律 operatio
 single-block structured region；multi-block SSACFG 保持显式 blocker，不做错误线性化。当前进入阶段
 4.6 func-scoped ExtendedCanonicalizer。
 
+阶段 4.6 已于 2026-07-30 完成：新增独立 `RunFirstFuncExtendedCanonicalizer` 阶段入口；经源码
+复核，共享 canonicalizer 中所有 modeled rewrite 均按 enclosing function 隔离，OperationFolder
+本来就是逐 function 建表，因而复用 4.3 的 fixed-point 实现而不复制第二套 pattern。双函数 fixture
+与真实 `builtin.module(func.func(canonicalize-ext))` 精确一致，证明 constant/worklist 不跨函数；
+8 profiles × 160 inputs 的 `08 -> 09` 单 pass 与 `00 -> 09` 累计 checkpoint 为
+`1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。当前进入阶段 4.7
+HIVMOptSinglePoint。
+
 ## 当前实现优先级
 
-1. 从阶段 4.6 func-scoped ExtendedCanonicalizer 开始，依次补齐其余
-   `canonicalizationHIVMPipeline` 和 `InlineOTFBroadcast`；阶段 1～3、4.1～4.5 已完成。
+1. 从阶段 4.7 HIVMOptSinglePoint 开始，依次补齐其余 `canonicalizationHIVMPipeline` 和
+   `InlineOTFBroadcast`；阶段 1～3、4.1～4.6 已完成。
 2. 使用阶段 0 已建立的原生 checkpoint 做每个新增 pass 的差分；最终以同进程原生 local
    PlanMemory 做 seeds 0～19 完整合同验证。
 3. 对齐后把 production prediction pass 前移到 before-AutoBlockify；在完成代表与全量验证前

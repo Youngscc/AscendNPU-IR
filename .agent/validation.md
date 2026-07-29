@@ -182,6 +182,19 @@ commutative CSE、nested visibility、sibling scope、read-only/write barrier、
 region-op equivalence 和 trivially-dead erase；完整模型测试通过，代表下游 PlanMemory 为
 `8/8 matched`。
 
+阶段 4.6 第一次 func-scoped ExtendedCanonicalizer：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/verify_first_func_extended_canonicalizer_pipeline.py \
+  --jobs 12 \
+  --json-report ub_overflow_model_cpp/output/first_func_canonicalizer_phase4_6.json
+```
+
+2026-07-30 的单 pass `08 -> 09` 与累计 `00 -> 09` 同-attempt checkpoint 均为
+`8 profiles × 160 inputs = 1280/1280 PASS`。双函数 fixture 与真实嵌套
+`builtin.module(func.func(canonicalize-ext))` 比较，确认 constant folder/worklist 不跨 function；
+完整模型测试通过，代表下游 PlanMemory 为 `8/8 matched`。
+
 ## 3. 正确性分类
 
 - `matched`：完整合同一致；
