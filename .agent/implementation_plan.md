@@ -396,13 +396,24 @@ PlanMemory 为 `8/8 matched`。
 
 ### 4.9 MemrefDeadStoreElimination
 
+状态：**2026-07-30 已完成**。
+
 - 对照原生 alias、access、forwarding 和 region/control-flow 条件；
 - 若 before-CV 支持域内不可达，使用明确的 IR capability 检查证明 no-op；未知 memref access
   必须 blocker，不能静默忽略。
 
+完成证据：模型复刻 `ValueDependencyAnalyzer` 的 preorder value 编号、ViewLike union-find、
+最小 index root 与 `OpsOfAlloc` chronological list；复刻同层 store cache、精确 index/全 1 memref
+load forwarding、MemoryEffect write、func.call 与 nested region barrier；并复刻 310B/950 的尾部
+无用 HIVM Load 清理及 MLIR `eraseDeadAllocAndStores` 的 subview 递归和危险 use 拒绝规则。普通和
+reg-based 定向 fixture 均与真实 `builtin.module(func.func(memref-dse))` 精确一致。另有最小 fixture
+证明原生 reg-based store-to-load forwarding 因随后访问已删除 op 而 SIGSEGV，模型对该已证明
+原生失败显式 fail open。8 profiles × 160 inputs 的 `11 -> 12` 单 pass和 `00 -> 12` 累计
+checkpoint 为 `1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。
+
 ### 阶段闸门
 
-九个 checkpoint 和完整 cumulative checkpoint 全部通过后，才允许进入 InlineOTFBroadcast。
+九个 checkpoint 和完整 cumulative checkpoint 已全部通过，允许进入 InlineOTFBroadcast。
 
 ## 10. 阶段 5：实现 InlineOTFBroadcast
 

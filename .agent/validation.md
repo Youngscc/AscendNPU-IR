@@ -223,6 +223,22 @@ python3 ub_overflow_model_cpp/scripts/verify_second_func_extended_canonicalizer_
 `builtin.module(func.func(canonicalize-ext))` 精确一致；完整测试通过，代表下游 PlanMemory 为
 `8/8 matched`。
 
+阶段 4.9 MemrefDeadStoreElimination：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/verify_memref_dse_pipeline.py \
+  --jobs 8 \
+  --json-report ub_overflow_model_cpp/output/memref_dse.json
+```
+
+2026-07-30 的单 pass `11 -> 12` 与累计 `00 -> 12` 同-attempt checkpoint 均为
+`8 profiles × 160 inputs = 1280/1280 PASS`。普通与 Ascend950 reg-based 定向 fixture 分别与
+真实 `builtin.module(func.func(memref-dse))` 精确一致，覆盖同层转发、scalar-like memref、
+ViewLike alias、write/call/nested-region barrier、死 alloc/subview/store 链和尾部无用 HIVM Load
+清理；完整测试通过，代表下游 PlanMemory 为 `8/8 matched`。最小 Ascend950 fixture 证明原生
+pass 在 store-to-load forwarding 后会于 reg-based cleanup 中 SIGSEGV；模型将此原生失败显式
+fail open，未修改原生逻辑也未把该失败当作 matched。
+
 ## 3. 正确性分类
 
 - `matched`：完整合同一致；

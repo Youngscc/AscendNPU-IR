@@ -116,6 +116,12 @@ ub_overflow_model_cpp/output/tests/test_second_func_extended_canonicalizer
 
 "${compiler}" -std=c++17 -O0 -g -Wall -Wextra -Wpedantic -Wconversion \
   -Wshadow -Werror \
+  ub_overflow_model_cpp/tests/test_pre_cv_memref_dse.cpp \
+  -o ub_overflow_model_cpp/output/tests/test_pre_cv_memref_dse
+ub_overflow_model_cpp/output/tests/test_pre_cv_memref_dse
+
+"${compiler}" -std=c++17 -O0 -g -Wall -Wextra -Wpedantic -Wconversion \
+  -Wshadow -Werror \
   ub_overflow_model_cpp/tools/pre_cv_prefix_model_runner.cpp \
   -o ub_overflow_model_cpp/output/tests/pre_cv_prefix_model_runner
 

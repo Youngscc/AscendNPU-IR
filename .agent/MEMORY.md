@@ -227,10 +227,22 @@ function 隔离的 fixed-point 实现，未复制第二套 pattern。定向 fixt
 `1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。当前进入阶段 4.9
 MemrefDeadStoreElimination。
 
+阶段 4.9 已于 2026-07-30 完成：新增 pre-CV `RunPreCVMemrefDeadStoreElimination`，逐句复刻
+原生 `ValueDependencyAnalyzer` 的 preorder value 编号、ViewLike alias 并查集与
+`OpsOfAlloc` 顺序，以及 `DeadStoreElimination.cpp` 的同层 store-to-load forwarding、精确 SSA
+index/全 1 memref 匹配、write/call/nested-region cache barrier、310B/950 尾部无用 HIVM Load
+清理和 MLIR `eraseDeadAllocAndStores` 规则。普通与 reg-based 定向 fixture 分别与真实
+`builtin.module(func.func(memref-dse))` 精确一致，覆盖 view alias、嵌套区域、call、递归 subview
+死链及保留间接使用；最小 fixture 证明原生 pass 在 reg-based 模式发生 store-to-load forwarding
+后会因已删除 operation 的悬空记录 SIGSEGV，模型在该组合上显式 fail open，而不复现未定义
+行为。8 profiles × 160 inputs 的 `11 -> 12` 单 pass 与
+`00 -> 12` 累计 checkpoint 为 `1280/1280 PASS`；完整测试通过，代表 PlanMemory 为
+`8/8 matched`。当前进入阶段 5 InlineOTFBroadcast。
+
 ## 当前实现优先级
 
-1. 从阶段 4.9 MemrefDeadStoreElimination 开始，依次补齐其余
-   `canonicalizationHIVMPipeline` 和 `InlineOTFBroadcast`；阶段 1～3、4.1～4.8 已完成。
+1. 完成阶段 5 InlineOTFBroadcast；阶段 1～3、4.1～4.9 已完成。随后执行 combined before-CV
+   checkpoint、embedded observe-only、20-seed 全量正确性和新边界全量速度验证。
 2. 使用阶段 0 已建立的原生 checkpoint 做每个新增 pass 的差分；最终以同进程原生 local
    PlanMemory 做 seeds 0～19 完整合同验证。
 3. 对齐后把 production prediction pass 前移到 before-AutoBlockify；在完成代表与全量验证前

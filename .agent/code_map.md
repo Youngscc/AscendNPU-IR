@@ -96,6 +96,15 @@ memory-user closure；与 post-bufferization 的 analysis-only `hivm_opt_single_
 阶段，不能互换。`verify_hivm_opt_single_point_pipeline.py` 验证 checkpoint `09 -> 10` 和累计
 `00 -> 10`，当前 8 profiles × 160 inputs 为 `1280/1280 PASS`。
 
+`ub_overflow_model_cpp/src/passes/pre_cv_memref_dead_store_elimination.hpp`
+
+阶段 4.9 的 pre-CV MemRef DSE。实现直接对应原生
+`Dialect/MemRef/Transforms/DeadStoreElimination.cpp`、`ValueDependencyAnalyzer.cpp` 与 MLIR
+`MemRefUtils.cpp::eraseDeadAllocAndStores`，包括 ViewLike alias root、同层 forwarding barrier、
+reg-based 尾部 HIVM Load 清理和递归 subview 死链删除。对应 runner 开关为
+`--apply-memref-dse`，验证脚本 `verify_memref_dse_pipeline.py` 同时比较 checkpoint `11 -> 12`
+和累计 `00 -> 12`；当前 8 profiles × 160 inputs 为 `1280/1280 PASS`。
+
 现有可复用模型代码：
 
 ```text
