@@ -1,696 +1,431 @@
-# UB Overflow 模型性能重构与 before-AutoBlockify 前移执行方案
+# before-AutoBlockify 到 PlanMemory 的轻量模型扩展计划
 
-本文是交给后续实现者的主执行方案。它描述的是产品实现顺序，不是测试脚本优化计划。
-执行者开始工作前必须同时阅读 [MEMORY.md](MEMORY.md)、[code_map.md](code_map.md)、
-[workflow.md](workflow.md) 和 [validation.md](validation.md)。源码、真实测量与本文冲突时，先用
-源码和同机实验重新核实，再更新本文，禁止带着已经失效的假设继续实现。
+最后更新：2026-07-30。本文是下一阶段开发的主执行计划。开始实现前必须同时完整阅读
+[MEMORY.md](MEMORY.md)、[code_map.md](code_map.md)、[workflow.md](workflow.md) 和
+[validation.md](validation.md)。
 
-## 1. 最终目标
+## 1. 目标与边界
 
-将轻量 UB overflow 模型作为真实 `bishengir-compile` 中的一个同步 Module pass，入口从当前
-before-CVPipelining 前移到 before-AutoBlockify：
-
-```text
-ModuleOp before AutoBlockify
-  -> embedded lightweight model
-       -> 模拟 AutoBlockify 到 CVPipelining 之间的真实语义
-       -> 模拟 CVPipelining 到 local PlanMemory 的 UB 相关语义
-       -> exact overflow：终止当前 attempt，交给 BiSheng 原有 fallback
-       -> exact non-overflow：继续真实 compiler pipeline
-       -> incomplete/blocker：fail open，继续真实 compiler pipeline
-```
-
-首要指标是轻量模型自身的单轮速度：在相同输入集合、相同 resolved options、相同
-retry-only 语义和相同构建模式下，比较原模型与新模型的每输入耗时、单轮聚合耗时和峰值
-内存。当前任务不评估 autotune 总收益，也不把原生 compiler 被剪枝后节省的时间计入模型
-性能收益。
-
-代码精简只是消除字符串解析、重复索引和中间转换后的附带收益，不是独立目标。禁止为了少写
-模型代码而 clone `ModuleOp` 并运行原生 pass pipeline；那会退化成完整后缀编译的成本。
-
-## 2. 当前基线与不可破坏原则
-
-当前产品入口仍在 before-CVPipelining，BiSheng pass 将 `ModuleOp` 打印为 Generic MLIR 文本，
-模型再解析为 `GenericModule`。模型内部约 4.9 万行 C++，主要性能热点和 2026-07-28 基线见
-[validation.md](validation.md)。当前原模型的主要单轮基线为：
+把 embedded UB overflow 模型的输入边界从 before-CVPipelining 前移到
+before-AutoBlockify：
 
 ```text
-160-input retry-only internal median aggregate    约 888 ms
-process wall（三轮）                               1433 / 1392 / 1379 ms
+raw adapter
+  -> 原生 BiSheng 前缀（典型 Triton 配置约 61 次 pass，不复刻）
+  -> ModuleOp before AutoBlockify
+  -> lightweight model
+       -> AutoBlockify 到 before-CVPipelining 的新增轻量前缀
+       -> 现有 CVPipelining 到 local PlanMemory 模型
+       -> exact overflow / exact non-overflow / blocker
 ```
 
-所有阶段必须遵守以下原则：
+AutoBlockify 之前的 HFusion、ConvertToHIVM 和 HIVM prefix 继续由原生 BiSheng 执行，不属于
+本任务。模型不直接消费 raw adapter，也不复刻前面 61 次 pass。
 
-- 只有 `Precision::Exact && overflow == true` 可以剪枝；blocker/incomplete 必须继续编译器。
-- 未固定 seed 时保持原生 retry 合同：seed 0～19 任一成功即 non-overflow，全部失败才 overflow。
-- 不修改 BiSheng 原生 AutoBlockify、CVPipelining、bufferization、PlanMemory 或 fallback 的核心
-  逻辑。允许增加默认关闭的观察、计时、dump 和边界验证辅助。
-- 不为 adapter、kernel 名、SSA 名、buffer 数量、配置名或 seed 写特例。
-- 任何会影响 op、buffer、RNG、lifetime 或地址规划顺序的遍历必须来自显式有序容器。
-- 新逻辑必须来自对应 BiSheng pass 源码；出现差异时先定位真实 pass 行为，禁止自行发明
-  “合理逻辑”让测试通过。
-- embedded correctness oracle 是同一真实 `bishengir-compile` attempt 中继续运行得到的原生
-  local PlanMemory。
-- 性能测量默认关闭 dump、validation、逐 pass artifact 和详细 stage timing。
-- `Output/`、`ub_overflow_model_cpp/output/`、cache、dump、临时 TSV 和 profile 不提交。
+本任务首先追求语义完整和逐 pass 可验证；不能为了尽快得到最终 PlanMemory 一致而从结果反推
+规则。每个新增逻辑必须能指出对应的 BiSheng/MLIR 源文件、匹配条件、重写顺序和失败行为。
 
-## 3. 目标架构
+## 2. 必须复刻的真实顺序
+
+唯一顺序来源是
+`bishengir/lib/Dialect/HIVM/Pipelines/HIVMPipelines.cpp` 当前源码：
 
 ```text
-只读 mlir::ModuleOp
-  -> MLIRModuleView
-       Operation / Value / Type / Attribute / Region / Block
-  -> stable-ID shadow overlay
-       base Operation* + stable IDs + overrides + synthetic arena
-  -> revisioned analysis manager
-       def-use / CFG / parent / order / effects / typed metadata
-  -> AutoBlockify-to-CV semantic stages
-  -> CVPipelining and UB-affecting stages
-  -> UBBufferProgram
-  -> typed PlanProgram
-  -> integer-ID PlanMemory
+1  AutoBlockifyParallelLoop                         [conditional]
+2  MarkMultiBuffer                                  [workspace manage enabled]
+3  ExtendedCanonicalizer
+4  ArithToAffine
+5  CanonicalizeIterArg                              [func]
+6  ExtendedCanonicalizer
+7  SCFForLoopCanonicalization
+8  CSE
+9  ExtendedCanonicalizer                            [func]
+10 HIVMOptSinglePoint                               [func]
+11 ExtendedCanonicalizer                            [func]
+12 MemrefDeadStoreElimination                       [func]
+13 InlineOTFBroadcast                               [func]
+-- existing model boundary --
+14 CVPipelining                                     [workspace manage enabled]
 ```
 
-原始 `Operation*` 只在当前同步 pass 调用期间有效。模型不得修改输入 `ModuleOp`，也不得跨
-RetriablePassManager attempt 保存 MLIR 指针。跨 fallback 复用只能保存无指针紧凑 snapshot。
+第 4～12 项是一次 `canonicalizationHIVMPipeline`，共 9 个 pass。第 3 项是它之前额外运行的
+module-level ExtendedCanonicalizer，不能与第 6/9/11 项合并。
 
-## 4. 总体阶段顺序
+条件必须逐字复刻：
 
-| 阶段 | 任务 | 性质 | 进入下一阶段的核心条件 |
+- AutoBlockify 仅在 `enableTritonKernelCompile && enableAutoBlockifyLoop` 时执行；
+- CV 前 MarkMultiBuffer 仅在 `!disableAutoCVWorkSpaceManage` 时执行；
+- CVPipelining 同样受 `!disableAutoCVWorkSpaceManage` 控制；
+- dump、trace 和 UB prediction 是辅助 pass，不属于原生语义序列。
+
+## 3. 不可破坏的实现原则
+
+- 对应原生源码是唯一语义来源；测试结果只能定位问题，不能用来编造规则。
+- 不修改 BiSheng 原生 pass、pattern、遍历顺序、fallback 或 PlanMemory 行为。
+- 不增加 kernel、adapter、SSA 名、buffer 数量、配置名或 seed 特例。
+- 未覆盖的原生分支必须返回 blocker/incomplete 并 fail open，不能猜测为 no-op。
+- 不能因为 corpus 中某 pass 暂时没有改变 IR，就删除或永久写成 no-op；必须从原生匹配条件证明
+  当前支持域内不可达，并保留未知分支保护。
+- 保持原生 greedy rewrite 的 worklist、user/use-list、插入点、erase 和遍历顺序；任何影响后续
+  operation/value identity 的变化都需要 checkpoint 验证。
+- 模型核心不新增 LLVM/MLIR 类型或运行时依赖。BiSheng adapter 可以读取 `ModuleOp`，但新增
+  pass 使用模型自有 `GenericModule` 和现有公共工具。
+- 不启动全流水 ShadowIR、通用 analysis manager 或 UBBufferProgram 替换。现有 AutoBlockify
+  overlay 只作为已经完成的实现复用，不扩大成全局迁移项目。
+
+## 4. 原生源码与现有实现盘点
+
+| pass | 原生语义来源 | 当前轻量实现 | 本阶段处理 |
 |---|---|---|---|
-| 0 | 冻结基线和测量口径 | 准备 | 正确性、时间、内存基线可重复 |
-| 1 | 直接 `ModuleOp` 输入 | P0 性能基础设施 | 生产路径不再打印/解析 MLIR 文本 |
-| 2 | stable-ID shadow overlay | P0 性能基础设施 | 变换不复制完整原 IR，顺序合同通过 |
-| 3 | 增量 analysis manager | P0 性能基础设施 | mutation 不再触发全量 def-use/CFG 重建 |
-| 4 | 入口前移、改造已有 AutoBlockify 并补齐到 CV | P0 产品功能 | 新边界完整语义和 PlanMemory oracle 对齐 |
-| 5 | 扩展后公共 fast path 优化 | P0 产品性能 | 新模型单轮总耗时明显下降 |
-| 6 | 统一 `UBBufferProgram/PlanProgram` | P1 性能基础设施 | 正常路径无文本 PlanMemory bridge |
-| 7 | 整数化和复用 PlanMemory | P1 overflow 性能 | 20-seed slow path 明显下降且语义不变 |
-| 8 | fallback snapshot、LTO/PGO | P2 系统性能 | 新模型单轮耗时继续稳定下降 |
+| AutoBlockify | `HIVM/Transforms/AutoBlockifyParallelLoop.cpp` | `passes/auto_blockify_parallel_loop.hpp`，已有 legacy/overlay 与 fixture | 复核源码后直接接入；只做输入合同、参数和必要适配 |
+| CV 前 MarkMultiBuffer | `HIVM/Transforms/MarkMultiBuffer.cpp` | 现有 `passes/mark_multi_buffer.hpp` 是 PlanMemory 前 local-buffer 阶段 | 新建 pre-CV 语义层；只复用枚举、解析和经证明相同的 helper |
+| ExtendedCanonicalizer | `Transforms/ExtendedCanonicalizer.cpp` + 所有已加载 dialect/op canonicalization pattern | `canonicalization_hivm_pipeline.hpp` 有受限投影 | 先记录 reachable pattern，再逐 pattern 对照原生实现补齐；未知 pattern blocker |
+| ArithToAffine | `Conversion/ArithToAffine/ArithToAffine.cpp` | 已有 `RunArithToAffineConversion` | 源码复核后复用，并在新输入阶段单独差分 |
+| CanonicalizeIterArg | `Dialect/SCF/Transforms/CanonicalizeIterArg.cpp` | 已有 iter-arg 受限实现 | 对照原生 For/While、dead iter arg、effect 判定逐分支补齐 |
+| SCFForLoopCanonicalization | `third-party/llvm-project/mlir/.../LoopCanonicalization.cpp` | 当前聚合 canonicalization 覆盖部分效果 | 拆出可独立调用/验证的 stage，按原生 pattern 实现 |
+| CSE | `third-party/llvm-project/mlir/lib/Transforms/CSE.cpp` | 已有受限、确定顺序 CSE | 复核 region/dominance/effect/equivalence 条件后在新阶段复用 |
+| HIVMOptSinglePoint | `HIVM/Transforms/HIVMOptSinglePoint.cpp` | 现有实现绑定 post-bufferization `BufferizedSemanticIR` | 新增 pre-CV GenericModule 版本或证明分支不可达；不得直接复用错误阶段状态 |
+| Memref DSE | `Dialect/MemRef/Transforms/DeadStoreElimination.cpp` | 没有独立 pre-CV stage | 按原生 alias/access/region 条件实现；不可达分支必须有证明与 guard |
+| InlineOTFBroadcast | `HIVM/Transforms/InlineOTFBroadcast.cpp` | 没有独立实现 | 按单一 `VBrcInlinePattern` 逐句复刻 |
 
-阶段 4 的边界要求必须从阶段 1 起参与接口设计，但实际 AutoBlockify→CV 功能实现必须等阶段
-1～3 的最低可用基础设施完成后进行，避免在旧 `GenericModule` 上完成后再重写一次。
+AutoBlockify 原生约 192 行、已有轻量实现约 573 行；MarkMultiBuffer 原生约 330 行；
+CanonicalizeIterArg 原生约 1710 行，是本次风险最高的单体之一。ExtendedCanonicalizer 驱动本身
+很小，但动态收集所有已加载 dialect/op pattern，是覆盖面最大的风险，不能按 93 行驱动代码
+低估工作量。
 
-仓库中的轻量 AutoBlockify 已经实现，并有独立 runner、验证脚本和单元测试。后续任务不是
-从零重新实现 AutoBlockify，而是先核对它与当前 BiSheng 源码是否仍一致，再将现有语义实现
-适配到 direct-MLIR/shadow overlay 基础设施，最后接入新的 before-AutoBlockify 产品入口。
-改造期间应尽量复用已经验证过的匹配条件、错误条件、顺序合同和测试用例。
+## 5. 阶段 0：冻结旧边界并建立逐 pass checkpoint
 
-## 5. 阶段 0：冻结基线和建立可观测性
+状态：**2026-07-30 已完成**。
 
 ### 目标
 
-在结构性修改前保存可重复的正确性、性能和内存基线，明确优化前后的同口径比较方式。
+在移动产品入口前，保存 `1dfddd59` 的 before-CV 正确性/性能基线，并建立不改变原生语义的
+before-AutoBlockify 与每个新增 pass 后 checkpoint。
 
 ### 执行方式
 
-1. 确认工作树、分支、构建模式和模型 build identity；Release 必须为 `-O3 -DNDEBUG`。
-2. 构建模型和真实 compiler：
-
-   ```bash
-   bash ub_overflow_model_cpp/build.sh
-   cmake --build build --target bishengir-compile -j8
-   ```
-
-3. 运行完整模型测试：
-
-   ```bash
-   bash ub_overflow_model_cpp/tests/run_tests.sh
-   ```
-
-4. 保存代表性 embedded fixed-seed 结果。至少覆盖：simple AIV、MIX、attention overflow、
-   late-seed success、auto multi-buffer、UB-saving、InjectBlockSync 和 AutoBlockify 输入。
-5. 保存当前原模型二进制或可复现 commit，使用 production retry-only 对同一输入集合交替测量
-   原模型和新模型，记录：
-   - 每个输入的 `Result::totalTimeNs`；
-   - 单轮 internal total；
-   - 单轮 process wall；
-   - median、mean、p95 和最慢输入；
-   - 模型峰值 RSS。
-6. 报告写入 `ub_overflow_model_cpp/output/performance/`，不提交。
+1. 保留当前产品 prediction pass 位置和剪枝行为不变。
+2. 在真实 pipeline 增加默认关闭的观察点：
+   - before AutoBlockify；
+   - 每个上述 pass 后；
+   - before CVPipelining。
+3. checkpoint 只用于测试：输出稳定结构记录，不改变 pass 输入、遍历或 insertion order。
+4. 稳定结构记录至少覆盖：
+   - operation/block/region 顺序与层级；
+   - result/operand/iter_arg/yield 对应关系；
+   - type、shape、layout、address space；
+   - memory effects；
+   - AutoBlockify、workspace、multi-buffer、broadcast、core-type 属性。
+5. 对相同 ModuleOp，原生 pass 链和轻量 pass 链必须从同一个 before-AutoBlockify checkpoint
+   分叉，禁止用不同编译产生的输入冒充逐 pass 对比。
 
 ### 完成条件
 
-- 连续三轮关键数据没有无法解释的大幅漂移；
-- 当前正确性基线可复现；
-- 明确记录输入集合、配置、seed/retry 模式、并发度和 timing 开关。
+- checkpoint 默认关闭，普通构建/运行无输出和可测开销；
+- 能单独停止并取得任意新增 pass 前后的原生结构；
+- 当前 before-CV embedded 回归未改变。
+
+### 完成证据
+
+- `BISHENGIR_UB_PREFIX_CHECKPOINT_DIR` 默认未设置时不插入任何 dump pass；
+- 共生成 14 个固定 checkpoint，覆盖 before AutoBlockify、13 个 pass 后和最终 before-CV；
+- `BISHENGIR_UB_PREFIX_CHECKPOINT_STAGE` 可精确选择单个 stage；
+- `BISHENGIR_STOP_AFTER_UB_PREFIX_CHECKPOINTS=1` 在最终 checkpoint 后停止，不加入
+  CVPipelining/PlanMemory；
+- vector-add 的最终 checkpoint 与修改前 `BISHENGIR_DUMP_BEFORE_CVPIPELINING` 输出逐字节一致；
+- 默认产品路径的 before-CV dump 与修改前基线逐字节一致；
+- `bishengir-compile` Release 构建和 `ub_overflow_model_cpp/tests/run_tests.sh` 全部通过。
 
 ### 提交边界
 
-本阶段通常不产生产品提交；必要的纯计时修复单独提交，不与后续架构代码混合。
+独立的测试基础设施提交，不混入任何 pass 语义。
 
-状态（2026-07-28）：已完成。冻结了 160-input production retry-only 三轮时间/RSS 基线、
-140-attempt embedded fixed-seed 正确性基线和 160-input AutoBlockify 基线；新增默认关闭、不会
-运行 validation/native suffix 的可重复测量工具。详细数字见 `validation.md`。
+## 6. 阶段 1：接入已有 AutoBlockify
 
-## 6. 阶段 1：删除生产文本边界，直接读取 ModuleOp
+### 实现
 
-### 目标
-
-生产 embedded 路径不再执行：
-
-```text
-ModuleOp -> generic text -> ParseGenericIR -> string-heavy GenericModule
-```
-
-standalone CLI 仍保留，但由 MLIR parser 解析文件后调用同一个 ModuleOp 入口。
-
-### 执行方式
-
-1. 在模型 API 中增加 MLIR-backed 同步入口。建议把“输入 IR”和“resolved options”拆开：
-   - embedded API 接受 `mlir::ModuleOp` 或不持有所有权的等价 view；
-   - standalone API 负责创建 `MLIRContext`、注册需要的 dialect、解析文件，再调用 embedded
-     核心；
-   - 旧文本 API 暂时只作为兼容 wrapper，不能继续作为生产入口。
-2. 修改 `BiShengIRUBOverflowModel` 的 CMake 依赖，使其显式链接所需 MLIR IR、support、
-   dialect/interface 库。只链接实际查询需要的库，不引入 PassManager 驱动整套原生 pipeline。
-3. 新建只读 `MLIRModuleView`：
-   - 以 IR 原始 region/block/op 顺序分配稳定 `OpId/BlockId/ValueId`；
-   - `Type`、`Attribute`、`OperationName` 保存 MLIRContext uniqued 句柄；
-   - 不复制完整 op 文本，不格式化 memref type，不解析 attribute dictionary 字符串；
-   - 原始 `Operation*` 只在当前 evaluate 调用中使用。
-4. 重构 input digest：
-   - 普通生产请求不得为了生成 digest 重新打印完整 IR；
-   - validation 模式可以由调用者提供已经计算的结构 digest，或使用单独的 opt-in 结构哈希。
-5. 在迁移期间提供双入口差分：同一个 `ModuleOp` 分别走旧文本入口和新入口，比较完整模型
-   结果和关键阶段摘要。
-
-### 重点文件
-
-```text
-bishengir/lib/Dialect/HIVM/Pipelines/UBOverflowPrediction.cpp
-ub_overflow_model_cpp/include/ub_overflow_model/api.hpp
-ub_overflow_model_cpp/src/api.cpp
-ub_overflow_model_cpp/CMakeLists.txt
-ub_overflow_model_cpp/src/ir/generic_ir.hpp
-```
+1. 完整复核原生 `AutoBlockifyParallelLoop.cpp` 与当前
+   `auto_blockify_parallel_loop.hpp`，列出每个条件和操作顺序的一一对应关系。
+2. 生产轻量前缀调用已有实现；优先使用当前已经验证的入口，不重写第二套实现。
+3. 支持禁用分支精确 no-op；读取真实 resolved `enableTritonKernelCompile`、
+   `enableAutoBlockifyLoop` 和模块 device/core-count 信息。
+4. 如需微调，只能修复与当前原生源码不一致之处；旧实现保留到新 checkpoint 对齐后再清理。
 
 ### 验证
 
-- 新旧入口在代表 fixed seeds 上 status/required/peak/plan/lifetime/multi/inplace 一致；
-- embedded model 对同进程原生 PlanMemory 一致；
-- standalone CLI 仍能消费现有 before-CV 文件；
-- ASan 或等价检查确认不保存失效 `Operation*`。
+- 现有 fixture/legacy-overlay 差分全部通过；
+- `verify_auto_blockify.py` 对 160 输入重新现场验证；
+- 新 before-AutoBlockify 输入上逐字段比较 after-AutoBlockify checkpoint；
+- 覆盖禁用、VECTOR、CUBE、MIX、factor、缺失 logical mark 和失败路径。
 
-### 性能门槛
+### 闸门
 
-- 生产路径 `serialize_ns` 和 `ParseGenericIR` 基本消失；
-- direct import 成本必须显著低于原 serialize+parse；
-- product wall time不能因为 MLIR dialect 注册或重复 context 初始化而回退。
+after-AutoBlockify checkpoint 完全对齐后才能开始 MarkMultiBuffer，不允许先串起完整前缀再回头
+定位。
 
-### 提交边界
+## 7. 阶段 2：实现 CV 前 MarkMultiBuffer
 
-一个独立提交：`perf(ub-model): read embedded input directly from MLIR`。
+### 实现
 
-状态（2026-07-28）：已完成并提交为 `35fbf7b6b`。生产 prediction pass 已改为同步
-借用 `ModuleOp`，不再打印/解析完整 Generic MLIR；新增只读 `MLIRModuleView`、MLIR parser
-standalone target 和默认关闭的双入口全字段差分。阶段 0 同口径 160-input × 3 轮 A/B 中，
-prediction internal total 从 `2047.247 ms` 降至 `1968.624 ms`（`-3.84%`），进程 wall 从
-`12569.785 ms` 降至 `12493.642 ms`（`-0.61%`），峰值 RSS 略降；140 个代表 fixed-seed
-attempt 全部 matched。阶段 2 仍需消除 direct import 后为旧核心生成完整 `GenericModule` 的
-过渡成本。
+按原生文件逐个迁移下列语义：
 
-## 7. 阶段 2：stable-ID shadow overlay
+1. workspace traceback：AllocWorkspace、ToTensor、ViewLike 链；
+2. 已有 annotation mark 的识别、校验和跳过；
+3. `MarkScopeMultiBuffer` 的 preload/core/V1-use 条件；
+4. ND2NZ/Fixpipe/Load/Store 的 local-buffer mark 条件；
+5. scf.for/scf.while parent-loop 限制；
+6. MIX core 下 only-cube/only-vector/no-l0c 策略；
+7. workspace multi-buffer 的 Store/Fixpipe、loop 和数量条件；
+8. greedy pattern 注册与应用顺序。
 
-### 目标
-
-避免把完整 `ModuleOp` 复制为另一棵可变通用 IR，同时支持模型复刻 pass 所需的创建、删除、
-移动和替换语义。
-
-### 执行方式
-
-1. 定义强类型 ID：`OpId`、`ValueId`、`BlockId`、`RegionId`、`BufferId`，禁止在新代码里以
-   裸字符串或 SSA 打印名作为核心 identity。
-2. 对原始节点只保存：
-   - stable ID；
-   - base `Operation*`/`Value`；
-   - active bit；
-   - 必要的 override bitmask；
-   - projection/source identity。
-3. synthetic node 存入 append-only arena；删除使用 tombstone/active `BitVector`，不要每个
-   pass 后全量 compact 和重新编号。
-4. block 顺序用显式 ordered ID vector；lookup 可以用 `DenseMap`，但其遍历不得产生语义
-   顺序。
-5. 提供统一 rewriter API：
-   - create op/region/block；
-   - insert/move/erase；
-   - replace operand/all uses/uses except；
-   - clone semantic node；
-   - set typed attribute/type/effect override。
-6. 迁移 pass 时保持旧实现并行可比较。优先迁移最能验证结构能力的操作：
-   - canonicalization；
-   - MarkRealCoreType projection；
-   - CVPipelining；
-   - AutoBlockify standalone 测试实现。
-7. 所有序列化移动到 debug serializer，生产结构不得依赖 serializer 才能继续下一阶段。
-
-### 验证
-
-- 为每个 mutation primitive 增加顺序、use replacement、nested region 和 tombstone 单测；
-- 对迁移 pass 比较旧 Generic 实现与 overlay 实现的阶段输出和最终 PlanMemory；
-- 特别检查 MIX projection、scf iter_args/result/yield 的一致置换和 synthetic op 顺序。
-
-### 性能门槛
-
-- 不允许出现完整 `ModuleOp` clone；
-- mutation-heavy kernel 的 module copy、compaction 和字符串 allocation 明显下降；
-- 代表 160-input internal total 相对阶段 1 继续下降，否则先 profile 再扩展迁移。
-
-### 提交边界
-
-可拆为两个产品提交：基础 overlay primitives；首批 pass 迁移。不得把未验证的一半 pass 切换
-为默认产品路径。
-
-进展（2026-07-28）：基础设施和首批 payload 迁移已完成，但阶段尚未完成。基础 primitives 包含强类型 stable IDs、借用 base
-payload、append-only synthetic arenas、有序 block IDs、tombstone，以及 create/move/erase、
-operand/use replacement、semantic clone 和 type/attribute/effect override。生产 MLIR view 已使用
-强类型 ID/base active record；Attribute payload 由 MLIR uniqued handle 延迟格式化，projection、
-canonicalization 和 clone 复制时使用精确 copy-on-write，修改时才 detach。结构 digest 使用
-MLIR 结构哈希，不会强制 materialize 字符串。完整测试和 140-attempt embedded fixed-seed 均
-通过。相对同轮阶段 0 的 160-input × 3 internal ratio 从阶段 1 的 `0.96160` 降到
-`0.95118`，归一化后比阶段 1 再降约 `1.08%`。当前生产路径仍会从 view 物化完整
-`GenericModule`，多处 pass 仍执行 `CompactGenericModule`；必须继续迁移结构变换、去掉该完整
-过渡表示后，阶段 2 才能关闭。
-
-后续增量（2026-07-28）：`AutoBlockifyParallelLoop` 已按真实实现逐句迁移到 stable-ID overlay，
-默认 standalone 模型只在 pass 结束时物化一次兼容 `GenericModule`；旧实现暂保留为单元差分
-oracle。overlay use-list 现同时维护普通 operand、DPS input 和 DPS init，物化边界覆盖 typed field
-override、synthetic arena、ordered block 和 tombstone。160 个 before-CV corpus 与原生
-`-auto-blockify-parallel-loop` 的结构差分全部通过。曾实验把全部 Generic payload 改为通用
-`shared_ptr` COW vector；160-input × 3 同机 A/B 显示 internal total 回退约 5.1% 且 RSS 增加，
-已完整撤销，后续只迁移真实 projection/mutation 热点，不向普通读取路径收取共享指针成本。
-生产 CVPipelining、canonicalization 和 MarkRealCoreType 尚未切换，完整导入桥仍在，因此本阶段
-继续保持“未完成”。
-
-同日又否决了两种把兼容 `GenericModule` 全局伪装成 shadow 的方案。第一种给所有 payload
-vector 增加通用 COW/shared ownership，160-input × 3 回退约 5.1%；第二种只让整数 ID 列表借用
-module arena，并把写操作改成显式 `mutate()`，仍回退约 4.6% 且 RSS 增加约 0.4 MB。两者均已
-完整撤销。结论是后续不能在每一次普通 ID 读取上增加间接层；必须让已迁移 pass 直接使用
-stable-ID overlay，并保持未迁移只读路径零额外成本。
-
-AutoBlockify 现已同时提供不物化的 `GenericShadowOverlay &` 原生入口和兼容
-`GenericModule -> GenericModule` wrapper；单测证明两条入口序列化结果一致。后续 migrated pass
-必须串接前者，不能在每个 pass 末尾调用 compatibility materializer。
-
-## 8. 阶段 3：revisioned 增量 analysis manager
-
-### 目标
-
-消除每个阶段或 mutation wave 后重复重建 definitions、users、value types、enclosing function、
-descendants、CFG 和 metadata cache 的工作。
-
-### 执行方式
-
-1. 将分析划分为独立 revision：
-   - topology/order；
-   - def-use；
-   - type/attribute/effect；
-   - CFG/dominance；
-   - enclosing function/descendants；
-   - UB buffer feature summary。
-2. 原始值的初始 users/definition 从 MLIR 读取；overlay mutation 维护 delta use-list，不能每次
-   回退到 module scan。
-3. rewriter 精确通知：operand replace、op create/erase/move、block create、type/attr override。
-4. 只失效受影响分析；增加 debug assertion，禁止使用旧 revision 的 analysis。
-5. 对只读 stage 复用同一 analysis；对 projection 使用 active `BitVector`，不要重新构造两份
-   module 和两份索引。
-6. 增加诊断计数器（默认关闭）：analysis build 次数、全量 scan 次数、updated uses 数、
-   allocated synthetic nodes 数。
-
-### 验证
-
-- mutation 后增量结果与从头 rebuild 的 debug oracle 一致；
-- randomized operation replacement/move 测试不出现悬空 ID；
-- fixed-seed 完整 plan 结果保持一致。
-
-### 性能门槛
-
-- 生产代表路径不再在多个 stage 重复构造等价全量索引；
-- 全量 rebuild 只允许出现在明确 stage boundary 或 debug cross-check；
-- 复杂 MIX/attention kernel 得到可重复收益，而不是仅优化小 corpus 特例。
-
-### 提交边界
-
-一个独立基础设施提交；若需要迁移多个 pass，后续按 pass 分提交。
-
-进展（2026-07-28）：最低可用 revisioned manager 已实现并验证，但由于阶段 2 产品迁移尚未
-完成，按阶段门槛暂不标记阶段 3 完成。topology、def-use、
-type/attribute/effect、CFG、hierarchy 和 buffer-feature revision 独立推进；operand replacement
-只更新 delta users/use-count，不再使 definitions/type/enclosing/descendants 全量索引失效。
-默认关闭的计数器记录 full builds/scans、incremental updates 和 synthetic nodes，单测断言增量
-结果与 rebuild oracle 一致且 replacement 后 full-index build 数不增长。完整测试与 140 个
-embedded fixed-seed attempt 通过。160-input × 3 相对同轮阶段 0 的 internal ratio 为
-`0.95028`，阶段 2 为 `0.95118`；总体收益很小但没有回退，mutation-heavy 路径已消除已知的
-重复全量 rebuild。
-
-## 9. 阶段 4：入口前移、改造已有 AutoBlockify 并补齐到 CV
-
-这是基础设施完成后的第一项功能扩展，也是后续所有性能数字的新产品边界。
-
-### 9.1 真实 pass 序列
-
-必须以 `HIVMPipelines.cpp` 当前源码为准。当前 AutoBlockify 到 CVPipelining 的顺序为：
+必须新增/传递真实 resolved options：
 
 ```text
-AutoBlockifyParallelLoop                         [conditional]
-MarkMultiBuffer                                 [workspace manage enabled]
-ExtendedCanonicalizer
-canonicalizationHIVMPipeline:
-  ArithToAffine
-  CanonicalizeIterArg
-  ExtendedCanonicalizer
-  SCFForLoopCanonicalization
-  CSE
-  func ExtendedCanonicalizer
-  HIVMOptSinglePoint
-  func ExtendedCanonicalizer
-  DeadStoreElimination
-InlineOTFBroadcast
-CVPipelining                                    [workspace manage enabled]
+enableAutoMultiBuffer
+limitAutoMultiBufferOnlyForLocalBuffer
+limitAutoMultiBufferOfLocalBuffer
+limitMixAutoMultiBufferBuffer
+setWorkspaceMultibuffer
+disableAutoCVWorkSpaceManage
 ```
 
-注意：这里的 CV 前 `MarkMultiBuffer` 与 PlanMemory 前只处理 local buffer 的
-`MarkMultiBuffer` 是两次不同调用，配置和输入 IR 阶段不同，不能合并成一次。
+现有 PlanMemory 前 `ModelMarkMultiBuffer` 不能直接调用，因为它消费
+`AfterInlineLoadCopyState`，而 CV 前 pass 运行在不同 IR 阶段。公共 enum/helper 只有在逐项证明
+行为相同后才能提取复用。
 
-### 9.2 新输入合同和参数
+### 验证
 
-1. 将 input contract 升级为 before-AutoBlockify，并更新 pipeline fingerprint/build identity。
-2. API 至少需要准确接收这一段真实分支使用的 resolved options：
+- 每个 pattern 单独 fixture；
+- enable-auto=false、local-only、四种 strategy、MIX/AIV/AIC、workspace 数量、已有 mark、
+  preload scope、unsupported loop 全覆盖；
+- 比较 annotation 的位置、属性、source identity、operation 顺序和完整 checkpoint；
+- 通过后再执行 AutoBlockify+MarkMultiBuffer 累积差分。
+
+## 8. 阶段 3：实现外层 ExtendedCanonicalizer
+
+这个 pass 位于 CV 前 MarkMultiBuffer 后、九步 canonicalization pipeline 前。它主要为后续
+InlineOTFBroadcast 清理冗余 1-to-1 broadcast，但真实行为来自全部已加载 pattern，不能只凭该
+注释实现一个 broadcast 特例。
+
+### 实现方法
+
+1. 默认关闭地记录原生 pass 在当前支持域内实际触发的 pattern 名、目标 op 和 rewrite 次序；
+2. 从对应 dialect/op 的 canonicalization 源码读取每个 reachable pattern；
+3. 在模型中逐 pattern 复刻匹配、替换、erase 和 greedy convergence；
+4. 为尚未支持但可能匹配的 op/pattern 建 capability guard，命中时 blocker/fail open；
+5. 不用“当前 160 输入没变化”证明所有输入 no-op。
+
+### 验证
+
+- pattern 级 fixture；
+- 单 pass checkpoint；
+- AutoBlockify+MarkMultiBuffer+outer canonicalizer 累积 checkpoint；
+- greedy rewrite 次数、最终 op 顺序和 use replacement 一致。
+
+## 9. 阶段 4：逐个实现九步 canonicalizationHIVMPipeline
+
+九个 pass 必须按下面九个子阶段依次实现和关闸。每个子阶段都执行：源码审阅→单元 fixture→
+单 pass checkpoint→从 AutoBlockify 开始的累积 checkpoint；通过后才进入下一个。
+
+### 4.1 ArithToAffine
+
+- 复核 affine legality、constant/index 处理和 canonicalization 顺序；
+- 优先复用 `RunArithToAffineConversion`，但必须证明 before-AutoBlockify 输入覆盖一致。
+
+### 4.2 CanonicalizeIterArg
+
+- 逐项覆盖 scf.for/scf.while、iteration-independent、dead iter arg、effect/speculation、
+  result/yield/region-arg 一致置换；
+- 现有实现只作为起点，原生 1710 行源码是判定标准。
+
+### 4.3 ExtendedCanonicalizer（module）
+
+- 复用阶段 3 的 pattern registry/capability 机制；
+- 重新记录这一 IR 阶段的 reachable patterns，不能沿用外层 pass 的 pattern 命中集合。
+
+### 4.4 SCFForLoopCanonicalization
+
+- 按上游 `LoopCanonicalization.cpp` 的 pattern 集合迁移；
+- 独立验证 loop bounds、iter args、body replacement 和 erase 顺序。
+
+### 4.5 CSE
+
+- 保持原生 dominance、region visibility、memory-effect 和 operation equivalence 条件；
+- 哈希结构只用于 lookup，替换顺序必须来自原生有序 traversal。
+
+### 4.6 ExtendedCanonicalizer（func）
+
+- 与 4.3 共用实现但使用 func scope；
+- 单独验证 scope 对 pattern worklist 和 region simplification 的影响。
+
+### 4.7 HIVMOptSinglePoint
+
+- 对照原生 VBrc、Copy/Load、VAdd/VSub/VMul/VDiv/VAbs/VSqrt/VMax/VMin pattern；
+- 区分 pure tensor 与 pure buffer semantics；
+- 当前 post-bufferization 实现不能直接替代该 pre-CV stage；若当前输入全部 tensor 语义导致
+  pattern 不触发，也必须由源码条件和 capability guard 证明。
+
+### 4.8 ExtendedCanonicalizer（func）
+
+- 重新运行同一实现；不能因为 4.6 已执行就省略，因为 4.7 会创建新的 arith/load/store op。
+
+### 4.9 MemrefDeadStoreElimination
+
+- 对照原生 alias、access、forwarding 和 region/control-flow 条件；
+- 若 before-CV 支持域内不可达，使用明确的 IR capability 检查证明 no-op；未知 memref access
+  必须 blocker，不能静默忽略。
+
+### 阶段闸门
+
+九个 checkpoint 和完整 cumulative checkpoint 全部通过后，才允许进入 InlineOTFBroadcast。
+
+## 10. 阶段 5：实现 InlineOTFBroadcast
+
+原生 pass 当前只有一个 `VBrcInlinePattern`，按源码逐句迁移：
+
+- 必须是 pure tensor semantics；
+- source 必须是 tensor；
+- 只支持单 broadcast axis；
+- i64/i1 不 inline；
+- LAST axis 使用原生白名单和 VAbs element-type 限制；
+- 其他 axis 要求 BroadcastableOTF、binary、HIVMStructured；
+- 合并用户已有 broadcast dims；
+- 按原始 user 顺序替换 DPS input；
+- 至少一个有效 user 才算 rewrite success；
+- 保持 VBrc 对其他不合法 users 的用途。
+
+验证覆盖每个成功/失败条件、多 user、部分可 inline user、已有 dims 和 user 顺序。最终比较
+before-CVPipelining checkpoint。
+
+## 11. 阶段 6：组合前缀与 API/input contract
+
+### 参数和合同
+
+1. 输入合同从 before-CVPipelining 升级为 before-AutoBlockify，提升 contract version 和
+   pipeline fingerprint。
+2. 从同一个 `HIVMPipelineOptions` resolved instance 传入所有新增分支参数，禁止模型侧重新
+   推导默认值。
+3. 至少新增或确认：
+   - `enableTritonKernelCompile`；
    - `enableAutoBlockifyLoop`；
-   - `enableTritonKernelCompile`（若产品 profile 固定为 true，也必须明确校验）；
-   - `disableAutoCVWorkSpaceManage`；
-   - `enableAutoMultiBuffer`；
    - `limitAutoMultiBufferOnlyForLocalBuffer`；
-   - `limitAutoMultiBufferOfLocalBuffer`；
-   - `limitMixAutoMultiBufferBuffer`；
    - `setWorkspaceMultibuffer`；
-   - 后续 CVPipelining 已有参数。
-3. 所有默认值来自同一个 `HIVMPipelineOptions` resolved instance，禁止模型侧重复推导默认值。
+   - 现有 auto-MB strategy 和 workspace-manage 参数。
+4. standalone before-CV 兼容入口可暂时保留为测试工具，但不得与新产品入口混淆。
 
-### 9.3 实现步骤
-
-#### A. 建立开发边界和双 checkpoint oracle
-
-- 在真实 pipeline 的 AutoBlockify 前增加默认关闭的 model/trace 接入点；
-- 在真实 InlineOTFBroadcast 后、CVPipelining 前保留只用于验证的 checkpoint；
-- validation 模式中，模型从 before-AutoBlockify 模拟到 before-CV，再让真实 pass 继续运行，
-  比较模型边界摘要和最终原生 PlanMemory；
-- 初期不得剪枝，避免未完成模型改变产品行为。
-
-#### B. 改造并迁移已有 AutoBlockify
-
-- 以真实 `AutoBlockifyParallelLoop.cpp` 为唯一语义来源；
-- 现有 `src/passes/auto_blockify_parallel_loop.hpp` 已经实现了轻量 AutoBlockify，应作为本阶段
-  的直接改造起点，不得无理由推倒重写；
-- 先运行现有 `auto_blockify_model_runner`、`verify_auto_blockify.py` 和对应单元测试，确认当前
-  实现与仓库内真实 pass 的语义基线；
-- 将其中基于 `GenericModule/GenericRewriter` 的结构访问和 mutation 改接 shadow overlay，保留
-  已经验证的匹配、physical block count、失败条件和操作顺序；
-- 迁移期间允许旧 Generic 实现作为差分 oracle；overlay 实现完整通过后，生产只保留新路径，
-  不长期维护两套 AutoBlockify；
-- 精确复刻 physical block count、logical mark def-chain、op move、block-id replacement、
-  synthetic op 顺序和失败条件；
-- 与真实 AutoBlockify 单 pass checkpoint 做差分。
-
-#### C. 实现 CV 前 MarkMultiBuffer
-
-- 复用 typed option 和公共判定工具，但不能复用“PlanMemory 前 local-only state”作为结果；
-- 模拟 workspace/tensor-level annotation 对后续 CVPipelining 的实际影响；
-- 覆盖 `limitAutoMultiBufferOnlyForLocalBuffer` 和 `setWorkspaceMultibuffer`；
-- 检查 CVPipelining 对 workspace multi-buffer mark 的清除/消费顺序。
-
-#### D. 复用并校正 canonicalization 基础设施
-
-- 按真实九个 pass 的顺序执行，不能把多个 canonicalization 简化成无序 fixpoint；
-- 优先复用已经迁移到 overlay 的 ArithToAffine、CanonicalizeIterArg、CSE 和
-  HIVMOptSinglePoint；
-- 每个子 pass 可在 debug 下输出稳定结构摘要，默认不序列化 IR。
-
-#### E. 补齐 InlineOTFBroadcast
-
-- 读取真实 pass 的匹配、合法性、use replacement 和 erase 顺序；
-- 只实现当前产品 profile 真实可达分支，但遇到未覆盖分支必须 blocker/fail open，不能默认
-  当作 no-op；
-- 与真实 pass checkpoint 做单 pass 和组合差分。
-
-#### F. 切换产品入口
-
-1. 先在 before-AutoBlockify 运行完整模型但 observe-only，继续真实 compiler；
-2. 通过代表矩阵后，允许 exact overflow 剪枝；
-3. 删除旧 before-CVPipelining 产品调用，避免同一次 attempt 运行两次模型；
-4. 保留默认关闭的 before-CV checkpoint 作为后续诊断工具，而不是第二个产品模型入口。
-
-### 9.4 正确性门槛
-
-- 单 pass：AutoBlockify、pre-CV MarkMultiBuffer、canonicalization、InlineOTFBroadcast 分别与
-  真实边界一致；
-- 组合：模型模拟后的 before-CV 结构摘要与真实 pipeline 对齐；
-- 端到端：same-process embedded model 与原生 local PlanMemory 的 status/required/peak/
-  overflow 和 fixed-seed 详细 plan 对齐；
-- 先跑代表输入 × 全有意义配置 × seeds `{0,13}`，再跑 20 seeds；
-- 阶段完成前执行 160 × 27 × 20 embedded 全量；timeout、原生 abort、无模型观测必须单列，
-  不能记为 matched；
-- 已知原生 `SmallPtrSet<Value>` 合法置换只在已有证据覆盖的字段和算子上分类，不能用它掩盖
-  新差异。
-
-### 9.5 性能门槛
-
-前移后必须分别报告：
+### 组合流水
 
 ```text
-原模型 before-CV 单轮模型耗时（历史基线）
-新模型 before-AutoBlockify 单轮模型耗时
-新模型中 AutoBlockify→before-CV 模拟阶段耗时
-两者输入边界和实际工作量差异
-每输入 median / mean / p95 / maximum 与峰值 RSS
+before-AutoBlockify GenericModule
+  -> AutoBlockify [conditional]
+  -> pre-CV MarkMultiBuffer [conditional]
+  -> outer ExtendedCanonicalizer
+  -> canonicalizationHIVMPipeline [9 exact stages]
+  -> InlineOTFBroadcast
+  -> existing CVPipelining-to-PlanMemory pipeline
 ```
 
-入口前移后模型增加了 AutoBlockify→CV 的实际工作，原模型和新模型的总耗时不是严格同工作量
-A/B；报告必须明确标注这一点。功能正确但新模型单轮耗时明显变慢时，不得用“模型代码更少”
-作为完成理由，应先保留 observe-only 或 feature gate，进入阶段 5 优化。
+先在模型内部启用新入口，真实 BiSheng prediction pass 仍保持旧位置；通过 before-CV checkpoint
+后，再进入 embedded observe-only。
 
-### 提交边界
+## 12. 阶段 7：embedded observe-only 与最终切换
 
-建议至少拆为：
+### observe-only
 
-1. `refactor(ub-model): define before-autoblockify input contract`
-2. `feat(ub-model): model autoblockify to cvpipelining prefix`
-3. `test(ub-model): validate pre-autoblockify embedded boundary`
-4. `feat(bishengir): move UB prediction before autoblockify`
+1. 把测试用 prediction hook 放到真实 AutoBlockify 前；
+2. 模型运行完整新路径，但无论结果如何都不剪枝；
+3. 原生 pipeline 继续运行 AutoBlockify、CVPipelining 和 local PlanMemory；
+4. 同一 attempt 比较模型与原生最终合同；
+5. 保留旧 before-CV model 作为短期迁移 oracle，仅限测试，不长期运行两次产品模型。
 
-不提交未完成的临时 dump 或 cache；需要保存现场时可以做不 push 的 `checkpoint(...)` 提交。
+### 验证顺序
 
-## 10. 阶段 5：优化扩展后的公共 fast path
+1. 单 pass fixture；
+2. 每个 pass 的 160-input checkpoint；
+3. 代表算子 × 所有相关配置 × seeds `{0,13}`；
+4. 代表算子 × 所有相关配置 × seeds `0-19`；
+5. 当前有意义配置的 160 × configs × 20 全量 embedded 验证。
 
-### 目标
+比较字段：status、overflow、required、peak、plan、lifetime、multi-buffer、inplace。已知等尺寸
+buffer identity 置换单独分类，不能掩盖新增前缀造成的差异。
 
-降低每次模型运行在 exact non-overflow 上界判定前都必须执行的公共工作，抵消入口前移新增
-语义带来的模型内部成本。
+### 产品切换
 
-### 执行方式
+只有全部满足时才允许：
 
-1. 重新 profile 新边界，不直接沿用 before-CV 时代的热点排序。
-2. 将生产 request 明确标记为 decision-only：
-   - 不构造 debug 名称、字符串 plan、stage artifact；
-   - 不计算只供详细结果使用的字段；
-   - 只维护 fast proof 和 slow path 真正需要的状态。
-3. 合并重复 projection/canonicalization；只能消除语义等价的重复工作，不能改变 pass 顺序。
-4. 对 immutable MLIR metadata 和 pre-AutoBlockify feature summary 只计算一次。
-5. 对已经确定不包含 MIX/相关 op 的函数跳过无效 projection，但依据必须是通用 feature
-   summary，而不是测试 kernel 名。
-6. 保留 conservative upper-bound proof；debug/validation 观察证明但继续完整模型。
+- before-CV cumulative checkpoint 对齐；
+- 20-seed 最终合同无新增差异；
+- blocker 正确 fail open；
+- 新增参数与真实 compiler resolved values 一致；
+- debug/validation 默认关闭；
+- observe-only 稳定后，才允许 exact overflow 剪枝；
+- 删除旧 before-CVPipelining 产品调用，确保一个 attempt 只运行一次模型。
 
-### 性能门槛
+## 13. 性能测量
 
-- 报告 fast-path 命中率和 fall-through 数；
-- 新模型单轮 internal total 和每输入分布必须相对本阶段修改前明显下降；
-- 同边界可比较阶段必须与原模型在同一输入上交替 A/B；入口不同的总耗时必须明确标注工作量
-  差异，不能包装成严格加速比；
-- 优化收益要在 simple、MIX、attention 多类输入上成立。
-
-## 11. 阶段 6：统一 UBBufferProgram 和 typed PlanProgram
-
-### 目标
-
-消除以下多层状态和正常路径文本桥接：
+边界前移增加了真实工作，旧 `CVPipelining→PlanMemory` 的 `3.95x` 只能保留为历史基线。新阶段
+必须同时报告：
 
 ```text
-BufferizedSemanticIR
-PostBufferizationRewriteState
-AfterAllocExtraBufferState
-AfterInlineLoadCopyState
-AfterMarkMultiBufferState
-PlanMemoryInputSemanticIR
-OperationRecord::text
-```
-
-### 执行方式
-
-1. 定义统一 `UBBufferProgram`，保存整数 identity、owner、allocation、alias、access、layout、
-   address space、extra buffer、multi-buffer 和 preload 状态。
-2. 每个 pass 对同一 program 写 typed delta，不再层层复制前一阶段完整对象。
-3. 直接生成 `PlanProgram`：operation/event/value/buffer 均为整数 ID；control-flow、effects、
-   iter_args、yield、inplace candidate 均为 typed 字段。
-4. `plan_memory_input_builder.hpp` 中真实必要的特殊语义迁入 typed builder；文本格式、regex、
-   memref 格式化和重复 value materialization 删除或移到兼容 parser/debug serializer。
-5. 保留旧 bridge 作为短期 debug oracle，默认生产不调用；完整对齐后删除。
-
-### 验证与性能门槛
-
-- 新旧 bridge fixed-seed 全字段一致；
-- `BuildPlanMemoryInput.EmitOperations/Normalize/MaterializeValueLists` 的主要成本消失；
-- fast path 不得因为统一结构而被迫构造完整 `PlanProgram`；
-- 代表和全量 embedded 回归通过后才能删除旧路径。
-
-## 12. 阶段 7：PlanMemory 整数化和 seed-independent 复用
-
-### 目标
-
-降低真正 overflow、late-seed success 和 debug full-plan 路径的 liveness/address planning 成本，
-不改变原生算法和 seed 结果。
-
-### 执行方式
-
-1. buffer/value/operation 名称查询改为整数 ID；名称只在最终诊断序列化时恢复。
-2. retry 外一次构造 alias、CFG、event program、seed-independent liveness 基础。
-3. 每个 seed 只重放 seed-sensitive kill/order 和地址规划状态。
-4. conflict 集合使用 `BitVector`/紧凑矩阵；outline 改为 index arena，同时保持原 splice、
-   rollback 和遍历顺序。
-5. 一个 evaluation 内复用 scratch capacity，避免 20 seeds 反复分配。
-6. 默认保持串行 retry；只有明确的单 kernel latency 实验证明收益后才考虑 seed 0 失败后的
-   并行 retry，并显式控制外层调用并发以避免过度订阅。
-
-### 验证与性能门槛
-
-- 20 个 fixed seeds 的 selected seed、peak、required、offset、lifetime、inplace 一致；
-- retry-only overflow/late-success wall time 明显下降；
-- PlanMemory stage 目标收益 20%～40%，但以实测为准，不以代码改动量验收。
-
-## 13. 阶段 8：跨 fallback snapshot 与构建优化
-
-### 目标
-
-消除 BiSheng code-motion fallback 对模型公共前缀的重复计算，并在架构稳定后评估链接和布局
-优化。
-
-### 执行方式
-
-1. 找出 RetriablePassManager 中 UB fallback 的真实分叉参数；只缓存分叉前不受这些参数影响的
-   无指针 snapshot。
-2. cache key 覆盖输入结构、所有分叉前有效参数、target、pipeline fingerprint 和 model
-   build identity。
-3. 下一 attempt 的 `ModuleOp` 指针不可复用；从紧凑 snapshot 恢复 shadow/analysis。
-4. 正确性和性能稳定后，分别 A/B 测试 ThinLTO/Full LTO 和代表模型输入 corpus PGO。
-5. 不优先投入仅减少二进制或理论上更快但没有 profile 证据的编译选项。
-
-### 完成条件
-
-- fallback 前后结果合同不变；
-- cache miss/stale 自动走安全现场路径；
-- 多 attempt 总耗时下降；
-- 新模型单轮总耗时在多轮交替测量中稳定下降。
-
-## 14. 每阶段统一验证流程
-
-### 阶段性结果汇报
-
-每一个阶段完成实现和该阶段规定的测试后，执行者必须先向用户报告一次阶段性结果。除非用户
-明确要求暂停，结果完全满足门槛时可以继续下一阶段；出现正确性差异、性能回退、范围扩张或
-需要修改原生 BiSheng 逻辑时，必须暂停并等待用户决定。
-
-每次阶段性汇报至少包含：
-
-```text
-阶段编号和目标
-完成的代码修改与主要文件
-当前 commit / 工作树状态
-执行过的构建和测试命令
-correctness matched/different/unavailable/timeout
-修改前后单模型耗时
-原模型与新模型的单轮 internal total / process wall
-每输入 median / mean / p95 / maximum
-入口或实际工作量是否发生变化
-内存变化（该阶段适用时）
-未解决问题和风险
-下一阶段准备执行的内容
-```
-
-阶段性数字是临时结果，必须注明输入集合、配置、seed/retry、并发度和 timing 开关；后续更大
-规模验证覆盖它们时，应更新 `.agent` 中的当前结论，不保留互相冲突的多代基线。
-
-### 快速开发循环
-
-1. 相关单元测试；
-2. `bash ub_overflow_model_cpp/tests/run_tests.sh`；
-3. representative operators × 相关 27 configs × seeds `0-19`；
-4. 同机 baseline/new 交替性能测量至少三轮。
-
-### 重大边界验证
-
-以下修改必须执行 20-seed embedded 现场验证：
-
-- 输入边界变化；
-- ordering、stable ID、use-list 或 CFG 变化；
-- AutoBlockify/pre-CV MarkMultiBuffer/CVPipelining 变化；
-- PlanMemoryInput/PlanMemory 数据结构变化；
-- fast proof 合同变化。
-
-最终规模为当前有意义场景的 `160 × 27 × 20 = 86400`。若增加 AutoBlockify 参数场景，应新增
-少量有意义配置，不做笛卡尔积；总数按实际配置文件重新报告。
-
-### 发布前验证
-
-- 现场运行真实 embedded oracle，确认脚本没有原生结果缓存或 prediction 后提前停止；
-- 普通产品环境变量全部关闭；
-- 使用真实 retry-only 重新测原模型和新模型的单轮时间与峰值 RSS；
-- 检查模型 blocker 是否 fail open；
-- 检查 exact overflow 是否仍进入 BiSheng 原 fallback；
-- 检查非 overflow 是否继续完整真实 pipeline。
-
-## 15. 性能报告固定格式
-
-每个阶段必须同时报告以下内容，禁止只给某个 pass 的孤立加速比：
-
-```text
-日期 / commit / build mode / target
-输入集合 / 配置 / seed 或 retry 模式 / jobs
-原模型单轮 internal total / process wall
-新模型单轮 internal total / process wall
-每输入 totalTimeNs median/mean/p95/maximum
-原模型/新模型输入边界与工作量说明
-fast-path hit/fall-through/blocker
+旧模型 CVPipelining->PlanMemory internal total
+新增 AutoBlockify->before-CVPipelining prefix internal total
+新模型 before-AutoBlockify->PlanMemory internal total
+原生 BiSheng AutoBlockify->local PlanMemory wall delta
+BiSheng/model ratio（同一新边界）
+per-case median / mean / p95 / max
 peak RSS
-stage timing（仅诊断运行）
-correctness matched/different/unavailable/timeout
+pass/stage breakdown
 ```
 
-性能结论只能来自预热后的交替 A/B 或 B/A 运行。不能先测完全部 baseline 再测全部 new，以免
-温度、缓存和系统负载造成方向性偏差。
+结构性能主测量使用 Release/O3、真实 retry-only、160 × 有意义配置、关闭提前 non-overflow
+返回及证明计算，使所有 case 执行到完整 PlanMemory。production fast path 另测，不能掩盖新增
+前缀回退。
 
-## 16. Git 与交接纪律
+功能阶段不能为了性能省略真实 pass。若某 pass 成为热点，必须在完整对齐后另开优化批次，仍以
+原生语义为边界。
 
-- 开始每阶段前记录 `git status --short` 和基线 commit，保留用户已有修改。
-- 一次提交只包含一个可说明的基础设施或功能边界；测试和文档可独立提交。
-- 半成品不必 push；需要跨会话保存时可在 `codex/` 分支建立清楚的本地
-  `checkpoint(...)`，完成后整理成产品提交。
-- 禁止 destructive reset/checkout；不得删除不属于当前任务的文件。
-- 完成一个阶段后更新 `.agent/MEMORY.md`、`code_map.md`、`validation.md` 和本文状态，不追加
-  多代流水账，直接替换失效结论。
-- 任何 cache、dump、profile、runtime TSV 和临时 corpus 都不得进入产品提交。
+## 14. 提交与汇报边界
 
-## 17. 最终完成定义
+建议提交顺序：
 
-只有同时满足以下条件，整个任务才算完成：
+1. `test(ub-model): add pre-autoblockify native checkpoints`
+2. `feat(ub-model): integrate autoblockify prefix stage`
+3. `feat(ub-model): model pre-cv multi-buffer marking`
+4. `feat(ub-model): model pre-cv outer canonicalization`
+5. canonicalization 九个子阶段按实际独立性分 3～9 个提交
+6. `feat(ub-model): model inline otf broadcast`
+7. `refactor(ub-model): define before-autoblockify input contract`
+8. `test(ub-model): validate pre-autoblockify embedded pipeline`
+9. `feat(bishengir): move UB prediction before autoblockify`
 
-1. 产品 prediction pass 位于真实 AutoBlockify 之前；
-2. 模型准确接受真实 pipeline 的 UB 相关 resolved options；
-3. 模型完整复刻 AutoBlockify→CVPipelining 和后续到 local PlanMemory 的 UB 相关行为；
-4. 生产路径直接读取 `ModuleOp`，不打印/解析完整 Generic MLIR；
-5. exact overflow、exact non-overflow、blocker/fail-open 和 20-seed retry 合同正确；
-6. embedded 现场 correctness matrix 达到预期，所有 unavailable/timeout 有明确分类；
-7. 原模型与新模型在相同构建和 retry-only 口径下有同机单轮时间、每输入分布和峰值 RSS
-   报告；
-8. 新模型单轮速度达到阶段目标；入口前移导致的额外工作量已独立列出，不使用 autotune 或
-   compiler 剪枝收益掩盖模型自身回退；
-9. 默认运行不输出 debug 日志、不生成 dump、不读取测试 cache；
-10. 文档、API、构建命令和真实产品行为一致。
+每个 pass 闸门通过后向用户报告：源码对应、实现范围、checkpoint 结果、最终合同小回归、工作树
+和下一 pass。未经用户要求不 push。半成品需要跨会话保存时可做明确的本地 checkpoint commit。
+
+## 15. 延后事项
+
+以下不与本功能扩展混合：
+
+- 全流水 stable-ID/ShadowIR 迁移；
+- 通用 revisioned analysis manager；
+- 统一 UBBufferProgram/PlanProgram；
+- PlanMemory retry 基础设施重写；
+- LLVM/MLIR core dependency 拆分；
+- LTO/PGO、seed 并行和 autotune 总收益优化。
+
+## 16. 完成定义
+
+1. 产品模型输入位于真实 AutoBlockify 前；
+2. AutoBlockify 前 61 次原生 pass 不在模型中重复实现；
+3. AutoBlockify 到 before-CV 的 13 个 pass 按真实条件和顺序复刻；
+4. 现有 AutoBlockify 实现得到复用并重新通过真实 checkpoint；
+5. 每个新增 pass 都有独立原生 checkpoint 差分证据；
+6. 模型准确接收这段流水使用的全部 resolved options；
+7. fixed seeds 0～19 的完整 PlanMemory 合同对齐；
+8. 没有通过 kernel/seed/config 特例或修改原生逻辑获得一致；
+9. blocker/fail-open、exact overflow 和提前 non-overflow 合同正确；
+10. 新边界有独立的正确性、单轮时间、stage 分布和 BiSheng/model 比值报告；
+11. 普通运行不输出调试日志、不生成 checkpoint、不运行两次模型；
+12. `.agent`、API 文档和真实代码行为一致。
+
+始终记住：逐 pass 对齐是硬门槛。不得先追求最终结果一致，再用结果倒推出一套与 BiSheng
+源码无对应关系的逻辑。

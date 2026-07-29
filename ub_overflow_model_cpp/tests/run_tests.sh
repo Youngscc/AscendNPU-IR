@@ -58,3 +58,4 @@ python3 ub_overflow_model_cpp/tests/test_validation_common.py
 python3 ub_overflow_model_cpp/tests/test_merged_report.py
 python3 ub_overflow_model_cpp/tests/test_plan_memory_contract.py
 python3 ub_overflow_model_cpp/tests/test_bisheng_embedded_matrix.py
+python3 ub_overflow_model_cpp/tests/test_ub_prefix_checkpoints.py

@@ -1,6 +1,7 @@
 # 当前代码与命令
 
-本文件只记录当前产品和新的性能目标；已删除的旧后缀工具只通过 Git 历史追溯。
+本文件记录当前产品、before-AutoBlockify 扩展位置和后续性能目标；已删除的旧后缀工具只通过
+Git 历史追溯。
 
 ## 产品调用路径
 
@@ -24,10 +25,90 @@ bishengir/lib/Tools/RetriablePassManager/RetriablePassManager.cpp
 bishengir/include/bishengir/Tools/RetriablePassManager/UbOverflowRetryPolicy.h
 ```
 
-生产边界已经由 `UBOverflowPrediction.cpp` 同步调用 `evaluateModule(ModuleOp, Request)`；普通
-产品路径不再打印/解析完整 Generic MLIR。文本 API 只供兼容测试使用。当前剩余桥接位于
-`MLIRModuleView::materializeLegacyGenericModule()`：它仍为尚未迁移的主链 passes 投影完整
-`GenericModule`，阶段 2 的后续工作应删除这层桥，而不是重新引入文本边界。
+当前生产边界由 `UBOverflowPrediction.cpp` 同步调用 `evaluateModule(ModuleOp, Request)`。这是
+提交 `1dfddd59` 的源码事实，但不再作为继续 MLIR-backed 基础设施迁移的方向。新的依赖目标是：
+BiSheng adapter 可以读取 `ModuleOp`，轻量模型 core 只接收项目自有输入。当前
+`MLIRModuleView::materializeLegacyGenericModule()` 暂时保留为兼容边界，不继续向更多 pass
+传播 MLIR 类型；core/adapter 拆分排在现有热点优化之后。
+
+下一产品边界位于 `HIVMPipelines.cpp` 的 `createAutoBlockifyParallelLoopPass()` 之前。典型
+Triton adapter 到该位置已经由原生 BiSheng 执行约 61 次 pass；模型不复刻这段前缀。切换前
+先使用默认关闭的测试 hook observe-only，当前 before-CV 产品入口继续保留。
+
+## before-AutoBlockify 到 CV 的原生序列
+
+```text
+bishengir/lib/Dialect/HIVM/Pipelines/HIVMPipelines.cpp
+
+AutoBlockifyParallelLoop                         [conditional]
+MarkMultiBuffer                                  [workspace manage enabled]
+ExtendedCanonicalizer
+canonicalizationHIVMPipeline:
+  ArithToAffine
+  CanonicalizeIterArg
+  ExtendedCanonicalizer
+  SCFForLoopCanonicalization
+  CSE
+  func ExtendedCanonicalizer
+  HIVMOptSinglePoint
+  func ExtendedCanonicalizer
+  MemrefDeadStoreElimination
+InlineOTFBroadcast
+CVPipelining                                     [existing model begins here]
+```
+
+原生实现位置：
+
+```text
+bishengir/lib/Dialect/HIVM/Transforms/AutoBlockifyParallelLoop.cpp
+bishengir/lib/Dialect/HIVM/Transforms/MarkMultiBuffer.cpp
+bishengir/lib/Transforms/ExtendedCanonicalizer.cpp
+bishengir/lib/Conversion/ArithToAffine/ArithToAffine.cpp
+bishengir/lib/Dialect/SCF/Transforms/CanonicalizeIterArg.cpp
+third-party/llvm-project/mlir/lib/Dialect/SCF/Transforms/LoopCanonicalization.cpp
+third-party/llvm-project/mlir/lib/Transforms/CSE.cpp
+bishengir/lib/Dialect/HIVM/Transforms/HIVMOptSinglePoint.cpp
+bishengir/lib/Dialect/MemRef/Transforms/DeadStoreElimination.cpp
+bishengir/lib/Dialect/HIVM/Transforms/InlineOTFBroadcast.cpp
+```
+
+现有可复用模型代码：
+
+```text
+ub_overflow_model_cpp/src/passes/auto_blockify_parallel_loop.hpp
+ub_overflow_model_cpp/tests/test_auto_blockify_parallel_loop.cpp
+ub_overflow_model_cpp/scripts/verify_auto_blockify.py
+ub_overflow_model_cpp/src/passes/canonicalization_hivm_pipeline.hpp
+ub_overflow_model_cpp/src/passes/convert_arith_to_affine.hpp
+```
+
+`src/passes/mark_multi_buffer.hpp` 是 PlanMemory 前、post-bufferization 阶段的实现，不等价于
+CV 前 MarkMultiBuffer；只能复用经源码证明相同的 enum/helper。当前没有独立的 pre-CV
+InlineOTFBroadcast 实现。
+
+## 原生逐 pass checkpoint
+
+默认关闭的 checkpoint hook 位于：
+
+```text
+bishengir/lib/Dialect/HIVM/Pipelines/HIVMPipelines.cpp
+bishengir/lib/Tools/bishengir-compile/BiShengIRCompileMain.cpp
+ub_overflow_model_cpp/scripts/dump_ub_prefix_checkpoints.py
+ub_overflow_model_cpp/tests/test_ub_prefix_checkpoints.py
+```
+
+生成全部 14 个原生 checkpoint：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/dump_ub_prefix_checkpoints.py \
+  ub_overflow_model_cpp/data/adapter/ascend_tutorial_01-vector-add.ttadapter \
+  --compiler build/bin/bishengir-compile \
+  --output-dir /tmp/cvub-prefix-checkpoints
+```
+
+只生成一个 stage 时增加 `--stage 01_after_auto_blockify`。自定义真实编译参数必须放在 `--`
+后；未提供时脚本使用 Triton/AutoBlockify 开发默认参数。checkpoint 位于
+`<output-dir>/attempt-N/`；停止开关在 before-CV 边界生效，不运行 CVPipelining。
 
 ## 模型入口和公共接口
 
@@ -82,30 +163,30 @@ src/passes/plan_memory/mem_liveness_analysis.hpp
 src/passes/plan_memory/mem_plan.hpp
 ```
 
-## 目标基础设施位置
-
-后续命名可以在实现时调整，但职责应保持清楚：
+## 当前依赖边界与暂停项
 
 ```text
-MLIR adapter（BiSheng 侧）
-  读取 ModuleOp/Operation/Value/Type/Attribute，不修改原 IR
+BiSheng adapter（允许 MLIR）
+  ModuleOp + resolved options
+  -> 一次性转换
 
-shadow IR（模型侧）
-  stable OpId/ValueId、base Operation*、局部 override、synthetic node arena
-
-analysis manager（模型侧）
-  revisioned def-use/CFG/enclosing-function/block-order/feature summary
-
-UBBufferProgram（模型侧）
-  统一 allocation/access/alias/layout/multi-buffer 状态
-
-Typed PlanProgram（模型侧）
-  PlanMemory 正常路径不生成也不读取 OperationRecord::text
+模型 core（不得新增 LLVM/MLIR）
+  GenericModule / model-owned states
+  -> current lightweight passes
+  -> PlanMemory
 ```
 
-原始 `Operation*` 只在一次同步 pass 调用期间有效。RetriablePassManager 的下一个 attempt 会
-clone 新 module；跨 fallback 缓存必须保存无指针的紧凑 snapshot，不能保存旧 attempt 的
-MLIR 指针。
+当前已有的 direct-MLIR 文件：
+
+```text
+ub_overflow_model_cpp/src/ir/mlir_module_view.hpp
+ub_overflow_model_cpp/src/mlir_main.cpp
+ub_overflow_model_cpp/include/ub_overflow_model/api.hpp
+```
+
+它们属于现有集成技术债和边界代码，不是新模型 core 的基础设施。`GenericShadowOverlay`、stable
+IDs 和最低可用 revisioned analysis 当前冻结，不继续迁移 CVPipelining、canonicalization、
+MarkRealCoreType 或后 bufferization 全流水。全局 `UBBufferProgram/PlanProgram` 替换同样暂停。
 
 ## 数据和验证入口
 
@@ -123,7 +204,7 @@ ub_overflow_model_cpp/tests/test_bisheng_embedded_matrix.py
 ub_overflow_model_cpp/tests/run_tests.sh
 ```
 
-direct-MLIR 边界：
+现有 direct-MLIR/overlay 边界（冻结，不扩张）：
 
 ```text
 ub_overflow_model_cpp/src/ir/mlir_module_view.hpp        同步只读 ModuleOp view/import

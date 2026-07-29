@@ -34,11 +34,14 @@
 #include "mlir/Dialect/SCF/Transforms/Passes.h"
 #include "mlir/Bytecode/BytecodeWriter.h"
 #include "mlir/Pass/PassManager.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <atomic>
 #include <cstdlib>
+#include <string>
 
 namespace mlir {
 namespace hivm {
@@ -115,6 +118,12 @@ static bool stopAfterLocalPlanMemoryRequested() {
 static bool stopAfterUBOverflowPredictionRequested() {
   const char *value =
       std::getenv("BISHENGIR_STOP_AFTER_UB_OVERFLOW_PREDICTION");
+  return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
+}
+
+static bool stopAfterUBPrefixCheckpointsRequested() {
+  const char *value =
+      std::getenv("BISHENGIR_STOP_AFTER_UB_PREFIX_CHECKPOINTS");
   return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
 }
 
@@ -222,6 +231,102 @@ static std::unique_ptr<Pass> createDumpIRBeforeCVPipeliningPass() {
   return std::make_unique<DumpIRBeforeCVPipeliningPass>();
 }
 
+struct UBPrefixCheckpointConfig {
+  std::string outputDirectory;
+  std::string stageFilter;
+  uint64_t attempt = 0;
+
+  bool enabled() const { return !outputDirectory.empty(); }
+
+  bool shouldDump(StringRef stage) const {
+    return enabled() &&
+           (stageFilter.empty() || stageFilter == "all" ||
+            StringRef(stageFilter) == stage);
+  }
+};
+
+static uint64_t nextUBPrefixCheckpointAttempt() {
+  static std::atomic<uint64_t> next{1};
+  return next.fetch_add(1, std::memory_order_relaxed);
+}
+
+static UBPrefixCheckpointConfig ubPrefixCheckpointConfig() {
+  UBPrefixCheckpointConfig config;
+  const char *directory =
+      std::getenv("BISHENGIR_UB_PREFIX_CHECKPOINT_DIR");
+  if (directory == nullptr || directory[0] == '\0')
+    return config;
+  config.outputDirectory = directory;
+  if (const char *filter =
+          std::getenv("BISHENGIR_UB_PREFIX_CHECKPOINT_STAGE"))
+    config.stageFilter = filter;
+  config.attempt = nextUBPrefixCheckpointAttempt();
+  return config;
+}
+
+struct DumpUBPrefixCheckpointPass
+    : public PassWrapper<DumpUBPrefixCheckpointPass,
+                         OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(DumpUBPrefixCheckpointPass)
+
+  DumpUBPrefixCheckpointPass(StringRef outputDirectory, uint64_t attempt,
+                             StringRef stage)
+      : outputDirectory(outputDirectory.str()), attempt(attempt),
+        stage(stage.str()) {}
+
+  DumpUBPrefixCheckpointPass(const DumpUBPrefixCheckpointPass &other)
+      : PassWrapper(other), outputDirectory(other.outputDirectory),
+        attempt(other.attempt), stage(other.stage) {}
+
+  StringRef getArgument() const override {
+    return "hivm-dump-ub-prefix-checkpoint";
+  }
+
+  void runOnOperation() override {
+    llvm::SmallString<256> attemptDirectory(outputDirectory);
+    llvm::sys::path::append(attemptDirectory,
+                            "attempt-" + std::to_string(attempt));
+    if (std::error_code error =
+            llvm::sys::fs::create_directories(attemptDirectory)) {
+      getOperation().emitError()
+          << "cannot create UB prefix checkpoint directory "
+          << attemptDirectory << ": " << error.message();
+      signalPassFailure();
+      return;
+    }
+
+    llvm::SmallString<256> outputPath(attemptDirectory);
+    llvm::sys::path::append(outputPath, stage + ".mlir");
+    std::error_code error;
+    llvm::raw_fd_ostream output(outputPath, error,
+                                llvm::sys::fs::OF_Text);
+    if (error) {
+      getOperation().emitError()
+          << "cannot dump UB prefix checkpoint " << stage << " to "
+          << outputPath << ": " << error.message();
+      signalPassFailure();
+      return;
+    }
+    getOperation().print(output, OpPrintingFlags().printGenericOpForm());
+    output << '\n';
+    markAllAnalysesPreserved();
+  }
+
+private:
+  std::string outputDirectory;
+  uint64_t attempt;
+  std::string stage;
+};
+
+static void addUBPrefixCheckpoint(
+    OpPassManager &pm, const UBPrefixCheckpointConfig &config,
+    StringRef stage) {
+  if (!config.shouldDump(stage))
+    return;
+  pm.addPass(std::make_unique<DumpUBPrefixCheckpointPass>(
+      config.outputDirectory, config.attempt, stage));
+}
+
 static bool isUBFlowTraceEnabled() {
   const char *value = std::getenv("BISHENGIR_UB_FLOW_TRACE");
   return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
@@ -264,16 +369,47 @@ static uint64_t nextUBFlowTraceAttempt() {
 
 } // namespace
 
-void canonicalizationHIVMPipeline(OpPassManager &pm) {
+static void canonicalizationHIVMPipelineImpl(
+    OpPassManager &pm,
+    const UBPrefixCheckpointConfig *checkpoints = nullptr) {
   pm.addPass(createArithToAffineConversionPass());
+  if (checkpoints)
+    addUBPrefixCheckpoint(pm, *checkpoints, "04_after_arith_to_affine");
   pm.nest<func::FuncOp>().addPass(scf::createCanonicalizeIterArgPass());
+  if (checkpoints)
+    addUBPrefixCheckpoint(pm, *checkpoints,
+                          "05_after_canonicalize_iter_arg");
   pm.addPass(bishengir::createExtendedCanonicalizerPass());
+  if (checkpoints)
+    addUBPrefixCheckpoint(pm, *checkpoints,
+                          "06_after_extended_canonicalizer_module");
   pm.addPass(createSCFForLoopCanonicalizationPass());
+  if (checkpoints)
+    addUBPrefixCheckpoint(pm, *checkpoints,
+                          "07_after_scf_for_loop_canonicalization");
   pm.addPass(createCSEPass());
+  if (checkpoints)
+    addUBPrefixCheckpoint(pm, *checkpoints, "08_after_cse");
   pm.nest<func::FuncOp>().addPass(bishengir::createExtendedCanonicalizerPass());
+  if (checkpoints)
+    addUBPrefixCheckpoint(pm, *checkpoints,
+                          "09_after_extended_canonicalizer_func_1");
   pm.nest<func::FuncOp>().addPass(createHIVMOptSinglePointPass());
+  if (checkpoints)
+    addUBPrefixCheckpoint(pm, *checkpoints,
+                          "10_after_hivm_opt_single_point");
   pm.nest<func::FuncOp>().addPass(bishengir::createExtendedCanonicalizerPass());
+  if (checkpoints)
+    addUBPrefixCheckpoint(pm, *checkpoints,
+                          "11_after_extended_canonicalizer_func_2");
   pm.nest<func::FuncOp>().addPass(memref::createDeadStoreEliminationPass());
+  if (checkpoints)
+    addUBPrefixCheckpoint(pm, *checkpoints,
+                          "12_after_memref_dead_store_elimination");
+}
+
+void canonicalizationHIVMPipeline(OpPassManager &pm) {
+  canonicalizationHIVMPipelineImpl(pm);
 }
 
 static void
@@ -419,6 +555,8 @@ static void addOptimizedConvertLayoutPipeline(OpPassManager &pm) {
 
 static void hivmPreBufferizationOptimizationPipeline(
     OpPassManager &pm, const HIVMPipelineOptions &hivmPipelineOptions) {
+  const UBPrefixCheckpointConfig prefixCheckpoints =
+      ubPrefixCheckpointConfig();
   // HIVM brc/reduce op's operands have the same rank, so after converting from
   // Linalg/HFusion to HIVM, reshape ops will be inserted. Need to propagate
   // them.
@@ -453,12 +591,16 @@ static void hivmPreBufferizationOptimizationPipeline(
   }
 
   pm.addPass(createInferFuncCoreTypePass());
+  addUBPrefixCheckpoint(pm, prefixCheckpoints,
+                        "00_before_auto_blockify");
   // AutoBlockifyParallelLoopPass needs to be after infer core type because
   // num. of physical blocks we loop on is dependent on core type
   if (hivmPipelineOptions.enableTritonKernelCompile &&
       hivmPipelineOptions.enableAutoBlockifyLoop) {
     pm.addPass(createAutoBlockifyParallelLoopPass());
   }
+  addUBPrefixCheckpoint(pm, prefixCheckpoints,
+                        "01_after_auto_blockify");
 
   if (!hivmPipelineOptions.disableAutoCVWorkSpaceManage) {
     MarkMultiBufferOptions multiBufferOptions;
@@ -474,13 +616,24 @@ static void hivmPreBufferizationOptimizationPipeline(
     pm.addNestedPass<func::FuncOp>(
         createMarkMultiBufferPass(multiBufferOptions));
   }
+  addUBPrefixCheckpoint(pm, prefixCheckpoints,
+                        "02_after_pre_cv_mark_multi_buffer");
   // Call canonicalize before inline OTF broadcast to optimize redundant 1-to-1
   // broadcasts.
   pm.addPass(bishengir::createExtendedCanonicalizerPass());
-  canonicalizationHIVMPipeline(pm);
+  addUBPrefixCheckpoint(pm, prefixCheckpoints,
+                        "03_after_outer_extended_canonicalizer");
+  if (prefixCheckpoints.enabled())
+    canonicalizationHIVMPipelineImpl(pm, &prefixCheckpoints);
+  else
+    canonicalizationHIVMPipeline(pm);
   pm.nest<func::FuncOp>().addPass(createInlineOTFBroadcastPass());
+  addUBPrefixCheckpoint(pm, prefixCheckpoints,
+                        "13_after_inline_otf_broadcast");
   if (std::getenv("BISHENGIR_DUMP_BEFORE_CVPIPELINING") != nullptr)
     pm.addPass(createDumpIRBeforeCVPipeliningPass());
+  if (stopAfterUBPrefixCheckpointsRequested())
+    return;
 
   // Construct this once and share it with prediction and the production pass.
   // This makes the pre-CVPipelining API consume the same resolved values that
@@ -708,6 +861,8 @@ void buildOptimizeHIVMPipeline(OpPassManager &pm,
   pm.nest<func::FuncOp>().addPass(createInitEntryKernelPass());
   if (!options.disableHIVMTensorCompile) {
     hivmPreBufferizationOptimizationPipeline(pm, options);
+    if (stopAfterUBPrefixCheckpointsRequested())
+      return;
     if (isUBOverflowPredictionActive(options) &&
         stopAfterUBOverflowPredictionRequested())
       return;
