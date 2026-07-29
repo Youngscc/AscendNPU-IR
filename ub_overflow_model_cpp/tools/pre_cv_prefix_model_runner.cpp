@@ -26,6 +26,7 @@ struct Options {
   bool applyCSE = false;
   bool applyFirstFuncCanonicalizer = false;
   bool applyHIVMOptSinglePoint = false;
+  bool applySecondFuncCanonicalizer = false;
   cvub::AutoBlockifyPrefixOptions autoBlockify;
   cvub::PreCVMarkMultiBufferOptions markMultiBuffer;
   std::filesystem::path input;
@@ -65,6 +66,8 @@ Options ParseOptions(int argc, char **argv) {
       options.applyFirstFuncCanonicalizer = true;
     else if (argument == "--apply-hivm-opt-single-point")
       options.applyHIVMOptSinglePoint = true;
+    else if (argument == "--apply-second-func-canonicalizer")
+      options.applySecondFuncCanonicalizer = true;
     else if (argument == "--enable-auto-multi-buffer")
       options.markMultiBuffer.enableAuto = true;
     else if (argument == "--disable-auto-cv-workspace-manage")
@@ -131,12 +134,15 @@ int main(int argc, char **argv) {
       module = cvub::RunFirstFuncExtendedCanonicalizer(std::move(module));
     if (options.applyHIVMOptSinglePoint)
       module = cvub::RunPreCVHIVMOptSinglePoint(std::move(module));
+    if (options.applySecondFuncCanonicalizer)
+      module = cvub::RunSecondFuncExtendedCanonicalizer(std::move(module));
     if (!options.applyModel && !options.applyOuterCanonicalizer &&
         !options.applyArithToAffine && !options.applyCanonicalizeIterArg &&
         !options.applyModuleCanonicalizer &&
         !options.applySCFForLoopCanonicalization && !options.applyCSE &&
         !options.applyFirstFuncCanonicalizer &&
-        !options.applyHIVMOptSinglePoint) {
+        !options.applyHIVMOptSinglePoint &&
+        !options.applySecondFuncCanonicalizer) {
       cvub::ApplyOperationSemanticsToAll(module.operations);
       module = cvub::CompactGenericModule(std::move(module));
     }

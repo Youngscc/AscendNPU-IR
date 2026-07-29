@@ -281,7 +281,7 @@ InlineOTFBroadcast 清理冗余 1-to-1 broadcast，但真实行为来自全部�
 
 ## 9. 阶段 4：逐个实现九步 canonicalizationHIVMPipeline
 
-当前子阶段：**4.8 第二次 func-scoped ExtendedCanonicalizer**。
+当前子阶段：**4.9 MemrefDeadStoreElimination**。
 
 九个 pass 必须按下面九个子阶段依次实现和关闸。每个子阶段都执行：源码审阅→单元 fixture→
 单 pass checkpoint→从 AutoBlockify 开始的累积 checkpoint；通过后才进入下一个。
@@ -384,7 +384,15 @@ greedy constant CSE 与真实 `builtin.module(func.func(hivm-opt-single-point))`
 
 ### 4.8 ExtendedCanonicalizer（func）
 
+状态：**2026-07-30 已完成**。
+
 - 重新运行同一实现；不能因为 4.6 已执行就省略，因为 4.7 会创建新的 arith/load/store op。
+
+完成证据：新增独立 `RunSecondFuncExtendedCanonicalizer` 阶段入口，复用与原生相同的函数级
+canonicalize-ext fixed point，同时保留独立 CLI 开关和 checkpoint。定向 fixture 与真实
+`builtin.module(func.func(canonicalize-ext))` 精确一致；8 profiles × 160 inputs 的
+`10 -> 11` 单 pass 与 `00 -> 11` 累计 checkpoint 为 `1280/1280 PASS`；完整测试通过，代表
+PlanMemory 为 `8/8 matched`。
 
 ### 4.9 MemrefDeadStoreElimination
 

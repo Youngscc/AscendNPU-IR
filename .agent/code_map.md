@@ -84,7 +84,9 @@ memory effect barrier 和 deferred erase。`verify_cse_pipeline.py` 同时验证
 阶段 4.6 第一次 func-scoped ExtendedCanonicalizer 的独立边界。它复用已验证的 module fixed-point
 实现，因为后者的 OperationFolder 与全部 modeled rewrite 已按 enclosing function 分区；双函数
 fixture 和 `verify_first_func_extended_canonicalizer_pipeline.py` 分别验证 scope 及 checkpoint
-`08 -> 09`/累计 `00 -> 09`。
+`08 -> 09`/累计 `00 -> 09`。同文件的 `RunSecondFuncExtendedCanonicalizer` 是阶段 4.8 的独立
+入口；`verify_second_func_extended_canonicalizer_pipeline.py` 验证 `10 -> 11`/累计 `00 -> 11`，
+当前同样为 `1280/1280 PASS`。
 
 `ub_overflow_model_cpp/src/passes/pre_cv_hivm_opt_single_point.hpp`
 

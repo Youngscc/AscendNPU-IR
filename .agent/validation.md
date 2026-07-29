@@ -210,6 +210,19 @@ Copy/Load、host、no-IO-alias、只读 user closure 和不匹配分支；另证
 `VMax/VMin<ui64>` 的 verifier 失败并在模型中 fail open。完整测试通过，代表下游 PlanMemory
 为 `8/8 matched`。
 
+阶段 4.8 第二次 func-scoped ExtendedCanonicalizer：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/verify_second_func_extended_canonicalizer_pipeline.py \
+  --jobs 12 \
+  --json-report ub_overflow_model_cpp/output/second_func_canonicalizer.json
+```
+
+2026-07-30 的单 pass `10 -> 11` 与累计 `00 -> 11` 同-attempt checkpoint 均为
+`8 profiles × 160 inputs = 1280/1280 PASS`。定向双函数 fixture 与真实嵌套
+`builtin.module(func.func(canonicalize-ext))` 精确一致；完整测试通过，代表下游 PlanMemory 为
+`8/8 matched`。
+
 ## 3. 正确性分类
 
 - `matched`：完整合同一致；

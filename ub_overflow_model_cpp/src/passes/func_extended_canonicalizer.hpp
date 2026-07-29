@@ -16,6 +16,15 @@ inline GenericModule RunFirstFuncExtendedCanonicalizer(GenericModule module) {
   return RunModuleExtendedCanonicalizer(std::move(module));
 }
 
+// The second invocation runs immediately after HIVMOptSinglePoint.  Native
+// BiSheng registers the identical func.func-nested canonicalize-ext pass a
+// second time so newly created scalar arith/math and memref operations reach
+// the same greedy fixed point.  Preserve a separate entry and checkpoint even
+// though the implementation and function-isolation proof are shared.
+inline GenericModule RunSecondFuncExtendedCanonicalizer(GenericModule module) {
+  return RunModuleExtendedCanonicalizer(std::move(module));
+}
+
 } // namespace cvub
 
 #endif

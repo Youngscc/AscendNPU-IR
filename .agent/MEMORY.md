@@ -220,10 +220,17 @@ arith/math、store 顺序及 greedy folding 与真实 `bishengir-opt` 精确一�
 `1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。当前进入阶段 4.8 第二次
 func-scoped ExtendedCanonicalizer。
 
+阶段 4.8 已于 2026-07-30 完成：原生在 HIVMOptSinglePoint 后重新注册相同的
+`func.func(canonicalize-ext)`，模型以独立 `RunSecondFuncExtendedCanonicalizer` 入口复用已证明按
+function 隔离的 fixed-point 实现，未复制第二套 pattern。定向 fixture 与真实嵌套 canonicalizer
+精确一致；8 profiles × 160 inputs 的 `10 -> 11` 单 pass 与 `00 -> 11` 累计 checkpoint 为
+`1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。当前进入阶段 4.9
+MemrefDeadStoreElimination。
+
 ## 当前实现优先级
 
-1. 从阶段 4.8 第二次 func-scoped ExtendedCanonicalizer 开始，依次补齐其余
-   `canonicalizationHIVMPipeline` 和 `InlineOTFBroadcast`；阶段 1～3、4.1～4.7 已完成。
+1. 从阶段 4.9 MemrefDeadStoreElimination 开始，依次补齐其余
+   `canonicalizationHIVMPipeline` 和 `InlineOTFBroadcast`；阶段 1～3、4.1～4.8 已完成。
 2. 使用阶段 0 已建立的原生 checkpoint 做每个新增 pass 的差分；最终以同进程原生 local
    PlanMemory 做 seeds 0～19 完整合同验证。
 3. 对齐后把 production prediction pass 前移到 before-AutoBlockify；在完成代表与全量验证前
