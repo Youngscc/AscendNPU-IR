@@ -5,6 +5,7 @@
 #include "../src/passes/module_extended_canonicalizer.hpp"
 #include "../src/passes/outer_extended_canonicalizer.hpp"
 #include "../src/passes/pre_cv_mark_multi_buffer.hpp"
+#include "../src/passes/pre_cv_hivm_opt_single_point.hpp"
 #include "../src/passes/pre_cv_cse.hpp"
 #include "../src/passes/scf_for_loop_canonicalization.hpp"
 
@@ -24,6 +25,7 @@ struct Options {
   bool applySCFForLoopCanonicalization = false;
   bool applyCSE = false;
   bool applyFirstFuncCanonicalizer = false;
+  bool applyHIVMOptSinglePoint = false;
   cvub::AutoBlockifyPrefixOptions autoBlockify;
   cvub::PreCVMarkMultiBufferOptions markMultiBuffer;
   std::filesystem::path input;
@@ -61,6 +63,8 @@ Options ParseOptions(int argc, char **argv) {
       options.applyCSE = true;
     else if (argument == "--apply-first-func-canonicalizer")
       options.applyFirstFuncCanonicalizer = true;
+    else if (argument == "--apply-hivm-opt-single-point")
+      options.applyHIVMOptSinglePoint = true;
     else if (argument == "--enable-auto-multi-buffer")
       options.markMultiBuffer.enableAuto = true;
     else if (argument == "--disable-auto-cv-workspace-manage")
@@ -125,11 +129,14 @@ int main(int argc, char **argv) {
       module = cvub::RunPreCVCSE(std::move(module));
     if (options.applyFirstFuncCanonicalizer)
       module = cvub::RunFirstFuncExtendedCanonicalizer(std::move(module));
+    if (options.applyHIVMOptSinglePoint)
+      module = cvub::RunPreCVHIVMOptSinglePoint(std::move(module));
     if (!options.applyModel && !options.applyOuterCanonicalizer &&
         !options.applyArithToAffine && !options.applyCanonicalizeIterArg &&
         !options.applyModuleCanonicalizer &&
         !options.applySCFForLoopCanonicalization && !options.applyCSE &&
-        !options.applyFirstFuncCanonicalizer) {
+        !options.applyFirstFuncCanonicalizer &&
+        !options.applyHIVMOptSinglePoint) {
       cvub::ApplyOperationSemanticsToAll(module.operations);
       module = cvub::CompactGenericModule(std::move(module));
     }

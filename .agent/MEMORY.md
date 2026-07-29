@@ -209,13 +209,21 @@ single-block structured region；multi-block SSACFG 保持显式 blocker，不�
 本来就是逐 function 建表，因而复用 4.3 的 fixed-point 实现而不复制第二套 pattern。双函数 fixture
 与真实 `builtin.module(func.func(canonicalize-ext))` 精确一致，证明 constant/worklist 不跨函数；
 8 profiles × 160 inputs 的 `08 -> 09` 单 pass 与 `00 -> 09` 累计 checkpoint 为
-`1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。当前进入阶段 4.7
-HIVMOptSinglePoint。
+`1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。
+
+阶段 4.7 已于 2026-07-30 完成：新增 pre-CV `RunPreCVHIVMOptSinglePoint`，逐项复刻原生
+VBrc、Copy/Load 以及 VAdd/VSub/VMul/VDiv/VAbs/VSqrt/VMax/VMin 的 pure-buffer、单点形状、
+f32/i64、host、no-IO-alias、memref traceback 和 memory-user 条件；生成的 constant、load、scalar
+arith/math、store 顺序及 greedy folding 与真实 `bishengir-opt` 精确一致。原生对合法
+`VMax/VMin<ui64>` 会生成 verifier 拒绝的 scalar op，模型将该已证明的原生失败显式 fail open。
+8 profiles × 160 inputs 的 `09 -> 10` 单 pass 与 `00 -> 10` 累计 checkpoint 为
+`1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。当前进入阶段 4.8 第二次
+func-scoped ExtendedCanonicalizer。
 
 ## 当前实现优先级
 
-1. 从阶段 4.7 HIVMOptSinglePoint 开始，依次补齐其余 `canonicalizationHIVMPipeline` 和
-   `InlineOTFBroadcast`；阶段 1～3、4.1～4.6 已完成。
+1. 从阶段 4.8 第二次 func-scoped ExtendedCanonicalizer 开始，依次补齐其余
+   `canonicalizationHIVMPipeline` 和 `InlineOTFBroadcast`；阶段 1～3、4.1～4.7 已完成。
 2. 使用阶段 0 已建立的原生 checkpoint 做每个新增 pass 的差分；最终以同进程原生 local
    PlanMemory 做 seeds 0～19 完整合同验证。
 3. 对齐后把 production prediction pass 前移到 before-AutoBlockify；在完成代表与全量验证前

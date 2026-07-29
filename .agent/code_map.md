@@ -86,6 +86,14 @@ memory effect barrier 和 deferred erase。`verify_cse_pipeline.py` 同时验证
 fixture 和 `verify_first_func_extended_canonicalizer_pipeline.py` 分别验证 scope 及 checkpoint
 `08 -> 09`/累计 `00 -> 09`。
 
+`ub_overflow_model_cpp/src/passes/pre_cv_hivm_opt_single_point.hpp`
+
+阶段 4.7 的 pre-CV pure-buffer scalarization。实现直接对应原生
+`HIVMOptSinglePoint.cpp` 和 `Dialect/Utils/Util.cpp` 的 scalar load/store、memref traceback 与
+memory-user closure；与 post-bufferization 的 analysis-only `hivm_opt_single_point.hpp` 是不同
+阶段，不能互换。`verify_hivm_opt_single_point_pipeline.py` 验证 checkpoint `09 -> 10` 和累计
+`00 -> 10`，当前 8 profiles × 160 inputs 为 `1280/1280 PASS`。
+
 现有可复用模型代码：
 
 ```text

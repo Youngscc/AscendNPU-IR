@@ -15,6 +15,7 @@ inline bool HasModeledOperationSemantics(const std::string &name) {
       "func.func", "func.return",
       "hivm.hir.atomic_cas", "hivm.hir.atomic_rmw", "hivm.hir.atomic_xchg",
       "hivm.hir.bitcast", "hivm.hir.debug", "hivm.hir.fixpipe",
+      "hivm.hir.copy",
       "hivm.hir.get_block_idx", "hivm.hir.get_sub_block_idx",
       "hivm.hir.load", "hivm.hir.mmadL1",
       "hivm.hir.multi_buffer_counter",
@@ -33,10 +34,12 @@ inline bool HasModeledOperationSemantics(const std::string &name) {
       "hivm.hir.vsel", "hivm.hir.vshl", "hivm.hir.vshr", "hivm.hir.vsort",
       "hivm.hir.vsqrt", "hivm.hir.vsub", "hivm.hir.vtranspose",
       "hivm.hir.vxor",
-      "llvm.inline_asm", "llvm.intr.assume", "memref.alloc",
-      "memref.collapse_shape", "memref.dim", "memref.load", "memref.store",
-      "memref.reinterpret_cast",
-      "memref.subview", "memref.view", "memref_ext.alloc_workspace", "scf.condition",
+      "llvm.inline_asm", "llvm.intr.assume", "memref.alloc", "memref.alloca",
+      "memref.cast", "memref.collapse_shape", "memref.dim",
+      "memref.expand_shape", "memref.load", "memref.memory_space_cast",
+      "memref.reinterpret_cast", "memref.reshape", "memref.store",
+      "memref.subview", "memref.transpose", "memref.view",
+      "memref_ext.alloc_workspace", "scf.condition",
       "scf.for", "scf.forall", "scf.forall.in_parallel", "scf.if",
       "scf.parallel", "scf.reduce", "scf.reduce.return", "scf.while",
       "scf.yield", "scope.return",
@@ -44,7 +47,8 @@ inline bool HasModeledOperationSemantics(const std::string &name) {
       "tensor.collapse_shape", "tensor.dim", "tensor.empty", "tensor.expand_shape",
       "tensor.extract", "tensor.extract_slice", "tensor.from_elements",
       "tensor.insert", "tensor.insert_slice"};
-  return startsWith(name, "arith.") || operations.count(name) != 0;
+  return startsWith(name, "arith.") || startsWith(name, "math.") ||
+         operations.count(name) != 0;
 }
 
 inline std::string JoinDelimited(const std::vector<std::string> &values,
@@ -77,8 +81,9 @@ inline bool HasNoMemoryEffect(const std::string &name) {
   static const std::set<std::string> operations = {
       "affine.apply", "affine.max", "affine.min", "cf.br", "cf.cond_br",
       "func.return", "llvm.inline_asm",
-      "memref.collapse_shape", "memref.reinterpret_cast", "memref.subview",
-      "memref.view",
+      "memref.cast", "memref.collapse_shape", "memref.expand_shape",
+      "memref.memory_space_cast", "memref.reinterpret_cast", "memref.reshape",
+      "memref.subview", "memref.transpose", "memref.view",
       "scf.condition", "scf.yield", "tensor.collapse_shape", "tensor.empty",
       "tensor.expand_shape", "tensor.extract", "tensor.extract_slice",
       "tensor.from_elements", "tensor.insert", "tensor.insert_slice",
@@ -86,7 +91,7 @@ inline bool HasNoMemoryEffect(const std::string &name) {
       "hivm.hir.get_sub_block_idx", "hivm.hir.multi_buffer_counter"};
   if (operations.count(name) != 0)
     return true;
-  return startsWith(name, "arith.");
+  return startsWith(name, "arith.") || startsWith(name, "math.");
 }
 
 inline std::vector<size_t> DpsInitOperandIndices(
@@ -149,7 +154,7 @@ inline void ValidateGenericOperationTypeContract(
           " expected one " + expectedType + " result");
   };
 
-  if (operation.name == "memref.alloc" ||
+  if (operation.name == "memref.alloc" || operation.name == "memref.alloca" ||
       operation.name == "memref_ext.alloc_workspace") {
     requireSingleResult(
         operation.resultTypes.size() == 1 &&
@@ -230,6 +235,7 @@ inline void ApplyOperationSemantics(Operation &operation) {
     operation.effects = GenericMemoryEffect(
         "read", std::to_string(operation.operands.front()), true);
   } else if ((operation.name == "memref.alloc" ||
+              operation.name == "memref.alloca" ||
               operation.name == "memref_ext.alloc_workspace") &&
              !operation.results.empty()) {
     operation.effects = GenericMemoryEffect(

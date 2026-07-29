@@ -195,6 +195,21 @@ python3 ub_overflow_model_cpp/scripts/verify_first_func_extended_canonicalizer_p
 `builtin.module(func.func(canonicalize-ext))` 比较，确认 constant folder/worklist 不跨 function；
 完整模型测试通过，代表下游 PlanMemory 为 `8/8 matched`。
 
+阶段 4.7 HIVMOptSinglePoint：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/verify_hivm_opt_single_point_pipeline.py \
+  --jobs 12 \
+  --json-report ub_overflow_model_cpp/output/hivm_single_point.json
+```
+
+2026-07-30 的单 pass `09 -> 10` 与累计 `00 -> 10` 同-attempt checkpoint 均为
+`8 profiles × 160 inputs = 1280/1280 PASS`。定向 fixture 与真实
+`builtin.module(func.func(hivm-opt-single-point))` 精确一致，覆盖 f32/i64 elementwise、VBrc、
+Copy/Load、host、no-IO-alias、只读 user closure 和不匹配分支；另证实原生
+`VMax/VMin<ui64>` 的 verifier 失败并在模型中 fail open。完整测试通过，代表下游 PlanMemory
+为 `8/8 matched`。
+
 ## 3. 正确性分类
 
 - `matched`：完整合同一致；

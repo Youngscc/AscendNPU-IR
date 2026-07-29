@@ -104,6 +104,12 @@ ub_overflow_model_cpp/output/tests/test_func_extended_canonicalizer
 
 "${compiler}" -std=c++17 -O0 -g -Wall -Wextra -Wpedantic -Wconversion \
   -Wshadow -Werror \
+  ub_overflow_model_cpp/tests/test_pre_cv_hivm_opt_single_point.cpp \
+  -o ub_overflow_model_cpp/output/tests/test_pre_cv_hivm_opt_single_point
+ub_overflow_model_cpp/output/tests/test_pre_cv_hivm_opt_single_point
+
+"${compiler}" -std=c++17 -O0 -g -Wall -Wextra -Wpedantic -Wconversion \
+  -Wshadow -Werror \
   ub_overflow_model_cpp/tools/pre_cv_prefix_model_runner.cpp \
   -o ub_overflow_model_cpp/output/tests/pre_cv_prefix_model_runner
 

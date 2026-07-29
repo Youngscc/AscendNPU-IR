@@ -281,7 +281,7 @@ InlineOTFBroadcast 清理冗余 1-to-1 broadcast，但真实行为来自全部�
 
 ## 9. 阶段 4：逐个实现九步 canonicalizationHIVMPipeline
 
-当前子阶段：**4.5 CSE**。
+当前子阶段：**4.8 第二次 func-scoped ExtendedCanonicalizer**。
 
 九个 pass 必须按下面九个子阶段依次实现和关闸。每个子阶段都执行：源码审阅→单元 fixture→
 单 pass checkpoint→从 AutoBlockify 开始的累积 checkpoint；通过后才进入下一个。
@@ -367,10 +367,20 @@ isolated function、commutative equivalence、read-only/write barrier 和 deferr
 
 ### 4.7 HIVMOptSinglePoint
 
+状态：**2026-07-30 已完成**。
+
 - 对照原生 VBrc、Copy/Load、VAdd/VSub/VMul/VDiv/VAbs/VSqrt/VMax/VMin pattern；
 - 区分 pure tensor 与 pure buffer semantics；
 - 当前 post-bufferization 实现不能直接替代该 pre-CV stage；若当前输入全部 tensor 语义导致
   pattern 不触发，也必须由源码条件和 capability guard 证明。
+
+完成证据：新增独立 `RunPreCVHIVMOptSinglePoint`，覆盖 host gate、pure-buffer、单一 DPS init、
+全 1 memref、f32/i64 scalar op、VBrc scalar/memref source、Copy/Load address space、Load
+no-IO-alias、原生 memref traceback 和只读 memory-user closure；生成操作、属性、插入位置及
+greedy constant CSE 与真实 `builtin.module(func.func(hivm-opt-single-point))` fixture 精确一致。
+合法 `VMax/VMin<ui64>` 触发的原生 arith verifier 失败由单独 fixture 证明，模型显式 fail open。
+8 profiles × 160 inputs 的 `09 -> 10` 单 pass 与 `00 -> 10` 累计 checkpoint 为
+`1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。
 
 ### 4.8 ExtendedCanonicalizer（func）
 
