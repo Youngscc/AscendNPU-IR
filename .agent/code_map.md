@@ -190,6 +190,22 @@ ub_overflow_model_cpp/scripts/verify_canonicalize_iter_arg_pipeline.py
 来自原生 `CanonicalizeIterArgPattern` 内部调用，不是无条件 standalone pass。验证脚本比较单 pass
 与从 checkpoint `00` 开始的累计前缀，当前 8 profiles × 160 inputs 为 `1280/1280 PASS`。
 
+canonicalization pipeline 内的 module-level ExtendedCanonicalizer：
+
+```text
+ub_overflow_model_cpp/src/passes/module_extended_canonicalizer.hpp
+ub_overflow_model_cpp/src/passes/affine_min_max_canonicalization.hpp
+ub_overflow_model_cpp/src/passes/convert_arith_to_affine.hpp
+ub_overflow_model_cpp/tests/fixtures/module_extended_canonicalizer.mlir
+ub_overflow_model_cpp/tests/test_module_extended_canonicalizer.cpp
+ub_overflow_model_cpp/scripts/verify_module_extended_canonicalizer_pipeline.py
+```
+
+`RunModuleExtendedCanonicalizer` 是 checkpoint `05 -> 06` 的严格阶段入口，复用公共 dialect
+patterns，但额外执行此边界由 ArithToAffine/CanonicalizeIterArg 暴露的 affine fixed point。
+验证脚本比较单 pass 与从 checkpoint `00` 开始的累计前缀，当前 8 profiles × 160 inputs 为
+`1280/1280 PASS`。
+
 ## 模型入口和公共接口
 
 ```text

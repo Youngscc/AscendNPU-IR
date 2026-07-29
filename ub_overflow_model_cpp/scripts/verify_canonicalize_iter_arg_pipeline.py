@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import json
 import os
 from pathlib import Path
@@ -19,6 +19,29 @@ from verify_pre_cv_mark_multi_buffer_pipeline import (
     read_profile,
     run,
     runner_arguments,
+)
+
+
+@dataclass(frozen=True)
+class StageSpec:
+    name: str
+    input_checkpoint: str
+    oracle_checkpoint: str
+    cumulative_flags: tuple[str, ...]
+    single_flag: str
+
+
+CANONICALIZE_ITER_ARG = StageSpec(
+    name="canonicalize-iter-arg",
+    input_checkpoint="04_after_arith_to_affine.mlir",
+    oracle_checkpoint="05_after_canonicalize_iter_arg.mlir",
+    cumulative_flags=(
+        "--apply-model",
+        "--apply-outer-canonicalizer",
+        "--apply-arith-to-affine",
+        "--apply-canonicalize-iter-arg",
+    ),
+    single_flag="--apply-canonicalize-iter-arg",
 )
 
 
@@ -38,6 +61,7 @@ def verify_one(
     runner: Path,
     temporary_root: Path,
     failure_root: Path | None,
+    stage: StageSpec,
 ) -> Result:
     work = temporary_root / f"case_{ordinal:05d}_{profile}_{adapter.name}"
     checkpoints = work / "checkpoints"
@@ -60,13 +84,13 @@ def verify_one(
     )
     attempt = checkpoints / "attempt-1"
     before_auto = attempt / "00_before_auto_blockify.mlir"
-    after_arith = attempt / "04_after_arith_to_affine.mlir"
-    after_iter_arg = attempt / "05_after_canonicalize_iter_arg.mlir"
+    stage_input = attempt / stage.input_checkpoint
+    stage_oracle = attempt / stage.oracle_checkpoint
     if (
         native.returncode != 0
         or not before_auto.is_file()
-        or not after_arith.is_file()
-        or not after_iter_arg.is_file()
+        or not stage_input.is_file()
+        or not stage_oracle.is_file()
     ):
         artifacts = preserve_failure(work, failure_root, ordinal)
         diagnostic = (native.stderr or native.stdout).strip()[-2000:]
@@ -76,18 +100,15 @@ def verify_one(
     cumulative = run(
         [
             str(runner),
-            "--apply-model",
-            "--apply-outer-canonicalizer",
-            "--apply-arith-to-affine",
-            "--apply-canonicalize-iter-arg",
+            *stage.cumulative_flags,
             *prefix_arguments,
             str(before_auto),
         ]
     )
     single = run(
-        [str(runner), "--apply-canonicalize-iter-arg", str(after_arith)]
+        [str(runner), stage.single_flag, str(stage_input)]
     )
-    oracle = run([str(runner), str(after_iter_arg)])
+    oracle = run([str(runner), str(stage_oracle)])
     for label, completed in (("cumulative", cumulative), ("single", single)):
         if completed.returncode != 0:
             artifacts = preserve_failure(work, failure_root, ordinal)
@@ -148,7 +169,7 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
+def main(stage: StageSpec = CANONICALIZE_ITER_ARG) -> int:
     arguments = parse_arguments()
     compiler = Path(arguments.compiler).resolve()
     runner = Path(arguments.model_runner).resolve()
@@ -170,7 +191,7 @@ def main() -> int:
 
     cases = [(adapter.resolve(), profile) for profile in profiles for adapter in adapters]
     results: list[Result | None] = [None] * len(cases)
-    with tempfile.TemporaryDirectory(prefix="canonicalize-iter-arg-") as temporary:
+    with tempfile.TemporaryDirectory(prefix=f"{stage.name}-") as temporary:
         temporary_root = Path(temporary)
         with ThreadPoolExecutor(max_workers=arguments.jobs) as executor:
             future_to_ordinal = {
@@ -183,6 +204,7 @@ def main() -> int:
                     runner,
                     temporary_root,
                     failure_root,
+                    stage,
                 ): ordinal
                 for ordinal, (adapter, profile) in enumerate(cases)
             }
@@ -229,5 +251,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except RuntimeError as error:
-        print(f"verify_canonicalize_iter_arg_pipeline: {error}", file=os.sys.stderr)
+        print(f"verify_{CANONICALIZE_ITER_ARG.name}: {error}", file=os.sys.stderr)
         raise SystemExit(2)

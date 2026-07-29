@@ -281,7 +281,7 @@ InlineOTFBroadcast 清理冗余 1-to-1 broadcast，但真实行为来自全部�
 
 ## 9. 阶段 4：逐个实现九步 canonicalizationHIVMPipeline
 
-当前子阶段：**4.3 ExtendedCanonicalizer（module）**。
+当前子阶段：**4.4 SCFForLoopCanonicalization**。
 
 九个 pass 必须按下面九个子阶段依次实现和关闸。每个子阶段都执行：源码审阅→单元 fixture→
 单 pass checkpoint→从 AutoBlockify 开始的累积 checkpoint；通过后才进入下一个。
@@ -314,8 +314,16 @@ inputs 的 `04 -> 05` 单 pass及 `00 -> 05` 累计 checkpoint 为 `1280/1280 PA
 
 ### 4.3 ExtendedCanonicalizer（module）
 
+状态：**2026-07-30 已完成**。
+
 - 复用阶段 3 的 pattern registry/capability 机制；
 - 重新记录这一 IR 阶段的 reachable patterns，不能沿用外层 pass 的 pattern 命中集合。
+
+完成证据：新增独立 `RunModuleExtendedCanonicalizer` 阶段入口；按原生 greedy driver 的迭代顺序
+覆盖此边界新暴露的 affine.apply/min/max 组合、常量与 identity fold、表达式/结果排序、CSE/DCE、
+semi-affine 重建以及相关 Arith/slice fold。fixture 覆盖 fresh-constant 生命周期和 semi-affine local
+项顺序；8 profiles × 160 inputs 的 `05 -> 06` 单 pass 与 `00 -> 06` 累计 checkpoint 为
+`1280/1280 PASS`；4.2 的 1280 项回归、完整测试和代表 PlanMemory `8/8 matched` 均通过。
 
 ### 4.4 SCFForLoopCanonicalization
 

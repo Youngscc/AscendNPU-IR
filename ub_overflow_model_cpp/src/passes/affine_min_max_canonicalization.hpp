@@ -6,6 +6,56 @@
 
 namespace cvub {
 
+// Mirrors canonicalizeMapExprAndTermOrder for the pure-affine, symbol-only
+// maps produced at this pipeline boundary. MLIR orders flattened coefficient
+// rows, not expression spelling: with operands [a, b], `b` sorts before `a`
+// because [0, 1, 0] is lexicographically smaller than [1, 0, 0]. A
+// floordiv/mod/ceildiv expression introduces local identifiers in MLIR's
+// flattener; in that case the native pattern declines the rewrite, so leave
+// the original expression order unchanged here as well.
+inline void CanonicalizeAffineMinMaxExpressionOrder(
+    std::vector<std::string> &expressions,
+    const std::vector<int> &operands) {
+  std::set<std::string> operandTerms;
+  for (int operand : operands)
+    operandTerms.insert(AffineValueExpression(operand));
+  std::vector<std::vector<int64_t>> flattened;
+  flattened.reserve(expressions.size());
+  for (const std::string &expression : expressions) {
+    const std::optional<AffineLinearForm> form =
+        FlattenAffineLinearExpression(expression);
+    if (!form || std::any_of(form->coefficients.begin(),
+                             form->coefficients.end(),
+                             [&](const auto &term) {
+                               return operandTerms.count(term.first) == 0;
+                             }))
+      return;
+    std::vector<int64_t> row;
+    row.reserve(operands.size() + 1);
+    for (int operand : operands) {
+      const auto coefficient =
+          form->coefficients.find(AffineValueExpression(operand));
+      row.push_back(coefficient == form->coefficients.end()
+                        ? 0
+                        : coefficient->second);
+    }
+    row.push_back(form->constant);
+    flattened.push_back(std::move(row));
+  }
+  std::vector<size_t> permutation(expressions.size());
+  for (size_t index = 0; index < permutation.size(); ++index)
+    permutation[index] = index;
+  std::stable_sort(permutation.begin(), permutation.end(),
+                   [&](size_t lhs, size_t rhs) {
+                     return flattened[lhs] < flattened[rhs];
+                   });
+  std::vector<std::string> ordered;
+  ordered.reserve(expressions.size());
+  for (size_t index : permutation)
+    ordered.push_back(expressions[index]);
+  expressions = std::move(ordered);
+}
+
 inline bool AffineExpressionUsesValue(const std::string &expression,
                                       int value) {
   return expression.find(AffineValueExpression(value)) != std::string::npos;
@@ -107,7 +157,8 @@ inline void FoldExistingAffineConstantOperands(GenericModule &module) {
     operation.operandTypes = std::move(operandTypes);
     std::vector<std::string> canonical = std::move(*expressions);
     if (operation.name == "affine.min" || operation.name == "affine.max")
-      std::sort(canonical.begin(), canonical.end());
+      CanonicalizeAffineMinMaxExpressionOrder(canonical,
+                                              operation.operands);
     operation.properties =
         "{map = " + operation.name + "(" +
         JoinDelimited(canonical, ",") + ")}";
@@ -407,7 +458,8 @@ inline void RunAffineMinMaxCanonicalization(
         mergedExpressions.push_back(sourceExpressions[index]);
       }
     }
-    std::sort(mergedExpressions.begin(), mergedExpressions.end());
+    CanonicalizeAffineMinMaxExpressionOrder(mergedExpressions,
+                                            mergedOperands);
     mergedExpressions.erase(
         std::unique(mergedExpressions.begin(), mergedExpressions.end()),
         mergedExpressions.end());
@@ -640,6 +692,280 @@ RunArithToAffineConversionWithAffineCanonicalization(GenericModule module) {
   RunAffineCanonicalizationCSE(module, state);
   return MaterializeArithToAffineConversion(std::move(module),
                                              std::move(state));
+}
+
+// Build the rewrite state for affine operations that already exist at the
+// input boundary.  ExtendedCanonicalizer registers the canonicalization
+// patterns of every loaded dialect, so the in-pipeline invocation immediately
+// after CanonicalizeIterArg revisits the affine.apply/min/max operations that
+// ArithToAffine materialized in the preceding pass.  This is deliberately
+// separate from RunConvertArithToAffine: no arith operation is converted a
+// second time at this boundary.
+inline ConvertArithToAffineState
+BuildExistingAffineCanonicalizationState(const GenericModule &module) {
+  ConvertArithToAffineState state;
+  for (const GenericOperation &operation : module.operations) {
+    std::optional<std::vector<std::string>> expressions;
+    if (const std::optional<std::string> apply =
+            ExistingAffineApplyExpression(operation))
+      expressions = std::vector<std::string>{*apply};
+    else
+      expressions = ExistingAffineMinMaxExpressions(operation);
+    if (!expressions)
+      continue;
+    state.replacementNames[operation.id] = operation.name;
+    state.replacementOperands[operation.id] = operation.operands;
+    state.replacementMapExpressions[operation.id] = std::move(*expressions);
+  }
+  return state;
+}
+
+inline std::optional<int> FindDominatingIndexConstantValue(
+    const GenericModule &module, const GenericOperation &operation,
+    int64_t value) {
+  for (const GenericOperation &candidate : module.operations) {
+    if (!IsIndexConstant(candidate) || candidate.results.empty() ||
+        IndexConstantExpression(candidate) !=
+            "c(" + std::to_string(value) + ")" ||
+        !GenericOperationDominates(module, candidate, operation))
+      continue;
+    return candidate.results.front();
+  }
+  return std::nullopt;
+}
+
+// Mirrors AffineApplyOp::fold, foldMinMaxOp and
+// CanonicalizeSingleResultAffineMinMaxOp.  GreedyPatternRewriteDriver folds
+// these operations through RewriterBase::replaceOpWithNewOp and the dialect's
+// materializeConstant hook: it creates a fresh constant at the folded
+// operation, rather than consulting the iteration's OperationFolder.  The
+// next greedy iteration then CSEs/hoists the surviving constant.  Keeping
+// those two steps separate is observable when an older equal-valued constant
+// becomes dead during the first iteration.
+inline void RunExistingAffineOperationFolding(
+    const GenericModule &module, ConvertArithToAffineState &state,
+    bool canonicalizeExpressionOrder) {
+  std::map<int, const GenericOperation *> definitions;
+  for (const GenericOperation &operation : module.operations)
+    for (int result : operation.results)
+      definitions[result] = &operation;
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    auto resolveAlias = [&](int value) {
+      std::set<int> visited;
+      while (true) {
+        auto definition = definitions.find(value);
+        if (definition == definitions.end())
+          break;
+        auto folded = state.foldedValues.find(definition->second->id);
+        if (folded == state.foldedValues.end() ||
+            !visited.insert(value).second)
+          break;
+        value = folded->second;
+      }
+      return value;
+    };
+
+    for (const GenericOperation &operation : module.operations) {
+      auto name = state.replacementNames.find(operation.id);
+      if (name == state.replacementNames.end() ||
+          state.foldedValues.count(operation.id) != 0 ||
+          state.foldedConstants.count(operation.id) != 0)
+        continue;
+      std::vector<std::string> &expressions =
+          state.replacementMapExpressions.at(operation.id);
+      std::vector<int> &operands =
+          state.replacementOperands.at(operation.id);
+      for (int operand : operands) {
+        const int resolved = resolveAlias(operand);
+        const auto definition = definitions.find(resolved);
+        std::string replacement = AffineValueExpression(resolved);
+        if (definition != definitions.end()) {
+          const auto newlyFolded =
+              state.foldedConstants.find(definition->second->id);
+          if (newlyFolded != state.foldedConstants.end())
+            replacement =
+                "c(" + std::to_string(newlyFolded->second) + ")";
+          else if (IsIndexConstant(*definition->second))
+            replacement = IndexConstantExpression(*definition->second);
+        }
+        for (std::string &expression : expressions)
+          expression = ReplaceAffineExpressionValue(expression, operand,
+                                                      replacement);
+      }
+      std::vector<int> canonicalOperands;
+      for (int operand : operands) {
+        const int resolved = resolveAlias(operand);
+        const auto definition = definitions.find(resolved);
+        if (definition != definitions.end() &&
+            (IsIndexConstant(*definition->second) ||
+             state.foldedConstants.count(definition->second->id) != 0))
+          continue;
+        if (std::any_of(expressions.begin(), expressions.end(),
+                        [&](const std::string &expression) {
+                          return AffineExpressionUsesValue(expression,
+                                                           resolved);
+                        }))
+          AppendUniqueAffineOperand(resolved, canonicalOperands);
+      }
+      operands = std::move(canonicalOperands);
+
+      if (name->second == "affine.min" || name->second == "affine.max") {
+        std::vector<std::string> deduplicated;
+        for (const std::string &expression : expressions)
+          if (std::find(deduplicated.begin(), deduplicated.end(),
+                        expression) == deduplicated.end())
+            deduplicated.push_back(expression);
+        expressions = std::move(deduplicated);
+        if (canonicalizeExpressionOrder)
+          CanonicalizeAffineMinMaxExpressionOrder(expressions, operands);
+      }
+
+      std::optional<int64_t> constant;
+      std::optional<int> identity;
+      if (name->second == "affine.apply" && expressions.size() == 1) {
+        constant = AffineConstantValue(expressions.front());
+        identity = AffineValue(expressions.front());
+      } else if (name->second == "affine.min" ||
+                 name->second == "affine.max") {
+        constant = FoldAffineReplacement(name->second, expressions);
+        if (expressions.size() == 1) {
+          identity = AffineValue(expressions.front());
+          if (!constant && !identity) {
+            name->second = "affine.apply";
+            changed = true;
+          }
+        }
+      }
+      if (identity) {
+        state.foldedValues[operation.id] = resolveAlias(*identity);
+        changed = true;
+      } else if (constant) {
+        state.foldedConstants[operation.id] = *constant;
+        changed = true;
+      }
+    }
+  }
+}
+
+// Projection of the affine dialect patterns reached by the module-level
+// ExtendedCanonicalizer inside canonicalizationHIVMPipeline.  The order
+// mirrors the fixed point reached by SimplifyAffineOp and
+// MergeAffineMinMaxOp: fold constants/identities, compose affine.apply
+// producers, merge same-kind min/max producers, then compose again because a
+// merge can expose another affine.apply operand.
+inline GenericModule
+RunExistingAffineCanonicalization(GenericModule module) {
+  FoldExistingAffineConstantOperands(module);
+  ConvertArithToAffineState state =
+      BuildExistingAffineCanonicalizationState(module);
+  RunExistingAffineOperationFolding(module, state, false);
+  RunAffineApplyCanonicalization(module, state);
+  RunAffineApplyComposition(module, state);
+  RunAffineApplyCanonicalization(module, state);
+  RunAffineApplyCompositionForMinMax(module, state);
+  RunAffineMinMaxCanonicalization(module, state);
+  RunAffineApplyCompositionForMinMax(module, state);
+  RunAffineMinMaxCanonicalization(module, state);
+  RunExistingAffineOperationFolding(module, state, true);
+  // The min/max rewrites above may consume the last use of an affine.apply
+  // producer. The greedy driver erases that newly dead producer in the same
+  // fixed-point invocation; rescan references to mirror that cleanup.
+  RunAffineApplyComposition(module, state);
+  return MaterializeArithToAffineConversion(std::move(module),
+                                             std::move(state));
+}
+
+// The generic IR uses "none" as its conservative, not-yet-modelled effect
+// sentinel, so the shared DCE intentionally cannot treat every such operation
+// as pure. These four operations are explicitly side-effect-free in the
+// native dialect interfaces and are exactly the operations made dead by the
+// affine canonicalization fixed point.
+inline void RunExistingAffineDeadCodeElimination(GenericModule &module) {
+  GenericRewriter rewriter(module);
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (auto iterator = module.operations.rbegin();
+         iterator != module.operations.rend(); ++iterator) {
+      GenericOperation &operation = *iterator;
+      const bool knownPure = operation.name == "arith.constant" ||
+                             operation.name == "arith.remui" ||
+                             operation.name == "affine.apply" ||
+                             operation.name == "affine.min" ||
+                             operation.name == "affine.max";
+      if (!knownPure || operation.blockId < 0 || operation.results.empty() ||
+          !operation.regions.empty() ||
+          static_cast<size_t>(operation.blockId) >= module.blocks.size() ||
+          std::find(module.blocks[static_cast<size_t>(operation.blockId)]
+                        .operations.begin(),
+                    module.blocks[static_cast<size_t>(operation.blockId)]
+                        .operations.end(),
+                    operation.id) ==
+              module.blocks[static_cast<size_t>(operation.blockId)]
+                  .operations.end())
+        continue;
+      if (std::any_of(operation.results.begin(), operation.results.end(),
+                      [&](int result) {
+                        return std::any_of(
+                            module.operations.begin(), module.operations.end(),
+                            [&](const GenericOperation &user) {
+                              return user.blockId >= 0 &&
+                                     std::find(user.operands.begin(),
+                                               user.operands.end(), result) !=
+                                         user.operands.end();
+                            });
+                      }))
+        continue;
+      rewriter.removeFromBlock(operation.blockId, operation.id);
+      changed = true;
+    }
+  }
+}
+
+// Affine folds can make both operands of a nearby arith.remui constant during
+// the same greedy canonicalizer invocation. Arith's native fold then replaces
+// the remainder with the operation folder's dominating index constant.
+inline void RunExistingAffineExposedArithFolds(GenericModule &module) {
+  std::map<int, const GenericOperation *> definitions;
+  for (const GenericOperation &operation : module.operations)
+    for (int result : operation.results)
+      definitions[result] = &operation;
+  GenericRewriter rewriter(module);
+  for (GenericOperation &operation : module.operations) {
+    if (operation.name != "arith.remui" || operation.operands.size() != 2 ||
+        operation.results.size() != 1)
+      continue;
+    const auto lhsDefinition = definitions.find(operation.operands[0]);
+    const auto rhsDefinition = definitions.find(operation.operands[1]);
+    if (lhsDefinition == definitions.end() ||
+        rhsDefinition == definitions.end())
+      continue;
+    const std::optional<int64_t> lhs =
+        IsIndexConstant(*lhsDefinition->second)
+            ? AffineConstantValue(
+                  IndexConstantExpression(*lhsDefinition->second))
+            : std::nullopt;
+    const std::optional<int64_t> rhs =
+        IsIndexConstant(*rhsDefinition->second)
+            ? AffineConstantValue(
+                  IndexConstantExpression(*rhsDefinition->second))
+            : std::nullopt;
+    if (!lhs || !rhs || *rhs == 0)
+      continue;
+    const uint64_t folded = static_cast<uint64_t>(*lhs) %
+                            static_cast<uint64_t>(*rhs);
+    if (folded > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+      continue;
+    const std::optional<int> constant = FindDominatingIndexConstantValue(
+        module, operation, static_cast<int64_t>(folded));
+    if (!constant)
+      continue;
+    rewriter.replaceAllUses(operation.results.front(), *constant);
+    rewriter.removeFromBlock(operation.blockId, operation.id);
+  }
 }
 
 inline GenericModule RunArithToAffineConversion(GenericModule module) {

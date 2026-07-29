@@ -141,6 +141,19 @@ python3 ub_overflow_model_cpp/scripts/verify_canonicalize_iter_arg_pipeline.py \
 `bishengir-opt --scf-canonicalize-iter-arg` 精确一致；完整模型测试通过；代表下游 PlanMemory 为
 `8/8 matched`。
 
+阶段 4.3 module-level ExtendedCanonicalizer：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/verify_module_extended_canonicalizer_pipeline.py \
+  --jobs 12 \
+  --json-report ub_overflow_model_cpp/output/module_extended_canonicalizer_phase4_3.json
+```
+
+2026-07-30 的单 pass `05 -> 06` 与累计 `00 -> 06` 同-attempt checkpoint 均为
+`8 profiles × 160 inputs = 1280/1280 PASS`。聚焦 fixture 验证 affine fixed point、fresh constant
+物化/CSE/hoist 和 semi-affine local 项顺序；阶段 4.2 的 1280 项回归、完整模型测试和代表下游
+PlanMemory `8/8 matched` 通过。
+
 ## 3. 正确性分类
 
 - `matched`：完整合同一致；

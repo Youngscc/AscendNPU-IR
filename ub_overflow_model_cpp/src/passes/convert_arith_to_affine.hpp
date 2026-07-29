@@ -662,6 +662,162 @@ inline std::string NativeAffineLinearExpressionText(
   return result;
 }
 
+inline bool IsAffineBinaryExpressionText(const std::string &expression) {
+  for (const std::string kind : {"mul", "add", "mod", "floordiv",
+                                 "ceildiv"})
+    if (AffineBinaryExpressionOperands(expression, kind))
+      return true;
+  return false;
+}
+
+inline std::string NativeAffineSemiAffineExpressionText(
+    const AffineLinearForm &form, const std::map<int, size_t> &symbols);
+
+inline std::string NativeAffineRawExpressionText(
+    const std::string &expression, const std::map<int, size_t> &symbols) {
+  if (const std::optional<int64_t> constant =
+          AffineConstantValue(expression))
+    return std::to_string(*constant);
+  if (const std::optional<int> value = AffineValue(expression)) {
+    const auto found = symbols.find(*value);
+    if (found == symbols.end())
+      throw std::runtime_error(
+          "ConvertArithToAffine: affine value is not an operation operand");
+    return "s" + std::to_string(found->second);
+  }
+  // SimpleAffineExprFlattener reconstructs the dividend of a semi-affine
+  // div/mod local through getAffineExprFromFlatForm before recording the
+  // local.  That reconstruction orders direct symbols before local products;
+  // recursively reproduce it instead of preserving the composed expression
+  // tree's incidental add order.
+  if (AffineBinaryExpressionOperands(expression, "add"))
+    if (const std::optional<AffineLinearForm> linear =
+            FlattenAffineLinearExpression(expression))
+      return NativeAffineSemiAffineExpressionText(*linear, symbols);
+  for (const std::string kind : {"mul", "add", "mod", "floordiv",
+                                 "ceildiv"}) {
+    const auto operands = AffineBinaryExpressionOperands(expression, kind);
+    if (!operands)
+      continue;
+    std::string lhs =
+        NativeAffineRawExpressionText(operands->first, symbols);
+    std::string rhs =
+        NativeAffineRawExpressionText(operands->second, symbols);
+    if (kind == "add")
+      return lhs + " + " + rhs;
+    if (IsAffineBinaryExpressionText(operands->first))
+      lhs = "(" + lhs + ")";
+    if (IsAffineBinaryExpressionText(operands->second))
+      rhs = "(" + rhs + ")";
+    if (kind == "mul")
+      return lhs + " * " + rhs;
+    return lhs + " " + kind + " " + rhs;
+  }
+  throw std::runtime_error(
+      "ConvertArithToAffine: unsupported native affine expression");
+}
+
+// Projection of getSemiAffineExprFromFlatForm. Direct symbols and recognized
+// symbol products are ordered by symbol position; other local expressions
+// (notably floor/mod expressions) follow them. Coefficients are emitted as
+// subtraction or a parenthesized scaled term exactly as AffineExpr::print
+// observes the reconstructed expression tree.
+inline std::string NativeAffineSemiAffineExpressionText(
+    const AffineLinearForm &form, const std::map<int, size_t> &symbols) {
+  struct Term {
+    size_t primary = std::numeric_limits<size_t>::max();
+    int group = 1;
+    int secondary = 0;
+    size_t ordinal = 0;
+    std::string expression;
+    int64_t coefficient = 0;
+  };
+  std::vector<Term> terms;
+  size_t ordinal = 0;
+  for (const auto &[expression, coefficient] : form.coefficients) {
+    if (coefficient == 0)
+      continue;
+    Term term;
+    term.ordinal = ordinal++;
+    term.expression = expression;
+    term.coefficient = coefficient;
+    if (const std::optional<int> value = AffineValue(expression)) {
+      const auto found = symbols.find(*value);
+      if (found == symbols.end())
+        throw std::runtime_error(
+            "ConvertArithToAffine: affine expression references a missing "
+            "operand");
+      term.primary = found->second;
+      term.group = 0;
+      term.secondary = 0;
+    } else if (const auto multiply =
+                   AffineBinaryExpressionOperands(expression, "mul")) {
+      const std::optional<int> lhs = AffineValue(multiply->first);
+      const std::optional<int> rhs = AffineValue(multiply->second);
+      if (lhs && rhs && symbols.count(*lhs) != 0 &&
+          symbols.count(*rhs) != 0) {
+        term.primary = symbols.at(*lhs);
+        term.group = 0;
+        term.secondary = 1;
+      }
+    }
+    terms.push_back(std::move(term));
+  }
+  std::stable_sort(terms.begin(), terms.end(),
+                   [](const Term &lhs, const Term &rhs) {
+                     return std::tie(lhs.group, lhs.primary, lhs.secondary,
+                                     lhs.ordinal) <
+                            std::tie(rhs.group, rhs.primary, rhs.secondary,
+                                     rhs.ordinal);
+                   });
+
+  std::string result;
+  for (const Term &term : terms) {
+    const bool negative = term.coefficient < 0;
+    const uint64_t magnitude = NativeAffineMagnitude(term.coefficient);
+    if (negative && magnitude == 1) {
+      const auto modulo =
+          AffineBinaryExpressionOperands(term.expression, "mod");
+      const std::optional<int64_t> divisor =
+          modulo ? AffineConstantValue(modulo->second) : std::nullopt;
+      if (modulo && divisor && *divisor > 0) {
+        const std::string dividend =
+            NativeAffineRawExpressionText(modulo->first, symbols);
+        const std::string divided = dividend + " floordiv " +
+                                    std::to_string(*divisor);
+        const std::string expanded =
+            "-" + dividend + " + (" + divided + ") * " +
+            std::to_string(*divisor);
+        if (result.empty())
+          result = expanded;
+        else
+          result += " + " + expanded;
+        continue;
+      }
+    }
+    std::string text =
+        NativeAffineRawExpressionText(term.expression, symbols);
+    if (magnitude != 1) {
+      if (IsAffineBinaryExpressionText(term.expression))
+        text = "(" + text + ")";
+      text += " * " + std::to_string(magnitude);
+    }
+    if (result.empty())
+      result = negative ? "-" + text : text;
+    else
+      result += negative ? " - " + text : " + " + text;
+  }
+  if (form.constant != 0 || result.empty()) {
+    if (result.empty())
+      result = std::to_string(form.constant);
+    else if (form.constant < 0)
+      result += " - " + std::to_string(NativeAffineMagnitude(form.constant));
+    else
+      result += " + " + std::to_string(form.constant);
+  }
+  return result;
+}
+
 inline std::string NativeAffineExpressionText(
     const std::string &expression, const std::map<int, size_t> &symbols) {
   if (const std::optional<AffineLinearForm> linear =
@@ -674,34 +830,9 @@ inline std::string NativeAffineExpressionText(
                     });
     if (onlyDirectSymbols)
       return NativeAffineLinearExpressionText(*linear, symbols);
+    return NativeAffineSemiAffineExpressionText(*linear, symbols);
   }
-  if (const std::optional<int64_t> constant =
-          AffineConstantValue(expression))
-    return std::to_string(*constant);
-  if (const std::optional<int> value = AffineValue(expression)) {
-    const auto found = symbols.find(*value);
-    if (found == symbols.end())
-      throw std::runtime_error(
-          "ConvertArithToAffine: affine value is not an operation operand");
-    return "s" + std::to_string(found->second);
-  }
-  for (const std::string &kind : {"mul", "add", "mod", "floordiv",
-                                  "ceildiv"}) {
-    const auto operands = AffineBinaryExpressionOperands(expression, kind);
-    if (!operands)
-      continue;
-    const std::string lhs =
-        NativeAffineExpressionText(operands->first, symbols);
-    const std::string rhs =
-        NativeAffineExpressionText(operands->second, symbols);
-    if (kind == "add")
-      return lhs + " + " + rhs;
-    if (kind == "mul")
-      return lhs + " * " + rhs;
-    return lhs + " " + kind + " " + rhs;
-  }
-  throw std::runtime_error(
-      "ConvertArithToAffine: unsupported native affine expression");
+  return NativeAffineRawExpressionText(expression, symbols);
 }
 
 inline std::string NativeAffineMapText(

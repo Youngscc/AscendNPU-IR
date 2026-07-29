@@ -175,13 +175,21 @@ tensor.empty folding、仅由 For/While pattern 触发的父函数 CSE、外部 
 SCF unchanged channel、For/While dead channel、effect/use closure 和 vector-function 禁用 backward
 pattern。修正了把保守 `none` effect 当纯操作及无循环函数误跑 CSE 的旧聚合行为。fixture 与真实
 `bishengir-opt --scf-canonicalize-iter-arg` 结构完全一致；8 profiles × 160 inputs 的单 pass 与累计
-checkpoint 为 `1280/1280 PASS`；完整测试通过；代表 PlanMemory 为 `8/8 matched`。当前进入阶段
-4.3：只实现 canonicalization pipeline 内的 module-level `ExtendedCanonicalizer`。
+checkpoint 为 `1280/1280 PASS`；完整测试通过；代表 PlanMemory 为 `8/8 matched`。
+
+阶段 4.3 已于 2026-07-30 完成：canonicalization pipeline 内的 module-level
+`ExtendedCanonicalizer` 现在有独立的 `RunModuleExtendedCanonicalizer` 入口，复刻原生 greedy
+fixed point 在该边界新触发的 affine composition、min/max canonicalization、fresh constant
+materialization、下一轮 OperationFolder CSE/hoist、DCE、Arith/slice fold 和 semi-affine 重建。
+修复过程没有复用旧常量来伪造操作顺序，而是保留原生两轮常量生命周期。8 profiles × 160 inputs
+的 `05 -> 06` 单 pass 与 `00 -> 06` 累计 checkpoint 为 `1280/1280 PASS`；4.2 全量回归、完整
+测试和代表 PlanMemory `8/8 matched` 通过。当前进入阶段 4.4
+`SCFForLoopCanonicalization`。
 
 ## 当前实现优先级
 
-1. 从阶段 4.3 module-level `ExtendedCanonicalizer` 开始，依次补齐其余
-   `canonicalizationHIVMPipeline` 和 `InlineOTFBroadcast`；阶段 1～3、4.1 和 4.2 已完成。
+1. 从阶段 4.4 `SCFForLoopCanonicalization` 开始，依次补齐其余
+   `canonicalizationHIVMPipeline` 和 `InlineOTFBroadcast`；阶段 1～3、4.1～4.3 已完成。
 2. 使用阶段 0 已建立的原生 checkpoint 做每个新增 pass 的差分；最终以同进程原生 local
    PlanMemory 做 seeds 0～19 完整合同验证。
 3. 对齐后把 production prediction pass 前移到 before-AutoBlockify；在完成代表与全量验证前
