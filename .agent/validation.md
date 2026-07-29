@@ -76,6 +76,17 @@ python3 ub_overflow_model_cpp/scripts/dump_ub_prefix_checkpoints.py \
 脚本默认在 `13_after_inline_otf_broadcast` 后停止；不会为取得 checkpoint 继续运行 CVPipelining
 或 PlanMemory。若要覆盖非默认参数，在命令最后加 `-- <bishengir-compile arguments...>`。
 
+阶段 1 AutoBlockify 使用同一次 attempt 的前后检查点全量验证：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/verify_auto_blockify_pipeline.py \
+  --jobs 8 \
+  --json-report ub_overflow_model_cpp/output/auto_blockify_pipeline_verification/full.json
+```
+
+2026-07-30 结果为 `160/160 PASS`；报告是可再生成本地产物，不提交。禁用 gate 另做原生
+before/after 字节一致和模型结构一致检查。
+
 ## 3. 正确性分类
 
 - `matched`：完整合同一致；

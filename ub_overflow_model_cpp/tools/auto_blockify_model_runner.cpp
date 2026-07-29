@@ -10,6 +10,8 @@ namespace {
 
 struct Options {
   bool applyModel = false;
+  bool enableTritonKernelCompile = true;
+  bool enableAutoBlockifyLoop = true;
   std::filesystem::path input;
 };
 
@@ -21,9 +23,19 @@ Options ParseOptions(int argc, char **argv) {
       options.applyModel = true;
       continue;
     }
+    if (argument == "--disable-triton-kernel-compile") {
+      options.enableTritonKernelCompile = false;
+      continue;
+    }
+    if (argument == "--disable-auto-blockify-loop") {
+      options.enableAutoBlockifyLoop = false;
+      continue;
+    }
     if (argument == "--help" || argument == "-h") {
       std::cout
-          << "usage: auto_blockify_model_runner [--apply-model] INPUT.mlir\n"
+          << "usage: auto_blockify_model_runner [--apply-model] "
+             "[--disable-triton-kernel-compile] "
+             "[--disable-auto-blockify-loop] INPUT.mlir\n"
           << "\n"
           << "Parse Generic MLIR, optionally apply the replicated "
              "AutoBlockifyParallelLoop transform, then emit a compact "
@@ -45,10 +57,16 @@ int main(int argc, char **argv) {
   try {
     const Options options = ParseOptions(argc, argv);
     cvub::GenericModule module = cvub::ParseGenericIR(options.input, false);
-    if (options.applyModel)
-      module = cvub::RunAutoBlockifyParallelLoop(std::move(module));
-    else
+    if (options.applyModel) {
+      cvub::AutoBlockifyPrefixOptions prefixOptions;
+      prefixOptions.enableTritonKernelCompile =
+          options.enableTritonKernelCompile;
+      prefixOptions.enableAutoBlockifyLoop = options.enableAutoBlockifyLoop;
+      module = cvub::RunAutoBlockifyPrefixStage(std::move(module),
+                                                prefixOptions);
+    } else {
       module = cvub::CompactGenericModule(std::move(module));
+    }
     std::cout << cvub::SerializeGenericModule(
         module, "AUTO_BLOCKIFY_CANONICAL_STRUCTURAL_IR");
     return 0;

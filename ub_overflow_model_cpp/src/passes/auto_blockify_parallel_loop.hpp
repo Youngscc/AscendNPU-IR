@@ -37,11 +37,10 @@
 //     spec makes the real `getPhysicalBlockNum` fail; this model fails closed
 //     (throws) rather than emitting an unmodeled result.
 //
-// Standalone transform only: this header is not yet wired into
-// `cvpipelining_ub_pipeline.hpp` or the CLI. Validating the flag-on path
-// end-to-end needs a blockified oracle corpus regenerated with the real
-// compiler (`--enable-auto-blockify-loop --enable-triton-kernel-compile`),
-// which is a separate step.
+// The conditional entry at the end of this file is the first stage of the
+// before-AutoBlockify lightweight prefix. It mirrors the native pipeline gate
+// `enableTritonKernelCompile && enableAutoBlockifyLoop`; the current production
+// API still starts after this pass and therefore must not call it yet.
 
 #include "../ir/generic_rewriter.hpp"
 #include "../ir/shadow_overlay.hpp"
@@ -566,6 +565,21 @@ inline GenericModule RunAutoBlockifyParallelLoop(GenericModule module) {
   GenericShadowOverlay overlay(module);
   RunAutoBlockifyParallelLoop(overlay);
   return overlay.materializeLegacyGenericModule();
+}
+
+struct AutoBlockifyPrefixOptions {
+  bool enableTritonKernelCompile = true;
+  bool enableAutoBlockifyLoop = true;
+};
+
+// Exact native pipeline gate from hivmPreBufferizationOptimizationPipeline.
+// Keeping it next to the transform avoids inventing a second default or
+// condition when the remaining pre-CV stages are connected later.
+inline GenericModule RunAutoBlockifyPrefixStage(
+    GenericModule module, const AutoBlockifyPrefixOptions &options = {}) {
+  if (!options.enableTritonKernelCompile || !options.enableAutoBlockifyLoop)
+    return module;
+  return RunAutoBlockifyParallelLoop(std::move(module));
 }
 
 } // namespace cvub

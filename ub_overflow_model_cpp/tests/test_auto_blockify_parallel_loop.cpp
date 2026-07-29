@@ -66,6 +66,22 @@ int main() {
             cvub::SerializeGenericModule(legacy),
         "stable-ID AutoBlockify must exactly match the reviewed legacy "
         "projection");
+  Check(cvub::SerializeGenericModule(
+            cvub::RunAutoBlockifyPrefixStage(before)) ==
+            cvub::SerializeGenericModule(after),
+        "enabled AutoBlockify prefix stage must apply the reviewed transform");
+  cvub::AutoBlockifyPrefixOptions disabled;
+  disabled.enableAutoBlockifyLoop = false;
+  Check(cvub::SerializeGenericModule(
+            cvub::RunAutoBlockifyPrefixStage(before, disabled)) ==
+            cvub::SerializeGenericModule(before),
+        "disabled AutoBlockify prefix stage must be an exact no-op");
+  disabled.enableAutoBlockifyLoop = true;
+  disabled.enableTritonKernelCompile = false;
+  Check(cvub::SerializeGenericModule(
+            cvub::RunAutoBlockifyPrefixStage(before, disabled)) ==
+            cvub::SerializeGenericModule(before),
+        "non-Triton AutoBlockify prefix stage must be an exact no-op");
 
   // Exactly one blockify loop is introduced (the plain kernel gets none).
   std::vector<int> subloops;

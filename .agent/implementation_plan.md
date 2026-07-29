@@ -142,6 +142,8 @@ before-AutoBlockify 与每个新增 pass 后 checkpoint。
 
 ## 6. 阶段 1：接入已有 AutoBlockify
 
+状态：**2026-07-30 已完成**。
+
 ### 实现
 
 1. 完整复核原生 `AutoBlockifyParallelLoop.cpp` 与当前
@@ -162,6 +164,19 @@ before-AutoBlockify 与每个新增 pass 后 checkpoint。
 
 after-AutoBlockify checkpoint 完全对齐后才能开始 MarkMultiBuffer，不允许先串起完整前缀再回头
 定位。
+
+### 完成证据
+
+- `AutoBlockifyPrefixOptions` 只表达原生两个 gate，启用路径调用已有 stable-ID 实现，禁用路径
+  不修改 module；
+- 现有 legacy/stable-ID fixture 和完整模型测试套件通过；
+- 同一个真实 compiler attempt 的 before/after checkpoint 在 160 个去重 adapter 上
+  `160 PASS / 0 mismatch / 0 unavailable`；
+- `enableAutoBlockifyLoop=false` 的原生 before/after IR 逐字节一致，模型禁用路径结构一致；
+- vector-add 与 fused-attention、production-default、seeds `{0,13}` 的最终 embedded
+  PlanMemory 小回归为 `matched=4, different=0, unavailable=0, timeout=0`；
+- production prediction pass 位置和现有 before-CV API 未移动，本阶段不会重复运行
+  AutoBlockify。
 
 ## 7. 阶段 2：实现 CV 前 MarkMultiBuffer
 

@@ -110,6 +110,19 @@ python3 ub_overflow_model_cpp/scripts/dump_ub_prefix_checkpoints.py \
 后；未提供时脚本使用 Triton/AutoBlockify 开发默认参数。checkpoint 位于
 `<output-dir>/attempt-N/`；停止开关在 before-CV 边界生效，不运行 CVPipelining。
 
+AutoBlockify 的同 attempt 全量差分：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/verify_auto_blockify_pipeline.py \
+  --jobs 8 \
+  --failure-dir ub_overflow_model_cpp/output/auto_blockify_pipeline_verification/failures \
+  --json-report ub_overflow_model_cpp/output/auto_blockify_pipeline_verification/full.json
+```
+
+脚本用 `data/before_cvpipelining` 的 160 个目录名选择对应 adapter；每个 adapter 只运行一次
+真实 compiler，并直接比较该 attempt 的 `00_before_auto_blockify` 经模型变换后的结构与
+`01_after_auto_blockify` 原生结构。
+
 ## 模型入口和公共接口
 
 ```text

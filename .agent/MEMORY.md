@@ -141,12 +141,18 @@ CVPipelining→PlanMemory 路径”的正式结论是：模型约为原生 BiShe
 阶段 0 已于 2026-07-30 完成：原生 before-AutoBlockify 到 before-CVPipelining 的 14 个
 checkpoint 已建立，默认关闭；显式停止会在 `13_after_inline_otf_broadcast` 后结束，不运行
 CVPipelining 或更后的 pass。普通产品路径的 before-CV IR 与阶段 0 修改前逐字节一致，完整模型
-测试套件通过。当前进入阶段 1：复核并接入已有 AutoBlockify 轻量实现。
+测试套件通过。
+
+阶段 1 已于 2026-07-30 完成：已有 AutoBlockify stable-ID 实现通过最小条件入口接入新增轻量
+前缀，精确使用原生 `enableTritonKernelCompile && enableAutoBlockifyLoop` gate。同一次原生编译
+attempt 生成的 before/after checkpoint 在去重后的 160 个 adapter 上全部结构一致；禁用分支为
+精确 no-op；代表输入 seeds `{0,13}` 最终 PlanMemory 为 4/4 matched。当前进入阶段 2：只实现
+CV 前 MarkMultiBuffer。
 
 ## 当前实现优先级
 
-1. 复核并接入现有 `AutoBlockifyParallelLoop` 轻量实现，再补齐 CV 前 `MarkMultiBuffer`、外层
-   `ExtendedCanonicalizer`、九步 `canonicalizationHIVMPipeline` 和 `InlineOTFBroadcast`。
+1. 实现 CV 前 `MarkMultiBuffer`，之后依次补齐外层 `ExtendedCanonicalizer`、九步
+   `canonicalizationHIVMPipeline` 和 `InlineOTFBroadcast`；阶段 1 的 AutoBlockify 已完成。
 2. 使用阶段 0 已建立的原生 checkpoint 做每个新增 pass 的差分；最终以同进程原生 local
    PlanMemory 做 seeds 0～19 完整合同验证。
 3. 对齐后把 production prediction pass 前移到 before-AutoBlockify；在完成代表与全量验证前

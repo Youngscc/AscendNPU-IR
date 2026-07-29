@@ -9,8 +9,8 @@ BiSheng 执行，不复刻。
 当前不做全局 IR/analysis 基础设施替换，不在模型核心新增 LLVM/MLIR 依赖，不同时进行纯性能
 重构。
 
-阶段状态：checkpoint infrastructure 已于 2026-07-30 完成；当前只执行 AutoBlockify 阶段，
-其 after-pass checkpoint 未对齐前不得开始 pre-CV MarkMultiBuffer。
+阶段状态：checkpoint infrastructure 和 AutoBlockify 已于 2026-07-30 完成；当前只执行 pre-CV
+MarkMultiBuffer，其 after-pass checkpoint 未对齐前不得开始 outer ExtendedCanonicalizer。
 
 ## 每个 pass 的固定开发循环
 
