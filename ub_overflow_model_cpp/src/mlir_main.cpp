@@ -20,6 +20,7 @@ namespace {
 
 struct Options {
   std::string input;
+  std::string inputStage = "before-cvpipelining";
   std::string format = "text";
   std::string target = "Ascend910_9382";
   cvub::Request request;
@@ -56,12 +57,17 @@ cvub::MultiBufferStrategy parseStrategy(llvm::StringRef value) {
 
 void printHelp() {
   llvm::outs()
-      << "Usage: bishengir-ub-overflow-model <before-cvpipelining.mlir> "
+      << "Usage: bishengir-ub-overflow-model <input.mlir> "
          "[options]\n"
       << "The file is parsed by MLIR and evaluated through the same ModuleOp "
          "API used by bishengir-compile. Use '-' for stdin.\n\n"
       << "  --format=<text|json>\n"
+      << "  --input-stage=<before-autoblockify|before-cvpipelining>\n"
       << "  --plan-memory-seed=<-1|0..19>  (-1 uses production retry)\n"
+      << "  --enable-triton-kernel-compile=<bool>\n"
+      << "  --enable-auto-blockify-loop=<bool>\n"
+      << "  --limit-auto-multi-buffer-only-for-local-buffer=<bool>\n"
+      << "  --set-workspace-multibuffer=<positive integer>\n"
       << "  --cv-pipeline-depth=<integer>\n"
       << "  --enable-cv-lazy-loading=<bool>\n"
       << "  --enable-preload=<bool>\n"
@@ -124,6 +130,8 @@ Options parseOptions(int argc, char **argv) {
 
     if (auto parsed = value("--format"))
       result.format = parsed->str();
+    else if (auto parsed = value("--input-stage"))
+      result.inputStage = parsed->str();
     else if (auto parsed = value("--target"))
       result.target = parsed->str();
     else if (auto parsed = value("--plan-memory-seed")) {
@@ -143,7 +151,14 @@ Options parseOptions(int argc, char **argv) {
     else if (auto parsed = value("--tile-mix-cube-loop"))
       result.request.options.tileMixCubeLoop =
           parseInteger(*parsed, "--tile-mix-cube-loop");
-    else if (auto parsed =
+    else if (auto parsed = value("--set-workspace-multibuffer")) {
+      const int count = parseInteger(*parsed, "--set-workspace-multibuffer");
+      if (count <= 0)
+        throw std::runtime_error(
+            "--set-workspace-multibuffer must be positive");
+      result.request.options.workspaceMultiBufferNum =
+          static_cast<unsigned>(count);
+    } else if (auto parsed =
                  value("--limit-auto-multi-buffer-of-local-buffer"))
       result.request.options.localMultiBufferStrategy =
           parseStrategy(*parsed);
@@ -151,6 +166,17 @@ Options parseOptions(int argc, char **argv) {
       result.request.options.mixMultiBufferStrategy = parseStrategy(*parsed);
     else if (boolean("--enable-cv-lazy-loading",
                      result.request.options.enableCVLazyLoading))
+      continue;
+    else if (boolean("--enable-triton-kernel-compile",
+                     result.request.options.enableTritonKernelCompile))
+      continue;
+    else if (boolean("--enable-auto-blockify-loop",
+                     result.request.options.enableAutoBlockifyLoop))
+      continue;
+    else if (boolean(
+                 "--limit-auto-multi-buffer-only-for-local-buffer",
+                 result.request.options
+                     .limitAutoMultiBufferOnlyForLocalBuffer))
       continue;
     else if (boolean("--enable-lazy-loading",
                      result.request.options.enableCVLazyLoading))
@@ -194,9 +220,18 @@ Options parseOptions(int argc, char **argv) {
   }
 
   if (result.input.empty())
-    throw std::runtime_error("a before-CVPipelining MLIR input is required");
+    throw std::runtime_error("an MLIR input is required");
   if (result.format != "text" && result.format != "json")
     throw std::runtime_error("--format must be text or json");
+  if (result.inputStage == "before-autoblockify") {
+    result.request.inputContractVersion =
+        cvub::kBeforeAutoBlockifyInputContractVersion;
+    result.request.compilerPipelineFingerprint =
+        cvub::kA3MembaseBeforeAutoBlockifyFingerprint;
+  } else if (result.inputStage != "before-cvpipelining") {
+    throw std::runtime_error(
+        "--input-stage must be before-autoblockify or before-cvpipelining");
+  }
   if (result.request.options.tileMixVectorLoop == 0 ||
       result.request.options.tileMixCubeLoop == 0)
     throw std::runtime_error("tile loop factors must be positive");

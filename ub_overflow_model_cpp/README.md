@@ -1,8 +1,9 @@
 # UB 溢出判定模型
 
-本模型在真实编译的 `CVPipelining` 前读取 Generic MLIR，复刻从
-`CVPipelining` 到本地 `PlanMemory` 之间会影响 UB 规划的逻辑，并在真实编译前快速判断
-kernel 是否发生 UB overflow。
+本模型嵌入真实 BiSheng，在原生 `AutoBlockify` 前直接读取当前 `ModuleOp`，精确复刻
+`AutoBlockify` 到本地 `PlanMemory` 之间会影响 UB 规划的 pass，并在执行这段原生流水前快速
+判断 kernel 是否发生 UB overflow。AutoBlockify 之前的 HFusion/HIVM 前缀仍由真实 BiSheng
+执行；模型不会重复编译 adapter 前缀。
 
 生产方应直接使用 `precision`、`status` 和 `overflow`。`ub_peak_bits`、
 `required_bits`、`capacity_bits` 与 `selected_seed` 用于解释结果；完整 buffer plan 主要用于
@@ -46,7 +47,24 @@ cmake --build build --target bishengir-compile -j8
 
 ## 2. 单独使用轻量模型
 
-直接读取一个 before-CVPipelining MLIR：
+直接读取一个 before-AutoBlockify checkpoint（当前产品边界）：
+
+```bash
+build/bin/bishengir-ub-overflow-model BEFORE_AUTO_BLOCKIFY.mlir \
+  --input-stage=before-autoblockify \
+  --format=json
+```
+
+开发时可从真实 adapter 生成该 checkpoint；模型产品接入本身不生成中间文件：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/dump_ub_prefix_checkpoints.py \
+  INPUT.ttadapter --compiler build/bin/bishengir-compile \
+  --output-dir /tmp/ub-prefix
+# 使用脚本打印的 attempt-N/00_before_auto_blockify.mlir
+```
+
+旧的 before-CVPipelining 文本入口仍保留作兼容和迁移测试：
 
 ```bash
 build/bin/bishengir-ub-overflow-model \
@@ -74,8 +92,13 @@ build/bin/bishengir-ub-overflow-model INPUT.mlir \
 | 参数 | 含义 |
 |---|---|
 | 位置参数 `PATH` | 输入 Generic MLIR，`-` 表示 stdin |
+| `--input-stage=STAGE` | `before-autoblockify` 为产品边界；`before-cvpipelining` 为兼容边界，默认后者 |
 | `--format=json\|text` | 输出格式 |
 | `--plan-memory-seed=-1\|0..19` | `-1` 为真实 retry，0～19 为固定 seed |
+| `--enable-triton-kernel-compile=BOOL` | 是否进入 Triton kernel 路径 |
+| `--enable-auto-blockify-loop=BOOL` | 是否运行 AutoBlockify |
+| `--limit-auto-multi-buffer-only-for-local-buffer=BOOL` | pre-CV MarkMultiBuffer 是否只处理 local buffer |
+| `--set-workspace-multibuffer=N` | workspace 的 multi-buffer 数量 |
 | `--disable-auto-cv-work-space-manage=BOOL` | 关闭自动 CV workspace 管理 |
 | `--cv-pipeline-depth=N` | CV pipeline depth，`-1` 表示自动 |
 | `--enable-preload=BOOL` | preload |
@@ -113,12 +136,20 @@ direct-ModuleOp 路径。
 #include "ub_overflow_model/api.hpp"
 
 cvub::Request request;
+request.inputContractVersion =
+    cvub::kBeforeAutoBlockifyInputContractVersion;
 request.compilerProfile = cvub::CompilerProfile::TritonMembaseA2A3;
-request.compilerPipelineFingerprint = cvub::kA3MembasePipelineFingerprint;
+request.compilerPipelineFingerprint =
+    cvub::kA3MembaseBeforeAutoBlockifyFingerprint;
 request.target = "Ascend910_9382";
 // embedded 路径无需序列化 ModuleOp；兼容 evaluate() 才填写文本字段。
 
 // 必须传入真实 HIVMPipelineOptions 解析默认值和别名后的最终有效值。
+request.options.enableTritonKernelCompile = enableTritonKernelCompile;
+request.options.enableAutoBlockifyLoop = enableAutoBlockifyLoop;
+request.options.limitAutoMultiBufferOnlyForLocalBuffer =
+    limitAutoMultiBufferOnlyForLocalBuffer;
+request.options.workspaceMultiBufferNum = setWorkspaceMultibuffer;
 request.options.disableAutoCVWorkSpaceManage = disableAutoCVWorkspaceManage;
 request.options.cvPipelineDepth = cvPipelineDepth;
 request.options.enableCVLazyLoading = enableCVLazyLoading;
@@ -151,8 +182,9 @@ if (result.precision == cvub::Precision::Exact &&
 
 ## 3. 在真实 BiSheng 中使用
 
-A2/A3 Triton membase 路径默认在 `CVPipelining` 前运行轻量模型。模型返回
-`Exact + Overflow` 时，当前 compile attempt 不再执行真实 CVPipelining；BiSheng 自己的
+A2/A3 Triton membase 路径默认在 `AutoBlockify` 前运行轻量模型。模型返回
+`Exact + Overflow` 时，当前 compile attempt 不再执行真实 AutoBlockify、CVPipelining 或
+PlanMemory；BiSheng 自己的
 fallback 会先关闭 code motion，仍失败时再关闭 auto multi-buffer。模型返回 success、
 blocker 或 internal error 时，真实 pipeline 继续运行。
 
@@ -271,7 +303,7 @@ BISHENGIR_UB_MODEL_EMIT_RESULT=1 \
   -o /tmp/output.o 2>/tmp/bisheng-timing.log
 ```
 
-测量完整的 160-input production retry-only 单轮模型成本并保存逐输入 TSV：
+测量当前产品默认 fast path 的 160-input retry-only 成本，可继续使用：
 
 ```bash
 .venv/bin/python3 ub_overflow_model_cpp/scripts/measure_embedded_model.py \
@@ -284,6 +316,25 @@ BISHENGIR_UB_MODEL_EMIT_RESULT=1 \
 该工具运行真实 prefix，但在 prediction 后停止；不会打开 validation、dump 或原生
 PlanMemory。报告包含 `model_ns`、旧文本边界的 `serialize_ns`、二者之和、process wall 和
 峰值 RSS。
+
+比较完整 before-AutoBlockify→local PlanMemory 模型和原生 BiSheng 的同边界耗时，使用下面的
+主性能命令。它关闭提前 non-overflow 返回及其证明计算，要求每个模型 attempt 都显示
+`decision_path=full_plan`；默认排除两个不插入模型的 workspace-manage-off 配置，并对已审核的
+原生长超时 pair 只测模型、不启动原生后半段：
+
+```bash
+.venv/bin/python3 \
+  ub_overflow_model_cpp/scripts/measure_before_auto_boundary.py \
+  --compiler build/bin/bishengir-compile \
+  --rounds 3 \
+  --report ub_overflow_model_cpp/output/performance/before_auto_full.tsv \
+  --summary ub_overflow_model_cpp/output/performance/before_auto_full.json
+```
+
+JSON 同时报告模型内部 total/median/mean/p95/max、原生同边界时间、process wall、峰值 RSS、
+完整配对数量和 `BiSheng/model` 汇总倍率。`--resume` 可续跑逐行落盘的长任务。需要诊断 pass
+分布时另跑较小子集并加 `--collect-stage-timings`；该开关会引入细粒度计时开销，不能用其结果
+替代上面的正式倍率。
 
 测量单个 non-overflow candidate 的真实增量时，使用同一 adapter 和参数交替运行下面两种
 模式，并在本地 PlanMemory 后停止；取多轮 paired median，不能比较一次冷启动：
@@ -303,7 +354,6 @@ build/bin/bishengir-compile INPUT.ttadapter \
   --enable-triton-kernel-compile=true -o /tmp/prediction.o
 ```
 
-整个 autotune 的收益必须在同一候选集合上配对比较 baseline、shadow 和 prune，总 wall time
-才是正式结论。Triton-Ascend 的 compile-only harness 会统一生成候选、交错执行三种模式，
-并输出 `no_overflow_model_overhead` 与 `overall_prune_speedup`；性能运行允许命中上述
-non-overflow fast path，正确性矩阵则始终执行完整模型。
+当前项目的正式性能结论只比较轻量模型与原生 BiSheng 在同一
+before-AutoBlockify→PlanMemory 边界的一次运行成本，不把 autotune 候选淘汰收益计入模型倍率。
+产品 fast path 可以另作行为观测，正确性矩阵仍必须执行完整模型和原生 PlanMemory。

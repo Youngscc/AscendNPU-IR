@@ -85,6 +85,7 @@ std::string EffectiveOptionsDigest(const Request &request,
   else
     value << "target";
   value << '\n' << debug.restrictInplaceAsISA << '\n';
+  value << debug.disableConservativeNonOverflowProof << '\n';
   return StableDigest(value.str());
 }
 
@@ -333,8 +334,11 @@ Result EvaluateImpl(const Request &request, const DebugModelControls &debug,
         enableDecisionOnlyNonOverflow;
     pipelineOptions.observeConservativeNonOverflow =
         observeConservativeNonOverflow;
-    const ModulePlanResult plan = RunCVPipeliningUBModulePipeline(
-        std::move(prepared.module), pipelineOptions);
+    const ModulePlanResult plan = MeasureStage(
+        tracePointer, "CVToPlanMemoryPipeline", [&] {
+          return RunCVPipeliningUBModulePipeline(
+              std::move(prepared.module), pipelineOptions);
+        });
     if (plan.precision != ModulePlanPrecision::Exact) {
       SetFailure(result, Status::Blocker, "model_blocker",
                  "the UB model could not produce an exact result");
@@ -441,7 +445,8 @@ Result evaluateForDebug(const Request &request,
           ? "before-autoblockify-v"
           : "before-cvpipelining-v";
   return EvaluateImpl(
-      request, controls, false, true,
+      request, controls, false,
+      !controls.disableConservativeNonOverflowProof,
       !input.empty(),
       [&](DebugTrace *trace) {
         PreparedInput input;
@@ -484,7 +489,9 @@ Result evaluateModuleForDebug(
     mlir::ModuleOp module, const Request &request,
     const DebugModelControls &controls) noexcept {
   return EvaluateImpl(
-      request, controls, false, true, static_cast<bool>(module),
+      request, controls, false,
+      !controls.disableConservativeNonOverflowProof,
+      static_cast<bool>(module),
       [&](DebugTrace *trace) {
         return MeasureStage(trace, "ImportMLIRModule", [&] {
           MLIRModuleView view(module);

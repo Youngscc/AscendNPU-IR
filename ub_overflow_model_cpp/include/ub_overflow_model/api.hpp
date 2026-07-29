@@ -14,7 +14,7 @@ class ModuleOp;
 
 namespace cvub {
 
-inline constexpr uint32_t kInProcessAPIVersion = 2;
+inline constexpr uint32_t kInProcessAPIVersion = 3;
 inline constexpr uint32_t kUBRelevantCompileOptionsVersion = 5;
 inline constexpr uint32_t kBeforeCVPipeliningInputContractVersion = 1;
 inline constexpr uint32_t kBeforeAutoBlockifyInputContractVersion = 2;
@@ -78,6 +78,9 @@ struct DebugModelControls {
   // Detailed per-stage timing is an opt-in diagnostic because recording every
   // nested stage is measurable overhead on the production autotune path.
   bool collectStageTimings = false;
+  // Structural performance diagnostics may disable even the conservative
+  // proof calculation so every sample follows the identical full-plan path.
+  bool disableConservativeNonOverflowProof = false;
   bool restrictInplaceAsISA = false;
   bool disableCVPipelining = false;
   bool disableAlignAllocSize = false;

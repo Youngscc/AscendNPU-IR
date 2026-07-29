@@ -22,7 +22,7 @@ SPEC.loader.exec_module(MODULE)
 rows = MODULE.load_scenarios(
     ROOT / "config/ub_relevant_parameter_scenarios.tsv", set()
 )
-assert len(rows) == 27
+assert len(rows) == 28
 assert len(MODULE.load_known_timeout_pairs(MODULE.DEFAULT_TIMEOUT_PAIRS)) == 66
 assert len(MODULE.load_adapters(MODULE.DEFAULT_ADAPTER_ROOT, set(), 0)) == 160
 assert len(MODULE.load_adapters(
@@ -34,7 +34,12 @@ arguments = MODULE.compiler_arguments(rows[0])
 assert "--enable-ub-overflow-prediction=true" in arguments
 assert "--prune-predicted-ub-overflow=false" in arguments
 assert "--enable-triton-kernel-compile" in arguments
+assert "--enable-auto-blockify-loop=false" in arguments
 assert "--limit-auto-multi-buffer-only-for-local-buffer=false" in arguments
+auto_blockify = next(row for row in rows
+                     if row["scenario_id"] == "auto_blockify")
+assert "--enable-auto-blockify-loop=true" in \
+    MODULE.compiler_arguments(auto_blockify)
 
 model_plan = Counter({(1024, 100): 2, (1024, 200): 1})
 native_plan = Counter({(1024, 100): 1, (1024, 200): 2})

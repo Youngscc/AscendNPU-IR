@@ -40,13 +40,53 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
+#include <optional>
 #include <string>
 
 namespace mlir {
 namespace hivm {
 
 namespace {
+
+using UBRangeClock = std::chrono::steady_clock;
+thread_local std::optional<UBRangeClock::time_point> nativeUBRangeStarted;
+
+static bool nativeUBRangeTimingRequested() {
+  const char *value = std::getenv("BISHENGIR_UB_NATIVE_RANGE_TIMING");
+  return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
+}
+
+struct StartNativeUBRangeTimingPass
+    : public PassWrapper<StartNativeUBRangeTimingPass,
+                         OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(StartNativeUBRangeTimingPass)
+
+  void runOnOperation() override {
+    nativeUBRangeStarted = UBRangeClock::now();
+    markAllAnalysesPreserved();
+  }
+};
+
+struct FinishNativeUBRangeTimingPass
+    : public PassWrapper<FinishNativeUBRangeTimingPass,
+                         OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(FinishNativeUBRangeTimingPass)
+
+  void runOnOperation() override {
+    if (nativeUBRangeStarted) {
+      const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+          UBRangeClock::now() - *nativeUBRangeStarted);
+      llvm::errs() << "BISHENGIR_UB_NATIVE_RANGE_TIME"
+                   << " start=before_autoblockify"
+                   << " end=after_local_plan_memory"
+                   << " ns=" << elapsed.count() << '\n';
+      nativeUBRangeStarted.reset();
+    }
+    markAllAnalysesPreserved();
+  }
+};
 
 static cvub::MultiBufferStrategy
 toModelMultiBufferStrategy(::MultiBufferStrategy strategy) {
@@ -617,15 +657,12 @@ static void hivmPreBufferizationOptimizationPipeline(
   if (predictionActive) {
     UBOverflowPredictionConfig modelConfig = predictionConfig(
         hivmPipelineOptions, pipelineOptions, traceAttempt);
-    // New-boundary rollout is observe-only until the full fixed-seed
-    // PlanMemory differential gate passes.  Remove this override only as the
-    // explicit production-switch step; the user-facing option remains wired
-    // in predictionConfig throughout validation.
-    modelConfig.pruneOnOverflow = false;
     pm.addPass(createUBOverflowPredictionPass(std::move(modelConfig)));
   }
   if (predictionActive && stopAfterUBOverflowPredictionRequested())
     return;
+  if (nativeUBRangeTimingRequested())
+    pm.addPass(std::make_unique<StartNativeUBRangeTimingPass>());
   // AutoBlockifyParallelLoopPass needs to be after infer core type because
   // num. of physical blocks we loop on is dependent on core type
   if (hivmPipelineOptions.enableTritonKernelCompile &&
@@ -848,6 +885,8 @@ static void hivmPostBufferizationOptimizationPipeline(
   planMemoryOption.enableMemoryDisplay =
       hivmPipelineOptions.enableMemoryDisplay;
   pm.nest<func::FuncOp>().addPass(createPlanMemoryPass(planMemoryOption));
+  if (nativeUBRangeTimingRequested())
+    pm.addPass(std::make_unique<FinishNativeUBRangeTimingPass>());
   if (stopAfterLocalPlanMemoryRequested())
     return;
 

@@ -176,6 +176,28 @@ int main() {
         "the oracle API must preserve a fixed PlanMemory seed");
   Check(!fixedSeed.stageTimings.empty(),
         "the debug API must collect stage timings when requested");
+  bool foundCVToPlanMemory = false;
+  for (const cvub::StageTiming &timing : fixedSeed.stageTimings)
+    foundCVToPlanMemory |= timing.stage == "CVToPlanMemoryPipeline";
+  Check(foundCVToPlanMemory,
+        "stage timing must expose the complete CV-to-PlanMemory boundary");
+
+  cvub::DebugModelControls fullPlanOnly;
+  fullPlanOnly.disableConservativeNonOverflowProof = true;
+  const cvub::Result withoutProof =
+      cvub::evaluateForDebug(request, fullPlanOnly);
+  Check(withoutProof.precision == cvub::Precision::Exact &&
+            !withoutProof.decisionOnlyNonOverflow &&
+            !withoutProof.conservativeUpperBoundBits,
+        "structural timing control must run the full plan without the proof");
+  Check(withoutProof.effectiveOptionsDigest != result.effectiveOptionsDigest,
+        "the full-plan-only debug control must alter the digest");
+  const cvub::Result beforeAutoWithoutProof =
+      cvub::evaluateForDebug(beforeAuto, fullPlanOnly);
+  Check(beforeAutoWithoutProof.precision == cvub::Precision::Exact &&
+            !beforeAutoWithoutProof.decisionOnlyNonOverflow &&
+            !beforeAutoWithoutProof.conservativeUpperBoundBits,
+        "the before-AutoBlockify contract must honor full-plan-only timing");
 
   debug.capacityOverrideBits = cvub::kDefaultUBCapacityBits + 8;
   const cvub::Result overridden = cvub::evaluateForDebug(request, debug);

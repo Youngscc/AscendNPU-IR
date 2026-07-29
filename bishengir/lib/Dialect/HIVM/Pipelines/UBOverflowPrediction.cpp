@@ -30,6 +30,18 @@ bool isTextEntryComparisonEnabled() {
   return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
 }
 
+bool isFullPlanMeasurementEnabled() {
+  const char *value =
+      std::getenv("BISHENGIR_UB_MODEL_FORCE_FULL_PLAN");
+  return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
+}
+
+bool isStageTimingEnabled() {
+  const char *value =
+      std::getenv("BISHENGIR_UB_MODEL_STAGE_TIMING");
+  return value != nullptr && value[0] != '\0' && StringRef(value) != "0";
+}
+
 bool shouldEmitMachineResult(bool validationEnabled) {
   if (validationEnabled)
     return true;
@@ -189,6 +201,14 @@ void emitMachineResult(const cvub::Result &result, uint64_t serializeNs,
   llvm::errs() << '\n';
 }
 
+void emitStageTimings(const cvub::Result &result) {
+  for (const cvub::StageTiming &timing : result.stageTimings)
+    llvm::errs() << "BISHENGIR_UB_MODEL_STAGE_TIME"
+                 << " name=" << timing.stage
+                 << " occurrence=" << timing.occurrence
+                 << " ns=" << timing.nanoseconds << '\n';
+}
+
 void emitFlowTrace(ModuleOp module, const cvub::Request &request,
                    const cvub::Result &result, uint64_t traceAttempt) {
   size_t operationCount = 0;
@@ -311,6 +331,14 @@ public:
       }
       validationId = nextValidationId();
       dumpValidationResult(validationId, result);
+    } else if (isFullPlanMeasurementEnabled()) {
+      // Performance-only path: disable the conservative early return while
+      // retaining production retry-only seed selection and without enabling
+      // validation dumps. Detailed stage timing remains separately opt-in.
+      cvub::DebugModelControls controls;
+      controls.disableConservativeNonOverflowProof = true;
+      controls.collectStageTimings = isStageTimingEnabled();
+      result = cvub::evaluateModuleForDebug(module, request, controls);
     } else {
       result = cvub::evaluateModule(module, request);
     }
@@ -319,6 +347,8 @@ public:
                         validationEnabled
                             ? std::optional<uint64_t>(validationId)
                             : std::nullopt);
+    if (!validationEnabled && isStageTimingEnabled())
+      emitStageTimings(result);
 
     const bool traceEnabled = isUBFlowTraceEnabled();
     if (traceEnabled)

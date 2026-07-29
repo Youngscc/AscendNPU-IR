@@ -158,6 +158,8 @@ def compiler_arguments(row: dict[str, str]) -> list[str]:
         "--enable-hfusion-compile",
         "--enable-hivm-compile",
         "--enable-triton-kernel-compile",
+        "--enable-auto-blockify-loop="
+        f"{flag(row['enable_auto_blockify_loop'])}",
         "--mlir-disable-threading",
         "--enable-ub-overflow-prediction=true",
         "--prune-predicted-ub-overflow=false",
