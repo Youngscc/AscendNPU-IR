@@ -493,13 +493,14 @@ inline std::string GeneratedBufferType(
     return "";
   }
   std::string identity = buffer;
-  if (startsWith(identity, "local:")) {
-    auto mapped = postBufferization.singlePoint.bufferMapping.find(identity);
-    if (mapped != postBufferization.singlePoint.bufferMapping.end())
-      identity = "base:" + mapped->second.substr(6);
-    else
-      identity = "base:" + identity.substr(6);
-  }
+  // OperationRewriteDelta buffers are produced by
+  // BuildOperationRewriteDeltas after applying the SinglePoint compaction
+  // map.  Their local ordinal is therefore already the post-SinglePoint base
+  // ordinal.  Applying bufferMapping again corrupts any ordinal that also
+  // happens to be an old-map key (for example local:24 -> local:20 ->
+  // local:16).
+  if (startsWith(identity, "local:"))
+    identity = "base:" + identity.substr(6);
   if (const LocalBufferRecord *record = bufferIndex.findSource(identity))
     return record->type;
   auto valueType = valueTypeByBuffer.find(buffer);
@@ -623,12 +624,10 @@ inline std::string GeneratedBufferAllocationTypeForTrace(
     return fallback;
   }
   std::string identity = buffer;
-  if (startsWith(identity, "local:")) {
-    auto mapped = postBufferization.singlePoint.bufferMapping.find(identity);
-    identity = mapped != postBufferization.singlePoint.bufferMapping.end()
-                   ? "base:" + mapped->second.substr(6)
-                   : "base:" + identity.substr(6);
-  }
+  // See GeneratedBufferType: generated rewrite identities have already been
+  // translated through SinglePoint's compaction map.
+  if (startsWith(identity, "local:"))
+    identity = "base:" + identity.substr(6);
   if (const LocalBufferRecord *record = bufferIndex.findSource(identity))
     return AllocationTypeForTrace(*record, metadata);
   return fallback;

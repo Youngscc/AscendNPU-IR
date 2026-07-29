@@ -1,6 +1,7 @@
 #include "../src/ir/generic_rewriter.hpp"
 #include "../src/passes/auto_blockify_parallel_loop.hpp"
 #include "../src/passes/canonicalization_hivm_pipeline.hpp"
+#include "../src/passes/cvpipelining/cvpipelining_pass.hpp"
 #include "../src/passes/func_extended_canonicalizer.hpp"
 #include "../src/passes/module_extended_canonicalizer.hpp"
 #include "../src/passes/outer_extended_canonicalizer.hpp"
@@ -33,6 +34,7 @@ struct Options {
   bool applyMemrefDSE = false;
   bool applyInlineOTFBroadcast = false;
   bool applyCombinedPrefix = false;
+  bool applyCVPipelining = false;
   cvub::AutoBlockifyPrefixOptions autoBlockify;
   cvub::PreCVMarkMultiBufferOptions markMultiBuffer;
   std::filesystem::path input;
@@ -80,6 +82,8 @@ Options ParseOptions(int argc, char **argv) {
       options.applyInlineOTFBroadcast = true;
     else if (argument == "--apply-combined-prefix")
       options.applyCombinedPrefix = true;
+    else if (argument == "--apply-cv-pipelining")
+      options.applyCVPipelining = true;
     else if (argument == "--enable-auto-multi-buffer")
       options.markMultiBuffer.enableAuto = true;
     else if (argument == "--disable-auto-cv-workspace-manage")
@@ -170,6 +174,8 @@ int main(int argc, char **argv) {
       module = cvub::RunPreCVMemrefDeadStoreElimination(std::move(module));
     if (!options.applyCombinedPrefix && options.applyInlineOTFBroadcast)
       module = cvub::RunPreCVInlineOTFBroadcast(std::move(module));
+    if (options.applyCVPipelining)
+      module = cvub::RunCVPipeliningPass(std::move(module), {});
     if (!options.applyModel && !options.applyOuterCanonicalizer &&
         !options.applyArithToAffine && !options.applyCanonicalizeIterArg &&
         !options.applyModuleCanonicalizer &&
@@ -177,7 +183,8 @@ int main(int argc, char **argv) {
         !options.applyFirstFuncCanonicalizer &&
         !options.applyHIVMOptSinglePoint &&
         !options.applySecondFuncCanonicalizer && !options.applyMemrefDSE &&
-        !options.applyInlineOTFBroadcast && !options.applyCombinedPrefix) {
+        !options.applyInlineOTFBroadcast && !options.applyCombinedPrefix &&
+        !options.applyCVPipelining) {
       cvub::ApplyOperationSemanticsToAll(module.operations);
       module = cvub::CompactGenericModule(std::move(module));
     }

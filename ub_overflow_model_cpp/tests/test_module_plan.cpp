@@ -1,4 +1,5 @@
 #include "../src/pipeline/cvpipelining_ub_pipeline.hpp"
+#include "../src/passes/auto_blockify_parallel_loop.hpp"
 
 #include <iostream>
 #include <set>
@@ -317,6 +318,97 @@ void TestErasedSinglePointLocalBufferDetection() {
         "an empty survivor map represents the identity construction");
 }
 
+void TestGeneratedRewriteBufferMappingIsAppliedOnce() {
+  cvub::PostBufferizationRewriteState state;
+  state.singlePoint.bufferMapping = {
+      {"local:24", "local:20"}, {"local:20", "local:16"}};
+  const std::vector<cvub::LocalBufferRecord> buffers = {
+      {"base:16", "base:16", "old", "memref<128xf16>",
+       cvub::AddressSpace::UB, 2048, false, {}},
+      {"base:20", "base:20", "rewritten", "memref<128xf32>",
+       cvub::AddressSpace::UB, 4096, false, {}}};
+  const cvub::LocalBufferIndex index(buffers);
+  cvub::PipelineMetadataCache metadata;
+  const std::map<std::string, std::string> valueTypes;
+
+  Check(cvub::GeneratedBufferType(state, "local:20", index, valueTypes) ==
+            "memref<128xf32>",
+        "post-SinglePoint generated buffers must not be remapped twice");
+  Check(cvub::GeneratedBufferAllocationTypeForTrace(
+            state, "local:20", index, "", metadata) ==
+            "memref<128xf32>",
+        "generated allocation tracing must use the post-SinglePoint ordinal");
+}
+
+void TestPlanMemoryParentLoopFollowsYieldedBuffer() {
+  cvub::LifetimeAnalysis liveness;
+  liveness.operations = {
+      MakePlanOperation(0, "scf.for", {}, 0),
+      MakePlanOperation(1, "scf.for", {10}, 1, {"%inner_result"}),
+      MakePlanOperation(2, "memref.alloc", {10, 11}, 2, {"%inner"}),
+      MakePlanOperation(3, "test.consume", {10, 11}, 2, {}, {"%inner"}),
+      MakePlanOperation(4, "scf.yield", {10, 11}, 2, {}, {"%inner"}),
+      MakePlanOperation(5, "test.consume", {10}, 1, {},
+                        {"%inner_result"}),
+      MakePlanOperation(6, "memref.alloc", {10}, 1, {"%outer"}),
+      MakePlanOperation(7, "test.consume", {10}, 1, {}, {"%outer"}),
+      MakePlanOperation(8, "scf.for.implicit_yield", {10}, 1),
+  };
+  liveness.canonicalAllocByValue = {
+      {"%inner", "%inner"}, {"%inner_result", "%inner"},
+      {"%outer", "%outer"}};
+  std::vector<cvub::BufferInfoRecord> buffers = {
+      {"%inner", 256, 256, false}, {"%outer", 256, 256, false}};
+  const cvub::PreparedStorageEntryAnalysis prepared(buffers, liveness);
+  Check(prepared.parentLoopByBuffer.at("%inner") ==
+            prepared.parentLoopByBuffer.at("%outer"),
+        "a buffer yielded from an inner loop and consumed by the outer loop "
+        "must use the native outer consumer-loop anchor");
+}
+
+void TestAtomicSyncBlockLockIsHoistedAroundOutermostLoop() {
+  cvub::GenericModule module = cvub::ParseGenericIR(
+      "ub_overflow_model_cpp/data/before_cvpipelining/"
+      "triton.language.atomic_and.ttadapter/"
+      "before_cvpipelining_func_func_atomic_and_32.mlir",
+      false);
+  cvub::ApplyOperationSemanticsToAll(module.operations);
+  module = cvub::RunAutoBlockifyPrefixStage(std::move(module), {});
+  module = cvub::RunCVPipeliningPass(std::move(module), {});
+  cvub::UBAffectingPassOptions options;
+  options.enableTritonKernelCompile = true;
+  const cvub::PlanMemoryInput input =
+      cvub::BuildPlanMemoryInputFromAfterCVPipelining(std::move(module),
+                                                       options);
+
+  const auto position = [&](const char *name) {
+    const auto found = std::find_if(
+        input.operations.begin(), input.operations.end(),
+        [&](const cvub::OperationRecord &operation) {
+          return operation.opName == name;
+        });
+    Check(found != input.operations.end(),
+          "atomic hoisting regression is missing an expected operation");
+    return static_cast<size_t>(
+        std::distance(input.operations.begin(), found));
+  };
+  const size_t loop = position("scf.for");
+  const size_t loopEnd = position("scf.for.end");
+  const size_t lock = position("hivm.hir.sync_block_lock");
+  const size_t unlock = position("hivm.hir.sync_block_unlock");
+  Check(lock < loop && loopEnd < unlock,
+        "SyncBlockHoisting must place one lock pair around the outermost "
+        "atomic loop");
+  Check(std::count_if(input.operations.begin(), input.operations.end(),
+                      [](const cvub::OperationRecord &operation) {
+                        return operation.opName ==
+                                   "hivm.hir.sync_block_lock" ||
+                               operation.opName ==
+                                   "hivm.hir.sync_block_unlock";
+                      }) == 2,
+        "one outermost loop must retain exactly one lock/unlock pair");
+}
+
 void TestSavingUBUnitAttributeDetection() {
   Check(cvub::HasUnitAttribute("{hivm.enable_saving_ub}",
                                "hivm.enable_saving_ub"),
@@ -435,6 +527,9 @@ int main() {
   TestEquivalentMarkedSlicesAreCSEdBeforeBubbleUp();
   TestPostOneShotScalarCSEProjection();
   TestErasedSinglePointLocalBufferDetection();
+  TestGeneratedRewriteBufferMappingIsAppliedOnce();
+  TestPlanMemoryParentLoopFollowsYieldedBuffer();
+  TestAtomicSyncBlockLockIsHoistedAroundOutermostLoop();
   TestSavingUBUnitAttributeDetection();
 
   std::cout << "[PASS] module plans AIV functions independently\n";
@@ -448,6 +543,9 @@ int main() {
   std::cout << "[PASS] equivalent marked slices CSE before bubble-up\n";
   std::cout << "[PASS] post-OneShot scalar CSE shares dominating guards\n";
   std::cout << "[PASS] erased SinglePoint locals are detected before remap\n";
+  std::cout << "[PASS] generated rewrite buffers are mapped exactly once\n";
+  std::cout << "[PASS] PlanMemory parent loops follow yielded buffers\n";
+  std::cout << "[PASS] atomic sync-block locks hoist around outermost loops\n";
   std::cout << "[PASS] saving-UB unit attributes are detected exactly\n";
   return 0;
 }

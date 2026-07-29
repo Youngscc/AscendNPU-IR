@@ -140,6 +140,8 @@ public:
     insertSliceByProducer.reserve(operationCapacity / 8 + 1);
     inPlaceInsertSliceCandidates.reserve(operationCapacity / 8 + 1);
     atomicLockValues.reserve(operationCapacity / 8 + 1);
+    hoistedAtomicLoopBySource.reserve(operationCapacity / 16 + 1);
+    hoistedAtomicSourcesByLoop.reserve(operationCapacity / 16 + 1);
     canonicalViewAliases.reserve(valueCapacity);
     erasedValueAliases.reserve(valueCapacity);
     cseAliases.reserve(valueCapacity / 4 + 1);
@@ -199,6 +201,7 @@ public:
       indexSunkFillInlineLoadViews();
       indexDeadConstantsAfterHIVMDecomposeOp();
       indexMappedLoops();
+      indexAtomicSyncBlockHoisting();
     });
     regionPathCache.resize(logical.operations.size());
     regionPathCached.assign(logical.operations.size(), false);
@@ -293,6 +296,44 @@ private:
     return function < 0
                ? nullptr
                : &logical.operations.at(static_cast<size_t>(function));
+  }
+
+  static bool isAtomicOperation(const GenericOperation &operation) {
+    return operation.name == "hivm.hir.atomic_xchg" ||
+           operation.name == "hivm.hir.atomic_rmw" ||
+           operation.name == "hivm.hir.atomic_cas";
+  }
+
+  static bool isLoopLikeOperation(const GenericOperation &operation) {
+    // This is the set of loop operations implementing LoopLikeOpInterface in
+    // the native HIVM suffix at this boundary.  SyncBlockHoisting applies its
+    // pattern to that interface and greedily carries an inner lock through
+    // every enclosing loop, so the final anchor is the outermost loop.
+    return operation.name == "scf.for" || operation.name == "scf.while" ||
+           operation.name == "scf.parallel" ||
+           operation.name == "scf.forall" ||
+           operation.name == "affine.for";
+  }
+
+  void indexAtomicSyncBlockHoisting() {
+    for (const GenericOperation &operation : logical.operations) {
+      if (!isAtomicOperation(operation) ||
+          erasedOperations.count(operation.id) != 0)
+        continue;
+      int outermostLoop = -1;
+      int parent = operation.parentId;
+      while (parent >= 0) {
+        const GenericOperation &ancestor =
+            logical.operations.at(static_cast<size_t>(parent));
+        if (isLoopLikeOperation(ancestor))
+          outermostLoop = ancestor.id;
+        parent = ancestor.parentId;
+      }
+      if (outermostLoop < 0)
+        continue;
+      hoistedAtomicLoopBySource.emplace(operation.id, outermostLoop);
+      hoistedAtomicSourcesByLoop[outermostLoop].push_back(operation.id);
+    }
   }
 
   void indexSourceBuffers() {
@@ -3968,7 +4009,8 @@ private:
                   nextOperationId++);
   }
 
-  void emitAtomicLockStart(const GenericOperation &source) {
+  void emitAtomicLockStart(const GenericOperation &source,
+                           const GenericOperation *placement = nullptr) {
     const GenericOperation *function = EnclosingFunction(logical, source);
     if (!function || function->regions.empty())
       throw std::runtime_error("HIVMDecomposeOp: atomic outside function");
@@ -3988,7 +4030,8 @@ private:
         "%atomic_lock_" + std::to_string(nextFlattenValue++);
     const std::string lockType =
         "memref<1xi64, #hivm.address_space<gm>>";
-    OperationRecord view = baseOperation(source, "memref.view");
+    const GenericOperation &placementSource = placement ? *placement : source;
+    OperationRecord view = baseOperation(placementSource, "memref.view");
     view.text = lock + " = memref.view " +
                 PlanMemoryValueName(entry.arguments[1]) + ", " +
                 scalarValueName(constants->second.at(0)) +
@@ -3998,17 +4041,18 @@ private:
     atomicLockValues[source.id] = lock;
 
     OperationRecord acquire =
-        baseOperation(source, "hivm.hir.sync_block_lock");
+        baseOperation(placementSource, "hivm.hir.sync_block_lock");
     acquire.text = "hivm.hir.sync_block_lock " + lock + " : " + lockType;
     result.operations.push_back(std::move(acquire));
   }
 
-  void emitAtomicLockEnd(const GenericOperation &source) {
+  void emitAtomicLockEnd(const GenericOperation &source,
+                         const GenericOperation *placement = nullptr) {
     auto lock = atomicLockValues.find(source.id);
     if (lock == atomicLockValues.end())
       return;
-    OperationRecord release =
-        baseOperation(source, "hivm.hir.sync_block_unlock");
+    OperationRecord release = baseOperation(
+        placement ? *placement : source, "hivm.hir.sync_block_unlock");
     release.text = "hivm.hir.sync_block_unlock " + lock->second + " : " +
                    namedValueTypes.at(lock->second);
     result.operations.push_back(std::move(release));
@@ -5134,9 +5178,24 @@ private:
         }
       }
     }
-    if (source.name == "hivm.hir.atomic_xchg" ||
-        source.name == "hivm.hir.atomic_rmw" ||
-        source.name == "hivm.hir.atomic_cas")
+    auto hoistedAtomics = hoistedAtomicSourcesByLoop.find(source.id);
+    if (hoistedAtomics != hoistedAtomicSourcesByLoop.end() &&
+        !hoistedAtomics->second.empty()) {
+      const GenericOperation &primary = logical.operations.at(
+          static_cast<size_t>(hoistedAtomics->second.front()));
+      // Native SyncBlockHoisting greedily replaces every lock/unlock nested
+      // under one outermost loop with a single pair around that loop.  It also
+      // keeps only the first create_sync_block_lock.  Emit that final form
+      // directly instead of materializing per-atomic pairs and then moving
+      // them through the synthetic PlanMemory bridge.
+      emitAtomicLockStart(primary, &source);
+      const std::string lock = atomicLockValues.at(primary.id);
+      for (int atomic : hoistedAtomics->second)
+        atomicLockValues[atomic] = lock;
+    }
+    const bool lockHoisted =
+        hoistedAtomicLoopBySource.count(source.id) != 0;
+    if (isAtomicOperation(source) && !lockHoisted)
       emitAtomicLockStart(source);
     std::vector<std::pair<size_t, const PlanMemoryInputBufferRecord *>>
         allocations;
@@ -5254,9 +5313,7 @@ private:
 
     if (module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.scalarizedOperations.count(source.id)) {
       emitScalarizedOperation(source);
-      if (source.name == "hivm.hir.atomic_xchg" ||
-          source.name == "hivm.hir.atomic_rmw" ||
-          source.name == "hivm.hir.atomic_cas")
+      if (isAtomicOperation(source) && !lockHoisted)
         emitAtomicLockEnd(source);
       return;
     }
@@ -5373,6 +5430,12 @@ private:
                    source.name == "scope.scope"
                        ? "scope.scope.end"
                        : source.name + ".end");
+      if (hoistedAtomics != hoistedAtomicSourcesByLoop.end() &&
+          !hoistedAtomics->second.empty()) {
+        const GenericOperation &primary = logical.operations.at(
+            static_cast<size_t>(hoistedAtomics->second.front()));
+        emitAtomicLockEnd(primary, &source);
+      }
       return;
     }
     if (source.name == "scf.yield" || source.name == "scf.condition" ||
@@ -5601,9 +5664,7 @@ private:
     } else {
       emitPassthrough(source);
     }
-    if (source.name == "hivm.hir.atomic_xchg" ||
-        source.name == "hivm.hir.atomic_rmw" ||
-        source.name == "hivm.hir.atomic_cas")
+    if (isAtomicOperation(source) && !lockHoisted)
       emitAtomicLockEnd(source);
   }
 
@@ -5982,6 +6043,8 @@ private:
   std::unordered_set<int> transformedInsertSlices;
   std::unordered_set<int> replayedInsertSliceProducers;
   std::unordered_map<int, std::string> atomicLockValues;
+  std::unordered_map<int, int> hoistedAtomicLoopBySource;
+  std::unordered_map<int, std::vector<int>> hoistedAtomicSourcesByLoop;
   std::map<int, std::map<std::string, std::string>> atomicTemporaryViews;
   struct ExpandShapeRecord {
     std::string source;

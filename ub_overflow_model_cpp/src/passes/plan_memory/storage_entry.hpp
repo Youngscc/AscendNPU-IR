@@ -108,22 +108,137 @@ struct PreparedStorageEntryAnalysis {
       bufferInfoByName[info.name] = info;
     const StrideAlignmentMap strideAlignments =
         CollectStrideAlignmentMarks(liveness.operations);
-    std::set<int> loopRegions;
+    PlanMemoryOperationIndex operationIndex(liveness.operations);
+    std::unordered_map<std::string, size_t> definingOperationByValue;
+    definingOperationByValue.reserve(liveness.operations.size() * 2);
+    std::unordered_map<int, size_t> loopOwnerByRegion;
+    std::unordered_map<int, size_t> ifOwnerByRegion;
+    std::vector<std::vector<int>> childRegionsByOperation(
+        liveness.operations.size());
     for (size_t i = 0; i < liveness.operations.size(); ++i) {
       const OperationRecord &operation = liveness.operations[i];
-      if (operation.opName != "scf.for")
+      for (const std::string &result : operationResultNames(operation))
+        definingOperationByValue.emplace(result, i);
+      if (operation.opName != "scf.for" &&
+          operation.opName != "scf.while" &&
+          operation.opName != "scf.if")
         continue;
+      bool enteredChildRegion = false;
       for (size_t j = i + 1; j < liveness.operations.size(); ++j) {
         const OperationRecord &candidate = liveness.operations[j];
         if (candidate.regionPath.size() == operation.regionPath.size() + 1 &&
             pathPrefix(operation.regionPath, candidate.regionPath)) {
-          loopRegions.insert(candidate.regionPath.back());
-          break;
+          const int region = candidate.regionPath.back();
+          if (std::find(childRegionsByOperation[i].begin(),
+                        childRegionsByOperation[i].end(), region) ==
+              childRegionsByOperation[i].end())
+            childRegionsByOperation[i].push_back(region);
+          enteredChildRegion = true;
+          continue;
         }
-        if (candidate.regionPath.size() <= operation.regionPath.size())
+        if (enteredChildRegion &&
+            candidate.regionPath.size() <= operation.regionPath.size())
           break;
       }
+      for (int region : childRegionsByOperation[i]) {
+        if (operation.opName == "scf.if")
+          ifOwnerByRegion.emplace(region, i);
+        else
+          loopOwnerByRegion.emplace(region, i);
+      }
     }
+    const auto nearestOwner = [](const std::vector<int> &path,
+                                 const std::unordered_map<int, size_t> &owners)
+        -> std::optional<size_t> {
+      for (auto region = path.rbegin(); region != path.rend(); ++region) {
+        auto owner = owners.find(*region);
+        if (owner != owners.end())
+          return owner->second;
+      }
+      return std::nullopt;
+    };
+    const auto isTerminator = [](const std::string &name) {
+      static const std::set<std::string> terminators = {
+          "cf.br",          "cf.cond_br",     "func.return",
+          "return",         "scf.condition",  "scf.for.implicit_yield",
+          "scf.if.implicit_yield", "scf.reduce.return", "scf.yield",
+          "scope.return"};
+      return terminators.count(name) != 0;
+    };
+    auto yieldedValues = [&](size_t owner, const std::string &value)
+        -> std::optional<size_t> {
+      for (int region : childRegionsByOperation[owner]) {
+        const std::vector<std::string> &yielded =
+            operationIndex.yieldedValuesForRegion(region);
+        auto found = std::find(yielded.begin(), yielded.end(), value);
+        if (found != yielded.end())
+          return static_cast<size_t>(std::distance(yielded.begin(), found));
+      }
+      return std::nullopt;
+    };
+    std::function<int(const std::string &, int,
+                      std::unordered_set<std::string> &)>
+        getParentLoopImpl;
+    getParentLoopImpl =
+        [&](const std::string &value, int consumerLoop,
+            std::unordered_set<std::string> &visited) -> int {
+      if (!visited.insert(value).second)
+        return consumerLoop;
+      auto defining = definingOperationByValue.find(value);
+      if (defining == definingOperationByValue.end())
+        return consumerLoop;
+      const size_t definingPosition = defining->second;
+      const OperationRecord &definingOperation =
+          liveness.operations[definingPosition];
+      std::optional<size_t> parentLoop =
+          nearestOwner(definingOperation.regionPath, loopOwnerByRegion);
+      if (!parentLoop)
+        return consumerLoop;
+
+      // Utils.cpp::isConsumedInLoop ignores terminators/annotation marks and
+      // stops at the first enclosing loop.  Therefore a use is consumed by
+      // parentLoop exactly when that is the user's nearest loop ancestor.
+      for (size_t userPosition : operationIndex.users(value)) {
+        const OperationRecord &user = liveness.operations[userPosition];
+        if (isTerminator(user.opName) || user.opName == "annotation.mark")
+          continue;
+        if (nearestOwner(user.regionPath, loopOwnerByRegion) == parentLoop) {
+          consumerLoop = static_cast<int>(*parentLoop);
+          break;
+        }
+      }
+
+      const std::vector<std::string> &loopResults =
+          operationIndex.results(liveness.operations[*parentLoop]);
+      if (loopResults.empty())
+        return consumerLoop >= 0 ? consumerLoop
+                                 : static_cast<int>(*parentLoop);
+      if (std::optional<size_t> resultIndex =
+              yieldedValues(*parentLoop, value)) {
+        if (*resultIndex >= loopResults.size())
+          return consumerLoop >= 0 ? consumerLoop
+                                   : static_cast<int>(*parentLoop);
+        return getParentLoopImpl(loopResults[*resultIndex], consumerLoop,
+                                 visited);
+      }
+
+      std::optional<size_t> parentIf =
+          nearestOwner(definingOperation.regionPath, ifOwnerByRegion);
+      if (parentIf) {
+        const std::vector<std::string> &ifResults =
+            operationIndex.results(liveness.operations[*parentIf]);
+        if (!ifResults.empty()) {
+          if (std::optional<size_t> resultIndex =
+                  yieldedValues(*parentIf, value)) {
+            if (*resultIndex < ifResults.size())
+              return getParentLoopImpl(ifResults[*resultIndex], consumerLoop,
+                                       visited);
+          }
+        }
+      }
+      return consumerLoop >= 0 ? consumerLoop
+                               : static_cast<int>(*parentLoop);
+    };
     auto recordCanonical = [&](const std::vector<std::string> &values,
                                std::unordered_set<std::string> &destination) {
       for (const std::string &value : values) {
@@ -136,11 +251,9 @@ struct PreparedStorageEntryAnalysis {
       if (operation.opName == "memref.alloc") {
         std::vector<std::string> results = operationResultNames(operation);
         if (!results.empty()) {
-          int parentLoop = -1;
-          for (int region : operation.regionPath)
-            if (loopRegions.count(region))
-              parentLoop = region;
-          parentLoopByBuffer[results.front()] = parentLoop;
+          std::unordered_set<std::string> visited;
+          parentLoopByBuffer[results.front()] =
+              getParentLoopImpl(results.front(), -1, visited);
         }
       }
       if (IsHIVMStructuredOp(operation.opName) &&
