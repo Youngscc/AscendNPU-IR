@@ -103,6 +103,19 @@ Fixpipe 和 scope preload pattern 一致。代表下游 PlanMemory 小回归为 
 当前既有 before-CV→PlanMemory 路径未回退，新增 prefix 的直接证明仍以同-attempt 结构完全一致
 为准。
 
+阶段 3 outer module-level ExtendedCanonicalizer 使用同一 8-profile 矩阵：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/verify_outer_extended_canonicalizer_pipeline.py \
+  --jobs 12 \
+  --json-report ub_overflow_model_cpp/output/outer_extended_canonicalizer_phase3.json
+```
+
+2026-07-30 结果为 `8 profiles × 160 inputs = 1280/1280 PASS`；每项同时比较单 pass
+`02 -> outer canonicalizer` 与累计 `00 -> AutoBlockify -> MarkMultiBuffer -> outer canonicalizer`
+到同一原生 `03_after_outer_extended_canonicalizer`。原生 `bishengir-opt --canonicalize-ext`
+fixture 结构完全一致；代表下游 PlanMemory 小回归为 `8/8 matched`。
+
 ## 3. 正确性分类
 
 - `matched`：完整合同一致；

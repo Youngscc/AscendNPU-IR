@@ -143,6 +143,26 @@ python3 ub_overflow_model_cpp/scripts/verify_pre_cv_mark_multi_buffer_pipeline.p
 before-AutoBlockify 开始的累计前缀，oracle 是同一 compiler attempt 的
 `02_after_pre_cv_mark_multi_buffer`。
 
+outer module-level ExtendedCanonicalizer 实现与验证：
+
+```text
+ub_overflow_model_cpp/src/passes/outer_extended_canonicalizer.hpp
+ub_overflow_model_cpp/src/ir/operation_folder.hpp
+ub_overflow_model_cpp/tests/fixtures/outer_extended_canonicalizer.mlir
+ub_overflow_model_cpp/tests/test_outer_extended_canonicalizer.cpp
+ub_overflow_model_cpp/scripts/verify_outer_extended_canonicalizer_pipeline.py
+```
+
+```bash
+python3 ub_overflow_model_cpp/scripts/verify_outer_extended_canonicalizer_pipeline.py \
+  --jobs 12 \
+  --json-report ub_overflow_model_cpp/output/outer_extended_canonicalizer_phase3.json
+```
+
+脚本逐项比较单 pass `02_after_pre_cv_mark_multi_buffer -> outer` 和累计
+`00_before_auto_blockify -> AutoBlockify -> MarkMultiBuffer -> outer` 与同一真实 compiler attempt
+的 `03_after_outer_extended_canonicalizer`。当前 8 profiles × 160 inputs 为 `1280/1280 PASS`。
+
 ## 模型入口和公共接口
 
 ```text

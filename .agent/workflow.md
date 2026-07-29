@@ -9,9 +9,9 @@ BiSheng 执行，不复刻。
 当前不做全局 IR/analysis 基础设施替换，不在模型核心新增 LLVM/MLIR 依赖，不同时进行纯性能
 重构。
 
-阶段状态：checkpoint infrastructure、AutoBlockify 和 pre-CV MarkMultiBuffer 已于 2026-07-30
-完成；当前只执行 outer module-level ExtendedCanonicalizer，其 after-pass checkpoint 未对齐前
-不得开始 ArithToAffine。
+阶段状态：checkpoint infrastructure、AutoBlockify、pre-CV MarkMultiBuffer 和 outer
+module-level ExtendedCanonicalizer 已于 2026-07-30 完成；当前只执行阶段 4.1
+ArithToAffine，其 after-pass checkpoint 未对齐前不得开始 CanonicalizeIterArg。
 
 ## 每个 pass 的固定开发循环
 

@@ -211,6 +211,135 @@ inline void ReplaceOperationFolderValue(GenericModule &module, int from,
   }
 }
 
+inline std::vector<int>
+CollectGreedyOperationFolderPostOrder(const GenericModule &module,
+                                      int functionId) {
+  std::vector<int> result;
+  std::function<void(int)> collect = [&](int operationId) {
+    const GenericOperation &operation =
+        module.operations.at(static_cast<size_t>(operationId));
+    for (int regionId : operation.regions)
+      for (int blockId :
+           module.regions.at(static_cast<size_t>(regionId)).blocks)
+        for (int childId :
+             module.blocks.at(static_cast<size_t>(blockId)).operations) {
+          collect(childId);
+          result.push_back(childId);
+        }
+  };
+  collect(functionId);
+  return result;
+}
+
+inline bool IsGreedyOperationFolderAttached(const GenericModule &module,
+                                            int operationId) {
+  if (operationId < 0 ||
+      static_cast<size_t>(operationId) >= module.operations.size())
+    return false;
+  const GenericOperation &operation =
+      module.operations.at(static_cast<size_t>(operationId));
+  if (operation.blockId < 0 ||
+      static_cast<size_t>(operation.blockId) >= module.blocks.size())
+    return false;
+  const std::vector<int> &operations =
+      module.blocks.at(static_cast<size_t>(operation.blockId)).operations;
+  return std::find(operations.begin(), operations.end(), operationId) !=
+         operations.end();
+}
+
+inline bool GreedyOperationFolderHasUse(const GenericModule &module,
+                                        int value) {
+  for (const GenericOperation &operation : module.operations)
+    if (IsGreedyOperationFolderAttached(module, operation.id) &&
+        std::find(operation.operands.begin(), operation.operands.end(),
+                  value) != operation.operands.end())
+      return true;
+  return false;
+}
+
+// Implements the operation folds that are reached by the native greedy
+// driver around AutoBlockify/MarkMultiBuffer.  The rules come directly from
+// ArithOps.cpp (MulIOp/DivSIOp/DivUIOp/TruncIOp::fold); this is intentionally
+// not a general algebraic simplifier.
+inline void RunGreedyArithIdentityFolds(GenericModule &module,
+                                        int functionId) {
+  GenericRewriter rewriter(module);
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    const std::vector<int> order =
+        CollectGreedyOperationFolderPostOrder(module, functionId);
+    std::map<int, ArithIntegerConstant> constants;
+    for (int operationId : order) {
+      const GenericOperation &operation =
+          module.operations.at(static_cast<size_t>(operationId));
+      if (const auto value = ParseArithIntegerConstant(operation);
+          value && operation.results.size() == 1)
+        constants[operation.results.front()] = *value;
+    }
+
+    for (int operationId : order) {
+      GenericOperation &operation =
+          module.operations.at(static_cast<size_t>(operationId));
+      if (!IsGreedyOperationFolderAttached(module, operationId) ||
+          operation.results.size() != 1)
+        continue;
+      std::optional<int> replacement;
+      if ((operation.name == "arith.muli" ||
+           operation.name == "arith.divsi" ||
+           operation.name == "arith.divui") &&
+          operation.operands.size() == 2) {
+        const auto rhs = constants.find(operation.operands[1]);
+        if (rhs != constants.end() && rhs->second.bits == 1)
+          replacement = operation.operands[0];
+        if (operation.name == "arith.muli" && rhs != constants.end() &&
+            rhs->second.bits == 0)
+          replacement = operation.operands[1];
+      } else if (operation.name == "arith.trunci" &&
+                 operation.operands.size() == 1 &&
+                 operation.resultTypes.size() == 1) {
+        const int extensionId = [&]() {
+          for (const GenericOperation &candidate : module.operations)
+            if (std::find(candidate.results.begin(), candidate.results.end(),
+                          operation.operands[0]) != candidate.results.end())
+              return candidate.id;
+          return -1;
+        }();
+        if (extensionId >= 0) {
+          const GenericOperation &extension = module.operations.at(
+              static_cast<size_t>(extensionId));
+          if ((extension.name == "arith.extsi" ||
+               extension.name == "arith.extui") &&
+              extension.operands.size() == 1 &&
+              extension.operandTypes.size() == 1 &&
+              extension.operandTypes.front() == operation.resultTypes.front())
+            replacement = extension.operands.front();
+        }
+      }
+      if (!replacement)
+        continue;
+      rewriter.replaceAllUses(operation.results.front(), *replacement);
+      rewriter.removeFromBlock(operation.blockId, operation.id);
+      changed = true;
+    }
+
+    const std::vector<int> afterFold =
+        CollectGreedyOperationFolderPostOrder(module, functionId);
+    for (auto iterator = afterFold.rbegin(); iterator != afterFold.rend();
+         ++iterator) {
+      GenericOperation &operation =
+          module.operations.at(static_cast<size_t>(*iterator));
+      if (!IsGreedyOperationFolderAttached(module, operation.id) ||
+          operation.results.size() != 1 ||
+          GreedyOperationFolderHasUse(module, operation.results.front()) ||
+          !startsWith(operation.name, "arith."))
+        continue;
+      rewriter.removeFromBlock(operation.blockId, operation.id);
+      changed = true;
+    }
+  }
+}
+
 // arith::MulIOp::fold and arith::IndexCastOp::fold run through the
 // OperationFolder used by applyPatternsGreedily.  Keep these folds here rather
 // than teaching an individual pass about a particular loop bound: both are
@@ -294,20 +423,8 @@ inline void RunGreedyOperationFolder(GenericModule &module, int functionId) {
     return;
   const int insertionBlock = functionRegion.blocks.front();
 
-  std::vector<int> postOrder;
-  std::function<void(int)> collect = [&](int operationId) {
-    const GenericOperation &operation =
-        module.operations.at(static_cast<size_t>(operationId));
-    for (int regionId : operation.regions)
-      for (int blockId :
-           module.regions.at(static_cast<size_t>(regionId)).blocks)
-        for (int childId :
-             module.blocks.at(static_cast<size_t>(blockId)).operations) {
-          collect(childId);
-          postOrder.push_back(childId);
-        }
-  };
-  collect(functionId);
+  const std::vector<int> postOrder =
+      CollectGreedyOperationFolderPostOrder(module, functionId);
 
   FoldOperationFolderIntegerConstants(module, postOrder);
 

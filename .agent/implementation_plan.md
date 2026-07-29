@@ -241,6 +241,8 @@ disableAutoCVWorkSpaceManage
 
 ## 8. 阶段 3：实现外层 ExtendedCanonicalizer
 
+状态：**2026-07-30 已完成**。
+
 这个 pass 位于 CV 前 MarkMultiBuffer 后、九步 canonicalization pipeline 前。它主要为后续
 InlineOTFBroadcast 清理冗余 1-to-1 broadcast，但真实行为来自全部已加载 pattern，不能只凭该
 注释实现一个 broadcast 特例。
@@ -260,7 +262,26 @@ InlineOTFBroadcast 清理冗余 1-to-1 broadcast，但真实行为来自全部�
 - AutoBlockify+MarkMultiBuffer+outer canonicalizer 累积 checkpoint；
 - greedy rewrite 次数、最终 op 顺序和 use replacement 一致。
 
+### 完成证据
+
+- 实现直接对应原生 `ExtendedCanonicalizer.cpp`、MLIR greedy driver/FoldUtils、Arith folds、
+  HIVM `RedudantVBrcOp`/`RedudantVReduceInitOp` 与 Annotation
+  `FoldUselessBufferSizeMarkOp`；
+- fixture 同时经过真实 `bishengir-opt --canonicalize-ext` 与轻量 runner，稳定结构完全一致；
+- 8 profiles × 160 inputs 的单 pass `02 -> outer canonicalizer` 与累计
+  `00 -> AutoBlockify -> MarkMultiBuffer -> outer canonicalizer` 均精确匹配原生 `03`，结果
+  `1280/1280 PASS`；
+- 完整 `ub_overflow_model_cpp/tests/run_tests.sh` 通过；
+- vector-add、attn-fwd × production-default/auto-MB × seeds `{0,13}` 的下游 embedded
+  PlanMemory 为 `matched=8, different=0, unavailable=0, timeout=0`。
+
+### 提交边界
+
+独立提交 outer ExtendedCanonicalizer，不混入阶段 4.1 ArithToAffine。
+
 ## 9. 阶段 4：逐个实现九步 canonicalizationHIVMPipeline
+
+当前子阶段：**4.1 ArithToAffine**。
 
 九个 pass 必须按下面九个子阶段依次实现和关闸。每个子阶段都执行：源码审阅→单元 fixture→
 单 pass checkpoint→从 AutoBlockify 开始的累积 checkpoint；通过后才进入下一个。

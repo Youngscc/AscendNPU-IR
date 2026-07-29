@@ -154,14 +154,21 @@ workspace 数量语义，并保留原生 greedy driver 同时触发的 ordinary 
 pre-CV profile × 160 inputs 的单 pass 与累计前缀同-attempt checkpoint 为 `1280/1280 PASS`；
 真实 `bishengir-opt` fixture 的 Load/Fixpipe/preload-scope 输出完全一致；完整模型测试通过；
 代表输入 × production/auto-MB × seeds `{0,13}` 的下游 embedded PlanMemory 为 `8/8 matched`。
-当前进入阶段 3：只实现 outer module-level `ExtendedCanonicalizer`，不得提前实现后续九步
-canonicalization pipeline。
+
+阶段 3 已于 2026-07-30 完成：新增 outer module-level `ExtendedCanonicalizer` 的轻量投影，按
+原生 MLIR greedy driver 的“先注册/CSE 常量、再处理 rewrite worklist”顺序执行，覆盖当前支持域
+实际到达的 Arith identity folds、constant CSE/hoist、`RedudantVBrcOp`、
+`RedudantVReduceInitOp`、`FoldUselessBufferSizeMarkOp` 和相应 DCE。8 个 pre-CV profile × 160
+inputs 的单 pass 与累计前缀同-attempt checkpoint 为 `1280/1280 PASS`；原生
+`bishengir-opt --canonicalize-ext` fixture 结构完全一致；完整模型测试通过；代表输入 ×
+production/auto-MB × seeds `{0,13}` 的下游 embedded PlanMemory 为 `8/8 matched`。当前进入阶段
+4.1：只实现 `ArithToAffine`，不得提前实现后续 canonicalization 子阶段。
 
 ## 当前实现优先级
 
-1. 实现外层 `ExtendedCanonicalizer`，之后依次补齐九步
-   `canonicalizationHIVMPipeline` 和 `InlineOTFBroadcast`；阶段 1 AutoBlockify 与阶段 2
-   pre-CV MarkMultiBuffer 已完成。
+1. 从阶段 4.1 `ArithToAffine` 开始，依次补齐九步 `canonicalizationHIVMPipeline` 和
+   `InlineOTFBroadcast`；阶段 1 AutoBlockify、阶段 2 pre-CV MarkMultiBuffer 与阶段 3 outer
+   ExtendedCanonicalizer 已完成。
 2. 使用阶段 0 已建立的原生 checkpoint 做每个新增 pass 的差分；最终以同进程原生 local
    PlanMemory 做 seeds 0～19 完整合同验证。
 3. 对齐后把 production prediction pass 前移到 before-AutoBlockify；在完成代表与全量验证前

@@ -219,7 +219,7 @@ private:
       return false;
     const int value = allocation.results.front();
     for (const GenericOperation &operation : module.operations) {
-      if (!isAttached(operation))
+      if (!IsGreedyOperationFolderAttached(module, operation.id))
         continue;
       if (operation.name != "annotation.mark" || operation.operands.empty() ||
           operation.operands.front() != value)
@@ -428,7 +428,8 @@ private:
   }
 
   bool isTerminator(const GenericOperation &operation) const {
-    if (!isAttached(operation) || operation.blockId < 0)
+    if (!IsGreedyOperationFolderAttached(module, operation.id) ||
+        operation.blockId < 0)
       return false;
     const GenericBlock &block =
         module.blocks.at(static_cast<size_t>(operation.blockId));
@@ -438,7 +439,8 @@ private:
 
   bool isConsumedInLoop(int value, const GenericOperation &loop) const {
     for (const GenericOperation &user : module.operations) {
-      if (!isAttached(user) || isTerminator(user) ||
+      if (!IsGreedyOperationFolderAttached(module, user.id) ||
+          isTerminator(user) ||
           user.name == "annotation.mark" ||
           std::find(user.operands.begin(), user.operands.end(), value) ==
               user.operands.end())
@@ -592,7 +594,7 @@ private:
 
   bool usedByScopeOrDescendant(int value) const {
     for (const GenericOperation &user : module.operations) {
-      if (!isAttached(user) ||
+      if (!IsGreedyOperationFolderAttached(module, user.id) ||
           std::find(user.operands.begin(), user.operands.end(), value) ==
               user.operands.end())
         continue;
@@ -705,108 +707,7 @@ private:
            operation.name == "hivm.hir.fixpipe"))
         markWorkspace(operation);
     }
-    foldGreedyOperations(functionId);
-  }
-
-  std::vector<int> attachedPostOrder(int functionId) const {
-    std::vector<int> result;
-    std::function<void(int)> collect = [&](int operationId) {
-      const GenericOperation &operation =
-          module.operations.at(static_cast<size_t>(operationId));
-      for (int regionId : operation.regions)
-        for (int blockId :
-             module.regions.at(static_cast<size_t>(regionId)).blocks)
-          for (int child :
-               module.blocks.at(static_cast<size_t>(blockId)).operations) {
-            collect(child);
-            result.push_back(child);
-          }
-    };
-    collect(functionId);
-    return result;
-  }
-
-  bool isAttached(const GenericOperation &operation) const {
-    if (operation.blockId < 0 ||
-        static_cast<size_t>(operation.blockId) >= module.blocks.size())
-      return false;
-    const std::vector<int> &operations = module.blocks.at(
-        static_cast<size_t>(operation.blockId)).operations;
-    return std::find(operations.begin(), operations.end(), operation.id) !=
-           operations.end();
-  }
-
-  bool hasUse(int value) const {
-    for (const GenericOperation &operation : module.operations)
-      if (isAttached(operation) &&
-          std::find(operation.operands.begin(), operation.operands.end(),
-                    value) != operation.operands.end())
-        return true;
-    return false;
-  }
-
-  void foldGreedyOperations(int functionId) {
-    bool changed = true;
-    while (changed) {
-      changed = false;
-      const std::vector<int> order = attachedPostOrder(functionId);
-      std::map<int, ArithIntegerConstant> constants;
-      for (int operationId : order) {
-        const GenericOperation &operation =
-            module.operations.at(static_cast<size_t>(operationId));
-        if (const auto value = ParseArithIntegerConstant(operation);
-            value && operation.results.size() == 1)
-          constants[operation.results.front()] = *value;
-      }
-
-      for (int operationId : order) {
-        GenericOperation &operation =
-            module.operations.at(static_cast<size_t>(operationId));
-        if (operation.blockId < 0 || operation.results.size() != 1)
-          continue;
-        std::optional<int> replacement;
-        if ((operation.name == "arith.muli" ||
-             operation.name == "arith.divsi" ||
-             operation.name == "arith.divui") &&
-            operation.operands.size() == 2) {
-          const auto rhs = constants.find(operation.operands[1]);
-          if (rhs != constants.end() && rhs->second.bits == 1)
-            replacement = operation.operands[0];
-          if (operation.name == "arith.muli" && rhs != constants.end() &&
-              rhs->second.bits == 0)
-            replacement = operation.operands[1];
-        } else if (operation.name == "arith.trunci" &&
-                   operation.operands.size() == 1 &&
-                   operation.resultTypes.size() == 1) {
-          const GenericOperation *extension = definition(operation.operands[0]);
-          if (extension &&
-              (extension->name == "arith.extsi" ||
-               extension->name == "arith.extui") &&
-              extension->operands.size() == 1 &&
-              extension->operandTypes.size() == 1 &&
-              extension->operandTypes.front() == operation.resultTypes.front())
-            replacement = extension->operands.front();
-        }
-        if (!replacement)
-          continue;
-        rewriter.replaceAllUses(operation.results.front(), *replacement);
-        rewriter.removeFromBlock(operation.blockId, operation.id);
-        changed = true;
-      }
-
-      const std::vector<int> afterFold = attachedPostOrder(functionId);
-      for (auto iterator = afterFold.rbegin(); iterator != afterFold.rend();
-           ++iterator) {
-        GenericOperation &operation =
-            module.operations.at(static_cast<size_t>(*iterator));
-        if (operation.blockId < 0 || operation.results.size() != 1 ||
-            hasUse(operation.results.front()) ||
-            !startsWith(operation.name, "arith."))
-          continue;
-        rewriter.removeFromBlock(operation.blockId, operation.id);
-        changed = true;
-      }
-    }
+    RunGreedyArithIdentityFolds(module, functionId);
   }
 
   GenericModule module;
