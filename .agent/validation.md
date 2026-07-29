@@ -239,6 +239,21 @@ ViewLike alias、write/call/nested-region barrier、死 alloc/subview/store 链�
 pass 在 store-to-load forwarding 后会于 reg-based cleanup 中 SIGSEGV；模型将此原生失败显式
 fail open，未修改原生逻辑也未把该失败当作 matched。
 
+阶段 5 InlineOTFBroadcast：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/verify_inline_otf_broadcast_pipeline.py \
+  --jobs 12 \
+  --json-report ub_overflow_model_cpp/output/inline_otf_broadcast.json
+```
+
+2026-07-30 的单 pass `12 -> 13` 与累计 `00 -> 13` 同-attempt checkpoint 均为
+`8 profiles × 160 inputs = 1280/1280 PASS`。普通与 Ascend950 定向 fixture 与真实
+`builtin.module(func.func(hivm-inline-otf-broadcast))` 的稳定结构 `2/2` 精确一致，覆盖
+LAST/non-LAST、类型和 trait 拒绝、多个/部分 user、已有 broadcast axes、重复 DPS use、
+buffer semantics、VAbs i16、VIsInf 以及 Ascend950 VShL；完整测试通过，代表下游 PlanMemory
+为 `8/8 matched`。
+
 ## 3. 正确性分类
 
 - `matched`：完整合同一致；

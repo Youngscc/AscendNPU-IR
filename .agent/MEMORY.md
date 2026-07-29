@@ -237,12 +237,19 @@ index/全 1 memref 匹配、write/call/nested-region cache barrier、310B/950 �
 后会因已删除 operation 的悬空记录 SIGSEGV，模型在该组合上显式 fail open，而不复现未定义
 行为。8 profiles × 160 inputs 的 `11 -> 12` 单 pass 与
 `00 -> 12` 累计 checkpoint 为 `1280/1280 PASS`；完整测试通过，代表 PlanMemory 为
-`8/8 matched`。当前进入阶段 5 InlineOTFBroadcast。
+`8/8 matched`。
+
+阶段 5 已于 2026-07-30 完成：新增 `RunPreCVInlineOTFBroadcast`，逐句复刻原生
+`VBrcInlinePattern` 的 pure-tensor、axis/type、LAST 白名单、Ascend950 shift、非 LAST
+BroadcastableOTF+binary+structured、DPS input replacement 和 broadcast dims 合并语义；无效
+user 保留 VBrc。普通/Ascend950 fixture 与原生结构 `2/2` 精确一致；8 profiles × 160 inputs 的
+`12 -> 13` 单 pass与 `00 -> 13` 累计 checkpoint 均为 `1280/1280 PASS`；完整测试通过，代表
+PlanMemory `8/8 matched`。当前进入阶段 6 combined before-CV 与 API/input contract。
 
 ## 当前实现优先级
 
-1. 完成阶段 5 InlineOTFBroadcast；阶段 1～3、4.1～4.9 已完成。随后执行 combined before-CV
-   checkpoint、embedded observe-only、20-seed 全量正确性和新边界全量速度验证。
+1. 完成阶段 6 combined before-CV 与 API/input contract；13 个新增 pass 已逐项完成。随后执行
+   embedded observe-only、20-seed 全量正确性和新边界全量速度验证。
 2. 使用阶段 0 已建立的原生 checkpoint 做每个新增 pass 的差分；最终以同进程原生 local
    PlanMemory 做 seeds 0～19 完整合同验证。
 3. 对齐后把 production prediction pass 前移到 before-AutoBlockify；在完成代表与全量验证前

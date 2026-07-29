@@ -105,6 +105,14 @@ reg-based 尾部 HIVM Load 清理和递归 subview 死链删除。对应 runner 
 `--apply-memref-dse`，验证脚本 `verify_memref_dse_pipeline.py` 同时比较 checkpoint `11 -> 12`
 和累计 `00 -> 12`；当前 8 profiles × 160 inputs 为 `1280/1280 PASS`。
 
+`ub_overflow_model_cpp/src/passes/pre_cv_inline_otf_broadcast.hpp`
+
+阶段 5 的 pre-CV VBrc inline。实现直接对应原生 `InlineOTFBroadcast.cpp` 的单一
+`VBrcInlinePattern`，包括 LAST-axis 白名单、Ascend950 shift、非 LAST trait/interface 条件、
+element-type 拒绝、DPS input replacement 和 broadcast dims 合并。runner 开关为
+`--apply-inline-otf-broadcast`；`verify_inline_otf_broadcast_pipeline.py` 验证 checkpoint
+`12 -> 13` 与累计 `00 -> 13`，当前 8 profiles × 160 inputs 为 `1280/1280 PASS`。
+
 现有可复用模型代码：
 
 ```text
@@ -116,8 +124,7 @@ ub_overflow_model_cpp/src/passes/convert_arith_to_affine.hpp
 ```
 
 `src/passes/mark_multi_buffer.hpp` 是 PlanMemory 前、post-bufferization 阶段的实现，不等价于
-CV 前 MarkMultiBuffer；只能复用经源码证明相同的 enum/helper。当前没有独立的 pre-CV
-InlineOTFBroadcast 实现。
+CV 前 MarkMultiBuffer；只能复用经源码证明相同的 enum/helper。
 
 ## 原生逐 pass checkpoint
 

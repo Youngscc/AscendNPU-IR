@@ -9,13 +9,10 @@ BiSheng 执行，不复刻。
 当前不做全局 IR/analysis 基础设施替换，不在模型核心新增 LLVM/MLIR 依赖，不同时进行纯性能
 重构。
 
-阶段状态：checkpoint infrastructure、AutoBlockify、pre-CV MarkMultiBuffer、outer
-module-level ExtendedCanonicalizer、阶段 4.1 ArithToAffine、阶段 4.2 CanonicalizeIterArg、阶段
-4.3 module-level ExtendedCanonicalizer、阶段 4.4 SCFForLoopCanonicalization、阶段 4.5 CSE、
-阶段 4.6 func-scoped ExtendedCanonicalizer、阶段 4.7 HIVMOptSinglePoint、阶段 4.8 第二次
-func-scoped ExtendedCanonicalizer 和阶段 4.9 MemrefDeadStoreElimination 已于 2026-07-30 完成；
-当前只执行阶段 5 InlineOTFBroadcast，其 after-pass checkpoint 未对齐前不得开始 combined
-before-CV/embedded 验证。
+阶段状态：checkpoint infrastructure 及 AutoBlockify→before-CVPipelining 的 13 个原生 pass
+已于 2026-07-30 逐项完成；每个 pass 的定向 fixture、单 pass checkpoint、累计 checkpoint、
+完整测试和代表 PlanMemory 均已通过。当前执行阶段 6 combined before-CV 与 API/input contract；
+组合入口未对齐前不得开始 embedded observe-only 或产品剪枝切换。
 
 ## 每个 pass 的固定开发循环
 

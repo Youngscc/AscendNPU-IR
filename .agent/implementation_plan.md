@@ -433,6 +433,18 @@ checkpoint 为 `1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/
 验证覆盖每个成功/失败条件、多 user、部分可 inline user、已有 dims 和 user 顺序。最终比较
 before-CVPipelining checkpoint。
 
+完成证据：模型逐句复刻 `VBrcInlinePattern` 的 pure-tensor、单 axis、element type、LAST-axis
+白名单、Ascend950 shift、非 LAST binary/trait/interface、DPS input replacement 和 broadcast
+axis 有序合并规则；无效 user 保留原 VBrc。定向 fixture 覆盖上述成功/失败及 VIsInf 的特殊
+operand segment 合同，与真实 `builtin.module(func.func(hivm-inline-otf-broadcast))` 的结构
+`2/2` 精确一致。8 profiles × 160 inputs 的 `12 -> 13` 单 pass 和 `00 -> 13` 累计 checkpoint
+均为 `1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。
+
+### 阶段闸门
+
+13 个原生 pass 的逐 pass 与累计 checkpoint 已全部通过，允许进入阶段 6 组合前缀与
+API/input contract；后续不得再以 before-CVPipelining 作为产品输入边界。
+
 ## 11. 阶段 6：组合前缀与 API/input contract
 
 ### 参数和合同

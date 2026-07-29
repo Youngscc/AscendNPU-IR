@@ -7,6 +7,7 @@
 #include "../src/passes/pre_cv_mark_multi_buffer.hpp"
 #include "../src/passes/pre_cv_hivm_opt_single_point.hpp"
 #include "../src/passes/pre_cv_memref_dead_store_elimination.hpp"
+#include "../src/passes/pre_cv_inline_otf_broadcast.hpp"
 #include "../src/passes/pre_cv_cse.hpp"
 #include "../src/passes/scf_for_loop_canonicalization.hpp"
 
@@ -29,6 +30,7 @@ struct Options {
   bool applyHIVMOptSinglePoint = false;
   bool applySecondFuncCanonicalizer = false;
   bool applyMemrefDSE = false;
+  bool applyInlineOTFBroadcast = false;
   cvub::AutoBlockifyPrefixOptions autoBlockify;
   cvub::PreCVMarkMultiBufferOptions markMultiBuffer;
   std::filesystem::path input;
@@ -72,6 +74,8 @@ Options ParseOptions(int argc, char **argv) {
       options.applySecondFuncCanonicalizer = true;
     else if (argument == "--apply-memref-dse")
       options.applyMemrefDSE = true;
+    else if (argument == "--apply-inline-otf-broadcast")
+      options.applyInlineOTFBroadcast = true;
     else if (argument == "--enable-auto-multi-buffer")
       options.markMultiBuffer.enableAuto = true;
     else if (argument == "--disable-auto-cv-workspace-manage")
@@ -142,13 +146,16 @@ int main(int argc, char **argv) {
       module = cvub::RunSecondFuncExtendedCanonicalizer(std::move(module));
     if (options.applyMemrefDSE)
       module = cvub::RunPreCVMemrefDeadStoreElimination(std::move(module));
+    if (options.applyInlineOTFBroadcast)
+      module = cvub::RunPreCVInlineOTFBroadcast(std::move(module));
     if (!options.applyModel && !options.applyOuterCanonicalizer &&
         !options.applyArithToAffine && !options.applyCanonicalizeIterArg &&
         !options.applyModuleCanonicalizer &&
         !options.applySCFForLoopCanonicalization && !options.applyCSE &&
         !options.applyFirstFuncCanonicalizer &&
         !options.applyHIVMOptSinglePoint &&
-        !options.applySecondFuncCanonicalizer && !options.applyMemrefDSE) {
+        !options.applySecondFuncCanonicalizer && !options.applyMemrefDSE &&
+        !options.applyInlineOTFBroadcast) {
       cvub::ApplyOperationSemanticsToAll(module.operations);
       module = cvub::CompactGenericModule(std::move(module));
     }
