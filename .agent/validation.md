@@ -268,6 +268,20 @@ python3 ub_overflow_model_cpp/scripts/verify_combined_pre_cv_prefix.py \
 API options v5、before-AutoBlockify contract v2 与新 fingerprint 的构建和完整测试通过；旧
 contract v1 仍只执行既有 CV→PlanMemory 路径。
 
+阶段 7 embedded observe-only 代表验证：
+
+- 调用点位于 `00_before_auto_blockify` 后、原生 AutoBlockify 前；模型 v2 内部运行前缀，原生
+  pipeline 随后继续到 local PlanMemory；源码强制关闭剪枝。
+- 27 configs × 4 inputs × seeds `{0,13}`：`200 matched / 16 unavailable / 0 different`；16 个
+  unavailable 精确对应两个 `disableAutoCVWorkSpaceManage=true` 场景，此时产品按设计不插入
+  prediction pass。
+- 排除上述两个无模型观测的场景后，25 configs × 4 inputs × seeds `0-19`：1969 strict
+  matched，31 个 `python_tutorial_06-fused-attention` 等尺寸 identity permutation，0 个 UB
+  决策差异、blocker、unavailable 或 timeout。
+- identity permutation 只有在 status/required/peak/multi 已一致，且删除 physical offset 后
+  完整 extent multiset、lifetime relation 和 inplace graph 仍一致时才单独分类；不能豁免其他
+  plan/lifetime/inplace 差异。
+
 ## 3. 正确性分类
 
 - `matched`：完整合同一致；

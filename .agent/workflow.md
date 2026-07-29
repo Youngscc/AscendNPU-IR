@@ -13,7 +13,8 @@ BiSheng 执行，不复刻。
 已于 2026-07-30 逐项完成；每个 pass 的定向 fixture、单 pass checkpoint、累计 checkpoint、
 完整测试和代表 PlanMemory 均已通过。阶段 6 combined before-CV 与 API/input contract 也已
 完成，组合 checkpoint 为 `1280/1280 PASS`。当前执行阶段 7 embedded observe-only；20-seed
-最终合同未通过前不得启用新边界产品剪枝。
+代表合同已通过，当前必须执行 25 个 active configs × 160 inputs × 20 seeds 的全量合同；完成前
+不得移除源码中的 observe-only 剪枝覆盖。
 
 ## 每个 pass 的固定开发循环
 

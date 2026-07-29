@@ -498,6 +498,15 @@ targets 构建通过。
 4. 同一 attempt 比较模型与原生最终合同；
 5. 保留旧 before-CV model 作为短期迁移 oracle，仅限测试，不长期运行两次产品模型。
 
+当前进度（2026-07-30）：prediction pass 已移到 checkpoint 00 与 AutoBlockify 之间，使用
+before-AutoBlockify contract v2，在模型内运行完整 pre-CV prefix；源码暂时强制
+`pruneOnOverflow=false`，因此无论用户剪枝选项为何都继续原生 prefix/CV/PlanMemory。27 configs
+× 4 代表输入 × seeds `{0,13}` 为 `200 matched / 16 unavailable / 0 different`，其中 16 个仅来自
+原本就禁用 prediction 的两组 workspace-manage-off 配置。其余 25 configs × 4 inputs × 20 seeds
+的严格结果为 1969 matched，加 31 个 fused-attention 等尺寸 buffer identity permutation；后者
+status/required/peak/multi 一致，去掉 physical offset 后 lifetime/inplace 图一致，单独分类而不
+计作普通 matched。尚未完成 160-input 全量，不得切换产品剪枝。
+
 ### 验证顺序
 
 1. 单 pass fixture；

@@ -265,16 +265,18 @@ public:
   }
 
   StringRef getDescription() const override {
-    return "Predict local UB usage before CVPipelining";
+    return "Predict local UB usage from before AutoBlockify";
   }
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
 
     cvub::Request request;
+    request.inputContractVersion =
+        cvub::kBeforeAutoBlockifyInputContractVersion;
     request.compilerProfile = cvub::CompilerProfile::TritonMembaseA2A3;
     request.compilerPipelineFingerprint =
-        cvub::kA3MembasePipelineFingerprint;
+        cvub::kA3MembaseBeforeAutoBlockifyFingerprint;
     request.target = config.target;
     request.options = config.modelOptions;
 
@@ -296,7 +298,7 @@ public:
         module.print(output, flags);
         output.flush();
         cvub::Request textRequest = request;
-        textRequest.beforeCVPipeliningGenericMLIR = genericMLIR;
+        textRequest.beforeAutoBlockifyGenericMLIR = genericMLIR;
         const cvub::Result textResult =
             cvub::evaluateForDebug(textRequest, controls);
         if (!samePlanContract(result, textResult)) {

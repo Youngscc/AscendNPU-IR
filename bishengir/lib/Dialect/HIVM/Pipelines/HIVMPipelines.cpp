@@ -599,8 +599,33 @@ static void hivmPreBufferizationOptimizationPipeline(
   }
 
   pm.addPass(createInferFuncCoreTypePass());
+
+  // Construct this once and share it with prediction and the production pass.
+  // The model now enters at the checkpoint immediately before AutoBlockify,
+  // then reproduces the native prefix internally.  Keep observe-only callers
+  // on the same resolved option object as the real CVPipelining pass.
+  CVPipeliningOptions pipelineOptions;
+  pipelineOptions.enableSkewMode = hivmPipelineOptions.enablePreload;
+  const bool traceEnabled = isUBFlowTraceEnabled();
+  const uint64_t traceAttempt =
+      traceEnabled ? nextUBFlowTraceAttempt() : 0;
+  const bool predictionActive =
+      isUBOverflowPredictionActive(hivmPipelineOptions);
+
   addUBPrefixCheckpoint(pm, prefixCheckpoints,
                         "00_before_auto_blockify");
+  if (predictionActive) {
+    UBOverflowPredictionConfig modelConfig = predictionConfig(
+        hivmPipelineOptions, pipelineOptions, traceAttempt);
+    // New-boundary rollout is observe-only until the full fixed-seed
+    // PlanMemory differential gate passes.  Remove this override only as the
+    // explicit production-switch step; the user-facing option remains wired
+    // in predictionConfig throughout validation.
+    modelConfig.pruneOnOverflow = false;
+    pm.addPass(createUBOverflowPredictionPass(std::move(modelConfig)));
+  }
+  if (predictionActive && stopAfterUBOverflowPredictionRequested())
+    return;
   // AutoBlockifyParallelLoopPass needs to be after infer core type because
   // num. of physical blocks we loop on is dependent on core type
   if (hivmPipelineOptions.enableTritonKernelCompile &&
@@ -643,26 +668,6 @@ static void hivmPreBufferizationOptimizationPipeline(
   if (stopAfterUBPrefixCheckpointsRequested())
     return;
 
-  // Construct this once and share it with prediction and the production pass.
-  // This makes the pre-CVPipelining API consume the same resolved values that
-  // will drive the real compiler rather than a parallel set of inferred
-  // defaults.
-  CVPipeliningOptions pipelineOptions;
-  pipelineOptions.enableSkewMode = hivmPipelineOptions.enablePreload;
-  const bool traceEnabled = isUBFlowTraceEnabled();
-  const uint64_t traceAttempt =
-      traceEnabled ? nextUBFlowTraceAttempt() : 0;
-  const bool predictionActive =
-      isUBOverflowPredictionActive(hivmPipelineOptions);
-  if (predictionActive) {
-    pm.addPass(createUBOverflowPredictionPass(
-        predictionConfig(hivmPipelineOptions, pipelineOptions,
-                         traceAttempt)));
-  }
-  // The opt-in measurement/validation boundary deliberately omits the native
-  // suffix. It is disabled in production and does not change pass semantics.
-  if (predictionActive && stopAfterUBOverflowPredictionRequested())
-    return;
   if (!hivmPipelineOptions.disableAutoCVWorkSpaceManage) {
     // Software pipelining Cube and Vector operations
     pm.nest<func::FuncOp>().addPass(createCVPipeliningPass(pipelineOptions));

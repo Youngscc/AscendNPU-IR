@@ -121,6 +121,13 @@ AutoBlockify/MarkMultiBuffer 的 resolved options。`pre_cv_prefix_model_runner`
 8 profiles × 160 inputs 为 `1280/1280 PASS`。API 的 before-AutoBlockify contract v2 才调用
 该入口，legacy v1 不调用。
 
+`bishengir/lib/Dialect/HIVM/Pipelines/HIVMPipelines.cpp`
+
+阶段 7 的 embedded 调用点现位于 checkpoint 00 后、原生 AutoBlockify 前。它与后续真实
+CVPipelining 共用同一 resolved options，并在全量验证期间强制 `pruneOnOverflow=false`；完成
+全量 gate 后才允许删除该覆盖。`UBOverflowPrediction.cpp` 构造 before-AutoBlockify contract v2
+并将相同 ModuleOp 交给模型。
+
 现有可复用模型代码：
 
 ```text

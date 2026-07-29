@@ -253,6 +253,14 @@ PlanMemory `8/8 matched`。当前进入阶段 6 combined before-CV 与 API/input
 的 checkpoint 13 达到 `1280/1280 PASS`；完整测试和两个 embedded build target 均通过。当前
 进入阶段 7 embedded observe-only，尚未允许新边界剪枝。
 
+阶段 7 observe-only 已接入：prediction pass 从 before-CVPipelining 前移到 checkpoint 00 后、
+原生 AutoBlockify 前，使用 contract v2；当前源码强制 `pruneOnOverflow=false`，真实 prefix、CV
+和 local PlanMemory 始终继续。27 configs × 4 inputs × seeds `{0,13}` 得到 200 matched、16 个
+仅因 workspace-manage-off 不插入模型而 unavailable、0 different；active 25 configs × 4 inputs
+× 20 seeds 得到 1969 strict matched 与 31 个已严格证明的等尺寸 identity permutation，无 UB
+决策差异。验证器把 identity permutation 单列，只有删除 offset 后 extent/lifetime/inplace 全图
+一致才接受。当前必须完成 active 25 × 160 × 20 全量，之后才允许产品剪枝。
+
 ## 当前实现优先级
 
 1. 完成阶段 7 embedded observe-only：把 prediction hook 前移到 AutoBlockify 前并传入 v2

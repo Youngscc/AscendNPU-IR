@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+from collections import Counter
 from pathlib import Path
 import sys
 
@@ -34,6 +35,38 @@ assert "--enable-ub-overflow-prediction=true" in arguments
 assert "--prune-predicted-ub-overflow=false" in arguments
 assert "--enable-triton-kernel-compile" in arguments
 assert "--limit-auto-multi-buffer-only-for-local-buffer=false" in arguments
+
+model_plan = Counter({(1024, 100): 2, (1024, 200): 1})
+native_plan = Counter({(1024, 100): 1, (1024, 200): 2})
+model_lifetimes = Counter({
+    ("kernel", 1024, 100, 0, 3): 1,
+    ("kernel", 1024, 100, 1, 3): 1,
+    ("kernel", 1024, 200, 2, 3): 1,
+})
+native_lifetimes = Counter({
+    ("kernel", 1024, 200, 0, 3): 1,
+    ("kernel", 1024, 200, 1, 3): 1,
+    ("kernel", 1024, 100, 2, 3): 1,
+})
+model_inplace = Counter({
+    (("kernel", 1024, (100,), 0, 3),
+     ("kernel", 1024, (100,), 1, 3)): 1,
+})
+native_inplace = Counter({
+    (("kernel", 1024, (200,), 0, 3),
+     ("kernel", 1024, (200,), 1, 3)): 1,
+})
+assert MODULE.is_equal_extent_identity_permutation(
+    model_plan, native_plan, model_lifetimes, native_lifetimes,
+    model_inplace, native_inplace,
+)
+different_lifetime = native_lifetimes.copy()
+different_lifetime[("kernel", 1024, 100, 2, 4)] = \
+    different_lifetime.pop(("kernel", 1024, 100, 2, 3))
+assert not MODULE.is_equal_extent_identity_permutation(
+    model_plan, native_plan, model_lifetimes, different_lifetime,
+    model_inplace, native_inplace,
+)
 
 segment = """\
 BISHENGIR_UB_MODEL_VALIDATION_BEGIN\t0

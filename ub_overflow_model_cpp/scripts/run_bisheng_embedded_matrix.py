@@ -298,6 +298,53 @@ def relevant_native_status(
     return "success", ""
 
 
+def is_equal_extent_identity_permutation(
+    model_plan: Counter, native_plan: Counter,
+    model_lifetimes: Counter, native_lifetimes: Counter,
+    model_inplace: Counter, native_inplace: Counter,
+) -> bool:
+    """Prove that strict plan differences only rename equal-size buffers.
+
+    Physical offsets are part of the strict PlanMemory contract, so this is
+    deliberately a separate result class rather than ``matched``.  The proof
+    erases offsets only after status/required/peak/multi have matched, then
+    requires the complete extent multiset, lifetime relation, and inplace
+    graph to remain identical.
+    """
+    def plan_without_offsets(values: Counter) -> Counter:
+        result: Counter = Counter()
+        for (extent, _offset), count in values.items():
+            result[extent] += count
+        return result
+
+    def lifetimes_without_offsets(values: Counter) -> Counter:
+        result: Counter = Counter()
+        for (function, extent, _offset, allocate, release), count in values.items():
+            result[(function, extent, allocate, release)] += count
+        return result
+
+    def identity_without_offset(identity: tuple) -> tuple:
+        function, extent, _offsets, allocate, release = identity
+        return function, extent, allocate, release
+
+    def inplace_without_offsets(values: Counter) -> Counter:
+        result: Counter = Counter()
+        for (source, destination), count in values.items():
+            result[(identity_without_offset(source),
+                    identity_without_offset(destination))] += count
+        return result
+
+    return (
+        model_plan != native_plan
+        and plan_without_offsets(model_plan) ==
+        plan_without_offsets(native_plan)
+        and lifetimes_without_offsets(model_lifetimes) ==
+        lifetimes_without_offsets(native_lifetimes)
+        and inplace_without_offsets(model_inplace) ==
+        inplace_without_offsets(native_inplace)
+    )
+
+
 def compare_segment(
     segment: str, seed: int, compiler_returncode: int = 0,
     timed_out: bool = False,
@@ -417,6 +464,22 @@ def compare_segment(
             if model_value != native_value:
                 differences.append(name)
                 evidence.append(counter_evidence(name, model_value, native_value))
+    identity_permutation = (
+        set(differences).issubset({"plan", "lifetime", "inplace"})
+        and differences
+        and model_multi == native_multi
+        and is_equal_extent_identity_permutation(
+            model_plan, native_plan, model_lifetimes, native_lifetimes,
+            model_inplace, native_inplace,
+        )
+    )
+    if identity_permutation:
+        evidence.insert(
+            0,
+            "equal-size identity permutation: strict offsets differ; "
+            "extent/lifetime/inplace projections are identical",
+        )
+        return "identity_permutation", differences, evidence
     return ("matched" if not differences else "different",
             differences, evidence)
 
@@ -490,6 +553,8 @@ def summarize_observation(
         status = "timeout"
     elif any(value[0] == "different" for value in comparable):
         status = "different"
+    elif any(value[0] == "identity_permutation" for value in comparable):
+        status = "identity_permutation"
     elif comparable:
         status = "matched"
     else:
@@ -541,7 +606,7 @@ def summarize_observation(
         "evidence": " | ".join(evidence[:12]),
         "seconds": f"{seconds:.6f}",
         "diagnostic": stderr[-1200:].replace("\t", " ").replace("\n", "\\n")
-        if status not in {"matched"} else "",
+        if status not in {"matched", "identity_permutation"} else "",
     }
 
 
@@ -720,7 +785,8 @@ def main() -> int:
     counts = Counter(str(row["status"]) for row in rows)
     print(
         "summary: " + " ".join(f"{key}={counts[key]}" for key in
-                                ("matched", "different", "unavailable", "timeout"))
+                                ("matched", "identity_permutation", "different",
+                                 "unavailable", "timeout"))
     )
     print(args.report)
     return 1 if counts["different"] or counts["timeout"] or counts["unavailable"] else 0
