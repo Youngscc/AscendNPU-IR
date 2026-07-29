@@ -476,6 +476,18 @@ before-AutoBlockify GenericModule
 先在模型内部启用新入口，真实 BiSheng prediction pass 仍保持旧位置；通过 before-CV checkpoint
 后，再进入 embedded observe-only。
 
+完成证据：新增唯一 `RunPreCVPrefixPipeline`，按 checkpoint 01～13 的原生顺序调用已验证
+pass，并从同一组 resolved options 映射 AutoBlockify、pre-CV MarkMultiBuffer 的全部分支。
+新增 input contract v2（before-AutoBlockify）、pipeline fingerprint 和 options v5；v1
+before-CVPipelining 仅保留迁移测试兼容，不会重复运行前缀。组合入口对 8 profiles × 160 inputs
+与同一原生 attempt 的最终 checkpoint 为 `1280/1280 PASS`，完整 C++/Python 测试与 embedded
+targets 构建通过。
+
+### 阶段闸门
+
+组合前缀和版本化 API 已对齐，允许进入阶段 7 embedded observe-only。产品调用点前移后，必须
+先关闭剪枝比较最终 PlanMemory 合同，不能直接启用新边界提前返回。
+
 ## 12. 阶段 7：embedded observe-only 与最终切换
 
 ### observe-only

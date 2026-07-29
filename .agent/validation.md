@@ -254,6 +254,20 @@ LAST/non-LAST、类型和 trait 拒绝、多个/部分 user、已有 broadcast a
 buffer semantics、VAbs i16、VIsInf 以及 Ascend950 VShL；完整测试通过，代表下游 PlanMemory
 为 `8/8 matched`。
 
+阶段 6 combined before-CV：
+
+```bash
+python3 ub_overflow_model_cpp/scripts/verify_combined_pre_cv_prefix.py \
+  --jobs 12 \
+  --json-report ub_overflow_model_cpp/output/combined_pre_cv_prefix.json
+```
+
+2026-07-30 使用唯一 `RunPreCVPrefixPipeline` 从 `00_before_auto_blockify` 一次运行到
+`13_after_inline_otf_broadcast`，8 profiles × 160 inputs 为 `1280/1280 PASS`。验证框架为组合
+入口的两条执行路径均传递相同 profile 参数；不再把缺少 profile 的二次执行误报为模型差异。
+API options v5、before-AutoBlockify contract v2 与新 fingerprint 的构建和完整测试通过；旧
+contract v1 仍只执行既有 CV→PlanMemory 路径。
+
 ## 3. 正确性分类
 
 - `matched`：完整合同一致；

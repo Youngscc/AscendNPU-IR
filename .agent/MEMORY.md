@@ -246,10 +246,17 @@ user 保留 VBrc。普通/Ascend950 fixture 与原生结构 `2/2` 精确一致�
 `12 -> 13` 单 pass与 `00 -> 13` 累计 checkpoint 均为 `1280/1280 PASS`；完整测试通过，代表
 PlanMemory `8/8 matched`。当前进入阶段 6 combined before-CV 与 API/input contract。
 
+阶段 6 已于 2026-07-30 完成：新增唯一 `RunPreCVPrefixPipeline`，按原生顺序组合 checkpoint
+01～13 的全部 pass；API 升级为 options v5，并增加 before-AutoBlockify input contract v2 与
+独立 fingerprint，legacy before-CV v1 只作迁移测试。新增 4 个 pre-CV resolved option 字段均
+由同一 `HIVMPipelineOptions` 映射。组合入口在 8 profiles × 160 inputs 上与同一原生 attempt
+的 checkpoint 13 达到 `1280/1280 PASS`；完整测试和两个 embedded build target 均通过。当前
+进入阶段 7 embedded observe-only，尚未允许新边界剪枝。
+
 ## 当前实现优先级
 
-1. 完成阶段 6 combined before-CV 与 API/input contract；13 个新增 pass 已逐项完成。随后执行
-   embedded observe-only、20-seed 全量正确性和新边界全量速度验证。
+1. 完成阶段 7 embedded observe-only：把 prediction hook 前移到 AutoBlockify 前并传入 v2
+   contract，但禁止剪枝，先做代表与 20-seed 最终合同验证；随后才切换产品入口并测新边界速度。
 2. 使用阶段 0 已建立的原生 checkpoint 做每个新增 pass 的差分；最终以同进程原生 local
    PlanMemory 做 seeds 0～19 完整合同验证。
 3. 对齐后把 production prediction pass 前移到 before-AutoBlockify；在完成代表与全量验证前

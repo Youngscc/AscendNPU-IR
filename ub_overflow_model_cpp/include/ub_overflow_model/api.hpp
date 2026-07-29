@@ -15,12 +15,15 @@ class ModuleOp;
 namespace cvub {
 
 inline constexpr uint32_t kInProcessAPIVersion = 2;
-inline constexpr uint32_t kUBRelevantCompileOptionsVersion = 4;
+inline constexpr uint32_t kUBRelevantCompileOptionsVersion = 5;
 inline constexpr uint32_t kBeforeCVPipeliningInputContractVersion = 1;
+inline constexpr uint32_t kBeforeAutoBlockifyInputContractVersion = 2;
 inline constexpr uint32_t kSubprocessResultContractVersion = 1;
 inline constexpr uint64_t kDefaultUBCapacityBits = 192ULL * 1024ULL * 8ULL;
 inline constexpr std::string_view kA3MembasePipelineFingerprint =
     "bishengir-a3-membase-cvpipelining-v1";
+inline constexpr std::string_view kA3MembaseBeforeAutoBlockifyFingerprint =
+    "bishengir-a3-membase-before-autoblockify-v1";
 
 enum class Precision { Exact, Incomplete };
 enum class Status { Success, Overflow, Blocker, InternalError };
@@ -40,6 +43,13 @@ enum class MultiBufferStrategy {
 // defaults, aliases and disable_* options have been resolved. Production
 // callers must assign every field from the real pipeline options.
 struct UBRelevantCompileOptions {
+  // before-AutoBlockify -> before-CVPipelining prefix branches.
+  bool enableTritonKernelCompile = true;
+  bool enableAutoBlockifyLoop = true;
+  bool limitAutoMultiBufferOnlyForLocalBuffer = false;
+  unsigned workspaceMultiBufferNum = 4;
+
+  // CVPipelining -> local PlanMemory branches.
   int cvPipelineDepth = -1;
   bool enableCVLazyLoading = false;
   bool enablePreload = false;
@@ -88,6 +98,10 @@ struct Request {
   // production callers leave this empty and pass a borrowed ModuleOp to
   // evaluateModule(). The view only needs to remain valid for evaluate().
   std::string_view beforeCVPipeliningGenericMLIR;
+  // New product text boundary. Embedded callers leave this empty and pass the
+  // borrowed before-AutoBlockify ModuleOp to evaluateModule(). The legacy
+  // field above remains available only for contract-version 1 migration tests.
+  std::string_view beforeAutoBlockifyGenericMLIR;
   UBRelevantCompileOptions options;
   std::string_view requestId;
 };

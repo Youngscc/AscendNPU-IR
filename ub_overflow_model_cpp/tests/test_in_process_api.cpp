@@ -88,6 +88,22 @@ int main() {
         "the differential API must observe the proof but materialize the "
         "full plan");
 
+  cvub::Request beforeAuto = request;
+  beforeAuto.inputContractVersion =
+      cvub::kBeforeAutoBlockifyInputContractVersion;
+  beforeAuto.compilerPipelineFingerprint =
+      cvub::kA3MembaseBeforeAutoBlockifyFingerprint;
+  beforeAuto.beforeCVPipeliningGenericMLIR = {};
+  beforeAuto.beforeAutoBlockifyGenericMLIR = ir;
+  beforeAuto.options.enableAutoBlockifyLoop = false;
+  beforeAuto.options.disableAutoCVWorkSpaceManage = true;
+  const cvub::Result beforeAutoResult =
+      cvub::evaluateForDebug(beforeAuto, cvub::DebugModelControls{});
+  Check(beforeAutoResult.precision == cvub::Precision::Exact &&
+            beforeAutoResult.compilerPipelineFingerprint ==
+                cvub::kA3MembaseBeforeAutoBlockifyFingerprint,
+        "the versioned before-AutoBlockify contract must run the combined prefix");
+
   const std::string cubeOnlyIR = ReadFile(
       "ub_overflow_model_cpp/data/before_cvpipelining/"
       "ascend_tutorial_08-grouped-gemm.ttadapter/"
@@ -116,6 +132,13 @@ int main() {
   const cvub::Result changedResult = cvub::evaluate(changed);
   Check(changedResult.effectiveOptionsDigest != result.effectiveOptionsDigest,
         "all effective option changes must alter the digest");
+
+  cvub::Request changedPrefix = request;
+  changedPrefix.options.enableAutoBlockifyLoop = false;
+  const cvub::Result changedPrefixResult = cvub::evaluate(changedPrefix);
+  Check(changedPrefixResult.effectiveOptionsDigest !=
+            result.effectiveOptionsDigest,
+        "pre-CV prefix option changes must alter the digest");
 
   cvub::Request inject = request;
   inject.options.enableHIVMCrossCoreGSS = false;

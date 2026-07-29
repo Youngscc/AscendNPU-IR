@@ -1,6 +1,7 @@
 #include "../include/ub_overflow_model/api.hpp"
 
 #include "pipeline/cvpipelining_ub_pipeline.hpp"
+#include "pipeline/pre_cv_prefix_pipeline.hpp"
 
 #ifdef CVUB_ENABLE_MLIR_API
 #include "ir/mlir_module_view.hpp"
@@ -13,7 +14,7 @@
 #include <stdexcept>
 
 #ifndef CVUB_MODEL_BUILD_ID
-#define CVUB_MODEL_BUILD_ID "cvub-api-v4-direct-mlir"
+#define CVUB_MODEL_BUILD_ID "cvub-api-v5-before-autoblockify"
 #endif
 
 namespace cvub {
@@ -53,6 +54,10 @@ std::string EffectiveOptionsDigest(const Request &request,
   value << "ub-relevant-options-v" << request.optionsVersion << '\n'
         << static_cast<unsigned>(request.compilerProfile) << '\n'
         << request.compilerPipelineFingerprint << '\n' << request.target
+        << '\n' << options.enableTritonKernelCompile
+        << '\n' << options.enableAutoBlockifyLoop
+        << '\n' << options.limitAutoMultiBufferOnlyForLocalBuffer
+        << '\n' << options.workspaceMultiBufferNum
         << '\n' << options.disableAutoCVWorkSpaceManage << '\n'
         << options.cvPipelineDepth << '\n'
         << options.enableCVLazyLoading << '\n' << options.enableCodeMotion
@@ -99,15 +104,20 @@ ValidateRequest(const Request &request, const DebugModelControls &debug,
   if (request.optionsVersion != kUBRelevantCompileOptionsVersion)
     return Diagnostic{"unsupported_options_version",
                       "unsupported UB-relevant compile options version"};
-  if (request.inputContractVersion !=
-      kBeforeCVPipeliningInputContractVersion)
+  const bool legacyBeforeCV =
+      request.inputContractVersion == kBeforeCVPipeliningInputContractVersion;
+  const bool beforeAutoBlockify =
+      request.inputContractVersion == kBeforeAutoBlockifyInputContractVersion;
+  if (!legacyBeforeCV && !beforeAutoBlockify)
     return Diagnostic{"unsupported_input_contract_version",
-                      "unsupported before-CVPipelining input contract"};
+                      "unsupported UB model input contract"};
   if (request.compilerProfile != CompilerProfile::TritonMembaseA2A3)
     return Diagnostic{"unsupported_compiler_profile",
                       "unsupported compiler profile"};
-  if (request.compilerPipelineFingerprint !=
-      kA3MembasePipelineFingerprint)
+  const std::string_view expectedFingerprint =
+      beforeAutoBlockify ? kA3MembaseBeforeAutoBlockifyFingerprint
+                         : kA3MembasePipelineFingerprint;
+  if (request.compilerPipelineFingerprint != expectedFingerprint)
     return Diagnostic{"unsupported_pipeline_fingerprint",
                       "compiler pipeline has not been certified"};
   if (!hasInput)
@@ -157,7 +167,7 @@ PipelineOptions(const Request &request, const DebugModelControls &debug,
   passes.limitAutoMultiBufferOfLocalBuffer =
       options.localMultiBufferStrategy;
   passes.limitMixAutoMultiBufferBuffer = options.mixMultiBufferStrategy;
-  passes.enableTritonKernelCompile = true;
+  passes.enableTritonKernelCompile = options.enableTritonKernelCompile;
   passes.disableAlignAllocSize = debug.disableAlignAllocSize;
   passes.disableEnableStrideAlign = debug.disableEnableStrideAlign;
   passes.disableInferHIVMDataLayout = debug.disableInferHIVMDataLayout;
@@ -167,6 +177,22 @@ PipelineOptions(const Request &request, const DebugModelControls &debug,
   result.capacityBits = debug.capacityOverrideBits.value_or(
       *CapacityForTarget(request.target));
   result.debugTrace = trace;
+  return result;
+}
+
+PreCVPrefixPipelineOptions PreCVPrefixOptions(const Request &request) {
+  const UBRelevantCompileOptions &options = request.options;
+  PreCVPrefixPipelineOptions result;
+  result.enableTritonKernelCompile = options.enableTritonKernelCompile;
+  result.enableAutoBlockifyLoop = options.enableAutoBlockifyLoop;
+  result.disableAutoCVWorkSpaceManage =
+      options.disableAutoCVWorkSpaceManage;
+  result.enableAutoMultiBuffer = options.enableAutoMultiBuffer;
+  result.limitAutoMultiBufferOnlyForLocalBuffer =
+      options.limitAutoMultiBufferOnlyForLocalBuffer;
+  result.localMultiBufferStrategy = options.localMultiBufferStrategy;
+  result.mixMultiBufferStrategy = options.mixMultiBufferStrategy;
+  result.workspaceMultiBufferNum = options.workspaceMultiBufferNum;
   return result;
 }
 
@@ -295,6 +321,12 @@ Result EvaluateImpl(const Request &request, const DebugModelControls &debug,
     DebugTrace *tracePointer = trace ? &*trace : nullptr;
     PreparedInput prepared = prepareInput(tracePointer);
     result.inputDigest = std::move(prepared.digest);
+    if (request.inputContractVersion ==
+        kBeforeAutoBlockifyInputContractVersion) {
+      prepared.module = RunPreCVPrefixPipeline(
+          std::move(prepared.module), PreCVPrefixOptions(request),
+          tracePointer);
+    }
     CVPipeliningUBPipelineOptions pipelineOptions =
         PipelineOptions(request, debug, tracePointer);
     pipelineOptions.enableDecisionOnlyNonOverflow =
@@ -366,18 +398,33 @@ Result EvaluateImpl(const Request &request, const DebugModelControls &debug,
 }
 
 Result evaluate(const Request &request) noexcept {
+  const std::string_view input =
+      request.inputContractVersion == kBeforeAutoBlockifyInputContractVersion
+          ? request.beforeAutoBlockifyGenericMLIR
+          : request.beforeCVPipeliningGenericMLIR;
+  const std::string_view boundary =
+      request.inputContractVersion == kBeforeAutoBlockifyInputContractVersion
+          ? "before-autoblockify-v"
+          : "before-cvpipelining-v";
   return EvaluateImpl(
       request, DebugModelControls{}, true, false,
-      !request.beforeCVPipeliningGenericMLIR.empty(),
+      !input.empty(),
       [&](DebugTrace *trace) {
         PreparedInput input;
         input.digest = StableDigest(
-            std::string("before-cvpipelining-v") +
+            std::string(boundary) +
             std::to_string(request.inputContractVersion) + "\n" +
-            std::string(request.beforeCVPipeliningGenericMLIR));
+            std::string(request.inputContractVersion ==
+                                kBeforeAutoBlockifyInputContractVersion
+                            ? request.beforeAutoBlockifyGenericMLIR
+                            : request.beforeCVPipeliningGenericMLIR));
         input.module = MeasureStage(trace, "ParseGenericIR", [&] {
-          return ParseGenericIRText(request.beforeCVPipeliningGenericMLIR,
-                                    false);
+          return ParseGenericIRText(
+              request.inputContractVersion ==
+                      kBeforeAutoBlockifyInputContractVersion
+                  ? request.beforeAutoBlockifyGenericMLIR
+                  : request.beforeCVPipeliningGenericMLIR,
+              false);
         });
         return input;
       });
@@ -385,18 +432,33 @@ Result evaluate(const Request &request) noexcept {
 
 Result evaluateForDebug(const Request &request,
                         const DebugModelControls &controls) noexcept {
+  const std::string_view input =
+      request.inputContractVersion == kBeforeAutoBlockifyInputContractVersion
+          ? request.beforeAutoBlockifyGenericMLIR
+          : request.beforeCVPipeliningGenericMLIR;
+  const std::string_view boundary =
+      request.inputContractVersion == kBeforeAutoBlockifyInputContractVersion
+          ? "before-autoblockify-v"
+          : "before-cvpipelining-v";
   return EvaluateImpl(
       request, controls, false, true,
-      !request.beforeCVPipeliningGenericMLIR.empty(),
+      !input.empty(),
       [&](DebugTrace *trace) {
         PreparedInput input;
         input.digest = StableDigest(
-            std::string("before-cvpipelining-v") +
+            std::string(boundary) +
             std::to_string(request.inputContractVersion) + "\n" +
-            std::string(request.beforeCVPipeliningGenericMLIR));
+            std::string(request.inputContractVersion ==
+                                kBeforeAutoBlockifyInputContractVersion
+                            ? request.beforeAutoBlockifyGenericMLIR
+                            : request.beforeCVPipeliningGenericMLIR));
         input.module = MeasureStage(trace, "ParseGenericIR", [&] {
-          return ParseGenericIRText(request.beforeCVPipeliningGenericMLIR,
-                                    false);
+          return ParseGenericIRText(
+              request.inputContractVersion ==
+                      kBeforeAutoBlockifyInputContractVersion
+                  ? request.beforeAutoBlockifyGenericMLIR
+                  : request.beforeCVPipeliningGenericMLIR,
+              false);
         });
         return input;
       });

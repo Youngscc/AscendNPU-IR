@@ -10,6 +10,7 @@
 #include "../src/passes/pre_cv_inline_otf_broadcast.hpp"
 #include "../src/passes/pre_cv_cse.hpp"
 #include "../src/passes/scf_for_loop_canonicalization.hpp"
+#include "../src/pipeline/pre_cv_prefix_pipeline.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -31,6 +32,7 @@ struct Options {
   bool applySecondFuncCanonicalizer = false;
   bool applyMemrefDSE = false;
   bool applyInlineOTFBroadcast = false;
+  bool applyCombinedPrefix = false;
   cvub::AutoBlockifyPrefixOptions autoBlockify;
   cvub::PreCVMarkMultiBufferOptions markMultiBuffer;
   std::filesystem::path input;
@@ -76,6 +78,8 @@ Options ParseOptions(int argc, char **argv) {
       options.applyMemrefDSE = true;
     else if (argument == "--apply-inline-otf-broadcast")
       options.applyInlineOTFBroadcast = true;
+    else if (argument == "--apply-combined-prefix")
+      options.applyCombinedPrefix = true;
     else if (argument == "--enable-auto-multi-buffer")
       options.markMultiBuffer.enableAuto = true;
     else if (argument == "--disable-auto-cv-workspace-manage")
@@ -119,34 +123,52 @@ int main(int argc, char **argv) {
     // CanonicalizeIterArg's internal CSE can incorrectly merge reads or
     // allocations only on the single-pass verification path.
     cvub::ApplyOperationSemanticsToAll(module.operations);
-    if (options.applyModel) {
+    if (options.applyCombinedPrefix) {
+      cvub::PreCVPrefixPipelineOptions prefix;
+      prefix.enableTritonKernelCompile =
+          options.autoBlockify.enableTritonKernelCompile;
+      prefix.enableAutoBlockifyLoop =
+          options.autoBlockify.enableAutoBlockifyLoop;
+      prefix.disableAutoCVWorkSpaceManage =
+          options.markMultiBuffer.disableAutoCVWorkSpaceManage;
+      prefix.enableAutoMultiBuffer = options.markMultiBuffer.enableAuto;
+      prefix.limitAutoMultiBufferOnlyForLocalBuffer =
+          options.markMultiBuffer.limitAutoMultiBufferOnlyForLocalBuffer;
+      prefix.localMultiBufferStrategy =
+          options.markMultiBuffer.limitAutoMultiBufferOfLocalBuffer;
+      prefix.mixMultiBufferStrategy =
+          options.markMultiBuffer.limitMixAutoMultiBufferBuffer;
+      prefix.workspaceMultiBufferNum =
+          options.markMultiBuffer.workspaceMultiBufferNum;
+      module = cvub::RunPreCVPrefixPipeline(std::move(module), prefix);
+    } else if (options.applyModel) {
       module = cvub::RunAutoBlockifyPrefixStage(
           std::move(module), options.autoBlockify);
       module = cvub::RunPreCVMarkMultiBuffer(
           std::move(module), options.markMultiBuffer);
     }
-    if (options.applyOuterCanonicalizer)
+    if (!options.applyCombinedPrefix && options.applyOuterCanonicalizer)
       module = cvub::RunOuterExtendedCanonicalizer(std::move(module));
-    if (options.applyArithToAffine)
+    if (!options.applyCombinedPrefix && options.applyArithToAffine)
       module = cvub::RunArithToAffineConversionPass(std::move(module));
-    if (options.applyCanonicalizeIterArg)
+    if (!options.applyCombinedPrefix && options.applyCanonicalizeIterArg)
       module = cvub::RunCanonicalizationHIVMAfterArithToAffine(
           std::move(module));
-    if (options.applyModuleCanonicalizer)
+    if (!options.applyCombinedPrefix && options.applyModuleCanonicalizer)
       module = cvub::RunModuleExtendedCanonicalizer(std::move(module));
-    if (options.applySCFForLoopCanonicalization)
+    if (!options.applyCombinedPrefix && options.applySCFForLoopCanonicalization)
       module = cvub::RunSCFForLoopCanonicalization(std::move(module));
-    if (options.applyCSE)
+    if (!options.applyCombinedPrefix && options.applyCSE)
       module = cvub::RunPreCVCSE(std::move(module));
-    if (options.applyFirstFuncCanonicalizer)
+    if (!options.applyCombinedPrefix && options.applyFirstFuncCanonicalizer)
       module = cvub::RunFirstFuncExtendedCanonicalizer(std::move(module));
-    if (options.applyHIVMOptSinglePoint)
+    if (!options.applyCombinedPrefix && options.applyHIVMOptSinglePoint)
       module = cvub::RunPreCVHIVMOptSinglePoint(std::move(module));
-    if (options.applySecondFuncCanonicalizer)
+    if (!options.applyCombinedPrefix && options.applySecondFuncCanonicalizer)
       module = cvub::RunSecondFuncExtendedCanonicalizer(std::move(module));
-    if (options.applyMemrefDSE)
+    if (!options.applyCombinedPrefix && options.applyMemrefDSE)
       module = cvub::RunPreCVMemrefDeadStoreElimination(std::move(module));
-    if (options.applyInlineOTFBroadcast)
+    if (!options.applyCombinedPrefix && options.applyInlineOTFBroadcast)
       module = cvub::RunPreCVInlineOTFBroadcast(std::move(module));
     if (!options.applyModel && !options.applyOuterCanonicalizer &&
         !options.applyArithToAffine && !options.applyCanonicalizeIterArg &&
@@ -155,7 +177,7 @@ int main(int argc, char **argv) {
         !options.applyFirstFuncCanonicalizer &&
         !options.applyHIVMOptSinglePoint &&
         !options.applySecondFuncCanonicalizer && !options.applyMemrefDSE &&
-        !options.applyInlineOTFBroadcast) {
+        !options.applyInlineOTFBroadcast && !options.applyCombinedPrefix) {
       cvub::ApplyOperationSemanticsToAll(module.operations);
       module = cvub::CompactGenericModule(std::move(module));
     }

@@ -70,6 +70,14 @@ static UBOverflowPredictionConfig predictionConfig(
   config.target = options.compilationTarget;
   config.pruneOnOverflow = options.prunePredictedUBOverflow;
   config.traceAttempt = traceAttempt;
+  config.modelOptions.enableTritonKernelCompile =
+      options.enableTritonKernelCompile;
+  config.modelOptions.enableAutoBlockifyLoop =
+      options.enableAutoBlockifyLoop;
+  config.modelOptions.limitAutoMultiBufferOnlyForLocalBuffer =
+      options.limitAutoMultiBufferOnlyForLocalBuffer;
+  config.modelOptions.workspaceMultiBufferNum =
+      options.setWorkspaceMultibuffer;
   config.modelOptions.disableAutoCVWorkSpaceManage =
       options.disableAutoCVWorkSpaceManage;
   // Read the effective values from the exact option object passed to the real

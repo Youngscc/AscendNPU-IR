@@ -219,6 +219,15 @@ void emitFlowTrace(ModuleOp module, const cvub::Request &request,
   printBoolean(llvm::errs(), request.options.enableUbufSaving);
   llvm::errs() << " enable_auto_multi_buffer=";
   printBoolean(llvm::errs(), request.options.enableAutoMultiBuffer);
+  llvm::errs() << " enable_triton_kernel_compile=";
+  printBoolean(llvm::errs(), request.options.enableTritonKernelCompile);
+  llvm::errs() << " enable_auto_blockify_loop=";
+  printBoolean(llvm::errs(), request.options.enableAutoBlockifyLoop);
+  llvm::errs() << " limit_auto_multi_buffer_only_for_local_buffer=";
+  printBoolean(llvm::errs(),
+               request.options.limitAutoMultiBufferOnlyForLocalBuffer);
+  llvm::errs() << " workspace_multi_buffer_num="
+               << request.options.workspaceMultiBufferNum;
   llvm::errs() << " enable_hivm_auto_storage_align=";
   printBoolean(llvm::errs(), request.options.enableHIVMAutoStorageAlign);
   llvm::errs() << " tile_mix_vector_loop="

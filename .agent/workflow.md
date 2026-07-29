@@ -11,8 +11,9 @@ BiSheng 执行，不复刻。
 
 阶段状态：checkpoint infrastructure 及 AutoBlockify→before-CVPipelining 的 13 个原生 pass
 已于 2026-07-30 逐项完成；每个 pass 的定向 fixture、单 pass checkpoint、累计 checkpoint、
-完整测试和代表 PlanMemory 均已通过。当前执行阶段 6 combined before-CV 与 API/input contract；
-组合入口未对齐前不得开始 embedded observe-only 或产品剪枝切换。
+完整测试和代表 PlanMemory 均已通过。阶段 6 combined before-CV 与 API/input contract 也已
+完成，组合 checkpoint 为 `1280/1280 PASS`。当前执行阶段 7 embedded observe-only；20-seed
+最终合同未通过前不得启用新边界产品剪枝。
 
 ## 每个 pass 的固定开发循环
 

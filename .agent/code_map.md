@@ -113,6 +113,14 @@ element-type 拒绝、DPS input replacement 和 broadcast dims 合并。runner �
 `--apply-inline-otf-broadcast`；`verify_inline_otf_broadcast_pipeline.py` 验证 checkpoint
 `12 -> 13` 与累计 `00 -> 13`，当前 8 profiles × 160 inputs 为 `1280/1280 PASS`。
 
+`ub_overflow_model_cpp/src/pipeline/pre_cv_prefix_pipeline.hpp`
+
+阶段 6 唯一组合入口，严格按原生 checkpoint 01～13 顺序串联全部 pre-CV pass，并集中映射
+AutoBlockify/MarkMultiBuffer 的 resolved options。`pre_cv_prefix_model_runner` 的
+`--apply-combined-prefix` 与 `verify_combined_pre_cv_prefix.py` 直接比较 checkpoint 00→13；当前
+8 profiles × 160 inputs 为 `1280/1280 PASS`。API 的 before-AutoBlockify contract v2 才调用
+该入口，legacy v1 不调用。
+
 现有可复用模型代码：
 
 ```text

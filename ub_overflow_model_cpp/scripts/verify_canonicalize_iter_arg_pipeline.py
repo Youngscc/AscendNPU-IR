@@ -29,6 +29,7 @@ class StageSpec:
     oracle_checkpoint: str
     cumulative_flags: tuple[str, ...]
     single_flag: str
+    single_uses_profile: bool = False
 
 
 CANONICALIZE_ITER_ARG = StageSpec(
@@ -106,7 +107,12 @@ def verify_one(
         ]
     )
     single = run(
-        [str(runner), stage.single_flag, str(stage_input)]
+        [
+            str(runner),
+            stage.single_flag,
+            *(prefix_arguments if stage.single_uses_profile else []),
+            str(stage_input),
+        ]
     )
     oracle = run([str(runner), str(stage_oracle)])
     for label, completed in (("cumulative", cumulative), ("single", single)):
