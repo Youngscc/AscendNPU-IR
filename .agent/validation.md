@@ -1,6 +1,6 @@
 # 当前验证与性能基线
 
-最后核实：2026-07-30，产品 commit `8ebd4f1203f1c2d751721be576b90eb9e00500f2`。
+最后核实：2026-07-30，产品 commit `7afe56bab`。
 
 before-AutoBlockify 产品边界及其全量正确性、同边界 full-plan 性能均已完成验证。2026-07-29 的
 before-CVPipelining 数据只保留为历史基线，不能与新边界倍率混用。
@@ -468,10 +468,28 @@ four ExtendedCanonicalizer stages                55.181 s
 
 2026-07-30 起，默认参数矩阵新增 4 个非笛卡尔积交互场景：`auto_blockify_preload`、
 `auto_blockify_auto_mb`、`auto_blockify_auto_mb_local_only` 和
-`auto_blockify_auto_mb_unrestricted`。当前矩阵共 32 组，排除两个 prediction 不插入的
-workspace-manage-off 场景后为 30 个有效配置；下一次全量正确性理论规模为
-`160×30×20=96000`，三轮 full-plan 性能规模为 `160×30×3=14400`。上文 26 配置结果仍是
-扩展前已经完成的历史现场基线，不能改写为 30 配置已经全量通过。
+`auto_blockify_auto_mb_unrestricted`。当前矩阵共 32 组，全部是有效配置；下一次全量正确性
+理论规模为 `160×32×20=102400`，三轮 full-plan 性能规模为
+`160×32×3=15360`。上文 26 配置结果仍是扩展前已经完成的历史现场基线，不能改写为 32 配置
+已经全量通过。
+
+2026-07-30 修正了 prediction 对 workspace manager 开关的错误 gate：
+`cv_workspace_manage_off` 与 `cv_workspace_manage_off_auto_mb` 现在仍插入轻量模型，并把
+`disable-auto-cv-work-space-manage=true` 同时传给模型和原生流水。原生 greedy canonicalization
+会通过 `OperationFolder` 把 loop 内常量提升到 isolated function entry，并合并等价常量；这一
+顺序会影响 PlanMemory live-list shuffle 的确定性 RNG 状态，因此轻量模型按原生
+`FoldUtils.cpp::insertKnownConstant` 行为补齐，而不是在 PlanMemory 中补偿 RNG。现场验证结果：
+
+```text
+configs × inputs × seeds                    2 × 160 × 20 = 6400
+strict matched                                             6400
+identity permutation / different / unavailable / timeout  0 / 0 / 0 / 0
+```
+
+同两组的 Release/O3、production full-plan、160×2×3 性能测量中，960 个模型样本全部
+`decision_path=full_plan`，921 个可配对样本的原生/模型 aggregate ratio 为 `0.7301x`，即模型
+约为原生耗时的 `1.37x`。这是这两组首次成为有效产品路径后的基线，不宣称为加速；后续性能
+优化必须单独处理该回退。完整测试套件同时通过。
 
 1. 相关单测；
 2. `bash ub_overflow_model_cpp/tests/run_tests.sh`；

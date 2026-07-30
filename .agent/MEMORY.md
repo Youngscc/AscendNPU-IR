@@ -1,7 +1,7 @@
 # AscendNPU-IR 项目记忆
 
 最后核实：2026-07-30，分支 `codex/ub-overflow-model-product`，当前产品提交
-`8ebd4f1203f1c2d751721be576b90eb9e00500f2`。本文件是 `.agent` 的唯一入口；源码或新测量与
+`7afe56bab`。本文件是 `.agent` 的唯一入口；源码或新测量与
 本文冲突时，应先现场核实，再直接替换失效结论，不维护多代任务流水账。
 
 ## 当前唯一目标
@@ -105,10 +105,13 @@ known-timeout skipped                         1320
 - 没有新的 blocker、unavailable、timeout 或 native/model 行为差异。
 
 上述正式基线完成后，默认矩阵新增 4 个非笛卡尔积交互场景：AutoBlockify 分别与 preload、
-default auto-MB、local-only auto-MB、unrestricted auto-MB 组合。矩阵现为 32 组，其中 30 组可
-用于 embedded correctness/同边界性能；下一轮理论规模为正确性 `160×30×20=96000`、三轮性能
-`160×30×3=14400`。4 场景 × 4 代表输入 × seeds `{0,13}` 小回归为 31 matched、1 个已知严格
-identity permutation、0 different/unavailable/timeout；这不是 30 配置全量结论。
+default auto-MB、local-only auto-MB、unrestricted auto-MB 组合。矩阵现为 32 组，32 组均会插入
+并执行 prediction；理论规模为正确性 `160×32×20=102400`、三轮性能
+`160×32×3=15360`。此前把 `cv_workspace_manage_off` 与
+`cv_workspace_manage_off_auto_mb` 排除为 inactive 是错误的产品 gate，不是原生语义要求；现已
+移除。修正后的两个场景在 160 inputs × seeds 0～19 上为 6400/6400 strict matched，0 identity
+permutation/different/unavailable/timeout。完整 32 配置现场矩阵仍须单独执行，不能把这 6400 项
+改写成 102400 项已经通过。
 
 报告：`ub_overflow_model_cpp/output/validation/before_auto_8ebd4f120_160x26x20.tsv`，仅本地生成，
 不提交。
@@ -274,7 +277,7 @@ contract v2；验证命令显式 `prune=false`，产品源码不再强制 observ
 1. 优先优化 pre-CV ExtendedCanonicalizer 的重复全量 fixed point；四次调用占 stage 诊断总时间
    约 63%，并造成 `triton.language.static_range` 的极端长尾。只能复用分析、worklist、常量索引和
    已收敛信息，不得省略原生 pass 次序或 pattern。
-2. 为 canonicalizer 优化建立相同 160×30×3 full-plan A/B，并重跑 160×30×20 正确性；目标是
+2. 为 canonicalizer 优化建立相同 160×32×3 full-plan A/B，并重跑 160×32×20 正确性；目标是
    先消除 `static_range` 长尾，再判断新边界是否获得稳定加速。
 3. 在现有数据结构内优化 `BuildPlanMemoryInput`、`AlignStorageAndAllocExtraBuffer` 和连续
    post-bufferization 状态之间的重复解析、扫描、拷贝和分配。
