@@ -13,6 +13,45 @@ void Check(bool condition, const char *message) {
 } // namespace
 
 int main() {
+  {
+    cvub::GenericModule constants = cvub::ParseGenericIR(
+        "ub_overflow_model_cpp/tests/fixtures/"
+        "canonicalization_constant_hoist.mlir",
+        false);
+    cvub::ApplyOperationSemanticsToAll(constants.operations);
+    constants =
+        cvub::HoistCanonicalizationConstants(std::move(constants));
+    const cvub::GenericOperation *function = nullptr;
+    size_t constantCount = 0;
+    for (const cvub::GenericOperation &operation : constants.operations) {
+      if (operation.name == "func.func")
+        function = &operation;
+      if (operation.name == "arith.constant")
+        ++constantCount;
+    }
+    Check(function != nullptr && !function->regions.empty(),
+          "constant-hoist fixture must retain its function");
+    const cvub::GenericRegion &functionRegion = constants.regions.at(
+        static_cast<size_t>(function->regions.front()));
+    const int entryBlock = functionRegion.blocks.front();
+    Check(constantCount == 3,
+          "nested duplicate constants must be uniqued by value and type");
+    for (const cvub::GenericOperation &operation : constants.operations)
+      if (operation.name == "arith.constant")
+        Check(operation.blockId == entryBlock,
+              "greedy canonicalization constants must hoist to the isolated "
+              "function entry");
+    const cvub::GenericBlock &entry =
+        constants.blocks.at(static_cast<size_t>(entryBlock));
+    Check(entry.operations.size() >= 3,
+          "constant-hoist fixture must retain the entry block");
+    for (size_t index = 0; index < 3; ++index)
+      Check(constants.operations.at(
+                static_cast<size_t>(entry.operations[index])).name ==
+                "arith.constant",
+            "folder-owned constants must remain a contiguous entry prefix");
+  }
+
   cvub::GenericModule module = cvub::ParseGenericIR(
       "ub_overflow_model_cpp/tests/fixtures/canonicalize_iter_arg.mlir",
       false);

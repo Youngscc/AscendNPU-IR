@@ -29,6 +29,7 @@ assert MODULE.first_record(stderr, MODULE.MACHINE_PREFIX)["model_ns"] == "100"
 assert MODULE.first_record(stderr, MODULE.NATIVE_PREFIX)["ns"] == "400"
 assert len(MODULE.records(stderr + stderr, MODULE.MACHINE_PREFIX)) == 2
 assert MODULE.max_rss(stderr) == 123456
+assert not hasattr(MODULE, "INACTIVE_SCENARIOS")
 
 old_environment = dict(os.environ)
 try:

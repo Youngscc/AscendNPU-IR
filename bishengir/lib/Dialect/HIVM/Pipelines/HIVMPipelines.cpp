@@ -177,8 +177,7 @@ static bool stopAfterUBPrefixCheckpointsRequested() {
 
 static bool isUBOverflowPredictionActive(const HIVMPipelineOptions &options) {
   return options.enableUBOverflowPrediction &&
-         options.enableTritonKernelCompile &&
-         !options.disableAutoCVWorkSpaceManage;
+         options.enableTritonKernelCompile;
 }
 
 struct DumpIRBeforeLocalPlanMemoryPass

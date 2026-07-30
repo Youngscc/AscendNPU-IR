@@ -90,6 +90,20 @@ auto_blockify_preload_arguments = auto_blockify_preload_profile.read_text(
 ).splitlines()
 assert "--enable-auto-blockify-loop=true" in auto_blockify_preload_arguments
 assert "--enable-preload=true" in auto_blockify_preload_arguments
+for scenario_id in (
+    "cv_workspace_manage_off",
+    "cv_workspace_manage_off_auto_mb",
+):
+    workspace_manage_off = next(
+        row for row in rows if row["scenario_id"] == scenario_id
+    )
+    workspace_manage_off_arguments = MODULE.compiler_arguments(
+        workspace_manage_off
+    )
+    assert "--enable-ub-overflow-prediction=true" in \
+        workspace_manage_off_arguments
+    assert "--disable-auto-cv-work-space-manage=true" in \
+        workspace_manage_off_arguments
 
 model_plan = Counter({(1024, 100): 2, (1024, 200): 1})
 native_plan = Counter({(1024, 100): 1, (1024, 200): 2})

@@ -39,12 +39,6 @@ DEFAULT_COMPILER = ROOT / "build/bin/bishengir-compile"
 MACHINE_PREFIX = "BISHENGIR_UB_MODEL_RESULT "
 NATIVE_PREFIX = "BISHENGIR_UB_NATIVE_RANGE_TIME "
 STAGE_PREFIX = "BISHENGIR_UB_MODEL_STAGE_TIME "
-INACTIVE_SCENARIOS = {
-    "cv_workspace_manage_off",
-    "cv_workspace_manage_off_auto_mb",
-}
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler", type=Path, default=DEFAULT_COMPILER)
@@ -60,7 +54,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--warmup-inputs", type=int, default=8)
     parser.add_argument("--timeout", type=int, default=360)
-    parser.add_argument("--include-inactive", action="store_true")
+    # Kept as a no-op for compatibility with commands recorded before the
+    # prediction hook learned the workspace-manager-off branch.  Every matrix
+    # scenario is active now.
+    parser.add_argument(
+        "--include-inactive", action="store_true", help=argparse.SUPPRESS
+    )
     parser.add_argument(
         "--include-known-timeouts", action="store_true",
         help="run native BiSheng even for audited long-timeout pairs",
@@ -381,9 +380,6 @@ def main() -> int:
     if not compiler.is_file() or not os.access(compiler, os.X_OK):
         raise ValueError(f"compiler is not executable: {compiler}")
     scenarios = load_scenarios(arguments.matrix, set(arguments.config))
-    if not arguments.include_inactive:
-        scenarios = [scenario for scenario in scenarios
-                     if scenario["scenario_id"] not in INACTIVE_SCENARIOS]
     inputs = load_adapters(
         arguments.adapter_root, set(arguments.input), arguments.max_inputs
     )

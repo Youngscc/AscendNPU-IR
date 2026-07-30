@@ -5,6 +5,7 @@
 #include "../ir/generic_rewriter.hpp"
 #include "affine_min_max_canonicalization.hpp"
 #include "fold_tensor_empty.hpp"
+#include "pre_cv_cse.hpp"
 #include "../analysis/hivm_dimension_analyzer.hpp"
 #include "../ir/operation_folder.hpp"
 
@@ -1128,6 +1129,80 @@ CanonicalizationOperationPreOrder(const GenericModule &module) {
   return result;
 }
 
+// GreedyPatternRewriteDriver runs OperationFolder even when no rewrite
+// pattern changes an operation.  OperationFolder uniques constants in the
+// nearest isolated region and moves the first constant for each
+// (dialect,value,type) key to that region's entry block.  In the HIVM
+// pipeline this is observable by PlanMemory: a constant hoisted out of a loop
+// participates in every earlier live-value shuffle and therefore changes the
+// deterministic retry order.  Mirror FoldUtils.cpp::insertKnownConstant here
+// instead of compensating for the resulting RNG drift in PlanMemory.
+inline GenericModule
+HoistCanonicalizationConstants(GenericModule module) {
+  if (module.operations.empty())
+    return module;
+  const GenericModuleAnalysisIndexes enclosingFunctions(
+      module, kGenericAnalysisEnclosingFunctions);
+  PipelineAnalysisContext useLists(
+      module, kGenericAnalysisDefinitions | kGenericAnalysisUsers);
+  GenericRewriter rewriter(module, &useLists);
+  std::map<std::pair<int, std::string>, int> knownConstants;
+  std::set<int> folderOwnedConstants;
+
+  for (int operationId : CanonicalizationOperationPreOrder(module)) {
+    const GenericOperation snapshot =
+        module.operations.at(static_cast<size_t>(operationId));
+    if (snapshot.name != "arith.constant" || snapshot.results.size() != 1 ||
+        snapshot.resultTypes.size() != 1 || snapshot.blockId < 0)
+      continue;
+    const int functionId =
+        enclosingFunctions.enclosingFunctionId(snapshot.id);
+    if (functionId < 0)
+      continue;
+    const GenericOperation &function =
+        module.operations.at(static_cast<size_t>(functionId));
+    if (function.regions.empty())
+      continue;
+    const GenericRegion &functionRegion = module.regions.at(
+        static_cast<size_t>(function.regions.front()));
+    if (functionRegion.blocks.empty())
+      continue;
+    const int entryBlockId = functionRegion.blocks.front();
+    const auto key = std::make_pair(functionId,
+                                    CanonicalizationOperationKey(snapshot));
+    auto existing = knownConstants.find(key);
+    if (existing != knownConstants.end()) {
+      const GenericOperation &candidate = module.operations.at(
+          static_cast<size_t>(existing->second));
+      rewriter.replaceAllUses(snapshot.results.front(),
+                              candidate.results.front());
+      rewriter.removeFromBlock(snapshot.blockId, snapshot.id);
+      continue;
+    }
+
+    GenericBlock &currentBlock =
+        module.blocks.at(static_cast<size_t>(snapshot.blockId));
+    bool alreadyAtFolderFront = snapshot.blockId == entryBlockId;
+    if (alreadyAtFolderFront && !currentBlock.operations.empty() &&
+        currentBlock.operations.front() != snapshot.id) {
+      const auto current =
+          std::find(currentBlock.operations.begin(),
+                    currentBlock.operations.end(), snapshot.id);
+      alreadyAtFolderFront =
+          current != currentBlock.operations.end() &&
+          current != currentBlock.operations.begin() &&
+          folderOwnedConstants.count(*std::prev(current)) != 0;
+    }
+    if (!alreadyAtFolderFront) {
+      rewriter.removeFromBlock(snapshot.blockId, snapshot.id);
+      rewriter.insertToBlock(entryBlockId, 0, snapshot.id);
+    }
+    folderOwnedConstants.insert(snapshot.id);
+    knownConstants.emplace(key, snapshot.id);
+  }
+  return CompactGenericModule(std::move(module));
+}
+
 inline bool CanonicalizationOperationDominates(
     const GenericModule &module, const CanonicalizationTopology &topology,
     const GenericOperation &candidate, const GenericOperation &operation) {
@@ -1221,6 +1296,7 @@ RunCanonicalizationHIVMAfterArithToAffine(GenericModule module) {
   // This is part of the production canonicalization pipeline, not just the
   // later standalone FoldTensorEmpty pass after TileAndBindSubBlock.
   module = RunFoldTensorEmpty(std::move(module));
+  module = HoistCanonicalizationConstants(std::move(module));
   const GenericModuleAnalysisIndexes foldIndexes(
       module, kGenericAnalysisDefinitions | kGenericAnalysisUsers);
   while (FoldConstantOffsetSizeAndStrideOperands(module, foldIndexes)) {
@@ -1258,15 +1334,19 @@ RunCanonicalizationHIVMAfterArithToAffine(GenericModule module) {
 }
 
 inline GenericModule RunCanonicalizationHIVMPipeline(GenericModule module) {
-  return RunCanonicalizationHIVMAfterArithToAffine(
-      RunArithToAffineConversion(std::move(module)));
+  // The combined native pipeline always runs a standalone createCSEPass after
+  // SCF loop canonicalization.  Keep that step at the combined-pipeline
+  // boundary: RunCanonicalizationHIVMAfterArithToAffine is also the strict
+  // pre-CV CanonicalizeIterArg checkpoint and must not execute CSE early.
+  return RunPreCVCSE(RunCanonicalizationHIVMAfterArithToAffine(
+      RunArithToAffineConversion(std::move(module))));
 }
 
 inline GenericModule
 RunCanonicalizationHIVMPipelineSourceAligned(GenericModule module) {
-  return RunCanonicalizationHIVMAfterArithToAffine(
+  return RunPreCVCSE(RunCanonicalizationHIVMAfterArithToAffine(
       RunArithToAffineConversionWithAffineCanonicalization(
-          std::move(module)));
+          std::move(module))));
 }
 
 } // namespace cvub
