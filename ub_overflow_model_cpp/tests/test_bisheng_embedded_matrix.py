@@ -22,7 +22,7 @@ SPEC.loader.exec_module(MODULE)
 rows = MODULE.load_scenarios(
     ROOT / "config/ub_relevant_parameter_scenarios.tsv", set()
 )
-assert len(rows) == 28
+assert len(rows) == 32
 assert len(MODULE.load_known_timeout_pairs(MODULE.DEFAULT_TIMEOUT_PAIRS)) == 66
 assert len(MODULE.load_adapters(MODULE.DEFAULT_ADAPTER_ROOT, set(), 0)) == 160
 assert len(MODULE.load_adapters(
@@ -40,6 +40,56 @@ auto_blockify = next(row for row in rows
                      if row["scenario_id"] == "auto_blockify")
 assert "--enable-auto-blockify-loop=true" in \
     MODULE.compiler_arguments(auto_blockify)
+auto_blockify_auto_mb = next(
+    row for row in rows
+    if row["scenario_id"] == "auto_blockify_auto_mb"
+)
+auto_blockify_auto_mb_arguments = MODULE.compiler_arguments(
+    auto_blockify_auto_mb
+)
+assert "--enable-auto-blockify-loop=true" in auto_blockify_auto_mb_arguments
+assert "--enable-auto-multi-buffer=true" in auto_blockify_auto_mb_arguments
+auto_blockify_local_only = next(
+    row for row in rows
+    if row["scenario_id"] == "auto_blockify_auto_mb_local_only"
+)
+assert "--limit-auto-multi-buffer-only-for-local-buffer=true" in \
+    MODULE.compiler_arguments(auto_blockify_local_only)
+auto_blockify_unrestricted = next(
+    row for row in rows
+    if row["scenario_id"] == "auto_blockify_auto_mb_unrestricted"
+)
+auto_blockify_unrestricted_arguments = MODULE.compiler_arguments(
+    auto_blockify_unrestricted
+)
+assert "--limit-auto-multi-buffer-of-local-buffer=no-limit" in \
+    auto_blockify_unrestricted_arguments
+assert "--limit-auto-multi-buffer-buffer=no-limit" in \
+    auto_blockify_unrestricted_arguments
+for row in (
+    auto_blockify_auto_mb,
+    auto_blockify_local_only,
+    auto_blockify_unrestricted,
+):
+    profile = ROOT / "config/pre_cv_profiles" / \
+        f"{row['pre_cv_profile']}.args"
+    assert profile.is_file(), profile
+    profile_arguments = profile.read_text(encoding="utf-8").splitlines()
+    assert "--enable-auto-blockify-loop=true" in profile_arguments
+    assert "--enable-auto-multi-buffer=true" in profile_arguments
+auto_blockify_preload = next(
+    row for row in rows if row["scenario_id"] == "auto_blockify_preload"
+)
+auto_blockify_preload_profile = (
+    ROOT / "config/pre_cv_profiles" /
+    f"{auto_blockify_preload['pre_cv_profile']}.args"
+)
+assert auto_blockify_preload_profile.is_file()
+auto_blockify_preload_arguments = auto_blockify_preload_profile.read_text(
+    encoding="utf-8"
+).splitlines()
+assert "--enable-auto-blockify-loop=true" in auto_blockify_preload_arguments
+assert "--enable-preload=true" in auto_blockify_preload_arguments
 
 model_plan = Counter({(1024, 100): 2, (1024, 200): 1})
 native_plan = Counter({(1024, 100): 1, (1024, 200): 2})

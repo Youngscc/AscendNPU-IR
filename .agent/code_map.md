@@ -358,7 +358,7 @@ MarkRealCoreType 或后 bufferization 全流水。全局 `UBBufferProgram/PlanPr
 ub_overflow_model_cpp/data/adapter/                  真实 compiler 起点
 ub_overflow_model_cpp/data/before_cvpipelining/      160 个去重性能/开发输入
 ub_overflow_model_cpp/config/ub_relevant_parameter_scenarios.tsv
-                                                      28 个场景，26 个有效测量场景
+                                                      32 个场景，30 个有效测量场景
 ub_overflow_model_cpp/config/known_timeout_pairs.tsv  已知原生长尾
 ub_overflow_model_cpp/config/failure_taxonomy.tsv     稳定失败分类
 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py

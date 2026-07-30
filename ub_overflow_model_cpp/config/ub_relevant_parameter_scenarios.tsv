@@ -1,6 +1,10 @@
 scenario_id	kernel_scope	input_contract	pre_cv_profile	purpose	enable_auto_blockify_loop	disable_auto_cv_workspace_manage	enable_preload	enable_code_motion	enable_auto_bind_sub_block	enable_hivm_auto_storage_align	enable_ubuf_saving	tile_mix_cube_loop	tile_mix_vector_loop	enable_auto_multi_buffer	limit_auto_multi_buffer_only_for_local_buffer	limit_auto_multi_buffer_of_local_buffer	limit_auto_multi_buffer_buffer	set_workspace_multibuffer	enable_hivm_cross_core_gss	enable_hivm_inject_block_all_sync	disable_auto_inject_block_sync
 production_default	all	reuse_before_cv	base_default	Production defaults and reference result	0	0	0	1	1	1	0	2	2	0	0	no-l0c	only-cube	4	1	0	0
 auto_blockify	all	reuse_before_cv	base_default	Enable the native AutoBlockify prefix while retaining default suffix options	1	0	0	1	1	1	0	2	2	0	0	no-l0c	only-cube	4	1	0	0
+auto_blockify_preload	mix	regenerate_before_cv	auto_blockify_preload	Cover CV preload and skew scheduling after AutoBlockify rewrites parallel loops	1	0	1	1	1	1	0	2	2	0	0	no-l0c	only-cube	4	1	0	0
+auto_blockify_auto_mb	all	regenerate_before_cv	auto_blockify_mb_default_ws4	Exercise pre-CV multi-buffer marking on loops rewritten by AutoBlockify	1	0	0	1	1	1	0	2	2	1	0	no-l0c	only-cube	4	1	0	0
+auto_blockify_auto_mb_local_only	mix	regenerate_before_cv	auto_blockify_mb_local_only	Keep AutoBlockify local multi-buffer marking while suppressing workspace marking	1	0	0	1	1	1	0	2	2	1	1	no-l0c	only-cube	4	1	0	0
+auto_blockify_auto_mb_unrestricted	mix	regenerate_before_cv	auto_blockify_mb_unrestricted_ws4	Exercise both Cube and Vector multi-buffer paths after AutoBlockify	1	0	0	1	1	1	0	2	2	1	0	no-limit	no-limit	4	1	0	0
 preload	mix	reuse_before_cv	base_default	Exercise CVPipelining skew/preload scheduling	0	0	1	1	1	1	0	2	2	0	0	no-l0c	only-cube	4	1	0	0
 code_motion_off	all	reuse_before_cv	base_default	Expose lifetime changes caused by LICM and subset hoisting	0	0	0	0	1	1	0	2	2	0	0	no-l0c	only-cube	4	1	0	0
 auto_bind_off	all	reuse_before_cv	base_default	Exercise the untiled TileAndBindSubBlock branch	0	0	0	1	0	1	0	2	2	0	0	no-l0c	only-cube	4	1	0	0

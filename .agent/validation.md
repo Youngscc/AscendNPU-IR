@@ -466,6 +466,13 @@ four ExtendedCanonicalizer stages                55.181 s
 
 ## 9. 每个优化批次的验证门槛
 
+2026-07-30 起，默认参数矩阵新增 4 个非笛卡尔积交互场景：`auto_blockify_preload`、
+`auto_blockify_auto_mb`、`auto_blockify_auto_mb_local_only` 和
+`auto_blockify_auto_mb_unrestricted`。当前矩阵共 32 组，排除两个 prediction 不插入的
+workspace-manage-off 场景后为 30 个有效配置；下一次全量正确性理论规模为
+`160×30×20=96000`，三轮 full-plan 性能规模为 `160×30×3=14400`。上文 26 配置结果仍是
+扩展前已经完成的历史现场基线，不能改写为 30 配置已经全量通过。
+
 1. 相关单测；
 2. `bash ub_overflow_model_cpp/tests/run_tests.sh`；
 3. simple AIV、MIX、attention overflow、late-seed success、auto-MB、UB-saving、
