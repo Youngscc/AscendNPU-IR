@@ -1,5 +1,6 @@
 #include "../src/pipeline/cvpipelining_ub_pipeline.hpp"
 #include "../src/passes/auto_blockify_parallel_loop.hpp"
+#include "../src/passes/pre_cv_mark_multi_buffer.hpp"
 
 #include <iostream>
 #include <set>
@@ -213,6 +214,29 @@ void TestCVPipeliningDoesNotExtractOverwrittenWorkspaceDestination() {
   }
 }
 
+void TestCVPipeliningRewritesNestedWorkspaceOutputUsers() {
+  cvub::GenericModule module = cvub::ParseGenericIR(
+      "ub_overflow_model_cpp/data/before_cvpipelining/"
+      "ascend_tutorial_03-matrix-multiplication.ttadapter/"
+      "before_cvpipelining_func_func_matmul_kernel_32.mlir",
+      false);
+  cvub::ApplyOperationSemanticsToAll(module.operations);
+
+  cvub::PreCVMarkMultiBufferOptions mark;
+  mark.enableAuto = true;
+  mark.workspaceMultiBufferNum = 4;
+  module = cvub::RunPreCVMarkMultiBuffer(std::move(module), mark);
+  module = cvub::RunCVPipeliningPass(std::move(module), {});
+  cvub::ValidateGenericModule(module);
+
+  cvub::UBAffectingPassOptions options;
+  options.enableTritonKernelCompile = true;
+  options.enableAutoBindSubBlock = true;
+  module = cvub::RunPassesBeforeLoopInvariantCodeMotion(
+      std::move(module), options);
+  cvub::ValidateGenericModule(module);
+}
+
 void TestRepeatedDestinationValueKeepsDistinctBufferizedOutputs() {
   cvub::UBAffectingPassOptions options;
   options.enableTritonKernelCompile = true;
@@ -377,6 +401,19 @@ void TestAtomicSyncBlockLockIsHoistedAroundOutermostLoop() {
   module = cvub::RunCVPipeliningPass(std::move(module), {});
   cvub::UBAffectingPassOptions options;
   options.enableTritonKernelCompile = true;
+  options.enableAutoMultiBuffer = true;
+  const cvub::ModulePlanResult autoMultiBufferPlan =
+      cvub::RunUBModuleFromAfterCVPipelining(module, options, 0);
+  Check(autoMultiBufferPlan.functions.size() == 1,
+        "atomic multi-buffer regression must produce one AIV plan");
+  Check(std::count_if(
+            autoMultiBufferPlan.functions.front()
+                .plan.multiBufferNums.begin(),
+            autoMultiBufferPlan.functions.front()
+                .plan.multiBufferNums.end(),
+            [](const auto &entry) { return entry.second == 2; }) == 4,
+        "MarkMultiBuffer must independently mark both Load and Store "
+        "buffers emitted by atomic decomposition");
   const cvub::PlanMemoryInput input =
       cvub::BuildPlanMemoryInputFromAfterCVPipelining(std::move(module),
                                                        options);
@@ -523,6 +560,7 @@ int main() {
   TestNormalizeDominatingCSE();
   TestFlattenCollapseCompositionCSE();
   TestCVPipeliningDoesNotExtractOverwrittenWorkspaceDestination();
+  TestCVPipeliningRewritesNestedWorkspaceOutputUsers();
   TestRepeatedDestinationValueKeepsDistinctBufferizedOutputs();
   TestEquivalentMarkedSlicesAreCSEdBeforeBubbleUp();
   TestPostOneShotScalarCSEProjection();
@@ -539,6 +577,7 @@ int main() {
   std::cout << "[PASS] PlanMemory normalization mirrors dominance-aware CSE\n";
   std::cout << "[PASS] FlattenOps collapse composition reuses equivalent views\n";
   std::cout << "[PASS] CVPipelining omits overwritten workspace slices\n";
+  std::cout << "[PASS] CVPipelining rewrites nested workspace output users\n";
   std::cout << "[PASS] repeated DPS init values keep distinct memrefs\n";
   std::cout << "[PASS] equivalent marked slices CSE before bubble-up\n";
   std::cout << "[PASS] post-OneShot scalar CSE shares dominating guards\n";

@@ -1,7 +1,7 @@
 # AscendNPU-IR 项目记忆
 
-最后核实：2026-07-30，分支 `codex/ub-overflow-model-product`，当前产品提交
-`7afe56bab`。本文件是 `.agent` 的唯一入口；源码或新测量与
+最后核实：2026-07-30，分支 `codex/ub-overflow-model-product`，本轮验证起点
+`50475b2152`。本文件是 `.agent` 的唯一入口；源码或新测量与
 本文冲突时，应先现场核实，再直接替换失效结论，不维护多代任务流水账。
 
 ## 当前唯一目标
@@ -83,38 +83,35 @@ GenericModule
 
 ## 当前正确性基线
 
-2026-07-30 在提交 `8ebd4f120` 上完成 before-AutoBlockify→PlanMemory 新边界的现场验证。有效
-矩阵为 26 configs × 160 inputs × 20 fixed seeds = 83200；66 个已审核原生长超时 pair 对应
-1320 个 attempt 未执行，实际报告 81880 项：
+2026-07-30 在工作树基于 `50475b2152` 上完成扩展后的
+before-AutoBlockify→PlanMemory 全量现场验证。矩阵为 35 configs × 160 inputs × 20 fixed
+seeds，理论规模 112000。81 个已审核、无法取得原生 oracle 的 config/input pair 对应 1620 个
+attempt 未执行，实际比较 110380 项：
 
 ```text
-matched                                      81789
-identity_permutation                            31
+matched                                     110183
+identity_permutation                            66
+ordering_equivalent                            131
 different                                        0
-unavailable                                     60
+unavailable                                      0
 timeout                                          0
-reported total                               81880
-known-timeout skipped                         1320
+reported total                              110380
+native-ineligible skipped                    1620
 ```
 
-- 31 项是 `python_tutorial_06-fused-attention` 的等尺寸 buffer identity permutation；只有在
-  status/required/peak/multi 一致，且去掉 offset 后 extent/lifetime/inplace 全图一致时才归入
-  该类别，不算普通 matched。
-- 60 项仍是 `preload_auto_mb` 下 3 个 matmul 输入的原生 SIGABRT（3×20）；不是模型差异。
-- 新增 `auto_blockify` 配置单独为 3200/3200 strict matched。
-- 没有新的 blocker、unavailable、timeout 或 native/model 行为差异。
+- 66 项 `identity_permutation` 与 131 项 `ordering_equivalent` 都要求 status、overflow、required、
+  peak、multi-buffer 和逻辑 buffer/lifetime/inplace 约束保持一致；它们不计作普通 matched。
+- 78 个 pair 是 13 个 auto-MB 相关场景下 6 个已知超过 360 秒的 attention 输入；另 3 个 pair 是
+  `preload_auto_mb` 下原生 `SplitMixKernelPass::replaceResultWithInitOperand` 的 SIGABRT。两类均在
+  运行前按审核清单排除，不能计作 matched。
+- validation 中提前 non-overflow 证明仍继续执行完整模型与原生 PlanMemory；100740 个证明信号
+  全部由可比较的原生结果验证为真。
+- 没有新的 blocker、different、unavailable、timeout 或 native/model UB 决策差异。
+- 原生 oracle 压缩缓存位于
+  `output/oracle_cache/bisheng_native_35x160x20`：110389 条记录中 109185 条单-attempt 记录可直接
+  回放；1204 条包含原生 fallback 的多-attempt 记录只保留审计，下次仍现场确认。
 
-上述正式基线完成后，默认矩阵新增 4 个非笛卡尔积交互场景：AutoBlockify 分别与 preload、
-default auto-MB、local-only auto-MB、unrestricted auto-MB 组合。矩阵现为 32 组，32 组均会插入
-并执行 prediction；理论规模为正确性 `160×32×20=102400`、三轮性能
-`160×32×3=15360`。此前把 `cv_workspace_manage_off` 与
-`cv_workspace_manage_off_auto_mb` 排除为 inactive 是错误的产品 gate，不是原生语义要求；现已
-移除。修正后的两个场景在 160 inputs × seeds 0～19 上为 6400/6400 strict matched，0 identity
-permutation/different/unavailable/timeout。完整 32 配置现场矩阵仍须单独执行，不能把这 6400 项
-改写成 102400 项已经通过。
-
-报告：`ub_overflow_model_cpp/output/validation/before_auto_8ebd4f120_160x26x20.tsv`，仅本地生成，
-不提交。
+报告：`ub_overflow_model_cpp/output/validation/embedded_160x35x20_final.tsv`，仅本地生成，不提交。
 
 ## 当前性能基线
 
@@ -277,7 +274,7 @@ contract v2；验证命令显式 `prune=false`，产品源码不再强制 observ
 1. 优先优化 pre-CV ExtendedCanonicalizer 的重复全量 fixed point；四次调用占 stage 诊断总时间
    约 63%，并造成 `triton.language.static_range` 的极端长尾。只能复用分析、worklist、常量索引和
    已收敛信息，不得省略原生 pass 次序或 pattern。
-2. 为 canonicalizer 优化建立相同 160×32×3 full-plan A/B，并重跑 160×32×20 正确性；目标是
+2. 为 canonicalizer 优化建立相同 160×35×3 full-plan A/B，并重跑 160×35×20 正确性；目标是
    先消除 `static_range` 长尾，再判断新边界是否获得稳定加速。
 3. 在现有数据结构内优化 `BuildPlanMemoryInput`、`AlignStorageAndAllocExtraBuffer` 和连续
    post-bufferization 状态之间的重复解析、扫描、拷贝和分配。
@@ -300,7 +297,9 @@ contract v2；验证命令显式 `prune=false`，产品源码不再强制 observ
 - 不修改 BiSheng 原生 pass、buffer plan、liveness、inplace、multi-buffer、fallback 或遍历语义。
 - 不增加 adapter、kernel、SSA、buffer 数量、配置名或 seed 特例。
 - 任何影响 op、buffer、RNG、lifetime 或地址规划顺序的遍历必须来自显式有序容器。
-- 正确性使用同进程原生 PlanMemory、fixed seeds 0～19 和完整合同；不得用缓存替代 oracle。
+- 正确性 oracle 必须源自同进程原生 PlanMemory、fixed seeds 0～19 和完整合同。允许回放身份中
+  包含 adapter 内容、完整参数和原生源码 fingerprint 的已验证缓存；缺失、过期、多-attempt 或
+  缓存比较不一致时必须现场运行原生 pipeline。
 - 性能只比较模型单轮成本；默认关闭 dump、validation、stage artifact 和详细计时。
 - 提前 non-overflow 在 production 可直接返回；debug/validation 必须继续完整模型与原生
   PlanMemory，验证证明真实成立。

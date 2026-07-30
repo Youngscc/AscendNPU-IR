@@ -1040,6 +1040,15 @@ inline GenericModule RunSplitMixKernelSelectedProjections(
   while (FoldSplitMixBooleanOperation(module, activeOperations, useLists)) {
   }
 
+  // RemoveUselessMarkOps participates in the same native greedy driver as
+  // ordinary folding and dead-code elimination.  It must observe the users
+  // that exist at the start of the iteration: a workspace allocation can
+  // still have both a mark and a soon-to-be-dead projection user, in which
+  // case native erases the mark before DCE removes that other user.  Running
+  // DCE first would leave the mark as the allocation's sole user and make the
+  // pair artificially self-sustaining.
+  RemoveUselessSplitMixMarkOps(module, activeOperations);
+
   GenericRewriter rewriter(module, &useLists);
   bool erased = true;
   while (erased) {
@@ -1061,7 +1070,6 @@ inline GenericModule RunSplitMixKernelSelectedProjections(
     }
     rewriter.removeManyFromBlocks(erasedOperations);
   }
-  RemoveUselessSplitMixMarkOps(module, activeOperations);
   return CompactGenericModule(std::move(module));
 }
 

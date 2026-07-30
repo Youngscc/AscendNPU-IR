@@ -2876,6 +2876,51 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId,
                              return extent.has_value();
                            });
       };
+  // Pattern.cpp::areOperandsUpperLevel checks the operands of the currently
+  // bubbled slice: its source and the dynamic half-tile offset carried by this
+  // request.  It does not re-check the operands of an extract_slice that
+  // defines the source until the greedy rewrite actually reaches that parent.
+  const auto valueParentOperation = [&](int value) {
+    const GenericOperation *definition = bubbleDefinition(value);
+    if (definition && definition->regionId >= 0)
+      return module.regions.at(static_cast<size_t>(definition->regionId))
+          .parentOperation;
+    if (value >= 0 &&
+        static_cast<size_t>(value) < bubbleBlockArgumentIds.size()) {
+      const int block =
+          bubbleBlockArgumentIds.at(static_cast<size_t>(value));
+      if (block >= 0) {
+        const int region =
+            module.blocks.at(static_cast<size_t>(block)).regionId;
+        if (region >= 0)
+          return module.regions.at(static_cast<size_t>(region))
+              .parentOperation;
+      }
+    }
+    return -1;
+  };
+  const auto isAncestorOrSelf = [&](int ancestor, int operation) {
+    size_t remaining = module.operations.size() + 1;
+    while (operation >= 0 && remaining-- != 0) {
+      if (operation == ancestor)
+        return true;
+      operation = module.operations.at(static_cast<size_t>(operation)).parentId;
+    }
+    return false;
+  };
+  const auto areBubbleOperandsUpperLevel =
+      [&](int source, const std::vector<int> &operands) {
+        const int sourceParent = valueParentOperation(source);
+        if (sourceParent < 0)
+          return false;
+        for (int operand : operands) {
+          const int operandParent = valueParentOperation(operand);
+          if (operandParent < 0 ||
+              !isAncestorOrSelf(operandParent, sourceParent))
+            return false;
+        }
+        return true;
+      };
   std::function<void(int, int, int, bool, std::set<int>)>
       runBubbleUpRequest =
       [&](int value, int offset, int replacedUserOperation,
@@ -2983,63 +3028,81 @@ inline bool AttemptBindSubBlock(GenericModule &module, int functionId,
 
         if (operationSnapshot.name == "tensor.extract_slice" &&
             !operationSnapshot.operands.empty()) {
-          const GenericOperation *parentExtract =
-              bubbleDefinition(operationSnapshot.operands.front());
-          if (parentExtract && parentExtract->name == "tensor.extract_slice") {
-          const std::optional<TileAndBindMixedSlice> childSlice =
+          // ExtractSliceBubbleUpStrategy compares the marked half-slice with
+          // the extract_slice that directly defines its source.  A same-axis
+          // overlap is legal only when that source extract was itself created
+          // by TileAndBind tiling.  Do not skip to the source extract's own
+          // defining operation: doing so misses the CVPipelining slice and
+          // accepts a candidate that native BiSheng rolls back.
+          const std::optional<TileAndBindMixedSlice> sourceSlice =
               ParseTileAndBindMixedSlice(operationSnapshot);
-          const std::optional<TileAndBindMixedSlice> parentSlice =
-              ParseTileAndBindMixedSlice(*parentExtract);
-          const auto isStaticSlice = [](const auto &slice) {
-            return slice &&
-                   std::all_of(slice->sizes.begin(), slice->sizes.end(),
-                               [](const TileAndBindFoldResult &size) {
-                                 return size.constant.has_value();
-                               });
-          };
-          const bool bothSlicesAreStatic =
-              isStaticSlice(childSlice) && isStaticSlice(parentSlice);
-          const std::set<size_t> parentDimensions =
-              GetTileAndBindExtractOrInsertDims(module, *parentExtract,
+          const bool sourceSliceIsStatic =
+              sourceSlice &&
+              std::all_of(sourceSlice->sizes.begin(),
+                          sourceSlice->sizes.end(),
+                          [](const TileAndBindFoldResult &size) {
+                            return size.constant.has_value();
+                          });
+          const std::set<size_t> sourceDimensions =
+              GetTileAndBindExtractOrInsertDims(module, operationSnapshot,
                                                 &originalValueTypes);
           const size_t childDimension = bubbleDims.at(value);
-          std::optional<size_t> childDimensionInParent = childDimension;
+          std::optional<size_t> childDimensionInSource = childDimension;
           auto resultType = originalValueTypes.find(value);
           const std::optional<ShapedTypeModel> resultShape =
               resultType == originalValueTypes.end()
                   ? std::nullopt
                   : metadata.shapedType(resultType->second);
-          if (childSlice && resultShape)
-            childDimensionInParent = TileAndBindSliceAxisForResultAxis(
-                childSlice->sizes, resultShape->shape, childDimension);
-          auto parentResultType =
-              originalValueTypes.find(operationSnapshot.operands.front());
-          const std::optional<ShapedTypeModel> parentResultShape =
-              parentResultType == originalValueTypes.end()
-                  ? std::nullopt
-                  : metadata.shapedType(parentResultType->second);
-          if (childDimensionInParent && parentSlice && parentResultShape)
-            childDimensionInParent = TileAndBindSliceAxisForResultAxis(
-                parentSlice->sizes, parentResultShape->shape,
-                *childDimensionInParent);
-          if (bothSlicesAreStatic &&
-              childDimensionInParent &&
-              parentDimensions.count(*childDimensionInParent) != 0 &&
-              !CreatedByTileAndBindTiling(module, *parentExtract,
+          if (sourceSlice && resultShape)
+            childDimensionInSource = TileAndBindSliceAxisForResultAxis(
+                sourceSlice->sizes, resultShape->shape, childDimension);
+          if (sourceSliceIsStatic && childDimensionInSource &&
+              sourceDimensions.count(*childDimensionInSource) != 0 &&
+              !CreatedByTileAndBindTiling(module, operationSnapshot,
                                           &originalValueTypes,
                                           nullptr,
                                           &bubbleDefinitionIds)) {
+            // The native greedy driver also contains
+            // tensor::populateFoldTensorEmptyPatterns.  A same-axis bubble
+            // pattern can fail locally and still reach a valid fixed point
+            // when this source extract is folded from tensor.empty.  Apply
+            // that alternative only when the rejected operation actually
+            // changes under the native fold set; a module-wide pre-fold would
+            // incorrectly hide unrelated unsupported marked slices.
+            GenericModule folded = module;
+            RunFoldTensorEmptyPatternsInPlace(folded);
+            const GenericOperation &foldedOperation =
+                folded.operations.at(
+                    static_cast<size_t>(operationSnapshot.id));
+            if (foldedOperation.name != operationSnapshot.name ||
+                foldedOperation.operands != operationSnapshot.operands) {
+              module = std::move(folded);
+              return;
+            }
             if (trace)
               trace->Pass(
                   "TileAndBind.Attempt.BubbleIntersection",
                   {{"operation", static_cast<uint64_t>(operationSnapshot.id)},
                    {"child_dim", static_cast<uint64_t>(childDimension)},
                    {"parent_dim",
-                    static_cast<uint64_t>(*childDimensionInParent)}});
+                    static_cast<uint64_t>(*childDimensionInSource)}});
             bubbleUpFailed = true;
             bubbleUpFailedOperation = operationSnapshot.id;
             return;
           }
+
+          const std::vector<int> bubbledSliceOperands = {value, offset};
+          if (!areBubbleOperandsUpperLevel(value, bubbledSliceOperands)) {
+            if (trace)
+              trace->Pass(
+                  "TileAndBind.Attempt.BubbleUpperLevelFailure",
+                  {{"operation", static_cast<uint64_t>(
+                                      operationSnapshot.id)},
+                   {"source", static_cast<uint64_t>(
+                                   operationSnapshot.operands.front())}});
+            bubbleUpFailed = true;
+            bubbleUpFailedOperation = operationSnapshot.id;
+            return;
           }
         }
 

@@ -7,11 +7,15 @@ import argparse
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import csv
+import gzip
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
@@ -22,6 +26,8 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from plan_memory_contract import (
     canonical_function_name,
+    logical_buffers_from_model,
+    logical_buffers_from_oracle,
     model_multi_and_inplace,
     normalized_lifetimes_from_model,
     parse_oracle,
@@ -46,6 +52,8 @@ DEFAULT_ADAPTER_ROOT = MODULE / "data/adapter"
 DEFAULT_MATRIX_INPUT_ROOT = MODULE / "data/before_cvpipelining"
 DEFAULT_COMPILER = REPO / "build/bin/bishengir-compile"
 DEFAULT_REPORT = MODULE / "output/bisheng_embedded_validation.tsv"
+CACHE_SCHEMA = 2
+DEFAULT_ORACLE_CACHE = MODULE / "output/bisheng_embedded_oracle_cache"
 FAILURE_TAXONOMY = FailureTaxonomy.load()
 
 
@@ -63,6 +71,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adapter-root", type=Path, default=DEFAULT_ADAPTER_ROOT)
     parser.add_argument("--compiler", type=Path, default=DEFAULT_COMPILER)
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
+    parser.add_argument(
+        "--oracle-cache-dir", type=Path, nargs="?", const=DEFAULT_ORACLE_CACHE,
+        help=(
+            "enable a read-through native BiSheng PlanMemory cache; live "
+            "observations are written atomically as compressed records"
+        ),
+    )
+    parser.add_argument(
+        "--refresh-oracle-cache", action="store_true",
+        help="ignore cache hits and replace them with live native observations",
+    )
     parser.add_argument("--config", "--scenario", dest="scenarios",
                         action="append", default=[], metavar="NAME")
     parser.add_argument("--input", action="append", default=[],
@@ -87,6 +106,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--jobs and --timeout must be positive")
     if args.max_inputs < 0:
         parser.error("--max-inputs must be non-negative")
+    if args.refresh_oracle_cache and args.oracle_cache_dir is None:
+        parser.error("--refresh-oracle-cache requires --oracle-cache-dir")
     return args
 
 
@@ -96,6 +117,94 @@ def boolean(value: str) -> bool:
 
 def flag(value: str) -> str:
     return "true" if boolean(value) else "false"
+
+
+def safe_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", value)
+
+
+def oracle_cache_path(
+    cache_dir: Path, scenario_id: str, adapter: str, seed: int,
+) -> Path:
+    return (
+        cache_dir / safe_name(scenario_id) /
+        f"{safe_name(adapter)}.seed-{seed}.json.gz"
+    )
+
+
+def write_gzip_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        with gzip.open(
+            temporary, "wt", encoding="utf-8", compresslevel=6
+        ) as stream:
+            json.dump(payload, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def read_gzip_json(path: Path) -> dict[str, Any]:
+    with gzip.open(path, "rt", encoding="utf-8") as stream:
+        value = json.load(stream)
+    if not isinstance(value, dict):
+        raise ValueError("oracle cache record is not an object")
+    return value
+
+
+def model_projection(segment: str) -> str:
+    """Keep only the current embedded-model machine contract."""
+    return "\n".join(
+        line for line in segment.splitlines()
+        if line.startswith("BISHENGIR_UB_MODEL_")
+    ) + "\n"
+
+
+def native_projection(segment: str) -> str:
+    """Remove the old model payload before persisting the native contract."""
+    return "\n".join(
+        line for line in segment.splitlines()
+        if not line.startswith("BISHENGIR_UB_MODEL_")
+    ) + "\n"
+
+
+def native_oracle_fingerprint(repo: Path = REPO) -> str:
+    """Fingerprint tracked native sources while excluding model-only files."""
+    digest = hashlib.sha256()
+    tracked = subprocess.run(
+        ["git", "ls-files", "-s", "-z"], cwd=repo,
+        capture_output=True, check=True,
+    ).stdout.split(b"\0")
+    excluded = (b"ub_overflow_model_cpp/", b".agent/")
+    for entry in tracked:
+        if not entry:
+            continue
+        path = entry.split(b"\t", 1)[-1]
+        if path.startswith(excluded):
+            continue
+        digest.update(entry)
+        digest.update(b"\0")
+    dirty = subprocess.run(
+        [
+            "git", "diff", "--binary", "HEAD", "--", ".",
+            ":(exclude)ub_overflow_model_cpp/**", ":(exclude).agent/**",
+        ],
+        cwd=repo, capture_output=True, check=True,
+    ).stdout
+    digest.update(dirty)
+    return digest.hexdigest()
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def selected_seeds(value: str) -> list[int]:
@@ -267,6 +376,75 @@ def parse_model_payload(segment: str) -> dict[str, Any]:
     return {"validation_id": validation_id, "result": result}
 
 
+def cache_identity(
+    scenario: dict[str, str], adapter: Path, seed: int,
+    native_fingerprint: str,
+) -> dict[str, Any]:
+    return {
+        "schema": CACHE_SCHEMA,
+        "scenario": scenario["scenario_id"],
+        "adapter": adapter.name,
+        "seed": seed,
+        "compiler_arguments": compiler_arguments(scenario),
+        # The model's input_digest is intentionally not used here: native
+        # pointer-order variation can change textual SSA identity between two
+        # equivalent prefix runs.  Adapter content + native source + complete
+        # options is the stable provenance of the native observation.
+        "adapter_sha256": file_sha256(adapter),
+        "native_oracle_fingerprint": native_fingerprint,
+    }
+
+
+def replayable_cache_record(path: Path) -> dict[str, Any] | None:
+    try:
+        record = read_gzip_json(path)
+        native_segments = record.get("native_segments")
+        if (
+            not isinstance(native_segments, list) or
+            not native_segments or
+            not all(isinstance(value, str) for value in native_segments)
+        ):
+            return None
+        if bool(record.get("timed_out")):
+            return None
+        if not isinstance(record.get("compiler_rc"), int):
+            return None
+        # Stopping after prediction cannot reproduce RetriablePassManager's
+        # later effective-option attempts.  Preserve such records for audit,
+        # but confirm them live until replay learns to drive every attempt.
+        if record.get("live_attempts") != 1:
+            return None
+        return record
+    except (
+        OSError, ValueError, TypeError, json.JSONDecodeError,
+        gzip.BadGzipFile,
+    ):
+        return None
+
+
+def matching_cache_record(
+    path: Path, identity: dict[str, Any],
+) -> dict[str, Any] | None:
+    record = replayable_cache_record(path)
+    if record is None or record.get("identity") != identity:
+        return None
+    return record
+
+
+def write_oracle_cache_record(
+    path: Path, identity: dict[str, Any], segments: list[str],
+    compiler_rc: int,
+) -> None:
+    write_gzip_json(path, {
+        "identity": identity,
+        "native_segments": [native_projection(segment) for segment in segments],
+        "compiler_rc": compiler_rc,
+        "timed_out": False,
+        "live_attempts": len(segments),
+        "created_unix": time.time(),
+    })
+
+
 def relevant_native_status(
     segment: str, seed: int, model_functions: set[str]
 ) -> tuple[str, str]:
@@ -344,6 +522,42 @@ def is_equal_extent_identity_permutation(
         lifetimes_without_offsets(native_lifetimes)
         and inplace_without_offsets(model_inplace) ==
         inplace_without_offsets(native_inplace)
+    )
+
+
+def is_ub_decision_equivalent_ordering(
+    model_plan: Counter, native_plan: Counter,
+    model_lifetimes: Counter, native_lifetimes: Counter,
+    model_inplace: Counter, native_inplace: Counter,
+    model_logical_buffers: Counter, native_logical_buffers: Counter,
+) -> bool:
+    """Prove a PlanMemory live-in ordering difference is UB-equivalent.
+
+    Native Liveness still exposes ``SmallPtrSet`` live-in iteration order to
+    the seeded PlanMemory shuffle.  Different pointer layouts can therefore
+    select a different equal-size inplace target without changing the buffer
+    population, lifetime requirements, peak, or overflow decision.  Keep
+    this weaker proof separate from both exact matches and strict identity
+    permutations: it preserves every source lifetime and only erases the
+    chosen target's identity after requiring an equal target extent.
+    """
+    def source_requirement(identity: tuple) -> tuple:
+        function, extent, _offsets, allocate, release = identity
+        return function, extent, allocate, release
+
+    def inplace_requirements(values: Counter) -> Counter:
+        result: Counter = Counter()
+        for (source, destination), count in values.items():
+            destination_function, destination_extent, *_ = destination
+            result[(source_requirement(source), destination_function,
+                    destination_extent)] += count
+        return result
+
+    return (
+        model_plan != native_plan
+        and model_logical_buffers == native_logical_buffers
+        and inplace_requirements(model_inplace) ==
+        inplace_requirements(native_inplace)
     )
 
 
@@ -441,6 +655,8 @@ def compare_segment(
     model_required = int(result["required_bits"] or model_peak)
     model_plan = plan_multiset_from_model(payload)
     model_lifetimes = normalized_lifetimes_from_model(payload)
+    model_logical_buffers = logical_buffers_from_model(payload)
+    native_logical_buffers = logical_buffers_from_oracle(segment, seed, "6")
     model_multi, model_inplace = model_multi_and_inplace(payload)
     differences: list[str] = []
     evidence: list[str] = []
@@ -482,13 +698,30 @@ def compare_segment(
             "extent/lifetime/inplace projections are identical",
         )
         return "identity_permutation", differences, evidence
+    ordering_equivalent = (
+        set(differences).issubset({"plan", "lifetime", "inplace"})
+        and differences
+        and model_multi == native_multi
+        and is_ub_decision_equivalent_ordering(
+            model_plan, native_plan, model_lifetimes, native_lifetimes,
+            model_inplace, native_inplace, model_logical_buffers,
+            native_logical_buffers,
+        )
+    )
+    if ordering_equivalent:
+        evidence.insert(
+            0,
+            "SmallPtrSet live-in ordering equivalent: strict plan/inplace "
+            "identity differs; logical buffers and UB decisions are equal",
+        )
+        return "ordering_equivalent", differences, evidence
     return ("matched" if not differences else "different",
             differences, evidence)
 
 
 def execute_compiler(
     compiler: Path, adapter: Path, scenario: dict[str, str], seed: int,
-    timeout: int,
+    timeout: int, stop_after_prediction: bool = False,
 ) -> dict[str, Any]:
     env = os.environ.copy()
     for name in (
@@ -504,12 +737,14 @@ def execute_compiler(
         env.pop(name, None)
     env["BISHENGIR_UB_MODEL_VALIDATION"] = "1"
     env["BISHENGIR_PLAN_MEMORY_FORCE_SEED"] = str(seed)
-    # Correctness validation is always live.  Even when the lightweight model
-    # proves non-overflow with its conservative fast path, debug evaluation
-    # materializes its complete plan and BiSheng continues through the native
-    # local PlanMemory pass for the same fixed seed.
-    env["BISHENGIR_DUMP_PLAN_MEMORY_ATTEMPTS"] = "1"
-    env["BISHENGIR_STOP_AFTER_LOCAL_PLAN_MEMORY"] = "1"
+    if stop_after_prediction:
+        env["BISHENGIR_STOP_AFTER_UB_OVERFLOW_PREDICTION"] = "1"
+    else:
+        # Live correctness validation always reaches native PlanMemory.  Even
+        # when the model proves non-overflow, debug evaluation materializes
+        # its complete plan for the same fixed seed.
+        env["BISHENGIR_DUMP_PLAN_MEMORY_ATTEMPTS"] = "1"
+        env["BISHENGIR_STOP_AFTER_LOCAL_PLAN_MEMORY"] = "1"
     command = [
         str(compiler), str(adapter), "-o", os.devnull,
         *compiler_arguments(scenario),
@@ -540,6 +775,7 @@ def execute_compiler(
 def summarize_observation(
     scenario: dict[str, str], adapter: Path, seed: int, stderr: str,
     compiler_returncode: int, timed_out: bool, seconds: float,
+    oracle_source: str = "live", cache_detail: str = "disabled",
 ) -> dict[str, Any]:
     segments = split_validation_segments(stderr)
     model_results = [parse_model_payload(segment)["result"]
@@ -557,6 +793,8 @@ def summarize_observation(
         status = "different"
     elif any(value[0] == "identity_permutation" for value in comparable):
         status = "identity_permutation"
+    elif any(value[0] == "ordering_equivalent" for value in comparable):
+        status = "ordering_equivalent"
     elif comparable:
         status = "matched"
     else:
@@ -570,8 +808,16 @@ def summarize_observation(
         for line in stderr.splitlines()
     )
     proof_verifications: list[bool] = []
-    for segment, result in zip(segments, model_results):
+    for segment, result, observation in zip(
+        segments, model_results, observations
+    ):
         if not result["non_overflow_upper_bound_proven"]:
+            continue
+        # A RetriablePassManager attempt can fail in a non-UB memory scope
+        # before native local PlanMemory provides a comparable observation.
+        # Such an attempt cannot verify or refute the model's UB proof; only
+        # attempts with a comparable native UB result belong in this column.
+        if observation[0] == "unavailable":
             continue
         model_functions = {
             canonical_function_name(function["function"])
@@ -595,6 +841,7 @@ def summarize_observation(
     return {
         "scenario": scenario["scenario_id"], "adapter": adapter.name,
         "seed": seed, "status": status,
+        "oracle_source": oracle_source, "cache_detail": cache_detail,
         "non_overflow_upper_bound_proven": str(any(
             result["non_overflow_upper_bound_proven"]
             for result in model_results
@@ -608,21 +855,94 @@ def summarize_observation(
         "evidence": " | ".join(evidence[:12]),
         "seconds": f"{seconds:.6f}",
         "diagnostic": stderr[-1200:].replace("\t", " ").replace("\n", "\\n")
-        if status not in {"matched", "identity_permutation"} else "",
+        if status not in {"matched", "identity_permutation",
+                          "ordering_equivalent"} else "",
     }
 
 
 def run_one(
     compiler: Path, adapter: Path, scenario: dict[str, str], seed: int,
-    timeout: int,
+    timeout: int, oracle_cache_dir: Path | None = None,
+    refresh_oracle_cache: bool = False,
+    native_fingerprint: str = "",
 ) -> dict[str, Any]:
+    cache_file = (
+        oracle_cache_path(
+            oracle_cache_dir, scenario["scenario_id"], adapter.name, seed
+        )
+        if oracle_cache_dir is not None else None
+    )
+    probe_seconds = 0.0
+    cache_detail = "disabled"
+    if (
+        cache_file is not None and cache_file.is_file() and
+        not refresh_oracle_cache
+    ):
+        candidate = replayable_cache_record(cache_file)
+        if candidate is not None:
+            probe = execute_compiler(
+                compiler, adapter, scenario, seed, timeout,
+                stop_after_prediction=True,
+            )
+            probe_seconds = float(probe["seconds"])
+            probe_segments = split_validation_segments(str(probe["stderr"]))
+            if bool(probe["timed_out"]):
+                return summarize_observation(
+                    scenario, adapter, seed, str(probe["stderr"]),
+                    int(probe["returncode"]), True, probe_seconds,
+                    "cache-probe", "model-timeout",
+                )
+            if probe_segments:
+                identity = cache_identity(
+                    scenario, adapter, seed, native_fingerprint,
+                )
+                if candidate.get("identity") == identity:
+                    synthetic = (
+                        model_projection(probe_segments[0]) +
+                        str(candidate["native_segments"][0])
+                    )
+                    cached_row = summarize_observation(
+                        scenario, adapter, seed, synthetic,
+                        int(candidate["compiler_rc"]), False, probe_seconds,
+                        "cache", "hit",
+                    )
+                    if cached_row["status"] in {
+                        "matched", "identity_permutation",
+                        "ordering_equivalent",
+                    }:
+                        return cached_row
+                    # Never trust an unproved cached mismatch: confirm it with
+                    # the live same-process native pipeline before reporting a
+                    # defect.
+                    cache_detail = "cache-mismatch"
+                else:
+                    cache_detail = "stale"
+            else:
+                cache_detail = "stale"
+        else:
+            cache_detail = "non-replayable"
+    elif cache_file is not None:
+        cache_detail = "refresh" if refresh_oracle_cache else "miss"
+
     live = execute_compiler(
         compiler, adapter, scenario, seed, timeout,
     )
+    live_segments = split_validation_segments(str(live["stderr"]))
+    if (
+        cache_file is not None and not bool(live["timed_out"]) and
+        live_segments
+    ):
+        identity = cache_identity(
+            scenario, adapter, seed, native_fingerprint,
+        )
+        write_oracle_cache_record(
+            cache_file, identity, live_segments,
+            int(live["returncode"]),
+        )
     return summarize_observation(
         scenario, adapter, seed, str(live["stderr"]),
         int(live["returncode"]), bool(live["timed_out"]),
-        float(live["seconds"]),
+        probe_seconds + float(live["seconds"]), "live", cache_detail,
     )
 
 
@@ -647,6 +967,7 @@ def read_report(path: Path) -> list[dict[str, Any]]:
 def report_columns() -> list[str]:
     return [
         "scenario", "adapter", "seed", "status",
+        "oracle_source", "cache_detail",
         "non_overflow_upper_bound_proven", "decision_paths",
         "native_plan_memory_observed", "non_overflow_proof_verified",
         "compiler_rc", "attempts", "comparable_attempts", "differences", "evidence",
@@ -683,6 +1004,22 @@ def main() -> int:
     if not compiler.is_file() or not os.access(compiler, os.X_OK):
         print(f"[ERROR] compiler is not executable: {compiler}", file=sys.stderr)
         return 2
+    oracle_cache_dir = (
+        args.oracle_cache_dir.resolve()
+        if args.oracle_cache_dir is not None else None
+    )
+    if oracle_cache_dir is not None:
+        oracle_cache_dir.mkdir(parents=True, exist_ok=True)
+    native_fingerprint = ""
+    if oracle_cache_dir is not None:
+        try:
+            native_fingerprint = native_oracle_fingerprint()
+        except subprocess.CalledProcessError as error:
+            print(
+                f"[ERROR] failed to fingerprint native BiSheng sources: {error}",
+                file=sys.stderr,
+            )
+            return 2
     existing_rows = read_report(args.report) if args.resume else []
     completed_keys = {
         (str(row["scenario"]), str(row["adapter"]), int(row["seed"]))
@@ -710,7 +1047,8 @@ def main() -> int:
         f"bisheng embedded validation: scenarios={len(scenarios)} "
         f"inputs={len(adapters)} seeds={len(seeds)} total={total} "
         f"jobs={args.jobs} resumed={len(existing_rows)} excluded={excluded} "
-        "native_plan_memory=live",
+        "native_plan_memory=live "
+        f"oracle_cache={'off' if oracle_cache_dir is None else oracle_cache_dir}",
         flush=True,
     )
     rows: list[dict[str, Any]] = list(existing_rows)
@@ -734,6 +1072,8 @@ def main() -> int:
             adapter, scenario, seed = next(iterator)
             future = pool.submit(
                 run_one, compiler, adapter, scenario, seed, args.timeout,
+                oracle_cache_dir, args.refresh_oracle_cache,
+                native_fingerprint,
             )
             pending[future] = (adapter, scenario, seed)
         completed_count = len(existing_rows)
@@ -776,6 +1116,8 @@ def main() -> int:
                     continue
                 new_future = pool.submit(
                     run_one, compiler, adapter, scenario, seed, args.timeout,
+                    oracle_cache_dir, args.refresh_oracle_cache,
+                    native_fingerprint,
                 )
                 pending[new_future] = (adapter, scenario, seed)
     if not args.no_progress:
@@ -785,10 +1127,15 @@ def main() -> int:
     ))
     write_report(args.report, rows)
     counts = Counter(str(row["status"]) for row in rows)
+    sources = Counter(str(row.get("oracle_source", "legacy")) for row in rows)
     print(
         "summary: " + " ".join(f"{key}={counts[key]}" for key in
-                                ("matched", "identity_permutation", "different",
+                                ("matched", "identity_permutation",
+                                 "ordering_equivalent", "different",
                                  "unavailable", "timeout"))
+        + " oracle=" + ",".join(
+            f"{key}:{sources[key]}" for key in sorted(sources)
+        )
     )
     print(args.report)
     return 1 if counts["different"] or counts["timeout"] or counts["unavailable"] else 0

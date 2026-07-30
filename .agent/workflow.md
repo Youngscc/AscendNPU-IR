@@ -79,8 +79,10 @@ production entry switch
 7. production-default retry-only 性能；
 8. 160 × 有意义配置、full-plan、无提前证明的结构性能。
 
-正确性 oracle 始终是同一真实 `bishengir-compile` attempt 中的原生 local PlanMemory。缓存不能
-替代原生结果。提前 non-overflow 在 validation 中只作为信号，必须继续完整模型和原生计划。
+正确性 oracle 始终来自真实 `bishengir-compile` 的原生 local PlanMemory。允许回放经过同进程
+采集、且 adapter 内容、完整参数和原生源码 fingerprint 全部一致的缓存；当前模型探针仍必须现场
+执行。缓存缺失、过期、多-attempt 或比较不一致时必须回到同进程原生计划。提前 non-overflow 在
+validation 中只作为信号，必须继续完整模型并用原生计划验证。
 
 ## 参数纪律
 

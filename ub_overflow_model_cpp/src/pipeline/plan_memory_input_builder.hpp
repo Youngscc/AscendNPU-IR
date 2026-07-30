@@ -4067,6 +4067,7 @@ private:
     std::vector<std::string> typedOperands;
     auto copiedInits = controlInitAliases.find(source.id);
     bool hasResult = false;
+    bool removedShapedLoopResult = false;
     for (size_t index = 0; index < source.results.size(); ++index) {
       if (isRemovedIfResult(source, index)) {
         const int resultValue = source.results[index];
@@ -4091,8 +4092,11 @@ private:
           shaped &&
           module.afterMarkMultiBuffer.afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization.singlePoint.canonicalizedIterArgAccesses.count(
               {source.id, static_cast<int>(index + 3)}) != 0;
-      if (canonicalizedResult || canonicalizedAccess)
+      if (canonicalizedResult || canonicalizedAccess) {
+        removedShapedLoopResult =
+            removedShapedLoopResult || (source.name == "scf.for" && shaped);
         continue;
+      }
       if (hasResult)
         text << ", ";
       typedResults.push_back(PlanMemoryValueName(source.results[index]));
@@ -4102,6 +4106,10 @@ private:
     if (hasResult)
       text << " = ";
     if (source.name == "scf.for") {
+      operation.materializedNativeLoopShufflePadding =
+          removedShapedLoopResult && !hasResult &&
+          !HasDictionaryEntry(source.properties, "ExtractedLoadOrStore") &&
+          !HasDictionaryEntry(source.attributes, "ExtractedLoadOrStore");
       std::string inductionVariable = PlanMemoryValueName(-source.id - 1);
       if (!source.regions.empty()) {
         const GenericRegion &region = logical.regions.at(

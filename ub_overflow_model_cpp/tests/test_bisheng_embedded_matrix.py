@@ -7,6 +7,7 @@ import importlib.util
 from collections import Counter
 from pathlib import Path
 import sys
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,8 +23,8 @@ SPEC.loader.exec_module(MODULE)
 rows = MODULE.load_scenarios(
     ROOT / "config/ub_relevant_parameter_scenarios.tsv", set()
 )
-assert len(rows) == 32
-assert len(MODULE.load_known_timeout_pairs(MODULE.DEFAULT_TIMEOUT_PAIRS)) == 66
+assert len(rows) == 35
+assert len(MODULE.load_known_timeout_pairs(MODULE.DEFAULT_TIMEOUT_PAIRS)) == 81
 assert len(MODULE.load_adapters(MODULE.DEFAULT_ADAPTER_ROOT, set(), 0)) == 160
 assert len(MODULE.load_adapters(
     MODULE.DEFAULT_ADAPTER_ROOT,
@@ -93,6 +94,8 @@ assert "--enable-preload=true" in auto_blockify_preload_arguments
 for scenario_id in (
     "cv_workspace_manage_off",
     "cv_workspace_manage_off_auto_mb",
+    "auto_blockify_workspace_manage_off",
+    "auto_blockify_workspace_manage_off_auto_mb",
 ):
     workspace_manage_off = next(
         row for row in rows if row["scenario_id"] == scenario_id
@@ -104,6 +107,34 @@ for scenario_id in (
         workspace_manage_off_arguments
     assert "--disable-auto-cv-work-space-manage=true" in \
         workspace_manage_off_arguments
+for scenario_id in (
+    "auto_blockify_workspace_manage_off",
+    "auto_blockify_workspace_manage_off_auto_mb",
+    "auto_blockify_inject_block_normal",
+):
+    interaction = next(
+        row for row in rows if row["scenario_id"] == scenario_id
+    )
+    interaction_arguments = MODULE.compiler_arguments(interaction)
+    assert "--enable-auto-blockify-loop=true" in interaction_arguments
+    profile = ROOT / "config/pre_cv_profiles" / \
+        f"{interaction['pre_cv_profile']}.args"
+    assert profile.is_file(), profile
+    assert "--enable-auto-blockify-loop=true" in \
+        profile.read_text(encoding="utf-8").splitlines()
+auto_blockify_workspace_auto_mb = next(
+    row for row in rows
+    if row["scenario_id"] ==
+    "auto_blockify_workspace_manage_off_auto_mb"
+)
+assert "--enable-auto-multi-buffer=true" in \
+    MODULE.compiler_arguments(auto_blockify_workspace_auto_mb)
+auto_blockify_inject = next(
+    row for row in rows
+    if row["scenario_id"] == "auto_blockify_inject_block_normal"
+)
+assert "--enable-hivm-cross-core-gss=false" in \
+    MODULE.compiler_arguments(auto_blockify_inject)
 
 model_plan = Counter({(1024, 100): 2, (1024, 200): 1})
 native_plan = Counter({(1024, 100): 1, (1024, 200): 2})
@@ -135,6 +166,61 @@ different_lifetime[("kernel", 1024, 100, 2, 4)] = \
 assert not MODULE.is_equal_extent_identity_permutation(
     model_plan, native_plan, model_lifetimes, different_lifetime,
     model_inplace, native_inplace,
+)
+different_native_target = Counter({
+    (("kernel", 1024, (200,), 0, 3),
+     ("kernel", 1024, (200,), 2, 3)): 1,
+})
+assert MODULE.is_ub_decision_equivalent_ordering(
+    model_plan, native_plan, model_lifetimes, native_lifetimes,
+    model_inplace, different_native_target,
+    Counter({("kernel", 1024, 0, 3, 1): 3}),
+    Counter({("kernel", 1024, 0, 3, 1): 3}),
+)
+assert not MODULE.is_ub_decision_equivalent_ordering(
+    model_plan, native_plan, model_lifetimes, different_lifetime,
+    model_inplace, different_native_target,
+    Counter({("kernel", 1024, 0, 3, 1): 3}),
+    Counter({("kernel", 1024, 0, 4, 1): 3}),
+)
+
+# A single logical buffer inplaced onto a two-stage target has two physical
+# offsets, but it remains one buffer with the same lifetime and multi count.
+multi_target_model_plan = Counter({(1024, 100): 2, (1024, 200): 1})
+multi_target_native_plan = Counter({(1024, 100): 3})
+multi_target_model_lifetimes = Counter({
+    ("kernel", 1024, 100, 0, 1): 2,
+    ("kernel", 1024, 200, 1, 2): 1,
+})
+multi_target_native_lifetimes = Counter({
+    ("kernel", 1024, 100, 0, 1): 2,
+    ("kernel", 1024, 100, 1, 2): 2,
+})
+multi_target_model_inplace = Counter({
+    (("kernel", 1024, (200,), 1, 2),
+     ("kernel", 1024, (300,), 0, 1)): 1,
+})
+multi_target_native_inplace = Counter({
+    (("kernel", 1024, (100, 200), 1, 2),
+     ("kernel", 1024, (100, 200), 0, 1)): 1,
+})
+logical_buffers = Counter({
+    ("kernel", 1024, 0, 1, 2): 1,
+    ("kernel", 1024, 1, 2, 1): 1,
+})
+assert MODULE.is_ub_decision_equivalent_ordering(
+    multi_target_model_plan, multi_target_native_plan,
+    multi_target_model_lifetimes, multi_target_native_lifetimes,
+    multi_target_model_inplace, multi_target_native_inplace,
+    logical_buffers, logical_buffers,
+)
+different_logical_buffers = logical_buffers.copy()
+different_logical_buffers[("kernel", 2048, 1, 2, 1)] = 1
+assert not MODULE.is_ub_decision_equivalent_ordering(
+    multi_target_model_plan, multi_target_native_plan,
+    multi_target_model_lifetimes, multi_target_native_lifetimes,
+    multi_target_model_inplace, multi_target_native_inplace,
+    logical_buffers, different_logical_buffers,
 )
 
 segment = """\
@@ -175,6 +261,31 @@ assert summary["decision_paths"] == \
 assert summary["native_plan_memory_observed"] == "true"
 assert summary["non_overflow_proof_verified"] == "true"
 
+identity = MODULE.cache_identity(
+    rows[0], ROOT / "data/adapter/ascend_tutorial_01-vector-add.ttadapter",
+    13, "native-fingerprint"
+)
+assert len(identity["adapter_sha256"]) == 64
+assert identity["native_oracle_fingerprint"] == "native-fingerprint"
+assert "pipeline_fingerprint" not in identity
+assert "BISHENGIR_UB_MODEL_RESULT" in MODULE.model_projection(segment)
+assert "PLANMEM_PEAK" not in MODULE.model_projection(segment)
+assert "BISHENGIR_UB_MODEL_RESULT" not in MODULE.native_projection(segment)
+assert "PLANMEM_PEAK" in MODULE.native_projection(segment)
+with tempfile.TemporaryDirectory(prefix="embedded-cache-test-") as temporary:
+    path = Path(temporary) / "record.json.gz"
+    MODULE.write_oracle_cache_record(path, identity, [segment], 0)
+    record = MODULE.matching_cache_record(path, identity)
+    assert record is not None
+    synthetic = MODULE.model_projection(segment) + record["native_segments"][0]
+    status, differences, evidence = MODULE.compare_segment(synthetic, 13)
+    assert status == "matched", (differences, evidence)
+    stale = dict(identity)
+    stale["adapter_sha256"] = "changed"
+    assert MODULE.matching_cache_record(path, stale) is None
+    MODULE.write_oracle_cache_record(path, identity, [segment, segment], 0)
+    assert MODULE.replayable_cache_record(path) is None
+
 incorrectly_pruned = segment.replace(
     "decision_path=full_plan_after_non_overflow_upper_bound",
     "decision_path=non_overflow_upper_bound",
@@ -197,6 +308,18 @@ non_ub_failure = segment.replace(
 )
 status, _, evidence = MODULE.compare_segment(non_ub_failure, 13)
 assert status == "unavailable"
+
+# A retry attempt that fails outside the modelled UB scope provides no native
+# evidence about the non-overflow proof.  It must be ignored rather than
+# counted as a false proof when a later comparable attempt verifies it.
+retry_summary = MODULE.summarize_observation(
+    rows[0], Path("sample.ttadapter"), 13,
+    non_ub_failure + segment, 0, False, 0.02,
+)
+assert retry_summary["status"] == "matched"
+assert retry_summary["attempts"] == 2
+assert retry_summary["comparable_attempts"] == 1
+assert retry_summary["non_overflow_proof_verified"] == "true"
 assert "non-UB" in evidence[0]
 
 overflow = segment.replace(
@@ -286,5 +409,20 @@ assert env["BISHENGIR_DUMP_PLAN_MEMORY_ATTEMPTS"] == "1"
 assert env["BISHENGIR_STOP_AFTER_LOCAL_PLAN_MEMORY"] == "1"
 assert "BISHENGIR_STOP_AFTER_UB_OVERFLOW_PREDICTION" not in env
 assert observation["returncode"] == 0
+
+captured.clear()
+try:
+    MODULE.subprocess.run = fake_run
+    MODULE.execute_compiler(
+        Path("/compiler"), Path("/input.ttadapter"), rows[0], 7, 10,
+        stop_after_prediction=True,
+    )
+finally:
+    MODULE.subprocess.run = original_run
+env = captured["env"]
+assert isinstance(env, dict)
+assert env["BISHENGIR_STOP_AFTER_UB_OVERFLOW_PREDICTION"] == "1"
+assert "BISHENGIR_DUMP_PLAN_MEMORY_ATTEMPTS" not in env
+assert "BISHENGIR_STOP_AFTER_LOCAL_PLAN_MEMORY" not in env
 
 print("[PASS] same-process BiSheng validation parser")

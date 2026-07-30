@@ -77,6 +77,11 @@ struct OperationRecord {
   std::vector<std::string> materializedTemporaryTypes;
   bool materializedControlFlow = false;
   std::string materializedForInduction;
+  // OneShotBufferize can canonicalize every shaped scf.for iter-result into
+  // its init buffer.  Native MLIR still has one non-buffer transition value
+  // in liveness at that loop boundary; the lightweight buffer program omits
+  // it, but PlanMemory must account for it when advancing the seeded shuffle.
+  bool materializedNativeLoopShufflePadding = false;
   std::vector<std::pair<std::string, std::string>> materializedIterArgPairs;
   std::vector<std::pair<std::string, std::string>>
       materializedWhileInitArgPairs;

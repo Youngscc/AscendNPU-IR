@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ub_overflow_model_cpp/scripts"))
 
 from plan_memory_contract import (  # noqa: E402
+    logical_buffers_from_model,
+    logical_buffers_from_oracle,
     model_multi_and_inplace,
     normalized_lifetimes_from_model,
     parse_oracle,
@@ -88,6 +90,10 @@ assert plan_multiset_from_model(wrapped_report) == collections.Counter({
     (32768, 4096): 1,
 })
 assert len(normalized_lifetimes_from_model(wrapped_report)) == 2
+assert logical_buffers_from_model(wrapped_report) == collections.Counter({
+    ("kernel", 32768, 0, 1, 1): 1,
+    ("kernel", 32768, 1, 2, 1): 1,
+})
 model_multi, model_inplace = model_multi_and_inplace(wrapped_report)
 assert model_multi == collections.Counter({1: 2})
 assert sum(model_inplace.values()) == 1
@@ -118,6 +124,8 @@ assert oracle_multi == model_multi
 assert oracle_inplace == model_inplace
 assert oracle_plan == plan_multiset_from_model(wrapped_report)
 assert oracle_lifetimes == normalized_lifetimes_from_model(wrapped_report)
+assert logical_buffers_from_oracle(oracle, 0, "6") == \
+    logical_buffers_from_model(wrapped_report)
 
 # Split MIX functions reuse local semantic buffer IDs.  An AIC/L1 multi mark
 # must not be joined to an AIV/UB buffer with the same ID.

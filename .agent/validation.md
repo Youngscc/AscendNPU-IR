@@ -1,6 +1,6 @@
 # 当前验证与性能基线
 
-最后核实：2026-07-30，产品 commit `7afe56bab`。
+最后核实：2026-07-30，本轮验证起点 `50475b2152`。
 
 before-AutoBlockify 产品边界及其全量正确性、同边界 full-plan 性能均已完成验证。2026-07-29 的
 before-CVPipelining 数据只保留为历史基线，不能与新边界倍率混用。
@@ -21,11 +21,15 @@ before-CVPipelining 数据只保留为历史基线，不能与新边界倍率混
 
 ```bash
 .venv/bin/python3 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py \
-  --seeds 0-19 --jobs 12
+  --seeds 0-19 --jobs 12 \
+  --oracle-cache-dir \
+    ub_overflow_model_cpp/output/oracle_cache/bisheng_native_35x160x20
 ```
 
-每个 seed 必须独立启动真实 compiler。不得用缓存替代本次原生 PlanMemory，也不得把同进程
-连续运行 20 seeds 当作独立生产 attempt。
+每个 seed 必须独立启动真实 compiler。允许使用由相同 adapter 内容、完整参数和原生源码
+fingerprint 标识的 PlanMemory 缓存，但当前模型必须现场执行；缓存未命中、过期、多-attempt 或
+比较不一致时必须运行同进程原生 PlanMemory。不得把同进程连续运行 20 seeds 当作独立生产
+attempt。
 
 ## 2. before-AutoBlockify 扩展的逐 pass oracle
 
@@ -466,12 +470,13 @@ four ExtendedCanonicalizer stages                55.181 s
 
 ## 9. 每个优化批次的验证门槛
 
-2026-07-30 起，默认参数矩阵新增 4 个非笛卡尔积交互场景：`auto_blockify_preload`、
-`auto_blockify_auto_mb`、`auto_blockify_auto_mb_local_only` 和
-`auto_blockify_auto_mb_unrestricted`。当前矩阵共 32 组，全部是有效配置；下一次全量正确性
-理论规模为 `160×32×20=102400`，三轮 full-plan 性能规模为
-`160×32×3=15360`。上文 26 配置结果仍是扩展前已经完成的历史现场基线，不能改写为 32 配置
-已经全量通过。
+2026-07-30 当前参数矩阵共 35 个有意义的非笛卡尔积场景。全量正确性理论规模为
+`160×35×20=112000`；81 个已审核 native-ineligible config/input pair 对应 1620 attempts，实际
+比较 110380 项。结果为 110183 matched、66 identity permutation、131 ordering equivalent，
+0 different/unavailable/timeout。validation 中 100740 个提前 non-overflow 证明全部由可比较的
+原生 PlanMemory 验证为真。报告和缓存分别位于
+`output/validation/embedded_160x35x20_final.tsv` 与
+`output/oracle_cache/bisheng_native_35x160x20`，均为本地生成物，不提交。
 
 2026-07-30 修正了 prediction 对 workspace manager 开关的错误 gate：
 `cv_workspace_manage_off` 与 `cv_workspace_manage_off_auto_mb` 现在仍插入轻量模型，并把
@@ -504,7 +509,7 @@ identity permutation / different / unavailable / timeout  0 / 0 / 0 / 0
 
 ## 10. 禁止的验证捷径
 
-- 用缓存替代当前 embedded 原生 PlanMemory；
+- 使用 provenance 不完整、过期、不可回放或没有当前模型现场探针的缓存；
 - 减少 seed 或配置来宣布完整正确性；
 - 把 mismatch 改成 blocker/incomplete；
 - 只比较 peak/overflow，忽略 fixed-seed plan/lifetime/multi/inplace；

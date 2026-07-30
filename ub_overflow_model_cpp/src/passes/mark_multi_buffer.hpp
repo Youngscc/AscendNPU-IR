@@ -180,38 +180,25 @@ inline bool MarkMultiBufferOperationWasErased(
              .preBufferizationCSE.erasedOperations.count(operationId) != 0;
 }
 
-inline std::optional<std::string> MarkMultiBufferReplacementName(
-    const AfterInlineLoadCopyState &afterInlineLoadCopy, int operationId) {
-  for (const InlineLoadCopyRewrite &rewrite :
-       afterInlineLoadCopy.inlineLoadCopy.rewrites) {
-    if (rewrite.loadOperation == operationId)
-      return std::string{};
-    if (rewrite.copyOperation == operationId)
-      return std::string{"hivm.hir.load"};
-  }
-  for (const OperationRewriteDelta &rewrite :
-       afterInlineLoadCopy.afterAllocExtraBuffer.postBufferization
-           .operationRewrites) {
-    if (rewrite.sourceOperation != operationId)
-      continue;
-    for (const GeneratedOperationRewrite &generated : rewrite.replacement)
-      if (generated.name == "hivm.hir.load" ||
-          generated.name == "hivm.hir.store" ||
-          generated.name == "hivm.hir.nd2nz" ||
-          generated.name == "hivm.hir.fixpipe")
-        return generated.name;
-    return std::string{};
-  }
-  return std::nullopt;
+struct FinalMultiBufferOperation {
+  std::string name;
+  std::vector<std::pair<std::string, std::string>> buffers;
+};
+
+inline bool IsMultiBufferCopyOperation(const std::string &name) {
+  return name == "hivm.hir.load" || name == "hivm.hir.store" ||
+         name == "hivm.hir.nd2nz" || name == "hivm.hir.fixpipe";
 }
 
-inline std::vector<std::pair<std::string, std::string>>
-FinalOperationBuffers(const AfterInlineLoadCopyState &afterInlineLoadCopy,
-                        const GenericOperation &operation) {
+inline std::vector<FinalMultiBufferOperation>
+FinalMultiBufferOperations(
+    const AfterInlineLoadCopyState &afterInlineLoadCopy,
+    const GenericOperation &operation) {
   for (const InlineLoadCopyRewrite &rewrite : afterInlineLoadCopy.inlineLoadCopy.rewrites) {
     if (rewrite.copyOperation == operation.id)
-      return {{rewrite.loadSource, "source"},
-              {rewrite.copyDestination, "destination"}};
+      return {{"hivm.hir.load",
+               {{rewrite.loadSource, "source"},
+                {rewrite.copyDestination, "destination"}}}};
   }
   if (afterInlineLoadCopy.inlineLoadCopy.erasedOperations.count(operation.id) != 0)
     return {};
@@ -219,18 +206,19 @@ FinalOperationBuffers(const AfterInlineLoadCopyState &afterInlineLoadCopy,
   for (const OperationRewriteDelta &rewrite : postBufferization.operationRewrites) {
     if (rewrite.sourceOperation != operation.id)
       continue;
-    std::vector<std::pair<std::string, std::string>> result;
+    std::vector<FinalMultiBufferOperation> result;
     for (const GeneratedOperationRewrite &generated : rewrite.replacement) {
-      if (generated.name != "hivm.hir.load" &&
-          generated.name != "hivm.hir.store" &&
-          generated.name != "hivm.hir.nd2nz" &&
-          generated.name != "hivm.hir.fixpipe")
+      if (!IsMultiBufferCopyOperation(generated.name))
         continue;
+      FinalMultiBufferOperation projected;
+      projected.name = generated.name;
       for (size_t index = 0; index < generated.buffers.size(); ++index)
-        result.push_back({MappedBufferIdentity(
-                              generated.buffers[index],
-                              postBufferization.singlePoint.bufferMapping),
-                          index == 0 ? "source" : "destination"});
+        projected.buffers.push_back(
+            {MappedBufferIdentity(
+                 generated.buffers[index],
+                 postBufferization.singlePoint.bufferMapping),
+             index == 0 ? "source" : "destination"});
+      result.push_back(std::move(projected));
     }
     return result;
   }
@@ -243,18 +231,19 @@ FinalOperationBuffers(const AfterInlineLoadCopyState &afterInlineLoadCopy,
     if (std::find(inits.begin(), inits.end(), index) == inits.end() &&
         buffers.count(index) != 0)
       inputs.push_back(index);
-  std::vector<std::pair<std::string, std::string>> result;
+  FinalMultiBufferOperation result;
+  result.name = operation.name;
   if (!inputs.empty()) {
     auto found = buffers.find(inputs.front());
     if (found != buffers.end())
-      result.push_back({found->second, "source"});
+      result.buffers.push_back({found->second, "source"});
   }
   if (!inits.empty()) {
     auto found = buffers.find(inits.front());
     if (found != buffers.end())
-      result.push_back({found->second, "destination"});
+      result.buffers.push_back({found->second, "destination"});
   }
-  return result;
+  return {std::move(result)};
 }
 
 inline MarkMultiBufferResult ModelMarkMultiBuffer(
@@ -453,92 +442,98 @@ inline MarkMultiBufferResult ModelMarkMultiBuffer(
       continue;
     }
 
-    const std::optional<std::string> replacementName =
-        MarkMultiBufferReplacementName(afterInlineLoadCopy, operation.id);
-    if (replacementName && replacementName->empty())
-      continue;
-    std::string finalName = replacementName ? *replacementName : operation.name;
-    if (finalName != "hivm.hir.nd2nz" && finalName != "hivm.hir.fixpipe" &&
-        finalName != "hivm.hir.load" && finalName != "hivm.hir.store")
-      continue;
+    for (const FinalMultiBufferOperation &projected :
+         FinalMultiBufferOperations(afterInlineLoadCopy, operation)) {
+      std::string finalName = projected.name;
+      if (!IsMultiBufferCopyOperation(finalName))
+        continue;
 
-    const std::vector<std::pair<std::string, std::string>> operands =
-        FinalOperationBuffers(afterInlineLoadCopy, operation);
-    const LocalBufferRecord *source = nullptr;
-    const LocalBufferRecord *destination = nullptr;
-    AddressSpace sourceAddressSpace = AddressSpace::Unknown;
-    AddressSpace destinationAddressSpace = AddressSpace::Unknown;
-    bool hasOperandWithoutMemorySpace = false;
-    for (const auto &[identity, role] : operands) {
-      const LocalBufferRecord *buffer = FindLocalBuffer(afterInlineLoadCopy, identity);
-      const std::optional<AddressSpace> addressSpace =
-          MarkMultiBufferAddressSpace(afterInlineLoadCopy, identity);
-      if (!addressSpace)
-        MarkMultiBufferExactBlocker(
-            operation, "buffer operand address space is unresolved: " + identity);
-      // MarkMultiBuffer::matchAndRewrite returns failure when either memref has
-      // no memory-space attribute. AddressSpace::Unknown represents that
-      // modeled no-match; a missing binding above remains an exact blocker.
-      if (*addressSpace == AddressSpace::Unknown)
-        hasOperandWithoutMemorySpace = true;
-      if (role == "source" && sourceAddressSpace == AddressSpace::Unknown) {
-        source = buffer;
-        sourceAddressSpace = *addressSpace;
+      const LocalBufferRecord *source = nullptr;
+      const LocalBufferRecord *destination = nullptr;
+      AddressSpace sourceAddressSpace = AddressSpace::Unknown;
+      AddressSpace destinationAddressSpace = AddressSpace::Unknown;
+      bool hasOperandWithoutMemorySpace = false;
+      for (const auto &[identity, role] : projected.buffers) {
+        const LocalBufferRecord *buffer =
+            FindLocalBuffer(afterInlineLoadCopy, identity);
+        const std::optional<AddressSpace> addressSpace =
+            MarkMultiBufferAddressSpace(afterInlineLoadCopy, identity);
+        if (!addressSpace)
+          MarkMultiBufferExactBlocker(
+              operation,
+              "buffer operand address space is unresolved: " + identity);
+        // MarkMultiBuffer::matchAndRewrite returns failure when either memref
+        // has no memory-space attribute. AddressSpace::Unknown represents
+        // that modeled no-match; a missing binding above remains an exact
+        // blocker.
+        if (*addressSpace == AddressSpace::Unknown)
+          hasOperandWithoutMemorySpace = true;
+        if (role == "source" &&
+            sourceAddressSpace == AddressSpace::Unknown) {
+          source = buffer;
+          sourceAddressSpace = *addressSpace;
+        }
+        if (role == "destination" &&
+            destinationAddressSpace == AddressSpace::Unknown) {
+          destination = buffer;
+          destinationAddressSpace = *addressSpace;
+        }
       }
-      if (role == "destination" &&
-          destinationAddressSpace == AddressSpace::Unknown) {
-        destination = buffer;
-        destinationAddressSpace = *addressSpace;
+      if (hasOperandWithoutMemorySpace)
+        continue;
+      // InferHIVMDataLayout folds an ND-to-NZ load into ND2NZ when the target
+      // buffer has been inferred as L1. MarkMultiBuffer observes that folded
+      // operation.
+      if (options.inferHIVMDataLayout && finalName == "hivm.hir.load" &&
+          destinationAddressSpace == AddressSpace::L1)
+        finalName = "hivm.hir.nd2nz";
+
+      const bool mix = IsMixFunction(*function);
+      bool enabledPattern = false;
+      if (finalName == "hivm.hir.nd2nz" ||
+          finalName == "hivm.hir.fixpipe") {
+        enabledPattern = !mix ||
+                         options.limitMixAutoMultiBufferBuffer !=
+                             MultiBufferStrategy::OnlyVector;
+        if (finalName == "hivm.hir.fixpipe" &&
+            options.limitAutoMultiBufferOfLocalBuffer ==
+                MultiBufferStrategy::CubeNoL0C)
+          enabledPattern = false;
+      } else if (finalName == "hivm.hir.load" ||
+                 finalName == "hivm.hir.store") {
+        enabledPattern = !mix ||
+                         options.limitMixAutoMultiBufferBuffer !=
+                             MultiBufferStrategy::OnlyCube;
       }
-    }
-    if (hasOperandWithoutMemorySpace)
-      continue;
-    // InferHIVMDataLayout folds an ND-to-NZ load into ND2NZ when the target
-    // buffer has been inferred as L1. MarkMultiBuffer observes that folded op.
-    if (options.inferHIVMDataLayout && finalName == "hivm.hir.load" &&
-        destinationAddressSpace == AddressSpace::L1)
-      finalName = "hivm.hir.nd2nz";
+      if (!enabledPattern)
+        continue;
 
-    const bool mix = IsMixFunction(*function);
-    bool enabledPattern = false;
-    if (finalName == "hivm.hir.nd2nz" ||
-        finalName == "hivm.hir.fixpipe") {
-      enabledPattern = !mix ||
-                       options.limitMixAutoMultiBufferBuffer !=
-                           MultiBufferStrategy::OnlyVector;
-      if (finalName == "hivm.hir.fixpipe" &&
-          options.limitAutoMultiBufferOfLocalBuffer ==
-              MultiBufferStrategy::CubeNoL0C)
-        enabledPattern = false;
-    } else if (finalName == "hivm.hir.load" ||
-               finalName == "hivm.hir.store") {
-      enabledPattern = !mix ||
-                       options.limitMixAutoMultiBufferBuffer !=
-                           MultiBufferStrategy::OnlyCube;
-    }
-    if (!enabledPattern)
-      continue;
-
-    if (operands.empty() &&
-        !MarkMultiBufferOperationWasErased(afterInlineLoadCopy, operation.id))
-      MarkMultiBufferExactBlocker(
-          operation, "enabled auto multi-buffer pattern has no modeled "
-                     "source/destination buffers");
-
-    const LocalBufferRecord *candidate =
-        source && source->addressSpace != AddressSpace::GM ? source
-        : destination && destination->addressSpace != AddressSpace::GM
-            ? destination
-            : nullptr;
-    if (candidate) {
-      const std::optional<bool> properParentLoop =
-          HasProperParentLoop(afterInlineLoadCopy, *candidate);
-      if (!properParentLoop)
+      if (projected.buffers.empty() &&
+          !MarkMultiBufferOperationWasErased(afterInlineLoadCopy,
+                                             operation.id))
         MarkMultiBufferExactBlocker(
-            operation, "candidate allocation owner is unresolved: " +
-                           candidate->sourceIdentity);
-      if (*properParentLoop)
-        mark(*function, *candidate, 2, false, operation);
+            operation, "enabled auto multi-buffer pattern has no modeled "
+                       "source/destination buffers");
+
+      const LocalBufferRecord *candidate =
+          source && source->addressSpace != AddressSpace::GM
+              ? source
+              : destination && destination->addressSpace != AddressSpace::GM
+                    ? destination
+                    : nullptr;
+      if (candidate) {
+        const std::optional<bool> properParentLoop =
+            HasProperParentLoop(afterInlineLoadCopy, *candidate);
+        if (!properParentLoop)
+          MarkMultiBufferExactBlocker(
+              operation, "candidate allocation owner is unresolved: " +
+                             candidate->sourceIdentity);
+        if (*properParentLoop) {
+          GenericOperation trigger = operation;
+          trigger.name = finalName;
+          mark(*function, *candidate, 2, false, trigger);
+        }
+      }
     }
   }
   return result;

@@ -511,6 +511,12 @@ before-AutoBlockify contract v2，在模型内运行完整 pre-CV prefix。valid
 后，81880 项报告为 81789 matched、31 identity permutation、60 个既有原生 SIGABRT、0
 different、0 timeout。31 项 identity permutation 均通过完整图分类，不计作普通 matched。
 
+扩展场景后的最新全量验证（2026-07-30）：35 configs × 160 inputs × 20 seeds 理论为 112000；
+排除 81 个无法取得原生 oracle 的 config/input pair 后实际比较 110380 项，结果为 110183
+matched、66 identity permutation、131 ordering equivalent、0 different/unavailable/timeout。
+100740 个提前 non-overflow 信号均继续到原生 PlanMemory 并验证为真。严格 provenance 的 gzip
+oracle cache 已保留；单-attempt 记录可回放，多-attempt fallback 记录继续现场确认。
+
 ### 验证顺序
 
 1. 单 pass fixture；

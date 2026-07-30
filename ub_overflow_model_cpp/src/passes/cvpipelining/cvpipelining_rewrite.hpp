@@ -419,6 +419,7 @@ public:
     std::map<int, int> outerResultValues;
     std::map<int, int> expandedProducedValues;
     std::map<int, int> expandedWorkspaceTensors;
+    std::vector<int> workItemLoops;
     for (size_t itemIndex = 0; itemIndex < analysis.worklist.size();
          ++itemIndex) {
       const CVPipelineWorkItem &item = analysis.worklist[itemIndex];
@@ -457,19 +458,30 @@ public:
               expandedProducedValues[oldTensor] = expandedTensor;
       }
       try {
+        int workItemLoop = -1;
         if (!rewriteWorkItem(
                 item, oldLoop, oldBody, newLoop,
                 outerRegion, outerBlock, result(indexZero), result(actualUpper),
                 result(indexOne), originalStep, outerIV, globalValues,
                 expandedLocalOutputs, workspaceAllocations, workspaceTypes,
                 expandedWorkspaceTensors,
-                expandedProducedValues, outerResultValues))
+                expandedProducedValues, outerResultValues, workItemLoop))
           return false;
+        workItemLoops.push_back(workItemLoop);
       } catch (const std::out_of_range &) {
         throw std::runtime_error("CVPipelining: unmapped value in work item " +
                                  std::to_string(itemIndex));
       }
     }
+
+    // BiSheng clones every work-item operation before it rewrites local and
+    // workspace output users.  The compact model constructs one work item at
+    // a time, so a consumer that is cloned before its producer can still
+    // reference the original value.  Repair exactly those cloned work-item
+    // uses after every expanded output is known, matching migrateOps()'s
+    // second phase instead of broadening replacement to the old pipeline
+    // loop or to unrelated generated operations.
+    repairCrossWorkItemOutputUsers(workItemLoops, expandedProducedValues);
 
     if (!analysis.trailingAtomicEffect.empty())
       createSetAtomic(newLoop, outerRegion, outerBlock,
@@ -806,7 +818,7 @@ private:
       const std::map<int, std::string> &workspaceTypes,
       const std::map<int, int> &expandedWorkspaceTensors,
       std::map<int, int> &expandedProducedValues,
-      std::map<int, int> &outerResultValues) {
+      std::map<int, int> &outerResultValues, int &createdWorkItemLoop) {
     std::vector<int> inits;
     std::vector<std::string> initTypes;
     for (const auto &[value, ordinal] : item.yieldedOutputs) {
@@ -841,6 +853,7 @@ private:
     const int loop = createInBlock(outerLoop, outerRegion, outerBlock,
                                    "scf.for", initTypes, operands,
                                    operandTypes, attributes);
+    createdWorkItemLoop = loop;
     const int region = rewriter.createRegion(loop);
     std::vector<std::string> argumentTypes = {"index"};
     argumentTypes.insert(argumentTypes.end(), initTypes.begin(), initTypes.end());
@@ -1081,6 +1094,77 @@ private:
     for (const auto &[source, replacement] : outerResultValues)
       globalValues[source] = replacement;
     return true;
+  }
+
+  void repairCrossWorkItemOutputUsers(
+      const std::vector<int> &workItemLoops,
+      const std::map<int, int> &expandedProducedValues) {
+    struct PendingUse {
+      int operation = -1;
+      size_t operand = 0;
+      int original = -1;
+      int expanded = -1;
+      int workItemLoop = -1;
+    };
+
+    const std::set<int> loopSet(workItemLoops.begin(), workItemLoops.end());
+    std::vector<PendingUse> pending;
+    const size_t operationCount = module.operations.size();
+    for (size_t operationIndex = 0; operationIndex < operationCount;
+         ++operationIndex) {
+      const GenericOperation &operation = module.operations[operationIndex];
+      int ownerLoop = operation.parentId;
+      while (ownerLoop >= 0 && loopSet.count(ownerLoop) == 0)
+        ownerLoop = module.operations.at(static_cast<size_t>(ownerLoop)).parentId;
+      if (ownerLoop < 0)
+        continue;
+      for (size_t operandIndex = 0;
+           operandIndex < operation.operands.size(); ++operandIndex) {
+        const int original = operation.operands[operandIndex];
+        const auto expanded = expandedProducedValues.find(original);
+        if (expanded == expandedProducedValues.end() ||
+            !CVPipelineIsTensorType(valueType(original, "output user")))
+          continue;
+        pending.push_back({operation.id, operandIndex, original,
+                           expanded->second, ownerLoop});
+      }
+    }
+
+    for (const PendingUse &use : pending) {
+      GenericOperation &owner =
+          module.operations.at(static_cast<size_t>(use.operation));
+      if (use.operand >= owner.operands.size() ||
+          owner.operands[use.operand] != use.original)
+        continue;
+      const GenericOperation &loop =
+          module.operations.at(static_cast<size_t>(use.workItemLoop));
+      const GenericRegion &region =
+          module.regions.at(static_cast<size_t>(loop.regions.front()));
+      const GenericBlock &body =
+          module.blocks.at(static_cast<size_t>(region.blocks.front()));
+      const int slice = createTensorExtract(
+          owner.parentId, owner.regionId, owner.blockId, use.expanded,
+          valueType(use.original, "output user"), body.arguments.front());
+      const int sliceResult = result(slice);
+
+      // createTensorExtract appends by default; OpBuilder in BiSheng inserts
+      // immediately before the user.  Restore that order so dominance and
+      // later canonicalization see the same IR shape.
+      GenericBlock &ownerBlock =
+          module.blocks.at(static_cast<size_t>(owner.blockId));
+      rewriter.removeFromBlock(owner.blockId, slice);
+      const auto ownerPosition =
+          std::find(ownerBlock.operations.begin(), ownerBlock.operations.end(),
+                    use.operation);
+      rewriter.insertToBlock(
+          owner.blockId,
+          static_cast<size_t>(std::distance(ownerBlock.operations.begin(),
+                                            ownerPosition)),
+          slice);
+      rewriter.replaceOperand(use.operation, use.operand, sliceResult);
+      ApplyOperationSemantics(
+          module.operations.at(static_cast<size_t>(use.operation)));
+    }
   }
 
   GenericModule &module;

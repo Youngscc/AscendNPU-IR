@@ -1001,6 +1001,13 @@ buildMemLivenessAnalysis(const PlanMemoryInput &input,
     if (orderedLive.empty())
       return result;
     shuffledLiveValues.assign(orderedLive.begin(), orderedLive.end());
+    // When OneShotBufferize canonicalizes every shaped iter-result into its
+    // init buffer, native MLIR liveness retains one non-buffer transition SSA
+    // at the now-resultless loop boundary.  The buffer-only program omits it;
+    // preserve only its shuffle effect.  A loop that was originally
+    // resultless has no such value and therefore must not receive padding.
+    if (op.materializedNativeLoopShufflePadding)
+      shuffledLiveValues.push_back("%native_bufferized_induction_cast");
     std::shuffle(shuffledLiveValues.begin(), shuffledLiveValues.end(),
                  randomGenerator);
     if (debugShuffle) {

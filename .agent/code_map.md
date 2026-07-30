@@ -358,7 +358,7 @@ MarkRealCoreType 或后 bufferization 全流水。全局 `UBBufferProgram/PlanPr
 ub_overflow_model_cpp/data/adapter/                  真实 compiler 起点
 ub_overflow_model_cpp/data/before_cvpipelining/      160 个去重性能/开发输入
 ub_overflow_model_cpp/config/ub_relevant_parameter_scenarios.tsv
-                                                      32 个场景，32 个有效测量场景
+                                                      35 个有效正确性场景
 ub_overflow_model_cpp/config/known_timeout_pairs.tsv  已知原生长尾
 ub_overflow_model_cpp/config/failure_taxonomy.tsv     稳定失败分类
 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py
@@ -385,8 +385,10 @@ ub_overflow_model_cpp/include/ub_overflow_model/api.hpp  evaluateModule 同步 A
 model 与原生 PlanMemory。`data/before_cvpipelining` 适合 standalone 性能分析，不替代
 embedded 正确性 oracle。
 
-`run_bisheng_embedded_matrix.py` 不读取原生结果缓存：每个选中的 seed 都从 adapter 启动真实
-编译，在模型之后继续到原生本地 PlanMemory，再比较完整合同。
+`run_bisheng_embedded_matrix.py` 支持带严格 provenance 的 read-through 原生结果缓存。缓存身份
+包括 adapter 内容、完整 compiler 参数和排除模型目录后的原生源码 fingerprint；每次仍从 adapter
+启动真实编译并运行当前模型探针，缓存只替代已经验证过的原生 PlanMemory 后半段。缓存缺失、
+过期、多-attempt 或比较不一致时自动回到同进程原生 pipeline，并原子写入 gzip 记录。
 
 ## 常用命令
 

@@ -12,6 +12,7 @@ from typing import Counter, Union
 
 PlanKey = tuple[int, int]
 LifetimeKey = tuple[str, int, int, int, int]
+LogicalBufferKey = tuple[str, int, int, int, int]
 BufferIdentity = tuple[str, int, tuple[int, ...], int, int]
 InplaceKey = tuple[BufferIdentity, BufferIdentity]
 OracleSource = Union[Path, str]
@@ -79,6 +80,87 @@ def model_multi_and_inplace(
                 raise ValueError(f"model inplace pair references unknown buffer: {pair!r}")
             inplace[(identity_by_name[first], identity_by_name[second])] += 1
     return multi, inplace
+
+
+def logical_buffers_from_model(payload: dict) -> Counter[LogicalBufferKey]:
+    """Return one normalized record per logical planned model buffer.
+
+    Unlike the physical plan/lifetime contracts, this projection deliberately
+    does not duplicate a multi-buffer allocation once per planned offset.
+    """
+    payload = model_result_payload(payload)
+    result: Counter[LogicalBufferKey] = collections.Counter()
+    for function in payload.get("functions", []):
+        function_name = canonical_function_name(
+            str(function.get("function", ""))
+        )
+        buffers = function.get("buffers", [])
+        event_times = sorted({
+            int(buffer[key])
+            for buffer in buffers
+            for key in ("alloc_time", "free_time")
+        })
+        ranks = {time: rank for rank, time in enumerate(event_times)}
+        for buffer in buffers:
+            result[(
+                function_name,
+                int(buffer["extent_bits"]),
+                ranks[int(buffer["alloc_time"])],
+                ranks[int(buffer["free_time"])],
+                int(buffer.get("multi_buffer_num", 1)),
+            )] += 1
+    return result
+
+
+def logical_buffers_from_oracle(
+    source: OracleSource, attempt: int, scope: str,
+) -> Counter[LogicalBufferKey]:
+    """Return one normalized record per logical native planned buffer."""
+    current_function = ""
+    buffer_lives: dict[tuple[str, str], tuple[int, int, int]] = {}
+    planned_buffers: set[tuple[str, str]] = set()
+    multi_by_buffer: dict[tuple[str, str], int] = {}
+    for raw_line in oracle_lines(source):
+        fields = raw_line.split("\t")
+        if not fields:
+            continue
+        if fields[0] in {"PLANMEM_LIVENESS_ATTEMPT",
+                         "PLANMEM_PLAN_ATTEMPT"} and len(fields) >= 4:
+            current_function = fields[1]
+        elif (fields[0] == "PLANMEM_EXACT_BUFFER" and len(fields) >= 8 and
+              int(fields[1]) == attempt and fields[4] == scope):
+            buffer_lives[(current_function, fields[2])] = (
+                int(fields[3]), int(fields[6]), int(fields[7]))
+        elif (fields[0] == "PLANMEM_EXACT_PLANNED_BUFFER" and
+              len(fields) >= 6 and int(fields[1]) == attempt and
+              fields[2] == scope):
+            planned_buffers.add((current_function, fields[3]))
+        elif (fields[0] == "PLANMEM_EXACT_MULTI" and len(fields) >= 4 and
+              int(fields[1]) == attempt):
+            multi_by_buffer[(current_function, fields[2])] = int(fields[3])
+
+    result: Counter[LogicalBufferKey] = collections.Counter()
+    for function in {key[0] for key in planned_buffers}:
+        function_buffers = {
+            key: buffer_lives[key]
+            for key in planned_buffers
+            if key[0] == function and key in buffer_lives
+        }
+        event_times = sorted({
+            time
+            for _, allocate, release in function_buffers.values()
+            for time in (allocate, release)
+        })
+        ranks = {time: rank for rank, time in enumerate(event_times)}
+        for key, (extent, allocate, release) in function_buffers.items():
+            result[(
+                canonical_function_name(function),
+                extent,
+                ranks[allocate],
+                ranks[release],
+                multi_by_buffer.get(key, 1),
+            )] += 1
+    return result
 
 
 def parse_oracle_contract(
