@@ -25,15 +25,14 @@ bishengir/lib/Tools/RetriablePassManager/RetriablePassManager.cpp
 bishengir/include/bishengir/Tools/RetriablePassManager/UbOverflowRetryPolicy.h
 ```
 
-当前生产边界由 `UBOverflowPrediction.cpp` 同步调用 `evaluateModule(ModuleOp, Request)`。这是
-提交 `1dfddd59` 的源码事实，但不再作为继续 MLIR-backed 基础设施迁移的方向。新的依赖目标是：
+当前生产边界位于原生 AutoBlockify 前，由 `UBOverflowPrediction.cpp` 同步调用
+`evaluateModule(ModuleOp, Request)`，使用 before-AutoBlockify contract v2。新的依赖目标是：
 BiSheng adapter 可以读取 `ModuleOp`，轻量模型 core 只接收项目自有输入。当前
 `MLIRModuleView::materializeLegacyGenericModule()` 暂时保留为兼容边界，不继续向更多 pass
 传播 MLIR 类型；core/adapter 拆分排在现有热点优化之后。
 
-下一产品边界位于 `HIVMPipelines.cpp` 的 `createAutoBlockifyParallelLoopPass()` 之前。典型
-Triton adapter 到该位置已经由原生 BiSheng 执行约 61 次 pass；模型不复刻这段前缀。切换前
-先使用默认关闭的测试 hook observe-only，当前 before-CV 产品入口继续保留。
+该位置之前典型 Triton adapter 已由原生 BiSheng 执行约 61 次 pass；模型不复刻这段前缀。
+产品源码允许 Exact overflow 剪枝；正确性脚本显式关闭剪枝并继续真实 PlanMemory。
 
 ## before-AutoBlockify 到 CV 的原生序列
 
@@ -123,10 +122,10 @@ AutoBlockify/MarkMultiBuffer 的 resolved options。`pre_cv_prefix_model_runner`
 
 `bishengir/lib/Dialect/HIVM/Pipelines/HIVMPipelines.cpp`
 
-阶段 7 的 embedded 调用点现位于 checkpoint 00 后、原生 AutoBlockify 前。它与后续真实
-CVPipelining 共用同一 resolved options，并在全量验证期间强制 `pruneOnOverflow=false`；完成
-全量 gate 后才允许删除该覆盖。`UBOverflowPrediction.cpp` 构造 before-AutoBlockify contract v2
-并将相同 ModuleOp 交给模型。
+阶段 7 的 embedded 调用点位于 checkpoint 00 后、原生 AutoBlockify 前。它与后续真实
+CVPipelining 共用同一 resolved options；`UBOverflowPrediction.cpp` 构造 before-AutoBlockify
+contract v2 并将相同 ModuleOp 交给模型。源码中的 observe-only 强制覆盖已经删除；
+`run_bisheng_embedded_matrix.py` 通过编译参数显式 `prune=false` 完成同 attempt 校验。
 
 现有可复用模型代码：
 
@@ -359,12 +358,14 @@ MarkRealCoreType 或后 bufferization 全流水。全局 `UBBufferProgram/PlanPr
 ub_overflow_model_cpp/data/adapter/                  真实 compiler 起点
 ub_overflow_model_cpp/data/before_cvpipelining/      160 个去重性能/开发输入
 ub_overflow_model_cpp/config/ub_relevant_parameter_scenarios.tsv
-                                                      27 个有意义场景
+                                                      28 个场景，26 个有效测量场景
 ub_overflow_model_cpp/config/known_timeout_pairs.tsv  已知原生长尾
 ub_overflow_model_cpp/config/failure_taxonomy.tsv     稳定失败分类
 ub_overflow_model_cpp/scripts/run_bisheng_embedded_matrix.py
 ub_overflow_model_cpp/scripts/plan_memory_contract.py  两侧 PlanMemory 合同解析
 ub_overflow_model_cpp/scripts/measure_embedded_model.py  production 单轮 A/B 与 RSS
+ub_overflow_model_cpp/scripts/measure_before_auto_boundary.py
+                                                      新同边界 full-plan A/B 与 stage 分解
 ub_overflow_model_cpp/tests/test_bisheng_embedded_matrix.py
 ub_overflow_model_cpp/tests/run_tests.sh
 ```

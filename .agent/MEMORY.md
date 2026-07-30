@@ -1,24 +1,26 @@
 # AscendNPU-IR 项目记忆
 
-最后核实：2026-07-30，分支 `codex/ub-overflow-model-product`，基线提交
-`1dfddd59f3f9835e4f51fd50f79aa75454b02e27`。本文件是 `.agent` 的唯一入口；源码或新测量与
+最后核实：2026-07-30，分支 `codex/ub-overflow-model-product`，当前产品提交
+`8ebd4f1203f1c2d751721be576b90eb9e00500f2`。本文件是 `.agent` 的唯一入口；源码或新测量与
 本文冲突时，应先现场核实，再直接替换失效结论，不维护多代任务流水账。
 
 ## 当前唯一目标
 
-保持 `ub_overflow_model_cpp` 是独立、轻量、可嵌入的 UB overflow 模型，并把产品输入边界从
-before-CVPipelining 前移到 before-AutoBlockify。模型新增精确复刻
-AutoBlockify→before-CVPipelining 的原生 pass 序列，再接入当前已经对齐的
-CVPipelining→local PlanMemory 模型。
+保持 `ub_overflow_model_cpp` 是独立、轻量、可嵌入且语义精确的 UB overflow 模型。产品输入
+边界已经从 before-CVPipelining 前移到 before-AutoBlockify，新增的
+AutoBlockify→before-CVPipelining 原生 pass 序列和既有 CVPipelining→local PlanMemory 模型已
+完成全量对齐。下一项唯一优化目标是在不改变这些 pass 语义的前提下，消除四次
+ExtendedCanonicalizer 的重复 fixed-point 工作和 `static_range` 长尾，使新同边界全量倍率从
+当前基本持平变为稳定快于原生 BiSheng。
 
 AutoBlockify 之前的原生前缀不属于复刻范围。典型 Triton 配置下 adapter 到 AutoBlockify 前有
 61 次 pass；它们继续由真实 BiSheng 执行。embedded model 直接消费这些 pass 已经生成的
 before-AutoBlockify `ModuleOp`，不直接消费原始 adapter，也不复刻 HFusion/ConvertToHIVM
 前缀。
 
-当前不推进大规模基础设施替换。新增前缀优先复用现有模型自有 `GenericModule`、canonicalization
-工具和已经完成的轻量 AutoBlockify；缺失语义按原生 pass 最小补齐。完成边界扩展和正确性对齐
-后，再继续优化现有流水中的重复扫描、解析、索引、物化、拷贝和分配。
+当前不推进大规模基础设施替换。性能优化继续使用现有模型自有 `GenericModule`、canonicalization
+工具和已经完成的轻量 AutoBlockify，先基于 profile 消除局部重复扫描、索引和 fixed point；不以
+删除 pattern、合并原生 pass 次序或减少验证范围获得加速。
 
 ## 依赖边界决定
 
@@ -54,8 +56,9 @@ adapter
 - 生产接入：`bishengir/lib/Dialect/HIVM/Pipelines/UBOverflowPrediction.cpp`。
 - 正确性 oracle：同一 `bishengir-compile` attempt 中继续执行得到的原生 local PlanMemory。
 - 旧 suffix/cv2pm 工具已退出产品和正确性路线，不恢复、不重新维护。
-- 当前产品 pass 仍在 before-CVPipelining；下一项实现任务是把它前移到
-  before-AutoBlockify，并在模型内补齐两者之间的语义。
+- 当前产品 pass 已位于 before-AutoBlockify；模型内部先执行已验证的 13-pass pre-CV 前缀，再
+  执行既有 CVPipelining→local PlanMemory 路径。Exact overflow 已恢复产品剪枝；validation
+  仍强制完整模型和原生 PlanMemory。
 
 ## 当前实现边界
 
@@ -80,61 +83,62 @@ GenericModule
 
 ## 当前正确性基线
 
-2026-07-29 在提交 `1dfddd59` 上完成了 160 inputs × 27 configs × 20 seeds 的 embedded
-现场验证。配置中 66 个已知原生长超时 pair，共 1320 个 attempt 按既定规则没有执行，因此
-实际报告 85080 项：
+2026-07-30 在提交 `8ebd4f120` 上完成 before-AutoBlockify→PlanMemory 新边界的现场验证。有效
+矩阵为 26 configs × 160 inputs × 20 fixed seeds = 83200；66 个已审核原生长超时 pair 对应
+1320 个 attempt 未执行，实际报告 81880 项：
 
 ```text
-matched                                      78583
-strict different                                37
-unavailable                                   6460
+matched                                      81789
+identity_permutation                            31
+different                                        0
+unavailable                                     60
 timeout                                          0
-total                                         85080
+reported total                               81880
+known-timeout skipped                         1320
 ```
 
-- 37 个 strict difference 全部是已知 fused-attention 等尺寸 buffer 身份置换，仅影响
-  plan/lifetime/inplace；status、overflow、required、peak、multi-buffer 一致。
-- 6400 个 unavailable 来自两个 workspace-manage-off 配置下产品 prediction pass 不插入。
-- 60 个 unavailable 来自 3 个 matmul 输入在 `preload_auto_mb` 下的原生 SIGABRT。
-- 不得把 unavailable 或身份置换写成“86400 全通过”。
+- 31 项是 `python_tutorial_06-fused-attention` 的等尺寸 buffer identity permutation；只有在
+  status/required/peak/multi 一致，且去掉 offset 后 extent/lifetime/inplace 全图一致时才归入
+  该类别，不算普通 matched。
+- 60 项仍是 `preload_auto_mb` 下 3 个 matmul 输入的原生 SIGABRT（3×20）；不是模型差异。
+- 新增 `auto_blockify` 配置单独为 3200/3200 strict matched。
+- 没有新的 blocker、unavailable、timeout 或 native/model 行为差异。
 
-原始报告：
-`ub_overflow_model_cpp/output/validation/full_1dfddd59_160x27x20.tsv`，属于本地生成物，不提交。
+报告：`ub_overflow_model_cpp/output/validation/before_auto_8ebd4f120_160x26x20.tsv`，仅本地生成，
+不提交。
 
 ## 当前性能基线
 
-性能主口径已经改为：Release/O3、160 × 27 read-only 配置、真实 retry-only、关闭模型的提前
-non-overflow 判定及其证明计算，模型全部执行到完整 PlanMemory。这样测量的是完整
-before-CVPipelining→PlanMemory 模型本身，不混入提前判定收益。
-
-2026-07-29，4320 个模型 case 全部执行：
+主口径为 Release/O3、before-AutoBlockify→local PlanMemory 同边界、26 configs × 160 inputs、
+真实 retry-only、3 轮、关闭提前 non-overflow 返回及其证明计算，所有模型 attempt 都走
+`decision_path=full_plan`。2026-07-30 的 12480 项结果：
 
 ```text
-model internal total                         23836.604 ms
-per-case median / mean / p95 / max       2.187 / 5.518 / 22.089 / 93.149 ms
-model process wall                           111.509 s
-model peak RSS                                51.266 MiB
-decision path                              4320 full_plan
+model full-plan samples                         12480 / 12480
+paired native samples                           12174
+model internal total                            273096.841 ms
+model median / mean / p95 / max       3.370 / 21.883 / 37.088 / 3056.203 ms
+paired model total                              249990.946 ms
+native same-boundary total                      249146.574 ms
+native median / mean / p95 / max       5.640 / 20.465 / 44.419 / 9669.407 ms
+BiSheng / model aggregate ratio                    0.9966x
+round ratios                         1.0215x / 0.9787x / 0.9870x
+process wall total                                859.586 s
+peak RSS                                           111.219 MiB
 ```
 
-原生 BiSheng 侧按既定规则跳过 66 个已知长超时 pair，可配对 4254 项：
+正式结论：新 before-AutoBlockify 边界下模型和原生 BiSheng 聚合时间基本持平；`0.9966x` 表示
+模型约慢 0.34%，三轮波动跨过 1.0，不能宣称稳定加速。模型中位数更快，但
+`triton.language.static_range` 的模型总时间 123.267 s、原生 7.952 s，单一长尾占配对模型总量
+约 49.3%；排除该输入后比值为 1.9033x。这个排除结果只用于定位热点，不能替代正式全量倍率。
 
-```text
-paired model internal total                  22621.361 ms
-native CVPipelining->local PlanMemory wall   89363.428 ms
-BiSheng / model aggregate ratio                  3.9504x
-```
+一轮 4160 项的 stage 诊断（有额外计时开销）分解为：输入桥 0.369 s、pre-CV 新前缀
+61.053 s、既有 CV→PlanMemory 25.981 s。四个 ExtendedCanonicalizer 合计约 55.18 s，占模型
+总时间约 63%；`static_range` 的 39.487 s 中约 91.8% 同样来自四个 canonicalizer。因此下一轮
+性能优化应优先消除 canonicalizer 的重复全量 fixed point，不能删除任何语义 pattern。
 
-若只统计原生单 attempt 的 4219 项，比例为 `3.7568x`。因此当前对“完整
-CVPipelining→PlanMemory 路径”的正式结论是：模型约为原生 BiSheng 的 `3.95x` 速度。这个比值
-以模型内部时间对原生边界 wall delta 计算，报告时必须保留口径说明。
-
-作为产品行为参考，production-default 允许 exact non-overflow fast path 时曾测得约 `6.81x`；
-它包含 147/160 的提前判定命中，不可用来代表完整 PlanMemory 路径的基础设施速度。关闭提前
-判定、只测 production-default 时为约 `4.006x`。
-
-原始报告：
-`ub_overflow_model_cpp/output/performance/1dfddd59_read_only_160x27.tsv`，属于本地生成物，不提交。
+正式报告：`output/performance/before_auto_8ebd4f120_160x26x3.{tsv,json}`；stage 诊断：
+`output/performance/before_auto_8ebd4f120_stage_160x26.{tsv,json}`。均为本地生成物，不提交。
 
 ## 当前阶段状态
 
@@ -183,7 +187,7 @@ fixed point 在该边界新触发的 affine composition、min/max canonicalizati
 materialization、下一轮 OperationFolder CSE/hoist、DCE、Arith/slice fold 和 semi-affine 重建。
 修复过程没有复用旧常量来伪造操作顺序，而是保留原生两轮常量生命周期。8 profiles × 160 inputs
 的 `05 -> 06` 单 pass 与 `00 -> 06` 累计 checkpoint 为 `1280/1280 PASS`；4.2 全量回归、完整
-测试和代表 PlanMemory `8/8 matched` 通过。当前进入阶段 4.4
+测试和代表 PlanMemory `8/8 matched` 通过。随后进入阶段 4.4
 `SCFForLoopCanonicalization`。
 
 阶段 4.4 已于 2026-07-30 完成：`RunSCFForLoopCanonicalization` 复刻上游六类 cross-dialect
@@ -192,7 +196,7 @@ pattern，覆盖 tensor/memref 的 iter-arg/loop-result dim folding、`tensor.in
 `scf.forall` 常量可证范围内的化简。对于无法证明的动态/非纯 affine 情况保持原操作，不推测。
 上游 fixture 的成功、部分成功、nested、no-change、parallel/forall 分支均与真实
 `bishengir-opt` 精确一致；8 profiles × 160 inputs 的 `06 -> 07` 单 pass 与 `00 -> 07` 累计
-checkpoint 为 `1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。当前进入阶段
+checkpoint 为 `1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。随后进入阶段
 4.5 CSE。
 
 阶段 4.5 已于 2026-07-30 完成：新增独立 `RunPreCVCSE`，按上游 `CSEDriver` 保留 region
@@ -201,7 +205,7 @@ scope、isolated-from-above、nested-region-first traversal、交换律 operatio
 `bishengir-opt --cse` 结构精确一致，覆盖纯操作、read/write barrier、嵌套/兄弟 region、region-op
 等价与 dead op；8 profiles × 160 inputs 的 `07 -> 08` 单 pass 与 `00 -> 08` 累计 checkpoint 为
 `1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。当前 160 输入只到达
-single-block structured region；multi-block SSACFG 保持显式 blocker，不做错误线性化。当前进入阶段
+single-block structured region；multi-block SSACFG 保持显式 blocker，不做错误线性化。随后进入阶段
 4.6 func-scoped ExtendedCanonicalizer。
 
 阶段 4.6 已于 2026-07-30 完成：新增独立 `RunFirstFuncExtendedCanonicalizer` 阶段入口；经源码
@@ -217,14 +221,14 @@ f32/i64、host、no-IO-alias、memref traceback 和 memory-user 条件；生成�
 arith/math、store 顺序及 greedy folding 与真实 `bishengir-opt` 精确一致。原生对合法
 `VMax/VMin<ui64>` 会生成 verifier 拒绝的 scalar op，模型将该已证明的原生失败显式 fail open。
 8 profiles × 160 inputs 的 `09 -> 10` 单 pass 与 `00 -> 10` 累计 checkpoint 为
-`1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。当前进入阶段 4.8 第二次
+`1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。随后进入阶段 4.8 第二次
 func-scoped ExtendedCanonicalizer。
 
 阶段 4.8 已于 2026-07-30 完成：原生在 HIVMOptSinglePoint 后重新注册相同的
 `func.func(canonicalize-ext)`，模型以独立 `RunSecondFuncExtendedCanonicalizer` 入口复用已证明按
 function 隔离的 fixed-point 实现，未复制第二套 pattern。定向 fixture 与真实嵌套 canonicalizer
 精确一致；8 profiles × 160 inputs 的 `10 -> 11` 单 pass 与 `00 -> 11` 累计 checkpoint 为
-`1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。当前进入阶段 4.9
+`1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/8 matched`。随后进入阶段 4.9
 MemrefDeadStoreElimination。
 
 阶段 4.9 已于 2026-07-30 完成：新增 pre-CV `RunPreCVMemrefDeadStoreElimination`，逐句复刻
@@ -244,40 +248,37 @@ index/全 1 memref 匹配、write/call/nested-region cache barrier、310B/950 �
 BroadcastableOTF+binary+structured、DPS input replacement 和 broadcast dims 合并语义；无效
 user 保留 VBrc。普通/Ascend950 fixture 与原生结构 `2/2` 精确一致；8 profiles × 160 inputs 的
 `12 -> 13` 单 pass与 `00 -> 13` 累计 checkpoint 均为 `1280/1280 PASS`；完整测试通过，代表
-PlanMemory `8/8 matched`。当前进入阶段 6 combined before-CV 与 API/input contract。
+PlanMemory `8/8 matched`。随后进入阶段 6 combined before-CV 与 API/input contract。
 
 阶段 6 已于 2026-07-30 完成：新增唯一 `RunPreCVPrefixPipeline`，按原生顺序组合 checkpoint
 01～13 的全部 pass；API 升级为 options v5，并增加 before-AutoBlockify input contract v2 与
 独立 fingerprint，legacy before-CV v1 只作迁移测试。新增 4 个 pre-CV resolved option 字段均
 由同一 `HIVMPipelineOptions` 映射。组合入口在 8 profiles × 160 inputs 上与同一原生 attempt
 的 checkpoint 13 达到 `1280/1280 PASS`；完整测试和两个 embedded build target 均通过。当前
-进入阶段 7 embedded observe-only，尚未允许新边界剪枝。
+随后进入阶段 7 embedded observe-only。
 
-阶段 7 observe-only 已接入：prediction pass 从 before-CVPipelining 前移到 checkpoint 00 后、
-原生 AutoBlockify 前，使用 contract v2；当前源码强制 `pruneOnOverflow=false`，真实 prefix、CV
-和 local PlanMemory 始终继续。27 configs × 4 inputs × seeds `{0,13}` 得到 200 matched、16 个
-仅因 workspace-manage-off 不插入模型而 unavailable、0 different；active 25 configs × 4 inputs
-× 20 seeds 得到 1969 strict matched 与 31 个已严格证明的等尺寸 identity permutation，无 UB
-决策差异。验证器把 identity permutation 单列，只有删除 offset 后 extent/lifetime/inplace 全图
-一致才接受。当前必须完成 active 25 × 160 × 20 全量，之后才允许产品剪枝。
+阶段 7 已于 2026-07-30 完成：prediction pass 位于 checkpoint 00 后、原生 AutoBlockify 前，使用
+contract v2；验证命令显式 `prune=false`，产品源码不再强制 observe-only，Exact overflow 恢复
+剪枝。26 个有效配置 × 160 inputs × 20 seeds 的理论规模为 83200，排除 1320 个已审核长超时后
+现场执行 81880 项，结果为 81789 matched、31 identity permutation、60 个既有原生 SIGABRT、
+0 different、0 timeout。完整模型测试、Release build 和同边界 160×26×3 性能测量均完成。
 
 ## 当前实现优先级
 
-1. 完成阶段 7 embedded observe-only：把 prediction hook 前移到 AutoBlockify 前并传入 v2
-   contract，但禁止剪枝，先做代表与 20-seed 最终合同验证；随后才切换产品入口并测新边界速度。
-2. 使用阶段 0 已建立的原生 checkpoint 做每个新增 pass 的差分；最终以同进程原生 local
-   PlanMemory 做 seeds 0～19 完整合同验证。
-3. 对齐后把 production prediction pass 前移到 before-AutoBlockify；在完成代表与全量验证前
-   只能 observe-only，不能用新增路径剪枝。
-4. 在现有数据结构内优化 `BuildPlanMemoryInput`、`AlignStorageAndAllocExtraBuffer` 和连续
+1. 优先优化 pre-CV ExtendedCanonicalizer 的重复全量 fixed point；四次调用占 stage 诊断总时间
+   约 63%，并造成 `triton.language.static_range` 的极端长尾。只能复用分析、worklist、常量索引和
+   已收敛信息，不得省略原生 pass 次序或 pattern。
+2. 为 canonicalizer 优化建立相同 160×26×3 full-plan A/B，并重跑 160×26×20 正确性；目标是
+   先消除 `static_range` 长尾，再判断新边界是否获得稳定加速。
+3. 在现有数据结构内优化 `BuildPlanMemoryInput`、`AlignStorageAndAllocExtraBuffer` 和连续
    post-bufferization 状态之间的重复解析、扫描、拷贝和分配。
-5. 在不改变 seed/RNG/遍历顺序的前提下，把 PlanMemory 的 seed-independent 工作移出 retry，
+4. 在不改变 seed/RNG/遍历顺序的前提下，把 PlanMemory 的 seed-independent 工作移出 retry，
    复用 scratch capacity 和只读事件信息。
-6. 只为 profile 证明的热点增加局部、明确生命周期的索引或 cache；不先建设通用全局 analysis
+5. 只为 profile 证明的热点增加局部、明确生命周期的索引或 cache；不先建设通用全局 analysis
    manager。
-7. 收益稳定后清理被真正替代的 wrapper、重复工具和死代码；禁止先增加一套平行架构再等待
+6. 收益稳定后清理被真正替代的 wrapper、重复工具和死代码；禁止先增加一套平行架构再等待
    将来删除旧实现。
-8. 边界扩展和当前路径优化接近收益上限后，再单独评审 core/MLIR adapter 的依赖拆分。
+7. 边界扩展和当前路径优化接近收益上限后，再单独评审 core/MLIR adapter 的依赖拆分。
 
 详细阶段见 [implementation_plan.md](implementation_plan.md)，执行纪律见
 [workflow.md](workflow.md)，正确性与性能口径见 [validation.md](validation.md)，代码位置见

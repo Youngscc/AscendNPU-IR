@@ -1,6 +1,6 @@
 # before-AutoBlockify 到 PlanMemory 的轻量模型扩展计划
 
-最后更新：2026-07-30。本文是下一阶段开发的主执行计划。开始实现前必须同时完整阅读
+最后更新：2026-07-30。本文记录本轮已经完成的主执行计划和验收证据；后续优化开始前仍须同时完整阅读
 [MEMORY.md](MEMORY.md)、[code_map.md](code_map.md)、[workflow.md](workflow.md) 和
 [validation.md](validation.md)。
 
@@ -281,7 +281,7 @@ InlineOTFBroadcast 清理冗余 1-to-1 broadcast，但真实行为来自全部�
 
 ## 9. 阶段 4：逐个实现九步 canonicalizationHIVMPipeline
 
-当前子阶段：**4.9 MemrefDeadStoreElimination**。
+状态：**九个子阶段均于 2026-07-30 完成**。
 
 九个 pass 必须按下面九个子阶段依次实现和关闸。每个子阶段都执行：源码审阅→单元 fixture→
 单 pass checkpoint→从 AutoBlockify 开始的累积 checkpoint；通过后才进入下一个。
@@ -417,6 +417,8 @@ checkpoint 为 `1280/1280 PASS`；完整测试通过，代表 PlanMemory 为 `8/
 
 ## 10. 阶段 5：实现 InlineOTFBroadcast
 
+状态：**2026-07-30 已完成**。
+
 原生 pass 当前只有一个 `VBrcInlinePattern`，按源码逐句迁移：
 
 - 必须是 pure tensor semantics；
@@ -446,6 +448,8 @@ operand segment 合同，与真实 `builtin.module(func.func(hivm-inline-otf-bro
 API/input contract；后续不得再以 before-CVPipelining 作为产品输入边界。
 
 ## 11. 阶段 6：组合前缀与 API/input contract
+
+状态：**2026-07-30 已完成**。
 
 ### 参数和合同
 
@@ -485,10 +489,12 @@ targets 构建通过。
 
 ### 阶段闸门
 
-组合前缀和版本化 API 已对齐，允许进入阶段 7 embedded observe-only。产品调用点前移后，必须
-先关闭剪枝比较最终 PlanMemory 合同，不能直接启用新边界提前返回。
+组合前缀和版本化 API 已对齐；阶段 7 已按先关闭剪枝比较最终 PlanMemory 合同、再恢复产品
+Exact overflow 剪枝的顺序完成。
 
 ## 12. 阶段 7：embedded observe-only 与最终切换
+
+状态：**2026-07-30 已完成**。
 
 ### observe-only
 
@@ -498,14 +504,12 @@ targets 构建通过。
 4. 同一 attempt 比较模型与原生最终合同；
 5. 保留旧 before-CV model 作为短期迁移 oracle，仅限测试，不长期运行两次产品模型。
 
-当前进度（2026-07-30）：prediction pass 已移到 checkpoint 00 与 AutoBlockify 之间，使用
-before-AutoBlockify contract v2，在模型内运行完整 pre-CV prefix；源码暂时强制
-`pruneOnOverflow=false`，因此无论用户剪枝选项为何都继续原生 prefix/CV/PlanMemory。27 configs
-× 4 代表输入 × seeds `{0,13}` 为 `200 matched / 16 unavailable / 0 different`，其中 16 个仅来自
-原本就禁用 prediction 的两组 workspace-manage-off 配置。其余 25 configs × 4 inputs × 20 seeds
-的严格结果为 1969 matched，加 31 个 fused-attention 等尺寸 buffer identity permutation；后者
-status/required/peak/multi 一致，去掉 physical offset 后 lifetime/inplace 图一致，单独分类而不
-计作普通 matched。尚未完成 160-input 全量，不得切换产品剪枝。
+完成结果（2026-07-30）：prediction pass 已移到 checkpoint 00 与 AutoBlockify 之间，使用
+before-AutoBlockify contract v2，在模型内运行完整 pre-CV prefix。validation 显式设置
+`prune=false` 继续原生 prefix/CV/PlanMemory；产品源码不再强制 observe-only，Exact overflow 已
+恢复剪枝。26 个有效配置 × 160 inputs × 20 seeds 理论为 83200；排除 1320 个已审核原生长超时
+后，81880 项报告为 81789 matched、31 identity permutation、60 个既有原生 SIGABRT、0
+different、0 timeout。31 项 identity permutation 均通过完整图分类，不计作普通 matched。
 
 ### 验证顺序
 
@@ -550,6 +554,12 @@ pass/stage breakdown
 返回及证明计算，使所有 case 执行到完整 PlanMemory。production fast path 另测，不能掩盖新增
 前缀回退。
 
+2026-07-30 的正式 160×26×3 同边界结果为：模型内部总计 273096.841 ms；12174 个可配对样本中
+模型 249990.946 ms，原生 BiSheng 249146.574 ms，`BiSheng/model = 0.9966x`；三轮分别为
+1.0215x、0.9787x、0.9870x。当前只能判定基本持平，不能宣称稳定加速。stage 诊断显示 pre-CV
+前缀占 61.053 s，既有 CV→PlanMemory 占 25.981 s；四个 ExtendedCanonicalizer 合计约 55.18 s，
+是下一轮独立性能优化的 P0。`static_range` 长尾的排除倍率只用于热点分析，不作为正式结论。
+
 功能阶段不能为了性能省略真实 pass。若某 pass 成为热点，必须在完整对齐后另开优化批次，仍以
 原生语义为边界。
 
@@ -582,6 +592,10 @@ pass/stage breakdown
 - LTO/PGO、seed 并行和 autotune 总收益优化。
 
 ## 16. 完成定义
+
+状态：**2026-07-30 全部满足**。正确性中的 known-timeout、原生 SIGABRT 和严格 identity
+permutation 均按分类单列；它们不计为 matched，也没有被模型逻辑掩盖。性能门槛完成了同边界
+全量测量，但结果是基本持平而非稳定加速，已作为后续 canonicalizer 优化风险记录。
 
 1. 产品模型输入位于真实 AutoBlockify 前；
 2. AutoBlockify 前 61 次原生 pass 不在模型中重复实现；

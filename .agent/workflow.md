@@ -1,6 +1,6 @@
 # 当前工作流：逐 pass 扩展到 before-AutoBlockify
 
-## 当前任务
+## 已完成任务与下一入口
 
 把模型输入从 before-CVPipelining 前移到 before-AutoBlockify，逐个复刻两者之间的 13 个原生
 pass，再接入现有 CVPipelining→PlanMemory 模型。AutoBlockify 前的 61 次原生 pass 继续由
@@ -9,12 +9,15 @@ BiSheng 执行，不复刻。
 当前不做全局 IR/analysis 基础设施替换，不在模型核心新增 LLVM/MLIR 依赖，不同时进行纯性能
 重构。
 
-阶段状态：checkpoint infrastructure 及 AutoBlockify→before-CVPipelining 的 13 个原生 pass
-已于 2026-07-30 逐项完成；每个 pass 的定向 fixture、单 pass checkpoint、累计 checkpoint、
-完整测试和代表 PlanMemory 均已通过。阶段 6 combined before-CV 与 API/input contract 也已
-完成，组合 checkpoint 为 `1280/1280 PASS`。当前执行阶段 7 embedded observe-only；20-seed
-代表合同已通过，当前必须执行 25 个 active configs × 160 inputs × 20 seeds 的全量合同；完成前
-不得移除源码中的 observe-only 剪枝覆盖。
+阶段状态：本轮边界扩展已于 2026-07-30 全部完成。checkpoint infrastructure、
+AutoBlockify→before-CVPipelining 的 13 个原生 pass、combined prefix、API/input contract、embedded
+切换和产品剪枝均已落地；逐 pass checkpoint 为 `1280/1280 PASS`。最终 26 个有效配置 × 160
+inputs × seeds 0～19 的理论规模为 83200，排除 1320 个已审核原生长超时后，81880 项报告中为
+81789 matched、31 identity permutation、60 个既有原生 SIGABRT、0 different、0 timeout。
+
+同边界 160×26×3 full-plan 性能为 `BiSheng/model = 0.9966x`，三轮跨过 1.0，当前只能判定基本
+持平，不能宣称稳定加速。下一任务应单独优化四次 ExtendedCanonicalizer 的重复 fixed point；
+不得回头改变本轮已经对齐的 pass 语义。
 
 ## 每个 pass 的固定开发循环
 

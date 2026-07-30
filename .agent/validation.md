@@ -1,16 +1,16 @@
 # 当前验证与性能基线
 
-最后核实：2026-07-29，commit `1dfddd59f3f9835e4f51fd50f79aa75454b02e27`。
+最后核实：2026-07-30，产品 commit `8ebd4f1203f1c2d751721be576b90eb9e00500f2`。
 
-2026-07-30 起的当前开发任务是把输入边界前移到 before-AutoBlockify。下述 2026-07-29 数据
-仍是旧 before-CVPipelining 产品基线；在新入口完成前不得把它描述为新边界结果。
+before-AutoBlockify 产品边界及其全量正确性、同边界 full-plan 性能均已完成验证。2026-07-29 的
+before-CVPipelining 数据只保留为历史基线，不能与新边界倍率混用。
 
 ## 1. 正确性 oracle
 
 唯一主 oracle 是同一真实 `bishengir-compile` attempt 中的原生 local PlanMemory：
 
 1. 从 adapter 运行真实 BiSheng prefix；
-2. before-CVPipelining 运行 embedded lightweight model，使用本轮真实 resolved options；
+2. before-AutoBlockify 运行 embedded lightweight model，使用本轮真实 resolved options；
 3. validation 模式固定一个 seed，模型即使提前证明 non-overflow 也继续完整 PlanMemory；
 4. 主 pipeline 继续到原生 local PlanMemory，并在该边界后停止；
 5. 比较 status、overflow、required、peak、buffer extent/offset、lifetime、multi-buffer 和
@@ -268,10 +268,11 @@ python3 ub_overflow_model_cpp/scripts/verify_combined_pre_cv_prefix.py \
 API options v5、before-AutoBlockify contract v2 与新 fingerprint 的构建和完整测试通过；旧
 contract v1 仍只执行既有 CV→PlanMemory 路径。
 
-阶段 7 embedded observe-only 代表验证：
+阶段 7 embedded 切换与最终验证：
 
 - 调用点位于 `00_before_auto_blockify` 后、原生 AutoBlockify 前；模型 v2 内部运行前缀，原生
-  pipeline 随后继续到 local PlanMemory；源码强制关闭剪枝。
+  pipeline 在 validation 中通过显式 `prune=false` 继续到 local PlanMemory。产品源码不再强制
+  observe-only，Exact overflow 已恢复剪枝。
 - 27 configs × 4 inputs × seeds `{0,13}`：`200 matched / 16 unavailable / 0 different`；16 个
   unavailable 精确对应两个 `disableAutoCVWorkSpaceManage=true` 场景，此时产品按设计不插入
   prediction pass。
@@ -281,6 +282,24 @@ contract v1 仍只执行既有 CV→PlanMemory 路径。
 - identity permutation 只有在 status/required/peak/multi 已一致，且删除 physical offset 后
   完整 extent multiset、lifetime relation 和 inplace graph 仍一致时才单独分类；不能豁免其他
   plan/lifetime/inplace 差异。
+
+最终全量现场结果：26 个有效配置 × 160 inputs × seeds 0～19，理论 83200；66 个已审核原生
+长超时 pair 对应的 1320 个 attempts 按清单排除，实际报告 81880：
+
+```text
+matched                                      81789
+identity_permutation                            31
+different                                        0
+unavailable                                     60
+timeout                                          0
+reported total                               81880
+known-timeout skipped                         1320
+```
+
+31 项全部来自 `python_tutorial_06-fused-attention` 的严格等尺寸 identity permutation；60 项来自
+`preload_auto_mb` 下三个 matmul 输入的原生 SIGABRT（3×20），不是模型差异。新增
+`auto_blockify` 配置自身为 3200/3200 strict matched。报告为
+`output/validation/before_auto_8ebd4f120_160x26x20.tsv`，本地生成、不提交。
 
 ## 3. 正确性分类
 
@@ -292,7 +311,7 @@ contract v1 仍只执行既有 CV→PlanMemory 路径。
 
 任何 unavailable、timeout 或 skipped 都不能写成 matched，也不能笼统写成“全通过”。
 
-## 4. 2026-07-29 全量正确性基线
+## 4. 2026-07-29 旧边界全量正确性基线（历史）
 
 理论规模：`160 × 27 × 20 = 86400`。
 
@@ -332,7 +351,7 @@ ub_overflow_model_cpp/output/validation/full_1dfddd59_160x27x20.tsv
 用于判断模型自身基础设施或局部实现是否变快：
 
 - Release/O3；
-- 相同 160 inputs × 27 read-only configs；
+- 相同 160 inputs × 当前有效 read-only configs；
 - 未固定 seed 的真实 retry-only；
 - 关闭 validation、dump、stage artifact 和详细 stage timing；
 - 关闭提前 non-overflow 返回；
@@ -347,7 +366,7 @@ ub_overflow_model_cpp/output/validation/full_1dfddd59_160x27x20.tsv
 用于观察真实产品默认行为和 fast-path 命中率。它会跳过部分 PlanMemory 工作，因此不能用来
 证明基础设施本身变快，也不能与 4.1 混写成同一加速比。
 
-## 6. 2026-07-29 完整路径性能基线
+## 6. 2026-07-29 旧边界完整路径性能基线（历史）
 
 输入为 160 × 27 = 4320 个模型 case，提前返回及 proof 均关闭：
 
@@ -404,21 +423,46 @@ production-default + full plan                 约 4.006x
 `6.81x` 命中了 147/160 个 exact non-overflow fast path，因此不是完整路径速度。后续结构优化不得
 用 fast-path 命中增加代替 core pipeline 加速。
 
-## 8. 新边界的性能口径
+## 8. 2026-07-30 新边界全量性能结果
 
 新模型增加 AutoBlockify→before-CV 的真实工作，因此旧 `CVPipelining→PlanMemory` 的 `3.95x`
-不是新边界的加速比。完成组合前缀后必须重新测量：
+不是新边界的加速比。正式测量使用 Release/O3、160 inputs × 26 有效配置 × 3 轮、真实
+retry-only、关闭提前 non-overflow 返回及证明计算，所有模型 attempt 都执行到完整 PlanMemory：
 
 ```text
-new lightweight before-AutoBlockify->PlanMemory internal time
-native BiSheng AutoBlockify->local PlanMemory boundary wall delta
-AutoBlockify->before-CV prefix stage time
-existing CV->PlanMemory stage time
-BiSheng/model ratio at the same new boundary
+model full-plan samples                         12480 / 12480
+paired native samples                           12174
+known native timeout skipped                      198
+native unavailable                                108
+model internal total                            273096.841 ms
+model median / mean / p95 / max       3.370 / 21.883 / 37.088 / 3056.203 ms
+paired model total                              249990.946 ms
+native same-boundary total                      249146.574 ms
+native median / mean / p95 / max       5.640 / 20.465 / 44.419 / 9669.407 ms
+BiSheng / model aggregate ratio                    0.9966x
+round ratios                         1.0215x / 0.9787x / 0.9870x
+process wall total                                859.586 s
+peak RSS                                           111.219 MiB
 ```
 
-主结构性能仍关闭提前 non-overflow 返回和证明计算，全部执行到完整 PlanMemory。入口切换前后
-工作量不同，旧/新模型总时间只能分解说明，不能包装成严格同工作量 A/B。
+正式结论是模型与原生 BiSheng 在新边界基本持平：`0.9966x` 表示模型约慢 0.34%，而且三轮
+波动跨过 1.0，不能宣称稳定加速。模型中位数更快，但 `triton.language.static_range` 的 78 个
+配对样本中模型耗时 123.267 s、原生 7.952 s，占配对模型总量约 49.3%；排除它后为 1.9033x，
+但该排除倍率只用于定位热点，不能替代正式全量倍率。
+
+一轮 4160 项的附加 stage 诊断（计时探针会产生额外开销，不能替代正式倍率）为：
+
+```text
+input bridge                                      0.369 s
+pre-CV prefix                                    61.053 s
+existing CV->PlanMemory                          25.981 s
+four ExtendedCanonicalizer stages                55.181 s
+```
+
+四个 canonicalizer 约占该轮模型内部总时间 63%；`static_range` 的 39.487 s 中约 91.8% 同样来自
+四个 canonicalizer。正式报告为
+`output/performance/before_auto_8ebd4f120_160x26x3.{tsv,json}`，stage 报告为
+`output/performance/before_auto_8ebd4f120_stage_160x26.{tsv,json}`，均不提交。
 
 ## 9. 每个优化批次的验证门槛
 
@@ -426,7 +470,7 @@ BiSheng/model ratio at the same new boundary
 2. `bash ub_overflow_model_cpp/tests/run_tests.sh`；
 3. simple AIV、MIX、attention overflow、late-seed success、auto-MB、UB-saving、
    InjectBlockSync 的 seeds 0～19 embedded 对比；
-4. ordering、identity、PlanMemory 或输入合同变化时，执行当前有意义配置的 160 × 27 × 20
+4. ordering、identity、PlanMemory 或输入合同变化时，执行当前有效配置的 160 × configs × 20
    现场矩阵；known timeout/unavailable 单列；
 5. 完整路径性能使用 baseline/new 同机交错 A/B 至少 3 轮；
 6. 报告 internal total、process wall、median、mean、p95、max、RSS、status 分布和
