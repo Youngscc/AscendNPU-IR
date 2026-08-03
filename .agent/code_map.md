@@ -467,7 +467,24 @@ fast path；此时 peak/required/selected_seed 为 unknown 是有意的窄合同
 
 普通产品运行默认不应设置 validation、dump、flow trace 或 machine-result 环境变量。
 
-160-input production retry-only 单轮性能测量：
+优化速度测试：当前 35 场景 × 160 inputs × 3 轮、真实 retry-only、关闭提前 non-overflow，模型
+与原生 BiSheng 都测 before-AutoBlockify→local PlanMemory 同一边界：
+
+```bash
+.venv/bin/python3 ub_overflow_model_cpp/scripts/measure_before_auto_boundary.py \
+  --compiler build/bin/bishengir-compile \
+  --rounds 3 \
+  --warmup-inputs 8 \
+  --timeout 360 \
+  --report ub_overflow_model_cpp/output/performance/optimization_fullplan.tsv \
+  --summary ub_overflow_model_cpp/output/performance/optimization_fullplan.json
+```
+
+该脚本内部设置 `BISHENGIR_UB_MODEL_FORCE_FULL_PLAN=1`，每个模型 attempt 必须报告
+`decision_path=full_plan`。只有定位热点时才额外加 `--collect-stage-timings`；带探针结果不能替代
+正式倍率。
+
+真实速度测试：160-input production-default retry-only，允许 exact non-overflow 提前返回：
 
 ```bash
 .venv/bin/python3 ub_overflow_model_cpp/scripts/measure_embedded_model.py \
@@ -477,8 +494,10 @@ fast path；此时 peak/required/selected_seed 为 unknown 是有意的窄合同
   --summary ub_overflow_model_cpp/output/performance/current.json
 ```
 
-工具只为测量显式打开 machine result 和 prediction 后停止边界；不会打开 validation、dump 或
-原生 PlanMemory。
+工具只为测量显式打开 machine result 和 prediction 后停止边界；不会设置
+`BISHENGIR_UB_MODEL_FORCE_FULL_PLAN`，不会打开 validation、dump 或原生 PlanMemory。结果必须
+单列 `decision_path=non_overflow_upper_bound` 命中率与 full-plan fall-through，不能作为结构优化
+倍率。
 
 ## 本地生成物
 

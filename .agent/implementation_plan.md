@@ -556,15 +556,24 @@ peak RSS
 pass/stage breakdown
 ```
 
-结构性能主测量使用 Release/O3、真实 retry-only、160 × 有意义配置、关闭提前 non-overflow
-返回及证明计算，使所有 case 执行到完整 PlanMemory。production fast path 另测，不能掩盖新增
-前缀回退。
+后续性能固定使用两个名称和两套口径：
 
-2026-07-30 的正式 160×26×3 同边界结果为：模型内部总计 273096.841 ms；12174 个可配对样本中
-模型 249990.946 ms，原生 BiSheng 249146.574 ms，`BiSheng/model = 0.9966x`；三轮分别为
-1.0215x、0.9787x、0.9870x。当前只能判定基本持平，不能宣称稳定加速。stage 诊断显示 pre-CV
-前缀占 61.053 s，既有 CV→PlanMemory 占 25.981 s；四个 ExtendedCanonicalizer 合计约 55.18 s，
-是下一轮独立性能优化的 P0。`static_range` 长尾的排除倍率只用于热点分析，不作为正式结论。
+1. **优化速度测试**：Release/O3、真实 retry-only、160 × 当前全部有效配置、至少 3 轮，设置
+   `BISHENGIR_UB_MODEL_FORCE_FULL_PLAN=1`，关闭提前 non-overflow 返回及 proof 计算，使每个
+   attempt 都执行完整 PlanMemory。它是判断实现优化是否生效的唯一主门槛。
+2. **真实速度测试**：Release/O3、production 默认路径、真实 retry-only，不设置 FORCE_FULL_PLAN，
+   允许 exact non-overflow 提前返回；单列 fast-path 命中率和 full-plan fall-through。它只描述
+   产品真实成本，不能替代优化速度测试。
+
+2026-07-30 在 `389d0375ab4e` 上完成正式 160×35×3 优化速度测试：模型内部总计
+338017.478 ms；16332 个可配对样本中模型 306788.863 ms，原生 BiSheng 393584.083 ms，
+`BiSheng/model = 1.2829x`，即模型耗时低 22.05%；三轮分别为 1.2799x、1.2852x、1.2836x。
+
+一轮 stage 诊断中 pre-CV 前缀 76.917 s、CV→PlanMemory 35.664 s；四个
+ExtendedCanonicalizer 合计 68.874 s，占模型总时间 60.59%，AutoBlockify 本体仅 0.220 s。
+P0 是在不改变 fixed-point/pattern/pass 顺序的条件下，让 canonicalizer 共享现有增量 def-use
+索引、dirty semantics 和批量 erase，并消除可以证明无变化的 compact；不是优化 AutoBlockify
+算法。`static_range` 等长尾的排除倍率只用于热点分析，不作为正式结论。
 
 功能阶段不能为了性能省略真实 pass。若某 pass 成为热点，必须在完整对齐后另开优化批次，仍以
 原生语义为边界。
@@ -599,9 +608,9 @@ pass/stage breakdown
 
 ## 16. 完成定义
 
-状态：**2026-07-30 全部满足**。正确性中的 known-timeout、原生 SIGABRT 和严格 identity
-permutation 均按分类单列；它们不计为 matched，也没有被模型逻辑掩盖。性能门槛完成了同边界
-全量测量，但结果是基本持平而非稳定加速，已作为后续 canonicalizer 优化风险记录。
+状态：**2026-07-30 全部满足**。正确性中的 known-timeout、原生 SIGABRT、严格 identity
+permutation 和 ordering equivalent 均按分类单列；它们不计为 matched，也没有被模型逻辑掩盖。
+35 场景同边界优化速度测试为稳定 `1.2829x`；canonicalizer 长尾仍是后续性能优化风险和 P0。
 
 1. 产品模型输入位于真实 AutoBlockify 前；
 2. AutoBlockify 前 61 次原生 pass 不在模型中重复实现；

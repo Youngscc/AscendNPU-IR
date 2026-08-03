@@ -11,13 +11,13 @@ BiSheng 执行，不复刻。
 
 阶段状态：本轮边界扩展已于 2026-07-30 全部完成。checkpoint infrastructure、
 AutoBlockify→before-CVPipelining 的 13 个原生 pass、combined prefix、API/input contract、embedded
-切换和产品剪枝均已落地；逐 pass checkpoint 为 `1280/1280 PASS`。最终 26 个有效配置 × 160
-inputs × seeds 0～19 的理论规模为 83200，排除 1320 个已审核原生长超时后，81880 项报告中为
-81789 matched、31 identity permutation、60 个既有原生 SIGABRT、0 different、0 timeout。
+切换和产品剪枝均已落地；逐 pass checkpoint 为 `1280/1280 PASS`。扩展后的 35 场景全量正确性
+实际比较 110380 项：110183 matched、66 identity permutation、131 ordering equivalent、
+0 different/unavailable/timeout；81 个 native-ineligible pair 在执行前按审核清单排除。
 
-同边界 160×26×3 full-plan 性能为 `BiSheng/model = 0.9966x`，三轮跨过 1.0，当前只能判定基本
-持平，不能宣称稳定加速。下一任务应单独优化四次 ExtendedCanonicalizer 的重复 fixed point；
-不得回头改变本轮已经对齐的 pass 语义。
+同边界 160×35×3 **优化速度测试**为 `BiSheng/model = 1.2829x`，三轮均约 1.28x。下一任务单独
+优化四次 ExtendedCanonicalizer 的重复 fixed point、def-use 扫描、semantics refresh 和无效
+compact；AutoBlockify 本体只占总时间 0.19%，不得回头改变已经对齐的 pass 语义。
 
 ## 每个 pass 的固定开发循环
 
@@ -76,8 +76,8 @@ production entry switch
 4. before-CV 完整结构差分；
 5. 代表算子 × 相关配置 × seeds 0～19；
 6. 160 × 有意义配置 × 20 seeds embedded 全量；
-7. production-default retry-only 性能；
-8. 160 × 有意义配置、full-plan、无提前证明的结构性能。
+7. **优化速度测试**：160 × 有意义配置、retry-only、full-plan、无提前证明，至少 3 轮；
+8. **真实速度测试**：production 默认 retry-only，允许提前 non-overflow，并报告 fast-path 命中率。
 
 正确性 oracle 始终来自真实 `bishengir-compile` 的原生 local PlanMemory。允许回放经过同进程
 采集、且 adapter 内容、完整参数和原生源码 fingerprint 全部一致的缓存；当前模型探针仍必须现场

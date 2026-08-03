@@ -1,7 +1,7 @@
 # AscendNPU-IR 项目记忆
 
-最后核实：2026-07-30，分支 `codex/ub-overflow-model-product`，本轮验证起点
-`50475b2152`。本文件是 `.agent` 的唯一入口；源码或新测量与
+最后核实：2026-07-30，分支 `codex/ub-overflow-model-product`，当前验证与性能基线
+`389d0375ab4e`。本文件是 `.agent` 的唯一入口；源码或新测量与
 本文冲突时，应先现场核实，再直接替换失效结论，不维护多代任务流水账。
 
 ## 当前唯一目标
@@ -10,8 +10,9 @@
 边界已经从 before-CVPipelining 前移到 before-AutoBlockify，新增的
 AutoBlockify→before-CVPipelining 原生 pass 序列和既有 CVPipelining→local PlanMemory 模型已
 完成全量对齐。下一项唯一优化目标是在不改变这些 pass 语义的前提下，消除四次
-ExtendedCanonicalizer 的重复 fixed-point 工作和 `static_range` 长尾，使新同边界全量倍率从
-当前基本持平变为稳定快于原生 BiSheng。
+ExtendedCanonicalizer 的重复 fixed-point、全量 def-use 扫描和无效 compact/semantic refresh，
+优先清除 `static_range` 长尾。当前 35 场景优化速度基线已稳定快于原生 BiSheng，但收益被三个
+canonicalizer 长尾输入显著稀释，仍有明确的局部优化空间。
 
 AutoBlockify 之前的原生前缀不属于复刻范围。典型 Triton 配置下 adapter 到 AutoBlockify 前有
 61 次 pass；它们继续由真实 BiSheng 执行。embedded model 直接消费这些 pass 已经生成的
@@ -83,7 +84,7 @@ GenericModule
 
 ## 当前正确性基线
 
-2026-07-30 在工作树基于 `50475b2152` 上完成扩展后的
+2026-07-30 在 `389d0375ab4e` 上完成扩展后的
 before-AutoBlockify→PlanMemory 全量现场验证。矩阵为 35 configs × 160 inputs × 20 fixed
 seeds，理论规模 112000。81 个已审核、无法取得原生 oracle 的 config/input pair 对应 1620 个
 attempt 未执行，实际比较 110380 项：
@@ -115,36 +116,51 @@ native-ineligible skipped                    1620
 
 ## 当前性能基线
 
-主口径为 Release/O3、before-AutoBlockify→local PlanMemory 同边界、26 configs × 160 inputs、
-真实 retry-only、3 轮、关闭提前 non-overflow 返回及其证明计算，所有模型 attempt 都走
-`decision_path=full_plan`。2026-07-30 的 12480 项结果：
+性能测试固定分为两种，禁止混用结果：
+
+- **优化速度测试**：Release/O3、before-AutoBlockify→local PlanMemory 同边界、160 inputs × 当前
+  35 个有效场景、真实 retry-only、至少 3 轮；设置 `BISHENGIR_UB_MODEL_FORCE_FULL_PLAN=1`，
+  不执行 conservative non-overflow proof，所有模型 attempt 必须为 `decision_path=full_plan`。
+  这是判断模型内部实现是否真正变快的主门槛。
+- **真实速度测试**：Release/O3、production 默认路径、真实 retry-only，不设置
+  `BISHENGIR_UB_MODEL_FORCE_FULL_PLAN`，允许 exact non-overflow proof 命中后直接返回。必须额外
+  报告 fast-path 命中率、完整 PlanMemory fall-through、overflow/blocker 分布；该结果描述产品
+  实际成本，不能证明基础设施本身变快。
+
+2026-07-30 在 `389d0375ab4e` 上完成当前优化速度测试，规模为 `160×35×3=16800`：
 
 ```text
-model full-plan samples                         12480 / 12480
-paired native samples                           12174
-model internal total                            273096.841 ms
-model median / mean / p95 / max       3.370 / 21.883 / 37.088 / 3056.203 ms
-paired model total                              249990.946 ms
-native same-boundary total                      249146.574 ms
-native median / mean / p95 / max       5.640 / 20.465 / 44.419 / 9669.407 ms
-BiSheng / model aggregate ratio                    0.9966x
-round ratios                         1.0215x / 0.9787x / 0.9870x
-process wall total                                859.586 s
-peak RSS                                           111.219 MiB
+model full-plan samples                         16800 / 16800
+paired native samples                           16332
+known native samples skipped                      243
+native unpaired samples                            225
+  partial / unavailable                       78 / 147
+model internal total                            338017.478 ms
+model median / mean / p95 / max       3.412 / 20.120 / 36.974 / 1630.884 ms
+paired model total                              306788.863 ms
+native same-boundary total                      393584.083 ms
+native median / mean / p95 / max       5.331 / 24.099 / 43.299 / 9539.219 ms
+BiSheng / model aggregate ratio                    1.2829x
+round ratios                         1.2799x / 1.2852x / 1.2836x
+process wall total                               1164.537 s
+peak RSS                                            72.27 MiB
 ```
 
-正式结论：新 before-AutoBlockify 边界下模型和原生 BiSheng 聚合时间基本持平；`0.9966x` 表示
-模型约慢 0.34%，三轮波动跨过 1.0，不能宣称稳定加速。模型中位数更快，但
-`triton.language.static_range` 的模型总时间 123.267 s、原生 7.952 s，单一长尾占配对模型总量
-约 49.3%；排除该输入后比值为 1.9033x。这个排除结果只用于定位热点，不能替代正式全量倍率。
+正式结论：同一完整边界上模型是原生 BiSheng 的 `1.2829x` 速度，亦即配对模型内部耗时低
+`22.05%`；三轮稳定同向。单 case 比值中位数为 `1.6414x`，`97.65%` 的配对 case 模型更快。
+聚合倍率受三个输入的 canonicalizer 长尾压低：`static_range`、`inline_asm_elementwise`、`randn`
+分别比原生多耗时 137.586 s、21.401 s、10.569 s；排除三者后的诊断倍率为 `3.2302x`，只用于
+热点归因，不替代正式全量倍率。
 
-一轮 4160 项的 stage 诊断（有额外计时开销）分解为：输入桥 0.369 s、pre-CV 新前缀
-61.053 s、既有 CV→PlanMemory 25.981 s。四个 ExtendedCanonicalizer 合计约 55.18 s，占模型
-总时间约 63%；`static_range` 的 39.487 s 中约 91.8% 同样来自四个 canonicalizer。因此下一轮
-性能优化应优先消除 canonicalizer 的重复全量 fixed point，不能删除任何语义 pattern。
+一轮 `160×35=5600` 的 stage 诊断（有额外计时开销）分解为：输入桥 0.492 s、pre-CV 新前缀
+76.917 s、既有 CV→PlanMemory 35.664 s。四个 ExtendedCanonicalizer 合计 68.874 s，占模型
+总时间 60.59%、占 pre-CV 前缀 89.54%；AutoBlockify 本体仅 0.220 s，占模型总时间 0.19%。
+`static_range` 的 pre-CV 前缀 48.224 s，而原生同输入整个 AutoBlockify→PlanMemory 边界仅
+3.362 s，已经严格证明异常成本来自模型 canonicalizer 实现，而不是 AutoBlockify 算法本身。
 
-正式报告：`output/performance/before_auto_8ebd4f120_160x26x3.{tsv,json}`；stage 诊断：
-`output/performance/before_auto_8ebd4f120_stage_160x26.{tsv,json}`。均为本地生成物，不提交。
+正式报告：`output/performance/optimization_fullplan_389d0375_rebuilt_160x35x3.{tsv,json}`；stage
+诊断：`output/performance/optimization_stages_389d0375_rebuilt_160x35.{tsv,json}`。均为本地生成物，
+不提交。
 
 ## 当前阶段状态
 
@@ -265,26 +281,33 @@ PlanMemory `8/8 matched`。随后进入阶段 6 combined before-CV 与 API/input
 
 阶段 7 已于 2026-07-30 完成：prediction pass 位于 checkpoint 00 后、原生 AutoBlockify 前，使用
 contract v2；验证命令显式 `prune=false`，产品源码不再强制 observe-only，Exact overflow 恢复
-剪枝。26 个有效配置 × 160 inputs × 20 seeds 的理论规模为 83200，排除 1320 个已审核长超时后
-现场执行 81880 项，结果为 81789 matched、31 identity permutation、60 个既有原生 SIGABRT、
-0 different、0 timeout。完整模型测试、Release build 和同边界 160×26×3 性能测量均完成。
+剪枝。扩展后的 35 场景全量为 110183 matched、66 identity permutation、131 ordering
+equivalent、0 different/unavailable/timeout；81 个 native-ineligible pair 在运行前排除。同边界
+160×35×3 优化速度测试为 `BiSheng/model=1.2829x`。
 
 ## 当前实现优先级
 
-1. 优先优化 pre-CV ExtendedCanonicalizer 的重复全量 fixed point；四次调用占 stage 诊断总时间
-   约 63%，并造成 `triton.language.static_range` 的极端长尾。只能复用分析、worklist、常量索引和
-   已收敛信息，不得省略原生 pass 次序或 pattern。
+1. 优先优化 pre-CV ExtendedCanonicalizer 的重复全量 fixed point；四次顶层调用实际会通过
+   module canonicalizer 再嵌套调用 outer canonicalizer，合计占 stage 诊断总时间 60.59%，并造成
+   `triton.language.static_range` 极端长尾。先让一次 canonicalizer invocation 共享现有
+   `PipelineAnalysisContext`，把 value replacement、has-use、definition lookup 和 DCE 从全模型
+   线性扫描改成有序增量索引；不得省略原生 pass 次序、worklist 顺序或 pattern。
 2. 为 canonicalizer 优化建立相同 160×35×3 full-plan A/B，并重跑 160×35×20 正确性；目标是
-   先消除 `static_range` 长尾，再判断新边界是否获得稳定加速。
-3. 在现有数据结构内优化 `BuildPlanMemoryInput`、`AlignStorageAndAllocExtraBuffer` 和连续
-   post-bufferization 状态之间的重复解析、扫描、拷贝和分配。
-4. 在不改变 seed/RNG/遍历顺序的前提下，把 PlanMemory 的 seed-independent 工作移出 retry，
-   复用 scratch capacity 和只读事件信息。
-5. 只为 profile 证明的热点增加局部、明确生命周期的索引或 cache；不先建设通用全局 analysis
+   先消除 `static_range` 长尾，再确认正式倍率稳定高于当前 `1.2829x`。
+3. canonicalizer 的第二批安全优化是 dirty-operation semantics refresh、批量 DCE/erase，以及用
+   mutation/tombstone 标志让确定无变化的 `CompactGenericModule` 走 O(1) no-op；不能跨原生 pass
+   边界复用尚未证明仍有效的 fixed-point 结果。
+4. 在现有数据结构内优化 `BuildPlanMemoryInput`：优先处理 `EmitOperations`、`IndexValues` 与
+   `Normalize` 的重复中间记录和二次 materialize；随后处理
+   `AlignStorageAndAllocExtraBuffer` 的重复 type/layout/attribute 解析。
+5. PlanMemory 已经把 `PreparedMemLivenessAnalysis` 和首次 `PreparedStorageEntryAnalysis` 提到
+   retry 外，后续只能继续分离严格 seed-independent 的 base facts，并保持 mt19937 调用次数、
+   候选顺序、inplace 选择和 retry 合同完全不变。
+6. 只为 profile 证明的热点增加局部、明确生命周期的索引或 cache；不先建设通用全局 analysis
    manager。
-6. 收益稳定后清理被真正替代的 wrapper、重复工具和死代码；禁止先增加一套平行架构再等待
+7. 收益稳定后清理被真正替代的 wrapper、重复工具和死代码；禁止先增加一套平行架构再等待
    将来删除旧实现。
-7. 边界扩展和当前路径优化接近收益上限后，再单独评审 core/MLIR adapter 的依赖拆分。
+8. 边界扩展和当前路径优化接近收益上限后，再单独评审 core/MLIR adapter 的依赖拆分。
 
 详细阶段见 [implementation_plan.md](implementation_plan.md)，执行纪律见
 [workflow.md](workflow.md)，正确性与性能口径见 [validation.md](validation.md)，代码位置见
@@ -300,7 +323,8 @@ contract v2；验证命令显式 `prune=false`，产品源码不再强制 observ
 - 正确性 oracle 必须源自同进程原生 PlanMemory、fixed seeds 0～19 和完整合同。允许回放身份中
   包含 adapter 内容、完整参数和原生源码 fingerprint 的已验证缓存；缺失、过期、多-attempt 或
   缓存比较不一致时必须现场运行原生 pipeline。
-- 性能只比较模型单轮成本；默认关闭 dump、validation、stage artifact 和详细计时。
+- 性能只比较模型单轮成本；默认关闭 dump、validation、stage artifact 和详细计时。优化速度测试
+  强制 full-plan，真实速度测试允许 non-overflow 提前返回；两个倍率必须分开命名、分开报告。
 - 提前 non-overflow 在 production 可直接返回；debug/validation 必须继续完整模型与原生
   PlanMemory，验证证明真实成立。
 - 性能数字必须说明日期、commit、构建、输入、配置、seed/retry、提前判定状态和 timing 口径。

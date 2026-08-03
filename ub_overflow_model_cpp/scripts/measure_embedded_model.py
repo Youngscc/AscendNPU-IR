@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Measure the embedded UB model without validation or the native suffix."""
+"""Measure the real embedded UB model path with the non-overflow fast path."""
 
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import csv
 import json
 import math
@@ -27,7 +28,8 @@ MACHINE_PREFIX = "BISHENGIR_UB_MODEL_RESULT "
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Measure production evaluate() in the real pre-CVPipelining pass. "
+            "Measure production evaluate() in the real before-AutoBlockify "
+            "pass. "
             "The real prefix executes, but the compiler stops immediately "
             "after prediction and does not run native PlanMemory."
         )
@@ -115,6 +117,7 @@ def compiler_environment() -> dict[str, str]:
         "BISHENGIR_UB_MODEL_VALIDATION",
         "BISHENGIR_DUMP_PLAN_MEMORY_ATTEMPTS",
         "BISHENGIR_PLAN_MEMORY_FORCE_SEED",
+        "BISHENGIR_UB_MODEL_FORCE_FULL_PLAN",
         "BISHENGIR_STOP_AFTER_LOCAL_PLAN_MEMORY",
         "BISHENGIR_UB_FLOW_TRACE",
     ):
@@ -185,7 +188,11 @@ def percentile(values: list[int], fraction: float) -> float:
 
 
 def summarize(rows: list[dict[str, Any]], rounds: int) -> dict[str, Any]:
-    result: dict[str, Any] = {"rounds": rounds, "variants": {}}
+    result: dict[str, Any] = {
+        "measurement_mode": "production_real_fast_path",
+        "rounds": rounds,
+        "variants": {},
+    }
     for variant in sorted({str(row["variant"]) for row in rows}):
         all_selected = [row for row in rows if row["variant"] == variant]
         selected = [row for row in all_selected
@@ -227,6 +234,16 @@ def summarize(rows: list[dict[str, Any]], rounds: int) -> dict[str, Any]:
                 row["decision_path"] == "non_overflow_upper_bound"
                 for row in selected
             ),
+            "full_plan_fallthrough": sum(
+                row["decision_path"] != "non_overflow_upper_bound"
+                for row in selected
+            ),
+            "decision_paths": dict(sorted(Counter(
+                str(row["decision_path"]) for row in selected
+            ).items())),
+            "statuses": dict(sorted(Counter(
+                str(row["status"]) for row in selected
+            ).items())),
         }
     return result
 

@@ -1,6 +1,6 @@
 # 当前验证与性能基线
 
-最后核实：2026-07-30，本轮验证起点 `50475b2152`。
+最后核实：2026-07-30，当前验证与性能基线 `389d0375ab4e`。
 
 before-AutoBlockify 产品边界及其全量正确性、同边界 full-plan 性能均已完成验证。2026-07-29 的
 before-CVPipelining 数据只保留为历史基线，不能与新边界倍率混用。
@@ -350,25 +350,29 @@ ub_overflow_model_cpp/output/validation/full_1dfddd59_160x27x20.tsv
 
 ## 5. 性能测量的两种口径
 
-### 5.1 结构优化主口径：完整模型路径
+### 5.1 优化速度测试：完整模型路径
 
 用于判断模型自身基础设施或局部实现是否变快：
 
 - Release/O3；
-- 相同 160 inputs × 当前有效 read-only configs；
+- 相同 160 inputs × 当前全部有效 read-only configs；
 - 未固定 seed 的真实 retry-only；
 - 关闭 validation、dump、stage artifact 和详细 stage timing；
-- 关闭提前 non-overflow 返回；
-- 同时关闭 conservative non-overflow proof 计算；
+- 设置 `BISHENGIR_UB_MODEL_FORCE_FULL_PLAN=1`，关闭提前 non-overflow 返回及 conservative proof
+  计算；
 - 每个模型 case 必须显示 `decision_path=full_plan`；
 - 所有模型 case 完整执行到 PlanMemory。
 
-该口径是后续 P0/P1 优化的主门槛。
+该口径简称“优化速度测试”，是后续 P0/P1 优化的唯一主性能门槛。正式 A/B 至少 3 轮；额外
+stage timing 只能用于归因，不能替代无探针正式倍率。
 
-### 5.2 产品口径：允许提前 non-overflow
+### 5.2 真实速度测试：允许提前 non-overflow
 
-用于观察真实产品默认行为和 fast-path 命中率。它会跳过部分 PlanMemory 工作，因此不能用来
-证明基础设施本身变快，也不能与 4.1 混写成同一加速比。
+用于观察真实产品默认行为和 fast-path 命中率：不设置
+`BISHENGIR_UB_MODEL_FORCE_FULL_PLAN`，允许 exact non-overflow proof 成功后直接返回。它必须报告
+fast-path 命中率、完整 PlanMemory fall-through、overflow/blocker、模型 internal latency、process
+wall 与 RSS。该口径简称“真实速度测试”；它会跳过部分 PlanMemory 工作，因此不能用来证明
+基础设施本身变快，也不能与 5.1 混写成同一加速比。
 
 ## 6. 2026-07-29 旧边界完整路径性能基线（历史）
 
@@ -427,46 +431,61 @@ production-default + full plan                 约 4.006x
 `6.81x` 命中了 147/160 个 exact non-overflow fast path，因此不是完整路径速度。后续结构优化不得
 用 fast-path 命中增加代替 core pipeline 加速。
 
-## 8. 2026-07-30 新边界全量性能结果
+## 8. 2026-07-30 新边界优化速度测试
 
 新模型增加 AutoBlockify→before-CV 的真实工作，因此旧 `CVPipelining→PlanMemory` 的 `3.95x`
-不是新边界的加速比。正式测量使用 Release/O3、160 inputs × 26 有效配置 × 3 轮、真实
-retry-only、关闭提前 non-overflow 返回及证明计算，所有模型 attempt 都执行到完整 PlanMemory：
+不是新边界的加速比。当前正式测量使用 Release/O3、160 inputs × 35 有效配置 × 3 轮、真实
+retry-only、`BISHENGIR_UB_MODEL_FORCE_FULL_PLAN=1`，所有模型 attempt 都执行完整 PlanMemory：
 
 ```text
-model full-plan samples                         12480 / 12480
-paired native samples                           12174
-known native timeout skipped                      198
-native unavailable                                108
-model internal total                            273096.841 ms
-model median / mean / p95 / max       3.370 / 21.883 / 37.088 / 3056.203 ms
-paired model total                              249990.946 ms
-native same-boundary total                      249146.574 ms
-native median / mean / p95 / max       5.640 / 20.465 / 44.419 / 9669.407 ms
-BiSheng / model aggregate ratio                    0.9966x
-round ratios                         1.0215x / 0.9787x / 0.9870x
-process wall total                                859.586 s
-peak RSS                                           111.219 MiB
+requested/model full-plan samples                16800 / 16800
+paired native samples                                   16332
+known native sample skips                                  243
+native unpaired samples                                    225
+  partial / unavailable                               78 / 147
+model internal total                                 338017.478 ms
+model median / mean / p95 / max            3.412 / 20.120 / 36.974 / 1630.884 ms
+paired model total                                   306788.863 ms
+native same-boundary total                           393584.083 ms
+native median / mean / p95 / max            5.331 / 24.099 / 43.299 / 9539.219 ms
+BiSheng / model aggregate ratio                         1.2829x
+round ratios                              1.2799x / 1.2852x / 1.2836x
+process wall total                                    1164.537 s
+peak RSS                                                 72.27 MiB
 ```
 
-正式结论是模型与原生 BiSheng 在新边界基本持平：`0.9966x` 表示模型约慢 0.34%，而且三轮
-波动跨过 1.0，不能宣称稳定加速。模型中位数更快，但 `triton.language.static_range` 的 78 个
-配对样本中模型耗时 123.267 s、原生 7.952 s，占配对模型总量约 49.3%；排除它后为 1.9033x，
-但该排除倍率只用于定位热点，不能替代正式全量倍率。
+正式结论：模型在 before-AutoBlockify→local PlanMemory 完整同边界是原生 BiSheng 的
+`1.2829x` 速度，即配对模型内部耗时低 `22.05%`；三轮稳定。case-wise 比值的
+p05/p25/median/p75/p95 为 `1.231/1.477/1.641/1.964/2.333x`，16332 个配对 case 中 15949 个
+模型更快（97.65%）。
 
-一轮 4160 项的附加 stage 诊断（计时探针会产生额外开销，不能替代正式倍率）为：
+聚合长尾高度集中：`static_range`、`inline_asm_elementwise`、`randn` 各 105 个配对 case 的
+模型/原生总耗时分别为 `147.643/10.057 s`、`27.437/6.036 s`、`16.761/6.191 s`。排除三者后
+诊断倍率为 `3.2302x`；此结果只证明热点集中，不能替代 1.2829x 正式倍率。
+
+一轮 `160×35=5600` 项的附加 stage 诊断（计时探针有开销，不能替代正式倍率）为：
 
 ```text
-input bridge                                      0.369 s
-pre-CV prefix                                    61.053 s
-existing CV->PlanMemory                          25.981 s
-four ExtendedCanonicalizer stages                55.181 s
+model internal total                              113.667 s
+input bridge                                        0.492 s   0.43%
+AutoBlockify->before-CV prefix                     76.917 s  67.67%
+  four ExtendedCanonicalizer stages               68.874 s  60.59% total
+  AutoBlockify itself                               0.220 s   0.19% total
+CVPipelining->local PlanMemory                     35.664 s  31.38%
 ```
 
-四个 canonicalizer 约占该轮模型内部总时间 63%；`static_range` 的 39.487 s 中约 91.8% 同样来自
-四个 canonicalizer。正式报告为
-`output/performance/before_auto_8ebd4f120_160x26x3.{tsv,json}`，stage 报告为
-`output/performance/before_auto_8ebd4f120_stage_160x26.{tsv,json}`，均不提交。
+`static_range` 的模型 pre-CV 前缀为 48.224 s，其中 canonicalizer 为 45.349 s；原生同一输入
+整个 AutoBlockify→PlanMemory 边界仅 3.362 s。因此无需推断就能确定：新增前缀的主要性能问题
+是模型 canonicalizer 的实现冗余，AutoBlockify 本体不是瓶颈。
+
+CV→PlanMemory 内部最大父级为 PlanMemory 8.754 s、BuildPlanMemoryInput 5.356 s、
+AlignStorageAndAllocExtraBuffer 4.588 s、MarkRealCoreType 2.506 s。当前原生探针只提供整个
+AutoBlockify→PlanMemory 的边界时间，没有原生 before-CV 中点，因此这些阶段可以报告模型绝对
+耗时和占比，但不得伪造分段的 BiSheng/model 倍率。
+
+正式报告为
+`output/performance/optimization_fullplan_389d0375_rebuilt_160x35x3.{tsv,json}`，stage 报告为
+`output/performance/optimization_stages_389d0375_rebuilt_160x35.{tsv,json}`，均不提交。
 
 ## 9. 每个优化批次的验证门槛
 
@@ -477,6 +496,21 @@ four ExtendedCanonicalizer stages                55.181 s
 原生 PlanMemory 验证为真。报告和缓存分别位于
 `output/validation/embedded_160x35x20_final.tsv` 与
 `output/oracle_cache/bisheng_native_35x160x20`，均为本地生成物，不提交。
+
+这 81 个 pair 不能表述为“原生编译器和模型都 fail”：
+
+- 78 个是 13 个 auto-MB 场景 × 6 个已知原生超过 360 秒的 attention 输入，正确性脚本在启动
+  前跳过，因而没有本轮原生 oracle；优化速度测试仍完整运行模型，三轮 234 个样本全部 success；
+- 另外 3 个是 `preload_auto_mb` × 三个 matmul，原生在 PlanMemory 前的 SplitMixKernel 中
+  SIGABRT；优化速度测试中的模型对应三轮 9 个样本均为 blocker。这里只能说双方都有稳定失败
+  信号，不能把它们计为 PlanMemory matched。
+
+131 个 `ordering_equivalent` 的现场证据明确标注为 `SmallPtrSet live-in ordering equivalent`：
+原生 MLIR Liveness 的 live-in 集合使用 `SmallPtrSet`，指针布局改变迭代顺序，并在固定 seed 的
+shuffle 前改变候选初始排列；比较器要求 logical buffers、status、required、peak、multi 和
+inplace requirement 全部等价。66 个 `identity_permutation` 只严格证明等尺寸 physical buffer
+身份置换后完整 extent/lifetime/inplace 图一致；其现象与同类指针/遍历顺序不稳定相符，但现有
+分类证据不足以断言唯一原因一定是上述 `SmallPtrSet`，报告时必须保留这个区分。
 
 2026-07-30 修正了 prediction 对 workspace manager 开关的错误 gate：
 `cv_workspace_manage_off` 与 `cv_workspace_manage_off_auto_mb` 现在仍插入轻量模型，并把
