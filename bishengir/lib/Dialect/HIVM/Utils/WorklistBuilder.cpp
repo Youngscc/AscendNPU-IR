@@ -1220,7 +1220,7 @@ void WorklistBuilder::computeLocalOutputs() {
 /// multibuffer reconciliation, ≥2-WorkItem requirement) are skipped in block
 /// mode.
 FailureOr<WorklistBuildResult> WorklistBuilder::build() {
-  int multibuffer = numMultibuffer > 1 ? numMultibuffer : 2;
+  int multibuffer = numMultibuffer > 0 ? numMultibuffer : 2;
 
   for (Operation &op : targetBlock->getOperations()) {
     if (isCoreOp(op))
@@ -1257,7 +1257,7 @@ FailureOr<WorklistBuildResult> WorklistBuilder::build() {
   });
 
   if (isLoopMode) {
-    if (multibuffer < 2)
+    if (multibuffer < 1)
       return failure();
     if (numMultibuffer < 1)
       numMultibuffer = multibuffer;

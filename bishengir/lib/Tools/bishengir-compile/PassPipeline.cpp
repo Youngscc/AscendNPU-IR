@@ -147,6 +147,7 @@ public:
         &enableLayoutOptimization,
         &enableSanitizer,
         &enableMemoryDisplay,
+        &enablePrintMemoryAllocatedSize,
         &enableStaticBarePtr,
         &enableTritonKernelCompile,
         &enableSimtVFSubTiling,
@@ -157,6 +158,8 @@ public:
     };
 
     SmallVector<Pass::Option<unsigned> *> sharedWithHIVMCompileUnsigned = {
+        &setCVPipelineDepth,
+        &setLocalMultibuffer,
         &setWorkspaceMultibuffer,
         &tileMixVectorLoop,
         &tileMixCubeLoop,

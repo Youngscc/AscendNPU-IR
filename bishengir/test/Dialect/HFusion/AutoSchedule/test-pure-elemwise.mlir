@@ -1,5 +1,7 @@
 // RUN: bishengir-opt %s -hfusion-auto-schedule="block-dim=20 enable-count-buffer-dma-opt" -split-input-file | FileCheck %s
+// RUN: bishengir-opt %s -hfusion-auto-schedule="block-dim=20 enable-auto-multi-buffer=true set-local-multibuffer=1 enable-count-buffer-dma-opt" -split-input-file | FileCheck --check-prefix=CHECK-MB1 %s
 // RUN: bishengir-opt %s -hfusion-auto-schedule="block-dim=20 enable-auto-multi-buffer=true enable-count-buffer-dma-opt" -split-input-file | FileCheck --check-prefix=CHECK-DB %s
+// RUN: bishengir-opt %s -hfusion-auto-schedule="block-dim=20 enable-auto-multi-buffer=true set-local-multibuffer=4 enable-count-buffer-dma-opt" -split-input-file | FileCheck --check-prefix=CHECK-MB4 %s
 // RUN: bishengir-opt %s -hfusion-auto-schedule="block-dim=20 max-buffer-count-tuning=1 enable-count-buffer-dma-opt" -split-input-file | FileCheck --check-prefix=CHECK-MT %s
 
 // CHECK: @add_mul_fusion
@@ -12,7 +14,9 @@ func.func @add_mul_fusion(%arg0: tensor<?xf32>, %arg1: tensor<?xf32>, %arg2: ten
 
   // CHECK: scf.for
   // CHECK: buffer_size_in_byte = 39296
+  // CHECK-MB1: buffer_size_in_byte = 39296
   // CHECK-DB: buffer_size_in_byte = 21824
+  // CHECK-MB4: buffer_size_in_byte = 11552
   // CHECK-MT: buffer_size_in_byte = 32736
   %0 = tensor.empty(%dim) : tensor<?xf32>
   %2 = linalg.elemwise_binary {fun = #linalg.binary_fn<mul>} ins(%arg0, %arg1 : tensor<?xf32>, tensor<?xf32>) outs(%0 : tensor<?xf32>) -> tensor<?xf32>
@@ -31,7 +35,9 @@ attributes {hacc.function_kind = #hacc.function_kind<DEVICE>, hfusion.fusion_kin
   // CHECK: hacc.block_dim = 20
   // CHECK: buffer_size_in_byte = 32736
   // CHECK: return
+  // CHECK-MB1: buffer_size_in_byte = 32736
   // CHECK-DB: buffer_size_in_byte = 21824
+  // CHECK-MB4: buffer_size_in_byte = 9344
   // CHECK-MT: buffer_size_in_byte = 28064
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
@@ -58,7 +64,9 @@ attributes {hacc.function_kind = #hacc.function_kind<DEVICE>, hfusion.fusion_kin
   // CHECK: scf.for
   // CHECK: linalg.elemwise_binary
   // CHECK: buffer_size_in_byte = 39296
+  // CHECK-MB1: buffer_size_in_byte = 39296
   // CHECK-DB: buffer_size_in_byte = 21824
+  // CHECK-MB4: buffer_size_in_byte = 11552
   // CHECK-MT: buffer_size_in_byte = 28064
   // CHECK: hivm.block
   %3 = linalg.elemwise_binary {fun = #linalg.binary_fn<mul>} ins(%arg0, %arg1 : tensor<1024xf32>, tensor<1024xf32>) outs(%0 : tensor<1024xf32>) -> tensor<1024xf32>
@@ -71,9 +79,11 @@ attributes {hacc.function_kind = #hacc.function_kind<DEVICE>, hfusion.fusion_kin
 
 func.func @func_arg_as_init(%arg0: tensor<1024xf32>, %arg1: tensor<1024xf32>, %arg2: tensor<1024xf32>, %arg3: tensor<1024xf32>) -> tensor<1024xf32>
 attributes {hacc.function_kind = #hacc.function_kind<DEVICE>, hfusion.fusion_kind = #hfusion.fusion_kind<PURE_ELEMWISE>} {
-// CHECK: hacc.block_dim = 20
+  // CHECK: hacc.block_dim = 20
   // CHECK: buffer_size_in_byte = 39296
+  // CHECK-MB1: buffer_size_in_byte = 39296
   // CHECK-DB: buffer_size_in_byte = 21824
+  // CHECK-MB4: buffer_size_in_byte = 11552
   // CHECK-MT: buffer_size_in_byte = 32736
   %0 = tensor.empty() : tensor<1024xf32>
   %1 = linalg.elemwise_binary {fun = #linalg.binary_fn<add>} ins(%arg0, %arg1 : tensor<1024xf32>, tensor<1024xf32>) outs(%0 : tensor<1024xf32>) -> tensor<1024xf32>

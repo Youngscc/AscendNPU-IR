@@ -302,8 +302,12 @@ LogicalResult KernelInfoCollector::postVisitFuncImpl(func::FuncOp f) {
           });
       if (llvm::hasSingleElement(copyOpUsers)) {
         Operation *copyOp = *(copyOpUsers.begin());
-        LDBG("Auto multi-buffer value: " << copyOp->getResult(0));
-        options.multiBufferCount[copyOp->getResult(0)] = 2;
+        LDBG("Auto multi-buffer value: " << copyOp->getResult(0)
+                                          << ", count: "
+                                          << getScheduleOptions()
+                                                 .localMultiBufferNum);
+        options.multiBufferCount[copyOp->getResult(0)] =
+            getScheduleOptions().localMultiBufferNum;
       }
     }
   }

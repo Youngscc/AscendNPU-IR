@@ -70,6 +70,9 @@ def AutoSchedule : Pass<"hfusion-auto-schedule", "ModuleOp"> {
               "Number of blocks to use">,
        Option<"enableAutoMultiBuffer", "enable-auto-multi-buffer", "bool",
               "false", "Enable auto multi buffer">,
+       Option<"localMultiBufferNum", "set-local-multibuffer", "unsigned",
+              "2", "Number of ordinary local multibuffers used by buffer "
+              "pressure estimation">,
        Option<"enableDeterministicComputing", "enable-deterministic-computing", "bool",
               "true", "Enable deterministic computing">,
        Option<"maxBufferCntTuning", "max-buffer-count-tuning", "int64_t", "0",

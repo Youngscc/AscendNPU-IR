@@ -538,7 +538,25 @@ def EnableHIVMInjectBlockAllSync : HIVMOptimizationControlOptions<
 >;
 
 def SetWorkspaceMultibuffer : HIVMOptimizationControlOptions<
-  "Override number of multibuffers for workspace, defaults to 4.",
+  "Override number of physical multibuffers for CV workspace, defaults to 4.",
+  "unsigned",
+  "4"
+>;
+
+def SetLocalMultibuffer : HIVMOptimizationControlOptions<
+  "Override number of automatically marked ordinary local multibuffers, "
+  "defaults to 2. Preload-local multibuffers retain their dedicated value.",
+  "unsigned",
+  "2"
+> {
+  // HFusion uses the same value when estimating the buffer pressure that
+  // drives its auto-schedule tiling. HIVM consumes it when materializing the
+  // ordinary local multi-buffer marks.
+  let passGroup = ["HFUSION", "HIVM"];
+}
+
+def SetCVPipelineDepth : HIVMOptimizationControlOptions<
+  "Override the CV software-pipeline unroll depth, defaults to 4.",
   "unsigned",
   "4"
 >;

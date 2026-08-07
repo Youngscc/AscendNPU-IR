@@ -2872,6 +2872,21 @@ void PlanMemoryPass::runOnOperation() {
     const bool isLastAttempt = attempt == kPlanRetryCount - 1;
     if (succeeded(memPlan.plan(/*emitErrors=*/isLastAttempt))) {
       plannedBuffer2Offsets = memPlan.GetBuffer2Offsets();
+      if (this->enablePrintMemoryAllocatedSize) {
+        auto storageEntries = memPlan.GetMemscope2rootStorageEntry();
+        auto ubIt = storageEntries.find(hivm::AddressSpace::UB);
+        if (ubIt != storageEntries.end()) {
+          StorageEntry *root = ubIt->second;
+          assert(root && "UB root storage entry must not be null");
+          uint64_t allocatedBits = root->alignedConstBits + root->bitsOffset;
+          for (auto *child : root->mergedChildren) {
+            allocatedBits = std::max(
+                allocatedBits, child->bitsOffset + child->alignedConstBits);
+          }
+          llvm::outs() << "[AscendNPU IR] Allocated UB size = "
+                       << allocatedBits << " bits \n";
+        }
+      }
       if (memPlan.enableMemoryDisplay) {
         SmallVector<MemoryDisplayInfo> memoryDisplayInfoList;
         // Collect plan success memory info for memory display tools.

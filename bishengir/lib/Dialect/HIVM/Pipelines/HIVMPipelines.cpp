@@ -19,6 +19,7 @@
 #include "bishengir/Dialect/Annotation/Transforms/Passes.h"
 #include "bishengir/Dialect/Arith/Transforms/Passes.h"
 #include "bishengir/Dialect/HFusion/IR/HFusion.h"
+#include "bishengir/Dialect/HFusion/Transforms/Passes.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Dialect/HIVM/Pipelines/Passes.h"
 #include "bishengir/Dialect/HIVM/Transforms/Passes.h"
@@ -123,6 +124,14 @@ bufferizationPipeline(OpPassManager &pm,
     pm.nest<func::FuncOp>().addPass(createCloneTensorEmptyPass());
     pm.nest<func::FuncOp>().addPass(createSinkOpToConsumerInLoopPass());
   }
+  // Keep the public merge-level semantics identical on the mem-based and
+  // regbase pipelines: level 1 merges tensor VFs before bufferization, level
+  // 2 merges their bufferized form afterwards, and level 0 adds neither pass.
+  if (hivmPipelineOptions.enableVfMergeLevel == 1) {
+    MergeVecScopeOptions options;
+    options.mergeLevel = 1;
+    pm.addPass(hfusion::createMergeVecScopePass(options));
+  }
   bufferization::OneShotBufferizationOptions oneShotOptions;
   oneShotOptions.bufferizeFunctionBoundaries = true;
   oneShotOptions.setFunctionBoundaryTypeConversion(
@@ -143,6 +152,11 @@ bufferizationPipeline(OpPassManager &pm,
   oneShotOptions.analysisHeuristic =
       bufferization::OneShotBufferizationOptions::AnalysisHeuristic::TopDown;
   pm.addPass(bufferization::createOneShotBufferizePass(oneShotOptions));
+  if (hivmPipelineOptions.enableVfMergeLevel == 2) {
+    MergeVecScopeOptions options;
+    options.mergeLevel = 2;
+    pm.addPass(hfusion::createMergeVecScopePass(options));
+  }
   canonicalizationHIVMPipeline(pm);
   if (hivmPipelineOptions.enableTritonKernelCompile) {
     // For triton kernels, bufferization will generate `memref.copy` ops,
@@ -263,6 +277,8 @@ static void hivmPreBufferizationOptimizationPipeline(
         hivmPipelineOptions.limitAutoMultiBufferOfLocalBuffer;
     multiBufferOptions.limitMixAutoMultiBufferBuffer =
         hivmPipelineOptions.limitAutoMultiBufferBuffer;
+    multiBufferOptions.localMultiBufferNum =
+        hivmPipelineOptions.setLocalMultibuffer;
     multiBufferOptions.workspaceMultiBufferNum =
         hivmPipelineOptions.setWorkspaceMultibuffer;
     pm.addNestedPass<func::FuncOp>(
@@ -278,6 +294,8 @@ static void hivmPreBufferizationOptimizationPipeline(
     if (hivmPipelineOptions.setCVPipelineMode != CVPipelineMode::Off) {
       CVPipeliningOptions pipelineOptions;
       pipelineOptions.setDepthInUnrollMode =
+          hivmPipelineOptions.setCVPipelineDepth;
+      pipelineOptions.setNumMultibufferInUnrollMode =
           hivmPipelineOptions.setWorkspaceMultibuffer;
       pipelineOptions.enableLazyLoading = hivmPipelineOptions.enableLazyLoading;
       pipelineOptions.pipelineMode = hivmPipelineOptions.setCVPipelineMode;
@@ -459,11 +477,15 @@ static void hivmPostBufferizationOptimizationPipeline(
       hivmPipelineOptions.limitAutoMultiBufferOfLocalBuffer;
   multiBufferOptions.limitMixAutoMultiBufferBuffer =
       hivmPipelineOptions.limitAutoMultiBufferBuffer;
+  multiBufferOptions.localMultiBufferNum =
+      hivmPipelineOptions.setLocalMultibuffer;
   pm.nest<func::FuncOp>().addPass(
       createMarkMultiBufferPass(multiBufferOptions));
   PlanMemoryOptions planMemoryOption;
   planMemoryOption.enableMemoryDisplay =
       hivmPipelineOptions.enableMemoryDisplay;
+  planMemoryOption.enablePrintMemoryAllocatedSize =
+      hivmPipelineOptions.enablePrintMemoryAllocatedSize;
   pm.nest<func::FuncOp>().addPass(createPlanMemoryPass(planMemoryOption));
 
   // Lower hivm ops to loops

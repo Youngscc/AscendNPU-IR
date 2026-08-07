@@ -146,6 +146,11 @@ def MarkMultiBuffer : Pass<"hivm-mark-multi-buffer", "func::FuncOp"> {
                           "only vector for mix auto multi buffer"),
                clEnumValN(MultiBufferStrategy::CUBE_NO_L0C, "no-l0c",
                           "Disable l0c for mix auto multi buffer"))}]>,
+    Option<"localMultiBufferNum", "set-local-multibuffer", "unsigned",
+           /*default=*/"2",
+           "Override the number of physical versions for ordinary local "
+           "buffers marked automatically. Preload-local buffers retain their "
+           "dedicated value.">,
     Option<"workspaceMultiBufferNum", "set-workspace-multibuffer", "unsigned",
            /*default=*/"4", "Override for multibuffer number for workspace">,
   ];
@@ -238,6 +243,9 @@ def PlanMemory : Pass<"hivm-plan-memory", "func::FuncOp"> {
     Option<"enableMemoryDisplay", "enable-memory-display", "bool",
            /*default=*/"false",
            "Enable memory display, default : false">,
+    Option<"enablePrintMemoryAllocatedSize", "enable-print-memory-allocated-size", "bool",
+           /*default=*/"false",
+           "Enable print memory allocated size, default : false">,
     Option<"restrictInplaceAsISA", "restrict-inplace-as-isa", "bool",
            /*default=*/"false",
            "restrict memory inplace as isa, default : false">,
@@ -1174,6 +1182,11 @@ def CVPipelining : Pass<"cv-pipelining", "func::FuncOp"> {
   let options = [Option<"setDepthInUnrollMode", "set-depth-in-unroll-mode", "int",
                         /*default=*/"-1",
                         "Specify pipeline depth for cv-pipelining.">,
+                 Option<"setNumMultibufferInUnrollMode",
+                        "set-num-multibuffer-in-unroll-mode", "int",
+                        /*default=*/"-1",
+                        "Specify the physical buffer multiplicity independently "
+                        "from pipeline depth.">,
                  Option<"pipelineMode", "pipeline-mode", "CVPipelineMode",
                         "CVPipelineMode::Unroll",
                         "Pipeline mode for CV-pipelining.",

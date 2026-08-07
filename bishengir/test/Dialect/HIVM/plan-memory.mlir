@@ -1,7 +1,9 @@
 // RUN: bishengir-opt %s -hivm-plan-memory -split-input-file -verify-diagnostics | FileCheck %s
+// RUN: bishengir-opt %s -hivm-plan-memory=enable-print-memory-allocated-size=true -split-input-file -verify-diagnostics | FileCheck %s --check-prefix=UB
 
 // -----
 module {
+  // UB: [AscendNPU IR] Allocated UB size = 65536 bits
   // CHECK-LABEL: func.func @test_mem_allocate_basic
   func.func @test_mem_allocate_basic(%src : memref<16x16x16xf16, #hivm.address_space<gm>>,
                                     %dst3 : memref<16x16x16xf16, #hivm.address_space<gm>>) {

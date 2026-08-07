@@ -1,7 +1,23 @@
-// RUN: bishengir-opt -cv-pipelining="set-depth-in-unroll-mode=2" -allow-unregistered-dialect -split-input-file -verify-diagnostics %s | FileCheck %s --check-prefixes=CHECK,CHECK-HINT,CHECK-NEG-HINT
+// RUN: bishengir-opt -cv-pipelining="set-depth-in-unroll-mode=2 set-num-multibuffer-in-unroll-mode=2" -allow-unregistered-dialect -split-input-file -verify-diagnostics %s | FileCheck %s --check-prefixes=CHECK,CHECK-HINT,CHECK-NEG-HINT
 // RUN: bishengir-opt -cv-pipelining="set-depth-in-unroll-mode=2 enable-lazy-loading=true" -allow-unregistered-dialect -split-input-file -verify-diagnostics %s | FileCheck %s --check-prefixes=CHECK,CHECK-LAZY,CHECK-HINT
+// RUN: bishengir-opt -cv-pipelining="set-depth-in-unroll-mode=2 set-num-multibuffer-in-unroll-mode=3" -allow-unregistered-dialect -split-input-file %s | FileCheck %s --check-prefix=CHECK-SPLIT
+// RUN: bishengir-opt -cv-pipelining="set-depth-in-unroll-mode=3 set-num-multibuffer-in-unroll-mode=2" -allow-unregistered-dialect -split-input-file %s | FileCheck %s --check-prefix=CHECK-RING2
+// RUN: bishengir-opt -cv-pipelining="set-depth-in-unroll-mode=4 set-num-multibuffer-in-unroll-mode=1" -allow-unregistered-dialect -split-input-file %s | FileCheck %s --check-prefix=CHECK-RING1
 
 // CHECK-LABEL: func.func @test_pipeline
+// CHECK-SPLIT-LABEL: func.func @test_pipeline
+// CHECK-SPLIT: memref<3x16x16xf16>
+// CHECK-SPLIT: cv_pipeline_depth = 2 : i32
+// CHECK-SPLIT-SAME: multibuffer_unroll_factor = 3 : i32
+// CHECK-RING2-LABEL: func.func @test_pipeline
+// CHECK-RING2: memref<2x16x16xf16>
+// CHECK-RING2: arith.remui
+// CHECK-RING2: cv_pipeline_depth = 3 : i32
+// CHECK-RING2-SAME: multibuffer_unroll_factor = 2 : i32
+// CHECK-RING1-LABEL: func.func @test_pipeline
+// CHECK-RING1: memref<1x16x16xf16>
+// CHECK-RING1: cv_pipeline_depth = 4 : i32
+// CHECK-RING1-SAME: multibuffer_unroll_factor = 1 : i32
 // CHECK: scf.for
 // CHECK: scf.for
 // CHECK: hivm.loop_core_type = #hivm.tcore_type<CUBE>

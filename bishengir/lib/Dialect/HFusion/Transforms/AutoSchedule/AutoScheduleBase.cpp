@@ -1205,6 +1205,12 @@ private:
 } // namespace
 
 void AutoSchedulePass::runOnOperation() {
+  if (enableAutoMultiBuffer && localMultiBufferNum < 1) {
+    getOperation()->emitError(
+        "ordinary local multibuffer count must be at least 1");
+    return signalPassFailure();
+  }
+
   AutoScheduleOptions options;
   SmallVector<func::FuncOp> funcList;
   getOperation()->walk([&](func::FuncOp func) { funcList.push_back(func); });
@@ -1224,6 +1230,7 @@ void AutoSchedulePass::runOnOperation() {
 void AutoSchedulePass::setOptionsForFunc(AutoScheduleOptions &options,
                                          func::FuncOp func) {
   options.enableAutoMultiBuffer = this->enableAutoMultiBuffer;
+  options.localMultiBufferNum = this->localMultiBufferNum;
   options.enableDeterministicComputing = this->enableDeterministicComputing;
   options.maxBufferCntTuning = this->maxBufferCntTuning;
   options.enableCountBufferDmaOpt = this->enableCountBufferDmaOpt;

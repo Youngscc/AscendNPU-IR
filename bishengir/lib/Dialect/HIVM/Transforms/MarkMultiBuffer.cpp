@@ -97,7 +97,7 @@ static bool isMarked(Operation *op) {
 }
 
 static void mark(mlir::Operation *op, PatternRewriter &rewriter,
-                 unsigned numBuffer = 2, bool isPreload = false) {
+                 unsigned numBuffer, bool isPreload = false) {
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPointAfter(op);
   // result of allocOp or memref_ext::AllocWorkspaceOp
@@ -178,8 +178,9 @@ template <typename CopyOpType>
 struct MarkMultiBuffer : public OpRewritePattern<CopyOpType> {
   using OpRewritePattern<CopyOpType>::OpRewritePattern;
 
-  explicit MarkMultiBuffer(MLIRContext *ctx)
-      : OpRewritePattern<CopyOpType>(ctx) {}
+  explicit MarkMultiBuffer(MLIRContext *ctx, unsigned localMultiBufferNum)
+      : OpRewritePattern<CopyOpType>(ctx),
+        localMultiBufferNum(localMultiBufferNum) {}
 
   LogicalResult matchAndRewrite(CopyOpType copyLikeOp,
                                 PatternRewriter &rewriter) const override {
@@ -212,7 +213,7 @@ struct MarkMultiBuffer : public OpRewritePattern<CopyOpType> {
       }
 
       // Do mark operations
-      mark(allocOp, rewriter);
+      mark(allocOp, rewriter, localMultiBufferNum);
       return success();
     };
 
@@ -240,6 +241,9 @@ struct MarkMultiBuffer : public OpRewritePattern<CopyOpType> {
 
     return failure();
   }
+
+private:
+  unsigned localMultiBufferNum;
 };
 
 // For workspace scene, it's distinct from marking ub multiple buffer that here
@@ -289,29 +293,50 @@ void MarkMultiBufferPass::runOnOperation() {
     return;
   }
 
+  if (localMultiBufferNum < 1) {
+    getOperation().emitError(
+        "ordinary local multibuffer count must be at least 1");
+    signalPassFailure();
+    return;
+  }
+
   auto funcOp = getOperation();
   if (hacc::utils::isHost(funcOp))
     return;
-
-  RewritePatternSet patterns(&getContext());
 
   auto funcCoreType = queryFuncCoreType(funcOp);
   const bool isMixFuncCore =
       funcCoreType.has_value() &&
       (funcCoreType.value() == TFuncCoreType::MIX ||
        funcOp->getAttrOfType<UnitAttr>(hivm::TPartOfMixAttr::name));
-  patterns.insert<MarkScopeMultiBuffer<scope::ScopeOp>>(patterns.getContext());
+
+  // Mark preload-local buffers first so the ordinary Load/Store patterns
+  // cannot claim the same allocation with localMultiBufferNum. Preload-local
+  // buffers have their own fixed count and are deliberately independent from
+  // the ordinary local multibuffer option.
+  RewritePatternSet preloadPatterns(&getContext());
+  preloadPatterns.insert<MarkScopeMultiBuffer<scope::ScopeOp>>(
+      preloadPatterns.getContext());
+  if (failed(applyPatternsGreedily(funcOp, std::move(preloadPatterns)))) {
+    signalPassFailure();
+    return;
+  }
+
+  RewritePatternSet patterns(&getContext());
   if (!isMixFuncCore ||
       !(limitMixAutoMultiBufferBuffer == MultiBufferStrategy::ONLY_VECTOR)) {
-    patterns.insert<MarkMultiBuffer<hivm::ND2NZOp>>(patterns.getContext());
+    patterns.insert<MarkMultiBuffer<hivm::ND2NZOp>>(
+        patterns.getContext(), localMultiBufferNum);
     if (limitAutoMultiBufferOfLocalBuffer != MultiBufferStrategy::CUBE_NO_L0C) {
-      patterns.insert<MarkMultiBuffer<hivm::FixpipeOp>>(patterns.getContext());
+      patterns.insert<MarkMultiBuffer<hivm::FixpipeOp>>(
+          patterns.getContext(), localMultiBufferNum);
     }
   }
   if (!isMixFuncCore ||
       !(limitMixAutoMultiBufferBuffer == MultiBufferStrategy::ONLY_CUBE)) {
-    patterns.insert<MarkMultiBuffer<hivm::LoadOp>>(patterns.getContext());
-    patterns.insert<MarkMultiBuffer<hivm::StoreOp>>(patterns.getContext());
+    patterns.insert<MarkMultiBuffer<hivm::LoadOp>,
+                    MarkMultiBuffer<hivm::StoreOp>>(
+        patterns.getContext(), localMultiBufferNum);
   }
 
   if (!limitAutoMultiBufferOnlyForLocalBuffer && isMixFuncCore)

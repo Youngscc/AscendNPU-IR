@@ -228,6 +228,7 @@ static void hfusionAutoSchedulePipeline(OpPassManager &pm,
   AutoScheduleOptions autoScheduleOptions;
   autoScheduleOptions.blockDim = options.blockDim;
   autoScheduleOptions.enableAutoMultiBuffer = options.enableAutoMultiBuffer;
+  autoScheduleOptions.localMultiBufferNum = options.setLocalMultibuffer;
   autoScheduleOptions.enableDeterministicComputing =
       options.enableDeterministicComputing;
   autoScheduleOptions.maxBufferCntTuning = options.hfusionMaxBufferCountTuning;

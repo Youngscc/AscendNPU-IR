@@ -176,6 +176,7 @@ constexpr llvm::StringLiteral kCVUnrolledLoopName =
     "cv_unrolled_loop";
 constexpr llvm::StringLiteral kMultibufferUnrollAttrName =
     "multibuffer_unroll_factor";
+constexpr llvm::StringLiteral kCVPipelineDepthAttrName = "cv_pipeline_depth";
 constexpr llvm::StringLiteral kPipelinedLoopCoreTypeAttrName =
     "hivm.loop_core_type";
 constexpr llvm::StringLiteral kPreLoadAttrName =

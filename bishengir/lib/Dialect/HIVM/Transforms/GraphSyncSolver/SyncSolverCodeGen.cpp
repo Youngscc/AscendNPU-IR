@@ -497,6 +497,25 @@ Value CodeGenerator::getMultiBufferSelectOp(IRRewriter &rewriter,
   return it->second = bufferSelected;
 }
 
+static Value getCVBufferSlotForEvent(IRRewriter &rewriter, Location loc,
+                                     scf::ForOp forOp) {
+  Value loopIndVar = forOp.getInductionVar();
+  auto numAttr =
+      forOp->getAttrOfType<IntegerAttr>(hivm::kMultibufferUnrollAttrName);
+  auto depthAttr =
+      forOp->getAttrOfType<IntegerAttr>(hivm::kCVPipelineDepthAttrName);
+  // Preserve the original direct-IV event selection for legacy/equal cases.
+  // Only split configurations can revisit a physical slot within one unroll.
+  if (!depthAttr || depthAttr.getInt() <= numAttr.getInt())
+    return loopIndVar;
+  int64_t numMultibuffer = numAttr.getInt();
+  if (numMultibuffer == 1)
+    return rewriter.create<arith::ConstantIndexOp>(loc, 0);
+  Value bufferCount =
+      rewriter.create<arith::ConstantIndexOp>(loc, numMultibuffer);
+  return rewriter.create<arith::RemUIOp>(loc, loopIndVar, bufferCount);
+}
+
 Value CodeGenerator::getCVMultiBufferSelectOpConsecutive(IRRewriter &rewriter,
                                                          SetWaitOp *syncOp) {
   assert(syncOp != nullptr);
@@ -520,12 +539,12 @@ Value CodeGenerator::getCVMultiBufferSelectOpConsecutive(IRRewriter &rewriter,
   auto loc = forOp->getLoc();
   PatternRewriter::InsertionGuard guard(rewriter);
   rewriter.setInsertionPointToStart(forOp.getBody());
-  Value loopIndVar = forOp.getInductionVar();
+  Value bufferSlot = getCVBufferSlotForEvent(rewriter, loc, forOp);
   auto eventIdAttr =
       rewriter.getIntegerAttr(rewriter.getIndexType(), syncOp->eventIds[0]);
   auto eventIdValue = rewriter.create<arith::ConstantOp>(loc, eventIdAttr);
   Value eventId = rewriter.create<arith::AddIOp>(loc, rewriter.getIndexType(),
-                                                 loopIndVar, eventIdValue);
+                                                 bufferSlot, eventIdValue);
   return getValueOrCreateCastToI64(rewriter, loc, eventId);
 }
 
@@ -547,7 +566,7 @@ Value CodeGenerator::getCVMultiBufferSelectOp(IRRewriter &rewriter,
   auto loc = forOp->getLoc();
   PatternRewriter::InsertionGuard guard(rewriter);
   rewriter.setInsertionPointToStart(forOp.getBody());
-  Value loopIndVar = forOp.getInductionVar();
+  Value bufferSlot = getCVBufferSlotForEvent(rewriter, loc, forOp);
   Value selectedValue{nullptr};
   for (auto [i, eventId] : llvm::enumerate(syncOp->eventIds)) {
     auto eventIdAttr =
@@ -559,7 +578,7 @@ Value CodeGenerator::getCVMultiBufferSelectOp(IRRewriter &rewriter,
     }
     Value iVal = rewriter.create<arith::ConstantIndexOp>(loc, i);
     Value cmpEqOp = rewriter.create<arith::CmpIOp>(
-        loc, arith::CmpIPredicate::eq, loopIndVar, iVal);
+        loc, arith::CmpIPredicate::eq, bufferSlot, iVal);
     selectedValue = rewriter.create<arith::SelectOp>(
         loc, rewriter.getI64Type(), cmpEqOp, eventIdValue, selectedValue);
   }
