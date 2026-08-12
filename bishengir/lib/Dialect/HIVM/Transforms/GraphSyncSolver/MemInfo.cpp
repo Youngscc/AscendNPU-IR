@@ -16,11 +16,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "bishengir/Dialect/HIVM/Transforms/GraphSyncSolver/MemInfo.h"
-#include "bishengir/Dialect/HACC/Utils/Utils.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
+#include "bishengir/Dialect/HIVM/Transforms/GraphSyncSolver/Utility.h"
 #include "bishengir/Dialect/HIVM/Utils/Utils.h"
 #include "bishengir/Dialect/Utils/Util.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/Value.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -52,25 +53,9 @@ std::optional<FuncArgInfo> FuncArgInfo::tryGet(Value value) {
   if (!parentFuncOp) {
     return {};
   }
-  return FuncArgInfo(parentFuncOp, blockArg,
-                     isWorkSpaceFuncArgument(parentFuncOp, blockArg));
-}
-
-llvm::SmallVector<int64_t> getAddresses(const llvm::SmallVector<Value> &addrs) {
-  llvm::SmallVector<int64_t> offsets;
-  for (auto addr : addrs) {
-    auto constOp =
-        llvm::dyn_cast_if_present<arith::ConstantOp>(addr.getDefiningOp());
-    if (!constOp) {
-      offsets.push_back(ShapedType::kDynamic);
-      continue;
-    }
-    auto baseAddr =
-        static_cast<int64_t>(cast<IntegerAttr>(constOp.getValue()).getInt());
-    int64_t baseAddrInBits = baseAddr * utils::kBitsToByte;
-    offsets.push_back(baseAddrInBits);
-  }
-  return offsets;
+  auto funcArgInfo = FuncArgInfo(parentFuncOp, blockArg);
+  funcArgInfo.isWorkSpace = isWorkSpaceFuncArgument(parentFuncOp, blockArg);
+  return funcArgInfo;
 }
 
 std::optional<PointerLikeInfo>
@@ -126,23 +111,22 @@ std::optional<PointerLikeInfo> PointerLikeInfo::tryGet(Value value) {
   return {};
 }
 
-MemInfo getMemInfo(Value value, std::optional<PIPE> pipe) {
-  if (auto funcArgInfo = FuncArgInfo::tryGet(value)) {
-    return MemInfo(value, funcArgInfo.value(), pipe);
+std::optional<AllocLikeInfo> AllocLikeInfo::tryGet(memref::AllocOp allocOp) {
+  AllocLikeInfo allocLikeInfo(allocOp);
+  if (utils::getAnnotateOpWithAttr(allocOp.getResult(),
+                                   hivm::HIVMTightlyCoupledBufferAttr::name)) {
+    allocLikeInfo.isTightlyCoupledBuffer = true;
   }
-  if (auto pointerLikeInfo = PointerLikeInfo::tryGet(value)) {
-    return MemInfo(value, pointerLikeInfo.value(), pipe);
-  }
-  return MemInfo(value, pipe);
+  return allocLikeInfo;
 }
 
-MemInfo getMemInfo(const llvm::SmallVector<int64_t> &addrs) {
-  MemInfo memInfo;
-  memInfo.pointerLikeInfo = PointerLikeInfo();
-  memInfo.pointerLikeInfo->addresses = addrs;
-  memInfo.pointerLikeInfo->allocateSize = 1;
-  memInfo.pointerLikeInfo->addressSpace = hivm::AddressSpace::Zero;
-  return memInfo;
+std::optional<AllocLikeInfo> AllocLikeInfo::tryGet(Value value) {
+  if (auto *defOp = value.getDefiningOp()) {
+    if (auto allocOp = llvm::dyn_cast<memref::AllocOp>(defOp)) {
+      return AllocLikeInfo::tryGet(allocOp);
+    }
+  }
+  return {};
 }
 
 bool FuncArgInfo::checkConflict(const FuncArgInfo &funcArgInfo1,
@@ -160,10 +144,11 @@ bool FuncArgInfo::checkConflict(const FuncArgInfo &funcArgInfo1,
   return false;
 }
 
-bool PointerLikeInfo::checkConflict(const PointerLikeInfo &pointerLikeInfo1,
-                                    const PointerLikeInfo &pointerLikeInfo2,
-                                    std::optional<int64_t> lcmLen,
-                                    std::optional<int64_t> eventIdNum) {
+bool PointerLikeInfo::checkConflict(
+    const PointerLikeInfo &pointerLikeInfo1,
+    const PointerLikeInfo &pointerLikeInfo2, std::optional<int64_t> lcmLen,
+    std::optional<int64_t> eventIdNum,
+    std::optional<std::pair<int64_t, int64_t>> offsetPair) {
   if (!pointerLikeInfo1.addressSpace.has_value() ||
       !pointerLikeInfo2.addressSpace.has_value()) {
     return false;
@@ -185,6 +170,12 @@ bool PointerLikeInfo::checkConflict(const PointerLikeInfo &pointerLikeInfo1,
     len2 = lcmLen.value();
   }
 
+  int64_t offsetPairI = 0;
+  int64_t offsetPairJ = 0;
+  if (offsetPair.has_value()) {
+    std::tie(offsetPairI, offsetPairJ) = offsetPair.value();
+  }
+
   for (int64_t i = 0; i < len1; i++) {
     for (int64_t j = 0; j < len2; j++) {
       if (eventIdNum.has_value()) {
@@ -193,8 +184,10 @@ bool PointerLikeInfo::checkConflict(const PointerLikeInfo &pointerLikeInfo1,
         }
       }
 
-      auto offset1 = offsets1[i % sz1];
-      auto offset2 = offsets2[j % sz2];
+      int64_t idxI = (((i + offsetPairJ - offsetPairI) % sz1) + sz1) % sz1;
+      int64_t idxJ = j % sz2;
+      auto offset1 = offsets1[idxI];
+      auto offset2 = offsets2[idxJ];
       if (offset1 == ShapedType::kDynamic || offset2 == ShapedType::kDynamic) {
         return true;
       }
@@ -218,9 +211,15 @@ bool PointerLikeInfo::checkConflict(const PointerLikeInfo &pointerLikeInfo1,
   return false;
 }
 
-bool MemInfo::checkConflict(const MemInfo &memInfo1, const MemInfo &memInfo2,
-                            std::optional<int64_t> lcmLen,
-                            std::optional<int64_t> eventIdNum) {
+bool AllocLikeInfo::checkConflict(const AllocLikeInfo &allocLikeInfo1,
+                                  const AllocLikeInfo &allocLikeInfo2) {
+  return allocLikeInfo1.op == allocLikeInfo2.op;
+}
+
+bool MemInfo::checkConflict(
+    const MemInfo &memInfo1, const MemInfo &memInfo2,
+    std::optional<int64_t> lcmLen, std::optional<int64_t> eventIdNum,
+    std::optional<std::pair<int64_t, int64_t>> offsetPair) {
   if (memInfo1.funcArgInfo.has_value() && memInfo2.funcArgInfo.has_value()) {
     return FuncArgInfo::checkConflict(memInfo1.funcArgInfo.value(),
                                       memInfo2.funcArgInfo.value());
@@ -229,14 +228,39 @@ bool MemInfo::checkConflict(const MemInfo &memInfo1, const MemInfo &memInfo2,
       memInfo2.pointerLikeInfo.has_value()) {
     return PointerLikeInfo::checkConflict(memInfo1.pointerLikeInfo.value(),
                                           memInfo2.pointerLikeInfo.value(),
-                                          lcmLen, eventIdNum);
+                                          lcmLen, eventIdNum, offsetPair);
+  }
+  if (memInfo1.allocLikeInfo.has_value() &&
+      memInfo2.allocLikeInfo.has_value()) {
+    return AllocLikeInfo::checkConflict(memInfo1.allocLikeInfo.value(),
+                                        memInfo2.allocLikeInfo.value());
   }
   return memInfo1.value == memInfo2.value;
 }
 
-bool isWorkSpaceFuncArgument(func::FuncOp funcOp, BlockArgument funcArg) {
-  return hacc::utils::isKernelArg(funcOp, funcArg.getArgNumber(),
-                                  hacc::KernelArgType::kWorkspace);
+MemInfo MemInfo::getMemInfo(Value value, std::optional<PIPE> pipe) {
+  if (auto funcArgInfo = FuncArgInfo::tryGet(value)) {
+    return MemInfo(value, funcArgInfo.value(), pipe);
+  }
+  if (auto pointerLikeInfo = PointerLikeInfo::tryGet(value)) {
+    return MemInfo(value, pointerLikeInfo.value(), pipe);
+  }
+  if (auto allocLikeInfo = AllocLikeInfo::tryGet(value)) {
+    return MemInfo(value, allocLikeInfo.value(), pipe);
+  }
+  return MemInfo(value, pipe);
+}
+
+MemInfo MemInfo::getMemInfo(Scope *counterScope,
+                            const llvm::SmallVector<int64_t> &addrs) {
+  MemInfo memInfo;
+  memInfo.pointerLikeInfo = PointerLikeInfo();
+  memInfo.pointerLikeInfo->addresses = addrs;
+  memInfo.pointerLikeInfo->allocateSize = 1;
+  memInfo.pointerLikeInfo->addressSpace = hivm::AddressSpace::Zero;
+  memInfo.pointerLikeInfo->parentCounterScope = counterScope;
+  assert(addrs.size() < 2 || counterScope != nullptr);
+  return memInfo;
 }
 
 } // namespace mlir::hivm::syncsolver

@@ -88,6 +88,7 @@ static void registerAndParseCLIOptions(int argc, char **argv) {
   // Register any command line options.
   mlir::registerMLIRContextCLOptions();
   mlir::registerAsmPrinterCLOptions();
+  mlir::registerDefaultTimingManagerCLOptions();
   bishengir::BiShengIRCompileMainConfig::registerCLOptions();
   bishengir::registerPassManagerCLOptions();
   // Enable full pass management abilities.
@@ -103,12 +104,13 @@ int main(int argc, char **argv) {
   llvm::InitLLVM y(argc, argv);
 
   // For regbase targets (Ascend910_95* / Ascend950*):
-  //  - set BISHENGIR_NATIVE_A5_REGBASE=1 to use the native
-  //    A5 regbase pipeline; without it, delegate as a safety fallback.
+  //  - set BISHENGIR_LEGACY_A5_REGBASE=1 to use the legacy
+  //    A5 regbase pipeline; 
+  //    without it, run merged native pipeline.
   // TODO: delegation will be removed after bishengir-compile and
   // bishengir-compile-a5 are merged.
   if (hasRegBaseTarget(argc, argv)) {
-    if (!getenv("BISHENGIR_NATIVE_A5_REGBASE")) {
+    if (getenv("BISHENGIR_LEGACY_A5_REGBASE")) {
       return runBishengirCompile91095(argc, argv);
     }
     llvm::errs() << "[INFO] Using merged native A5 regbase pipeline\n";

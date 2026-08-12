@@ -28,11 +28,19 @@ check_inputs_of_load_gm_to_ubuf_3d_core(memref_t<__gm__ T, 3> *src,
   auto stride2_ub = dst->strides[2];
   assert(isAddress32ByteAligned(dst_ptr) &&
          "The starting address of dst must be 32byte aligned.");
+#if !defined(__DAV_C310__)
   assert(((isSizeAlignedToBlock<T>(stride0_ub) || stride0_ub == 1) &&
           (isSizeAlignedToBlock<T>(stride1_ub) || stride1_ub == 1) &&
           (isSizeAlignedToBlock<T>(stride2_ub) || stride2_ub == 1)) &&
          "The dst strides[0]/strides[1]/strides[2] must be 1 or aligned to"
          "block.");
+#else
+  if (!is_unpadded_gm_to_ubuf_copy<T, 3>(src, dst, left_padding_num))
+    assert(((isSizeAlignedToBlock<T>(stride0_ub) || stride0_ub == 1) &&
+            (isSizeAlignedToBlock<T>(stride1_ub) || stride1_ub == 1) &&
+            (isSizeAlignedToBlock<T>(stride2_ub) || stride2_ub == 1)) &&
+           "Padded DMA destination strides must be 1 or block aligned.");
+#endif
 #endif
 }
 
@@ -55,8 +63,8 @@ hasUnalignedUbufStrideFor3dDma(int64_t size1, int64_t size2, int64_t stride0_ub,
 }
 
 /// Core func of loading GM -> UB, 3D
-/// UB starting address must be 32B aligned; otherwise, it degrades to looped
-/// scalar transfer.
+/// A dense, unpadded copy with an unaligned UB start uses GM -> UB NDDMA.
+/// Other layouts fall back to the existing regular DMA or scalar paths.
 /// + `UB&GM stride[2] == 1`: last dimension contiguous
 ///   - `load_gm_to_ubuf_3d_core_with_contiguous_last_dim`
 /// + `UB|GM stride[2] != 1`: last dimension non-contiguous
@@ -97,6 +105,15 @@ __aiv__ __attribute__((always_inline)) void load_gm_to_ubuf_3d_core(
     return;
   }
 
+  auto dst_ptr = dst->aligned + dst->offset - left_padding_num;
+  if (is_unpadded_gm_to_ubuf_copy<T, 3>(src, dst, left_padding_num) &&
+      !isAddress32ByteAligned(dst_ptr)) {
+    if (!load_dense_gm_to_ubuf_by_nddma<T, 3>(
+            src, dst, static_cast<uint8_t>(eviction_policy)))
+      load_gm_to_ubuf_3d_by_scalar<T>(src, dst);
+    return;
+  }
+
   using PadValueT = typename PadValueType<T>::type;
   if (pad_mode == PadMode::Value) {
     INTRINSIC(set_mov_pad_val, *((uint64_t *)((PadValueT *)(&pad_value))));
@@ -107,7 +124,6 @@ __aiv__ __attribute__((always_inline)) void load_gm_to_ubuf_3d_core(
   // Input parameter constraints assert.
   check_inputs_of_load_gm_to_ubuf_3d_core(src, dst, left_padding_num);
 
-  auto dst_ptr = dst->aligned + dst->offset;
   if (!isAddress32ByteAligned(dst_ptr)) {
     load_gm_to_ubuf_3d_by_scalar<T>(src, dst);
     return;
@@ -117,12 +133,22 @@ __aiv__ __attribute__((always_inline)) void load_gm_to_ubuf_3d_core(
   const int64_t stride2_gm = src->strides[2];
   const int64_t stride2_ub = dst->strides[2];
   bool has_padding = left_padding_num != 0;
+  const int64_t stride0_ub = dst->strides[0];
+  const int64_t stride1_ub = dst->strides[1];
+  const int64_t stride0_gm = src->strides[0];
+  const int64_t stride1_gm = src->strides[1];
+  if (((stride0_gm < stride1_gm || stride1_gm < stride2_gm) ||
+       (stride0_ub < stride1_ub || stride1_ub < stride2_ub))) {
+    load_gm_to_ubuf_3d_by_scalar<T>(src, dst);
+    return;
+  }
+
   if (stride2_gm == 1 && stride2_ub == 1) [[likely]] {
     // last dimension is contiguous
-    if (!has_padding && hasUnalignedUbufStrideFor3dDma<T>(
-                            dst->sizes[1], dst->sizes[2], dst->strides[0],
-                            dst->strides[1], src->strides[0],
-                            src->strides[1])) {
+    if (!has_padding &&
+        hasUnalignedUbufStrideFor3dDma<T>(dst->sizes[1], dst->sizes[2],
+                                          dst->strides[0], dst->strides[1],
+                                          src->strides[0], src->strides[1])) {
       load_gm_to_ubuf_3d_by_scalar<T>(src, dst);
       return;
     }
@@ -131,20 +157,6 @@ __aiv__ __attribute__((always_inline)) void load_gm_to_ubuf_3d_core(
     return;
   }
   // last dimension is not contiguous
-  const int64_t stride0_ub = dst->strides[0];
-  const int64_t stride1_ub = dst->strides[1];
-  const int64_t stride0_gm = src->strides[0];
-  const int64_t stride1_gm = src->strides[1];
-  if (((stride0_gm < stride1_gm || stride1_gm < stride2_gm) ||
-       (stride0_ub < stride1_ub || stride1_ub < stride2_ub))) {
-    // Implicit transposition scenarios
-    if constexpr (std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>) {
-      load_gm_to_ubuf_3d_by_scalar<T>(src, dst);
-    } else {
-      load_gm_to_ubuf_3d_by_nddma<T>(src, dst);
-    }
-    return;
-  }
   // axis 1 is contiguous
   const int64_t size0 = dst->sizes[0];
   const int64_t size1 = dst->sizes[1];
@@ -181,10 +193,10 @@ __aiv__ __attribute__((always_inline)) void load_gm_to_ubuf_3d_core(
                                   dst->offset,
                                   {size0, size1 * size2, 1},
                                   {stride0_ub, stride2_ub, 1}};
-    if (!has_padding && hasUnalignedUbufStrideFor3dDma<T>(
-                            ub_3d.sizes[1], ub_3d.sizes[2], ub_3d.strides[0],
-                            ub_3d.strides[1], gm_3d.strides[0],
-                            gm_3d.strides[1])) {
+    if (!has_padding &&
+        hasUnalignedUbufStrideFor3dDma<T>(ub_3d.sizes[1], ub_3d.sizes[2],
+                                          ub_3d.strides[0], ub_3d.strides[1],
+                                          gm_3d.strides[0], gm_3d.strides[1])) {
       load_gm_to_ubuf_3d_by_scalar<T>(src, dst);
       return;
     }
@@ -205,10 +217,10 @@ __aiv__ __attribute__((always_inline)) void load_gm_to_ubuf_3d_core(
                                   dst->offset,
                                   {size0 * size1, size2, 1},
                                   {stride1_ub, stride2_ub, 1}};
-    if (!has_padding && hasUnalignedUbufStrideFor3dDma<T>(
-                            ub_3d.sizes[1], ub_3d.sizes[2], ub_3d.strides[0],
-                            ub_3d.strides[1], gm_3d.strides[0],
-                            gm_3d.strides[1])) {
+    if (!has_padding &&
+        hasUnalignedUbufStrideFor3dDma<T>(ub_3d.sizes[1], ub_3d.sizes[2],
+                                          ub_3d.strides[0], ub_3d.strides[1],
+                                          gm_3d.strides[0], gm_3d.strides[1])) {
       load_gm_to_ubuf_3d_by_scalar<T>(src, dst);
       return;
     }
@@ -651,7 +663,7 @@ template <typename T>
 __aiv__ __attribute__((always_inline)) void
 check_inputs_of_copy_ubuf_to_ubuf_3d_core(memref_t<__ubuf__ T, 3> *src,
                                           memref_t<__ubuf__ T, 3> *dst) {
-#ifdef ENABLE_CPU_TRACE_INTRINSIC
+#if defined(ENABLE_CPU_TRACE_INTRINSIC) && !defined(__DAV_C310__)
   const int64_t stride2_src = src->strides[2];
   const int64_t stride2_dst = dst->strides[2];
   assert((stride2_src == 1) && "Last dimension of src must be contiguous.");
@@ -807,8 +819,9 @@ check_inputs_of_copy_ubuf_to_cbuf_3d_core(memref_t<__ubuf__ T, 3> *src,
 
 /// core func of copy ub -> cbuf, 3d
 /// constraints:
-/// 1. stride2 must be 1
-/// TODO: update for constraints on alignment
+/// 1. source/destination addresses and higher strides must be 32B aligned
+///    (ISA section 4.25)
+/// 2. stride2 must be 1
 template <typename T>
 __aiv__ __attribute__((always_inline)) void
 copy_ubuf_to_cbuf_3d_core(memref_t<__ubuf__ T, 3> *src,

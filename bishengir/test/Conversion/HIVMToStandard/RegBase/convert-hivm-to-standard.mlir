@@ -34,3 +34,101 @@ module {
     return
   }
 }
+// -----
+module {
+  // CHECK-LABEL: test_mmadmxL1_transpose
+  func.func @test_mmadmxL1_transpose() {
+    %ma = memref.alloc() : memref<256x128xf8E5M2>
+    %mb = memref.alloc() : memref<128x256xf8E5M2>
+    %ma_t = memref.alloc() : memref<128x256xf8E5M2>
+    %mb_t = memref.alloc() : memref<256x128xf8E5M2>
+    %scaleA = memref.alloc() : memref<256x4xui8>
+    %scaleB = memref.alloc() : memref<256x4xui8>
+    %mc = memref.alloc() : memref<256x256xf32>
+    %init = arith.constant 1 : i1
+    %c256 = arith.constant 256 : index
+    %c128 = arith.constant 128 : index
+
+    // CHECK: call @mmadmxL1_float8_e5m2_t_to_float_ta
+    hivm.hir.mmadmxL1 {a_transpose}
+      ins(%ma_t, %mb, %scaleA, %scaleB, %init, %c256, %c128, %c256 :
+          memref<128x256xf8E5M2>, memref<128x256xf8E5M2>,
+          memref<256x4xui8>, memref<256x4xui8>, i1, index, index, index)
+      outs(%mc : memref<256x256xf32>)
+
+    // CHECK: call @mmadmxL1_float8_e5m2_t_to_float_tb
+    hivm.hir.mmadmxL1 {b_transpose}
+      ins(%ma, %mb_t, %scaleA, %scaleB, %init, %c256, %c128, %c256 :
+          memref<256x128xf8E5M2>, memref<256x128xf8E5M2>,
+          memref<256x4xui8>, memref<256x4xui8>, i1, index, index, index)
+      outs(%mc : memref<256x256xf32>)
+
+    // CHECK: call @mmadmxL1_float8_e5m2_t_to_float_ta_tb
+    hivm.hir.mmadmxL1 {a_transpose, b_transpose}
+      ins(%ma_t, %mb_t, %scaleA, %scaleB, %init, %c256, %c128, %c256 :
+          memref<128x256xf8E5M2>, memref<256x128xf8E5M2>,
+          memref<256x4xui8>, memref<256x4xui8>, i1, index, index, index)
+      outs(%mc : memref<256x256xf32>)
+    return
+  }
+}
+// -----
+module {
+  // CHECK-LABEL: test_mmadmxL1_fp8_format
+  func.func @test_mmadmxL1_fp8_format() {
+    %ma = memref.alloc() : memref<256x128xi8>
+    %mb = memref.alloc() : memref<128x256xi8>
+    %scaleA = memref.alloc() : memref<256x4xui8>
+    %scaleB = memref.alloc() : memref<256x4xui8>
+    %mc = memref.alloc() : memref<256x256xf32>
+    %init = arith.constant 1 : i1
+    %c256 = arith.constant 256 : index
+    %c128 = arith.constant 128 : index
+
+    // CHECK: call @mmadmxL1_int8_t_to_float_lhs_format_fp8_e5m2_t_rhs_format_fp8_e5m2_t
+    hivm.hir.mmadmxL1 {lhsFormat = 1 : i32, rhsFormat = 1 : i32}
+      ins(%ma, %mb, %scaleA, %scaleB, %init, %c256, %c128, %c256 :
+          memref<256x128xi8>, memref<128x256xi8>,
+          memref<256x4xui8>, memref<256x4xui8>, i1, index, index, index)
+      outs(%mc : memref<256x256xf32>)
+
+    // CHECK: call @mmadmxL1_int8_t_to_float_lhs_format_fp8_e4m3_t_rhs_format_fp8_e4m3_t
+    hivm.hir.mmadmxL1 {lhsFormat = 2 : i32, rhsFormat = 2 : i32}
+      ins(%ma, %mb, %scaleA, %scaleB, %init, %c256, %c128, %c256 :
+          memref<256x128xi8>, memref<128x256xi8>,
+          memref<256x4xui8>, memref<256x4xui8>, i1, index, index, index)
+      outs(%mc : memref<256x256xf32>)
+
+    // CHECK: call @mmadmxL1_int8_t_to_float_lhs_format_fp8_e5m2_t_rhs_format_fp8_e4m3_t
+    hivm.hir.mmadmxL1 {lhsFormat = 1 : i32, rhsFormat = 2 : i32}
+      ins(%ma, %mb, %scaleA, %scaleB, %init, %c256, %c128, %c256 :
+          memref<256x128xi8>, memref<128x256xi8>,
+          memref<256x4xui8>, memref<256x4xui8>, i1, index, index, index)
+      outs(%mc : memref<256x256xf32>)
+    return
+  }
+}
+// -----
+module {
+  // CHECK-LABEL: func @test_sync_block_lock_unlock
+  func.func @test_sync_block_lock_unlock() attributes {hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>} {
+    %lock = memref.alloc() : memref<1xi64>
+    // CHECK: call @sync_block_lock
+    hivm.hir.sync_block_lock lock_var(%lock : memref<1xi64>)
+    // CHECK: call @sync_block_unlock
+    hivm.hir.sync_block_unlock lock_var(%lock : memref<1xi64>)
+    return
+  }
+}
+// -----
+module {
+  // CHECK-LABEL: func @test_sync_block_lock_unlock_with_subblock
+  func.func @test_sync_block_lock_unlock_with_subblock() attributes {hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>} {
+    %lock = memref.alloc() : memref<1xi64>
+    // CHECK: call @sync_block_lock_with_subblock
+    hivm.hir.sync_block_lock {hivm.sync_block_lock_with_subblock} lock_var(%lock : memref<1xi64>)
+    // CHECK: call @sync_block_unlock_with_subblock
+    hivm.hir.sync_block_unlock {hivm.sync_block_lock_with_subblock} lock_var(%lock : memref<1xi64>)
+    return
+  }
+}

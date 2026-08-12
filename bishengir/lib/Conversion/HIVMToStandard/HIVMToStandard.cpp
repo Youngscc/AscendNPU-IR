@@ -124,9 +124,37 @@ static func::CallOp createLibCall(PatternRewriter &rewriter, Operation *op,
     funcOp->setAttr(LLVM::LLVMDialect::getEmitCWrapperAttrName(),
                     UnitAttr::get(ctx));
 
-    auto haccAlwaysInlineAttr = hacc::stringifyHACCToLLVMIRTranslateAttr(
-        hacc::HACCToLLVMIRTranslateAttr::ALWAYS_INLINE);
-    funcOp->setAttr(haccAlwaysInlineAttr, rewriter.getUnitAttr());
+    // Default: always_inline for standard library calls. HIVM custom ops
+    // default to noinline unless explicitly marked always_inline via
+    // hivm.inline_mode.
+    bool markNoInline = false;
+    std::optional<hivm::InlineMode> inlineMode;
+    if (auto customOp = dyn_cast<hivm::CustomOp>(op))
+      inlineMode =
+          customOp.getInlineMode().value_or(hivm::InlineMode::NoInline);
+    else if (auto customMacroOp = dyn_cast<hivm::CustomMacroOp>(op))
+      inlineMode =
+          customMacroOp.getInlineMode().value_or(hivm::InlineMode::NoInline);
+    if (inlineMode) {
+      switch (*inlineMode) {
+      case hivm::InlineMode::AlwaysInline:
+        markNoInline = false;
+        break;
+      case hivm::InlineMode::NoInline:
+        markNoInline = true;
+        break;
+      }
+    }
+
+    auto haccInlineAttr = hacc::stringifyHACCToLLVMIRTranslateAttr(
+        markNoInline ? hacc::HACCToLLVMIRTranslateAttr::NOINLINE
+                     : hacc::HACCToLLVMIRTranslateAttr::ALWAYS_INLINE);
+    funcOp->setAttr(haccInlineAttr, rewriter.getUnitAttr());
+
+    if (markNoInline)
+      funcOp->setAttr(
+          hacc::HACCFuncTypeAttr::name,
+          hacc::HACCFuncTypeAttr::get(ctx, hacc::HACCFuncType::DEVICE));
 
     funcOp.setPrivate();
 
@@ -1831,7 +1859,11 @@ public:
                                 PatternRewriter &rewriter) const final {
     ModuleOp mod = op->template getParentOfType<ModuleOp>();
     std::string libCallName = op.getOpName().str();
-    if (op->hasAttr(SyncBlockLockWithSubblockAttr::name))
+    // The unordered (Bakery) attr is exclusive of the subblock-ordered token
+    // ring: the unordered template already uses subblock-aware indexing.
+    if (op->hasAttr(SyncBlockLockUnorderedAttr::name))
+      libCallName += "_unordered";
+    else if (op->hasAttr(SyncBlockLockWithSubblockAttr::name))
       libCallName += "_with_subblock";
     createLibCall(rewriter, op, mod, libCallName, op->getOperands(), {});
     rewriter.eraseOp(op);

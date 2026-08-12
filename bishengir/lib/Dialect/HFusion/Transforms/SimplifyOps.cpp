@@ -14,6 +14,7 @@
 // limitations under the License.
 //
 //===----------------------------------------------------------------------===//
+#include "bishengir/Conversion/TorchToHFusion/Rewrite.h"
 #include "bishengir/Dialect/HACC/Utils/Utils.h"
 #include "bishengir/Dialect/HFusion/IR/HFusion.h"
 #include "bishengir/Dialect/HFusion/Transforms/Passes.h"
@@ -21,6 +22,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -841,7 +843,248 @@ public:
   }
 };
 
+/// Linearize a tree of integer `linalg.elemwise_binary<add>` into its leaf
+/// multiset and re-emit repeated leaves as an `elemwise_binary<mul>`:
+///
+///   a + a + ... + a  (k times) + b + ...   ->   k*a + b + ...
+///
+/// Valid only for wrap-around integer arithmetic (invalid for floats)
+///
+/// TODO optimize k*a + a -> (k + 1) * a, and even realize more universal
+/// mathematical expression folding optimization.
+struct CollapseElemwiseAddTreeToMul
+    : public OpRewritePattern<linalg::ElemwiseBinaryOp> {
+  using OpRewritePattern<linalg::ElemwiseBinaryOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(linalg::ElemwiseBinaryOp root,
+                                PatternRewriter &rewriter) const override {
+    if (root.getFun() != linalg::BinaryFn::add || root.getNumDpsInits() != 1)
+      return failure();
+    auto tensorTy = dyn_cast<RankedTensorType>(root->getResult(0).getType());
+    if (!tensorTy || !tensorTy.hasStaticShape() ||
+        !isa<IntegerType>(tensorTy.getElementType()))
+      return failure();
+    // It will be processed when its user traverses it.
+    if (root->getResult(0).hasOneUse())
+      if (auto user = dyn_cast<linalg::ElemwiseBinaryOp>(
+              *root->getResult(0).getUsers().begin()))
+        if (user.getFun() == linalg::BinaryFn::add &&
+            llvm::is_contained(user.getInputs(), root->getResult(0)))
+          return failure();
+
+    auto isAbsorbableAdd = [&](Value v) -> linalg::ElemwiseBinaryOp {
+      if (auto e = v.getDefiningOp<linalg::ElemwiseBinaryOp>())
+        if (e.getFun() == linalg::BinaryFn::add && v.hasOneUse() &&
+            e->getResult(0).getType() == tensorTy)
+          return e;
+      return {};
+    };
+    // Now it is a root node, optimize it.
+    // 1. Linearize the add.
+    llvm::MapVector<Value, int64_t> leafCounts;
+    SmallVector<linalg::ElemwiseBinaryOp> removeOp;
+    SmallVector<linalg::ElemwiseBinaryOp> worklist{root};
+    while (!worklist.empty()) {
+      linalg::ElemwiseBinaryOp cur = worklist.pop_back_val();
+      if (cur != root)
+        removeOp.push_back(cur);
+      for (Value in : cur.getInputs()) {
+        if (linalg::ElemwiseBinaryOp child = isAbsorbableAdd(in))
+          worklist.push_back(child);
+        else
+          ++leafCounts[in]; // Cannot be folded.
+      }
+    }
+    if (llvm::none_of(leafCounts, [](auto &kv) { return kv.second >= 2; }))
+      return failure();
+
+    // 2. Rewrite.
+    Type elemTy = tensorTy.getElementType();
+    unsigned width = elemTy.getIntOrFloatBitWidth();
+    Location loc = root.getLoc();
+    auto emptyInit = [&]() -> Value {
+      return rewriter.create<tensor::EmptyOp>(loc, tensorTy.getShape(), elemTy);
+    };
+
+    SmallVector<Value> terms;
+    for (auto &kv : leafCounts) {
+      if (kv.second == 1) {
+        terms.push_back(kv.first);
+        continue;
+      }
+      APInt cVal(width, static_cast<uint64_t>(kv.second), /*isSigned=*/false);
+      Value cst = rewriter.create<arith::ConstantOp>(
+          loc, DenseElementsAttr::get(tensorTy,
+                                      rewriter.getIntegerAttr(elemTy, cVal)));
+      terms.push_back(createLinalgBinary<linalg::BinaryFn::mul>(
+          rewriter, loc, kv.first, cst, emptyInit()));
+    }
+    Value sum = terms.front();
+    for (Value term : llvm::drop_begin(terms))
+      sum = createLinalgBinary<linalg::BinaryFn::add>(rewriter, loc, sum, term,
+                                                      emptyInit());
+    rewriter.replaceOp(root, sum);
+    for (linalg::ElemwiseBinaryOp e : removeOp)
+      if (e->use_empty())
+        rewriter.eraseOp(e);
+    return success();
+  }
+};
+
+/// Check if a value is a scalar constant (arith.constant with scalar type).
+/// Looks through FillOp and CastOp chains.
+static bool isScalarConstant(Value v) {
+  auto type = getElementTypeOrSelf(v);
+  if (isa<FloatType>(type)) {
+    APFloat val(cast<FloatType>(type).getFloatSemantics());
+    if (matchPattern(v, m_ConstantFloat(&val)))
+      return true;
+  } else if (type.isIntOrIndex()) {
+    APInt val;
+    if (matchPattern(v, m_ConstantInt(&val)))
+      return true;
+  }
+
+  auto defineOp = v.getDefiningOp();
+  if (!defineOp)
+    return false;
+
+  auto resIdx = cast<OpResult>(v).getResultNumber();
+  if (auto fillOp = dyn_cast<linalg::FillOp>(defineOp))
+    return isScalarConstant(fillOp.getOperand(resIdx));
+  if (auto castOp = dyn_cast<hfusion::CastOp>(defineOp))
+    return isScalarConstant(castOp.getOperand(resIdx));
+
+  return false;
+}
+
+/// If \p elemOp is an elemwise_binary<mul>(matmul_result, constant) or
+/// elemwise_binary<sub>(0, matmul_result), return the matmul result and the
+/// scalar constant operand. For sub(0, x), the constant is conceptually -1.
+/// Returns {nullptr, nullptr} on failure.
+static std::pair<Value, Value>
+getScaledOperand(linalg::ElemwiseBinaryOp elemOp) {
+  if (elemOp.getFun() == linalg::BinaryFn::mul) {
+    for (int i = 0; i < 2; ++i) {
+      if (isScalarConstant(elemOp.getInputs()[i]))
+        return {elemOp.getInputs()[1 - i], elemOp.getInputs()[i]};
+    }
+  } else if (elemOp.getFun() == linalg::BinaryFn::sub) {
+    if (isConstZero(elemOp.getInputs()[0]))
+      return {elemOp.getInputs()[1], nullptr}; // sentinel: negate
+  }
+  return {nullptr, nullptr};
+}
+
+/// Hoist scalar multiplication through a matmul consumer to its output.
+///
+/// Converts:
+///   %a = linalg.matmul ins(%x, %y) outs(%init1)
+///   %scaled_a = linalg.elemwise_binary<mul>(%a, %k)  // or sub(0, %a)
+///   %b = linalg.matmul ins(%scaled_a, %z) outs(%init2)
+///
+/// Into:
+///   %a = linalg.matmul ins(%x, %y) outs(%init1)
+///   %b = linalg.matmul ins(%a, %z) outs(%init2)
+///   %scaled_b = linalg.elemwise_binary<mul>(%b, %k)  // or sub(0, %b)
+///
+/// This moves the vector operation to an epilogue position where it can
+/// overlap with subsequent work, instead of blocking the matmul input path.
+struct HoistScalarMulFromMatmulPattern
+    : public OpRewritePattern<linalg::ElemwiseBinaryOp> {
+  using OpRewritePattern<linalg::ElemwiseBinaryOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(linalg::ElemwiseBinaryOp elemOp,
+                                PatternRewriter &rewriter) const override {
+    auto [producerMatmulResult, scalarConst] = getScaledOperand(elemOp);
+    if (!producerMatmulResult)
+      return failure();
+
+    // The scaled value must come from a matmul-like op
+    auto *producerMatmulOp = producerMatmulResult.getDefiningOp();
+    if (!producerMatmulOp || !hfusion::isMatmulOps(producerMatmulOp))
+      return failure();
+
+    // The scaling op must have a single use (a consumer matmul)
+    if (!elemOp->hasOneUse())
+      return failure();
+
+    // Find the consumer matmul that uses the scaled result
+    Operation *consumerOp = *elemOp->getUsers().begin();
+    if (!hfusion::isMatmulOps(consumerOp))
+      return failure();
+
+    auto consumerMatmul = cast<linalg::LinalgOp>(consumerOp);
+    Value consumerResult = consumerOp->getResult(0);
+
+    // Check which input of the consumer matmul uses the scaled value
+    int inputIdx = -1;
+    for (int i = 0; i < 2; ++i) {
+      if (consumerMatmul.getDpsInputs()[i] == elemOp.getResult(0)) {
+        inputIdx = i;
+        break;
+      }
+    }
+    if (inputIdx == -1)
+      return failure();
+
+    // Only hoist if the producer matmul has zero init/accumulator.
+    // For the consumer, we need to check if it has a bias (non-zero init).
+    // The transformation k*(A*B)*C + bias != A*B*C*k + bias, so we cannot
+    // hoist through a consumer with bias.
+    auto producerMatmul = cast<linalg::LinalgOp>(producerMatmulOp);
+    Value producerInit = producerMatmul.getDpsInits()[0];
+    Value consumerInit = consumerMatmul.getDpsInits()[0];
+    if (!isConstZero(producerInit) || !isConstZero(consumerInit))
+      return failure();
+
+    Location loc = elemOp.getLoc();
+    OpBuilder::InsertionGuard guard(rewriter);
+
+    // Replace consumer's input with the unscaled producer result
+    Value unscaledProducer = producerMatmulResult;
+    rewriter.modifyOpInPlace(consumerOp, [&]() {
+      consumerMatmul.getDpsInputOperand(inputIdx)->set(unscaledProducer);
+    });
+
+    // Create the scaled version of the consumer's result
+    rewriter.setInsertionPointAfter(consumerOp);
+    
+    auto consumerResultType = cast<RankedTensorType>(consumerResult.getType());
+    Type elemType = consumerResultType.getElementType();
+
+    // Recreate the scalar constant if needed (for sub(0, x) case)
+    Value scalarConstToUse = scalarConst;
+    if (!scalarConstToUse) {
+      if (isa<FloatType>(elemType)) {
+        scalarConstToUse = rewriter.create<arith::ConstantOp>(
+            loc, elemType, rewriter.getFloatAttr(elemType, -1.0));
+      } else {
+        scalarConstToUse = rewriter.create<arith::ConstantOp>(
+            loc, elemType, rewriter.getIntegerAttr(elemType, -1));
+      }
+    }
+
+    Value emptyTensor = rewriter.create<tensor::EmptyOp>(
+        loc, consumerResultType.getShape(), elemType);
+
+    Value scaledConsumer = createLinalgBinary<linalg::BinaryFn::mul>(
+        rewriter, loc, consumerResult, scalarConstToUse, emptyTensor);
+
+    // Replace the consumer result with the scaled version, but exclude the use
+    // we just created in scaledConsumer itself to avoid circular dependency
+    rewriter.replaceAllUsesExcept(consumerResult, scaledConsumer, 
+                                  scaledConsumer.getDefiningOp());
+    
+    // The elemOp is now dead and will be cleaned up
+    return success();
+  }
+};
+
 void populateSimplifyOpsPattern(RewritePatternSet &patterns) {
+  patterns.add<HoistScalarMulFromMatmulPattern>(patterns.getContext());
+  patterns.add<CollapseElemwiseAddTreeToMul>(patterns.getContext());
+  patterns.add<MergeConsecutiveCopiesPattern>(patterns.getContext());
   patterns.add<LoopedCastOpPattern>(patterns.getContext());
   patterns.add<CastOpPattern>(patterns.getContext());
   patterns.add<TransposeOpPattern>(patterns.getContext());

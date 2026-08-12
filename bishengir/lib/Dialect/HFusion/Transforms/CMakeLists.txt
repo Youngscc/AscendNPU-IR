@@ -14,6 +14,9 @@ add_bishengir_dialect_library(BiShengIRHFusionTransforms
   AddFFTSAddr.cpp
   AutoVectorize.cpp
   AutoVectorize/AutoVectorizeInterpreter.cpp
+  AutoVectorize/FusedNode.cpp
+  AutoVectorize/FusionUtils.cpp
+  AutoVectorize/PlanContext.cpp
   AutoVectorize/Verify.cpp
   AutoVectorizeV2.cpp
   AutoVectorizeVerifier.cpp
@@ -35,6 +38,7 @@ add_bishengir_dialect_library(BiShengIRHFusionTransforms
   FoldSymbolicDim.cpp
   GenericUnroller.cpp
   HFusionGeneralize.cpp
+  LoopInvariantPromotion.cpp
   HoistTensorEmpty.cpp
   InlineBrc.cpp
   InferFuncFusionKind.cpp
@@ -109,6 +113,7 @@ add_bishengir_dialect_library(BiShengIRHFusionTransforms
   MLIRShapeDialect
   MLIRTensorDialect
   MLIRTensorTransformOps
+  MLIRTensorTransforms
   MLIRTensorUtils
   MLIRTransformDialect
   MLIRTransformDialectTransforms

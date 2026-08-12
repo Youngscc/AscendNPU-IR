@@ -204,6 +204,9 @@ void CodeGenerator::insertSetFlagOp(IRRewriter &rewriter, OperationBase *opBase,
   if (llvm::succeeded(handleMmadL1SyncOps(rewriter, opBase, setFlagOp))) {
     return;
   }
+  if (llvm::succeeded(handleMmadMxL1SyncOps(rewriter, opBase, setFlagOp))) {
+    return;
+  }
   customMacroCodegen.recordBoundaryArgIfNeeded(
       opBase, setFlagOp, rewriter, [&](SetWaitOp *setWaitOp, Location loc) {
         return getEventIdValue(rewriter, setWaitOp, loc);
@@ -252,6 +255,9 @@ void CodeGenerator::insertWaitFlagOp(IRRewriter &rewriter,
     return;
   }
   if (llvm::succeeded(handleMmadL1SyncOps(rewriter, opBase, waitFlagOp))) {
+    return;
+  }
+  if (llvm::succeeded(handleMmadMxL1SyncOps(rewriter, opBase, waitFlagOp))) {
     return;
   }
   customMacroCodegen.recordBoundaryArgIfNeeded(
@@ -346,34 +352,54 @@ void CodeGenerator::insertWaitBlockFlagOp(IRRewriter &rewriter,
   }
 }
 
+static int64_t add_modular(int64_t a, int64_t b, int64_t mod) {
+  return ((a % mod + b % mod) % mod + mod) % mod;
+}
+
+llvm::SmallVector<int64_t>
+CodeGenerator::getEventIdsWithOffset(const llvm::SmallVector<int64_t> &eventIds,
+                                     int64_t offset) {
+  if (!offset) {
+    return eventIds;
+  }
+
+  int64_t eventIdsSize = eventIds.size();
+  llvm::SmallVector<int64_t> newEventIds(eventIdsSize);
+  for (auto [i, eventId] : llvm::enumerate(eventIds)) {
+    // newEventIds[i] = oldEventIds[(i-offset)%num];
+    // newEventIds[(i+offset)%num] = oldEventIds[i];
+    int64_t newIdx = add_modular(i, offset, eventIdsSize);
+    newEventIds[newIdx] = eventId;
+  }
+  return newEventIds;
+}
+
 // Build/select a runtime i64 value that picks which buffer/event to use for
 // multi-buffer sync.
 Value CodeGenerator::getNestedIndexModular(IRRewriter &rewriter,
                                            LoopLikeOpInterface multibufferLoop,
-                                           int64_t eventIdNum,
-                                           int64_t preloadOffset) {
+                                           int64_t mod, int64_t offset) {
   Value modularIndex;
   PatternRewriter::InsertionGuard guard(rewriter);
   {
-    auto key = std::make_tuple(multibufferLoop, eventIdNum, /*offset=*/0);
+    auto key = std::make_tuple(multibufferLoop, mod, /*offset=*/0);
     auto [it, isInserted] = nestedIndexModularMem.insert({key, Value{}});
     if (isInserted) {
-      it->second =
-          createNestedIndexModular(rewriter, multibufferLoop, eventIdNum);
+      it->second = createNestedIndexModular(rewriter, multibufferLoop, mod);
     }
     modularIndex = it->second;
   }
-  if (preloadOffset > 0) {
-    auto key = std::make_tuple(multibufferLoop, eventIdNum, preloadOffset);
+  if (offset) {
+    auto key = std::make_tuple(multibufferLoop, mod, offset);
     auto [it, isInserted] = nestedIndexModularMem.insert({key, Value{}});
     if (isInserted) {
       auto loc = multibufferLoop->getLoc();
       PatternRewriter::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointAfter(modularIndex.getDefiningOp());
-      Value eventIdNumVal = rewriter.create<arith::ConstantOp>(
-          loc, rewriter.getIndexAttr(eventIdNum));
+      Value eventIdNumVal =
+          rewriter.create<arith::ConstantOp>(loc, rewriter.getIndexAttr(mod));
       Value preloadOffsetVal = rewriter.create<arith::ConstantOp>(
-          loc, rewriter.getIndexAttr(eventIdNum - preloadOffset % eventIdNum));
+          loc, rewriter.getIndexAttr(add_modular(0, -offset, mod)));
       Value newIndex = rewriter.create<arith::AddIOp>(
           multibufferLoop->getLoc(), modularIndex, preloadOffsetVal);
       it->second = rewriter.create<arith::RemSIOp>(multibufferLoop->getLoc(),
@@ -387,31 +413,36 @@ Value CodeGenerator::getNestedIndexModular(IRRewriter &rewriter,
 Value CodeGenerator::getMultiBufferSelectOpConsecutive(IRRewriter &rewriter,
                                                        SetWaitOp *syncOp) {
   assert(syncOp != nullptr);
-
-  auto multibufferLoopOp = syncOp->eventIdInfo.multibufferLoop;
-  if (!multibufferLoopOp) {
-    return nullptr;
-  }
-  
   for (size_t i = 1; i < syncOp->eventIds.size(); i++) {
-    if (syncOp->eventIds[i-1] + 1 != syncOp->eventIds[i]) {
+    if (syncOp->eventIds[i - 1] + 1 != syncOp->eventIds[i]) {
       return nullptr;
     }
   }
 
-  auto multibufferLoop = dyn_cast<LoopLikeOpInterface>(multibufferLoopOp->op);
-  int64_t eventIdNum = static_cast<int64_t>(syncOp->eventIds.size());
-  int64_t preloadOffset = isa<SetFlagOp>(syncOp)
-                              ? syncOp->eventIdInfo.preloadOffset1
-                              : syncOp->eventIdInfo.preloadOffset2;
+  int64_t preloadOffset = 0;
+  Loop *multibufferLoopOp{nullptr};
+  if (auto cvPreloadingInfo = syncOp->eventIdInfo.cvPreloadingInfo) {
+    preloadOffset = isa<SetFlagOp>(syncOp) ? cvPreloadingInfo->preloadOffset1
+                                           : cvPreloadingInfo->preloadOffset2;
+    multibufferLoopOp = cvPreloadingInfo->cvPreloadingLoop;
+  } else if (auto multiBufferInfo = syncOp->eventIdInfo.multiBufferInfo) {
+    multibufferLoopOp = dyn_cast<Loop>(multiBufferInfo->multibufferScope);
+    assert(multibufferLoopOp != nullptr);
+  } else {
+    return nullptr;
+  }
 
-  auto key = std::make_pair(multibufferLoop, preloadOffset);
+  auto multibufferLoop = dyn_cast<LoopLikeOpInterface>(multibufferLoopOp->op);
+  assert(multibufferLoop != nullptr);
+
+  auto key = std::make_tuple(multibufferLoop, preloadOffset);
   auto [it, isInserted] =
       bufferSelectedMem[key].insert({syncOp->eventIds, Value{}});
   if (!isInserted) {
     return it->second;
   }
 
+  int64_t eventIdNum = static_cast<int64_t>(syncOp->eventIds.size());
   Value counter = getNestedIndexModular(rewriter, multibufferLoop, eventIdNum,
                                         preloadOffset);
 
@@ -430,56 +461,60 @@ Value CodeGenerator::getMultiBufferSelectOp(IRRewriter &rewriter,
                                             SetWaitOp *syncOp) {
   assert(syncOp != nullptr);
 
-  auto multibufferLoopOp = syncOp->eventIdInfo.multibufferLoop;
-  if (!multibufferLoopOp) {
+  int64_t preloadOffset = 0;
+  Loop *multibufferLoopOp{nullptr};
+  if (auto cvPreloadingInfo = syncOp->eventIdInfo.cvPreloadingInfo) {
+    preloadOffset = isa<SetFlagOp>(syncOp) ? cvPreloadingInfo->preloadOffset1
+                                           : cvPreloadingInfo->preloadOffset2;
+    multibufferLoopOp = cvPreloadingInfo->cvPreloadingLoop;
+  } else if (auto multiBufferInfo = syncOp->eventIdInfo.multiBufferInfo) {
+    multibufferLoopOp = dyn_cast<Loop>(multiBufferInfo->multibufferScope);
+    assert(multibufferLoopOp != nullptr);
+  } else {
     return nullptr;
   }
 
   auto multibufferLoop = dyn_cast<LoopLikeOpInterface>(multibufferLoopOp->op);
-  assert((llvm::isa_and_present<scf::ForOp, scf::WhileOp>(multibufferLoop)) &&
-         "multi-buffer requires scf.for or scf.while parent");
-  int64_t eventIdNum = static_cast<int64_t>(syncOp->eventIds.size());
-  int64_t preloadOffset = isa<SetFlagOp>(syncOp)
-                              ? syncOp->eventIdInfo.preloadOffset1
-                              : syncOp->eventIdInfo.preloadOffset2;
+  assert(multibufferLoop != nullptr);
 
-  auto key = std::make_pair(multibufferLoop, preloadOffset);
-  auto [it, isInserted] =
-      bufferSelectedMem[key].insert({syncOp->eventIds, Value{}});
+  llvm::SmallVector<int64_t> eventIds =
+      getEventIdsWithOffset(syncOp->eventIds, preloadOffset);
+
+  auto key = std::make_tuple(multibufferLoop, 0);
+  auto [it, isInserted] = bufferSelectedMem[key].insert({eventIds, Value{}});
   if (!isInserted) {
     return it->second;
   }
 
-  Value counter = getNestedIndexModular(rewriter, multibufferLoop, eventIdNum,
-                                        preloadOffset);
-  assert(isa_and_present<OpResult>(counter));
+  int64_t eventIdNum = static_cast<int64_t>(eventIds.size());
+  Value counter = getNestedIndexModular(rewriter, multibufferLoop, eventIdNum);
 
   PatternRewriter::InsertionGuard guard(rewriter);
   rewriter.setInsertionPointAfter(counter.getDefiningOp());
   auto loc = counter.getLoc();
 
   Value bufferSelected;
-  if (syncOp->eventIds.size() == 2) {
+  if (eventIds.size() == 2) {
     counter = rewriter.create<arith::IndexCastOp>(
         counter.getLoc(), rewriter.getI1Type(), counter);
 #ifndef BSPUB_DAVINCI_BISHENGIR_A5
     Value firstID = rewriter.create<arith::ConstantIntOp>(
-        loc, syncOp->eventIds[0], rewriter.getI64Type());
+        loc, eventIds[0], rewriter.getI64Type());
     Value secondID = rewriter.create<arith::ConstantIntOp>(
-        loc, syncOp->eventIds[1], rewriter.getI64Type());
+        loc, eventIds[1], rewriter.getI64Type());
 #else
     Value firstID = rewriter.create<arith::ConstantIntOp>(
-        loc, rewriter.getI64Type(), syncOp->eventIds[0]);
+        loc, rewriter.getI64Type(), eventIds[0]);
     Value secondID = rewriter.create<arith::ConstantIntOp>(
-        loc, rewriter.getI64Type(), syncOp->eventIds[1]);
+        loc, rewriter.getI64Type(), eventIds[1]);
 #endif
     bufferSelected = rewriter.create<arith::SelectOp>(
         loc, rewriter.getI64Type(), counter, firstID, secondID);
   } else {
     Value selectedValue{nullptr};
-    for (auto [i, eventId] : llvm::enumerate(syncOp->eventIds)) {
+    for (auto [i, eventId] : llvm::enumerate(eventIds)) {
       auto eventIdAttr =
-          rewriter.getIntegerAttr(rewriter.getI64Type(), syncOp->eventIds[i]);
+          rewriter.getIntegerAttr(rewriter.getI64Type(), eventIds[i]);
       Value eventIdValue = rewriter.create<arith::ConstantOp>(loc, eventIdAttr);
       if (!selectedValue) {
         selectedValue = eventIdValue;
@@ -506,7 +541,7 @@ static Value getCVBufferSlotForEvent(IRRewriter &rewriter, Location loc,
       forOp->getAttrOfType<IntegerAttr>(hivm::kCVPipelineDepthAttrName);
   // Preserve the original direct-IV event selection for legacy/equal cases.
   // Only split configurations can revisit a physical slot within one unroll.
-  if (!depthAttr || depthAttr.getInt() <= numAttr.getInt())
+  if (!numAttr || !depthAttr || depthAttr.getInt() <= numAttr.getInt())
     return loopIndVar;
   int64_t numMultibuffer = numAttr.getInt();
   if (numMultibuffer == 1)
@@ -516,20 +551,22 @@ static Value getCVBufferSlotForEvent(IRRewriter &rewriter, Location loc,
   return rewriter.create<arith::RemUIOp>(loc, loopIndVar, bufferCount);
 }
 
-Value CodeGenerator::getCVMultiBufferSelectOpConsecutive(IRRewriter &rewriter,
-                                                         SetWaitOp *syncOp) {
+Value CodeGenerator::getCVPipeliningSelectOpConsecutive(IRRewriter &rewriter,
+                                                        SetWaitOp *syncOp) {
   assert(syncOp != nullptr);
-  auto multibufferLoopOp = isa<SetFlagOp>(syncOp)
-                               ? syncOp->eventIdInfo.multibufferUnrollLoop1
-                               : syncOp->eventIdInfo.multibufferUnrollLoop2;
-  if (!multibufferLoopOp) {
-    return nullptr;
-  }
   for (size_t i = 1; i < syncOp->eventIds.size(); i++) {
     if (syncOp->eventIds[i - 1] + 1 != syncOp->eventIds[i]) {
       return nullptr;
     }
   }
+
+  if (!syncOp->eventIdInfo.cvPipeliningInfo.has_value()) {
+    return nullptr;
+  }
+  auto multibufferLoopOp =
+      isa<SetFlagOp>(syncOp)
+          ? syncOp->eventIdInfo.cvPipeliningInfo->cvPipeliningLoop1
+          : syncOp->eventIdInfo.cvPipeliningInfo->cvPipeliningLoop2;
 
   auto multibufferLoop = dyn_cast<LoopLikeOpInterface>(multibufferLoopOp->op);
   auto forOp = dyn_cast<scf::ForOp>(multibufferLoop.getOperation());
@@ -548,15 +585,16 @@ Value CodeGenerator::getCVMultiBufferSelectOpConsecutive(IRRewriter &rewriter,
   return getValueOrCreateCastToI64(rewriter, loc, eventId);
 }
 
-Value CodeGenerator::getCVMultiBufferSelectOp(IRRewriter &rewriter,
-                                              SetWaitOp *syncOp) {
+Value CodeGenerator::getCVPipeliningSelectOp(IRRewriter &rewriter,
+                                             SetWaitOp *syncOp) {
   assert(syncOp != nullptr);
-  auto multibufferLoopOp = isa<SetFlagOp>(syncOp)
-                               ? syncOp->eventIdInfo.multibufferUnrollLoop1
-                               : syncOp->eventIdInfo.multibufferUnrollLoop2;
-  if (!multibufferLoopOp) {
+  if (!syncOp->eventIdInfo.cvPipeliningInfo.has_value()) {
     return nullptr;
   }
+  auto multibufferLoopOp =
+      isa<SetFlagOp>(syncOp)
+          ? syncOp->eventIdInfo.cvPipeliningInfo->cvPipeliningLoop1
+          : syncOp->eventIdInfo.cvPipeliningInfo->cvPipeliningLoop2;
 
   auto multibufferLoop = dyn_cast<LoopLikeOpInterface>(multibufferLoopOp->op);
   auto forOp = dyn_cast<scf::ForOp>(multibufferLoop.getOperation());
@@ -594,10 +632,10 @@ Value CodeGenerator::getMultiBufferBlockSelectOp(IRRewriter &rewriter,
   if (auto selectOp = getMultiBufferSelectOp(rewriter, syncOp)) {
     return selectOp;
   }
-  if (auto selectOp = getCVMultiBufferSelectOpConsecutive(rewriter, syncOp)) {
+  if (auto selectOp = getCVPipeliningSelectOpConsecutive(rewriter, syncOp)) {
     return selectOp;
   }
-  if (auto selectOp = getCVMultiBufferSelectOp(rewriter, syncOp)) {
+  if (auto selectOp = getCVPipeliningSelectOp(rewriter, syncOp)) {
     return selectOp;
   }
   llvm::report_fatal_error(
@@ -661,6 +699,55 @@ llvm::LogicalResult CodeGenerator::handleMmadL1SyncOps(IRRewriter &rewriter,
   return llvm::success();
 }
 
+// Attempt to attach sync args to MmadMxL1 ops by recognizing special load
+// L0 / L1 patterns for A, B, ScaleA, ScaleB independently.
+llvm::LogicalResult CodeGenerator::handleMmadMxL1SyncOps(
+    IRRewriter &rewriter, OperationBase *opBase, SyncOp *syncOp) {
+  if (opBase->parentOp == nullptr || opBase->parentOp->parentOp == nullptr) {
+    return llvm::failure();
+  }
+  hivm::MmadMxL1Op mmadMxL1Op;
+  if (auto *mmadMxL1Loop =
+          dyn_cast<MmadMxL1LoopOp>(opBase->parentOp->parentOp)) {
+    mmadMxL1Op = llvm::dyn_cast<hivm::MmadMxL1Op>(mmadMxL1Loop->op);
+    assert(mmadMxL1Op != nullptr);
+  }
+  if (mmadMxL1Op == nullptr) {
+    return llvm::failure();
+  }
+  assert(isa<LoadL0AOp>(opBase) || isa<LoadL0BOp>(opBase) ||
+         isa<LoadL0AMxOp>(opBase) || isa<LoadL0BMxOp>(opBase));
+  assert(isa<SetFlagOp>(syncOp) || isa<WaitFlagOp>(syncOp));
+  if (auto *setFlagOp = dyn_cast<SetFlagOp>(syncOp)) {
+    if (isa<LoadL0AOp>(opBase))
+      mmadMxL1SyncArgsMap[mmadMxL1Op].l1AWaitL0Event =
+          getEventIdValue(rewriter, setFlagOp, mmadMxL1Op->getLoc());
+    else if (isa<LoadL0AMxOp>(opBase))
+      mmadMxL1SyncArgsMap[mmadMxL1Op].l1ScaleAWaitL0Event =
+          getEventIdValue(rewriter, setFlagOp, mmadMxL1Op->getLoc());
+    else if (isa<LoadL0BOp>(opBase))
+      mmadMxL1SyncArgsMap[mmadMxL1Op].l1BWaitL0Event =
+          getEventIdValue(rewriter, setFlagOp, mmadMxL1Op->getLoc());
+    else if (isa<LoadL0BMxOp>(opBase))
+      mmadMxL1SyncArgsMap[mmadMxL1Op].l1ScaleBWaitL0Event =
+          getEventIdValue(rewriter, setFlagOp, mmadMxL1Op->getLoc());
+  } else if (auto *waitFlagOp = dyn_cast<WaitFlagOp>(syncOp)) {
+    if (isa<LoadL0AOp>(opBase))
+      mmadMxL1SyncArgsMap[mmadMxL1Op].l0WaitL1AEvent =
+          getEventIdValue(rewriter, waitFlagOp, mmadMxL1Op->getLoc());
+    else if (isa<LoadL0AMxOp>(opBase))
+      mmadMxL1SyncArgsMap[mmadMxL1Op].l0WaitL1ScaleAEvent =
+          getEventIdValue(rewriter, waitFlagOp, mmadMxL1Op->getLoc());
+    else if (isa<LoadL0BOp>(opBase))
+      mmadMxL1SyncArgsMap[mmadMxL1Op].l0WaitL1BEvent =
+          getEventIdValue(rewriter, waitFlagOp, mmadMxL1Op->getLoc());
+    else if (isa<LoadL0BMxOp>(opBase))
+      mmadMxL1SyncArgsMap[mmadMxL1Op].l0WaitL1ScaleBEvent =
+          getEventIdValue(rewriter, waitFlagOp, mmadMxL1Op->getLoc());
+  }
+  return llvm::success();
+}
+
 Value CodeGenerator::getLoopDBCond(IRRewriter &rewriter, Operation *op) {
   if (!checkAllParentLoopsAreForLoops(op)) {
     return nullptr;
@@ -679,13 +766,17 @@ Value CodeGenerator::getLoopDBCond(IRRewriter &rewriter, Operation *op) {
 }
 
 void CodeGenerator::insertPipeMPipeMte1OuterBwdPairs(IRRewriter &rewriter) {
-  auto firstLastMmadlOps = getFirstLastOp<hivm::MmadL1Op>(funcOp);
-  if (llvm::failed(firstLastMmadlOps)) {
+  // Find the first and last Mmad-type op without a full tree traversal.
+  auto firstLastMmadOps =
+      getFirstLastOpOfTypes<hivm::MmadL1Op, hivm::MmadMxL1Op>(funcOp);
+  if (failed(firstLastMmadOps)) {
     return;
   }
+
+  auto [firstOp, lastOp] = firstLastMmadOps.value();
+
   auto loc = funcOp->getLoc();
-  auto *ctx = funcOp->getContext();
-  auto [firstOp, lastOp] = firstLastMmadlOps.value();
+  auto ctx = funcOp->getContext();
   auto *funcRegion = &funcOp.getFunctionBody();
   rewriter.setInsertionPoint(funcRegion->findAncestorOpInRegion(*firstOp));
   auto eventId0Attr = EventAttr::get(ctx, hivm::EVENT::EVENT_ID0);
@@ -737,6 +828,30 @@ void CodeGenerator::insertMmadL1SyncArgs(IRRewriter &rewriter) {
       }
     }
     mmadL1Op.getSyncRelatedArgsMutable().assign(newArgs);
+  }
+}
+
+// Create and propagate sync args into MmadMxL1 op arguments.
+void CodeGenerator::insertMmadMxL1SyncArgs(IRRewriter &rewriter) {
+  for (auto &[mmadMxL1Op, syncArgs] : mmadMxL1SyncArgsMap) {
+    rewriter.setInsertionPoint(mmadMxL1Op);
+    auto defaultValue = rewriter.create<arith::ConstantIntOp>(
+        mmadMxL1Op->getLoc(), rewriter.getI64Type(), -1);
+    SmallVector<Value> newArgs;
+    newArgs.push_back(syncArgs.l0WaitL1AEvent);       // [0]
+    newArgs.push_back(syncArgs.l0WaitL1ScaleAEvent);   // [1]
+    newArgs.push_back(syncArgs.l0WaitL1BEvent);         // [2]
+    newArgs.push_back(syncArgs.l0WaitL1ScaleBEvent);    // [3]
+    newArgs.push_back(syncArgs.l1AWaitL0Event);         // [4]
+    newArgs.push_back(syncArgs.l1ScaleAWaitL0Event);    // [5]
+    newArgs.push_back(syncArgs.l1BWaitL0Event);         // [6]
+    newArgs.push_back(syncArgs.l1ScaleBWaitL0Event);    // [7]
+    for (auto &val : newArgs) {
+      if (!val || val == Value{}) {
+        val = defaultValue;
+      }
+    }
+    mmadMxL1Op.getSyncRelatedArgsMutable().assign(newArgs);
   }
 }
 
@@ -814,6 +929,7 @@ void CodeGenerator::generateResultOps() {
 
   if (options.isIntraCoreMode()) {
     insertMmadL1SyncArgs(rewriter);
+    insertMmadMxL1SyncArgs(rewriter);
     customMacroCodegen.populateSyncRelatedArgs(funcOp, rewriter);
     insertPipeMPipeMte1OuterBwdPairs(rewriter);
     handleUnitFlagEnabledOps(rewriter);

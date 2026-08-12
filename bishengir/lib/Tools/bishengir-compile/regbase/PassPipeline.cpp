@@ -108,6 +108,21 @@ void setupHIVMPipelineOptions(hivm::regbase::HIVMPipelineOptions &hivmPipelineOp
   if (config.isUBAwareVfFusion() && hivmPipelineOptions.enableVfMergeLevel > 0)
     hivmPipelineOptions.enableVfMergeLevel = 0;
 
+  // Arch-dependent default for workspace/CV pipeline depth: RegBase uses 2
+  // unless the user explicitly passed --set-workspace-multibuffer.
+  // createFromCLOptions applies the same policy to the compile config; keep
+  // this mirror so pipeline setup stays correct if config is constructed
+  // without going through that helper.
+  {
+    auto &registeredOptions = llvm::cl::getRegisteredOptions();
+    auto wsMbOpt = registeredOptions.find("set-workspace-multibuffer");
+    bool hasExplicit =
+        wsMbOpt != registeredOptions.end() &&
+        wsMbOpt->second->getNumOccurrences() != 0;
+    if (!hasExplicit && hacc::utils::isRegBasedArch(config.getTarget()))
+      options.setWorkspaceMultibuffer = 2;
+  }
+
   // Backward compatibility: --enable-preload=true overrides
   // --enablecv-pipeline-mode to skew
   if (options.enablePreload) {
@@ -117,6 +132,10 @@ void setupHIVMPipelineOptions(hivm::regbase::HIVMPipelineOptions &hivmPipelineOp
              "--enablecv-pipeline-mode; forcing 'Skew'.\n";
       options.setCVPipelineMode = CVPipelineMode::Skew;
     }
+  }
+
+  if (options.setCVPipelineMode == CVPipelineMode::Unroll) {
+    options.enableLazyLoading = false;
   }
 
   // When cv-pipelining is off, disable workspace multibuffer entirely
@@ -165,8 +184,17 @@ void setupHIVMAVEPipelineOptions(
       config.getEnableHIVMGlobalWorkspaceReuse();
   hivmAVEPipelineOptions.enableHIVMInjectBarrierAllSync =
       config.getEnableHIVMInjectBarrierAllSync();
-  hivmAVEPipelineOptions.workspaceMultiBufferNum =
-      config.getSetWorkspaceMultibuffer();
+  {
+    unsigned wsMb = config.getSetWorkspaceMultibuffer();
+    auto &registeredOptions = llvm::cl::getRegisteredOptions();
+    auto wsMbOpt = registeredOptions.find("set-workspace-multibuffer");
+    bool hasExplicit =
+        wsMbOpt != registeredOptions.end() &&
+        wsMbOpt->second->getNumOccurrences() != 0;
+    if (!hasExplicit && hacc::utils::isRegBasedArch(config.getTarget()))
+      wsMb = 2;
+    hivmAVEPipelineOptions.workspaceMultiBufferNum = wsMb;
+  }
   hivmAVEPipelineOptions.enableAutoCVBalance =
       config.getEnableHIVMAutoCVBalance();
   hivmAVEPipelineOptions.enableInjectBlockAllSync =
@@ -480,6 +508,7 @@ void buildBiShengHIRPipeline(OpPassManager &pm,
     if (config.getEnableSimdSimtMixCompile()) {
       // TODO(regbase)
       pm.addPass(hivm::createAutoScopePass());
+      pm.addPass(hivm::createLegalizeBoolForSimtVFPass());
       pm.addPass(hivm::createInsertMemSemanticForSimtVFPass());
       pm.addPass(scope::createOutlineScopePass());
       pm.addPass(hivm::createInsertAllocBasePlaceholderPass());

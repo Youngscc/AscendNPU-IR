@@ -17,6 +17,8 @@
 
 #include "bishengir/Dialect/HACC/Utils/Utils.h"
 #include "bishengir/Dialect/HIVM/IR/HIVMImpl.h"
+#include "bishengir/Dialect/HIVM/Transforms/BubbleUpExtractSlice/BubbleUpUtils.h"
+#include "bishengir/Dialect/HIVM/Transforms/BubbleUpExtractSlice/BufferizationBubbleUp.h"
 #include "bishengir/Dialect/HIVM/Transforms/BubbleUpExtractSlice/CSEPattern.h"
 #include "bishengir/Dialect/HIVM/Transforms/BubbleUpExtractSlice/HoistAffine.h"
 #include "bishengir/Dialect/HIVM/Transforms/BubbleUpExtractSlice/Pattern.h"
@@ -34,6 +36,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Visitors.h"
 #include "mlir/Pass/PassManager.h"
@@ -82,6 +85,9 @@ public:
         }
       }
 
+      if (isa<UnrealizedConversionCastOp>(op))
+        return WalkResult::interrupt();
+
       if (!isa<tensor::ExtractSliceOp>(op)) {
         return WalkResult::advance();
       }
@@ -93,7 +99,7 @@ public:
           return WalkResult::advance();
         }
         auto *srcDefOp = extractSrc.getDefiningOp();
-        if (failed(findContainingSubblockLoop(srcDefOp))) {
+        if (failed(findContainingTilingLoop(srcDefOp))) {
           return WalkResult::advance();
         }
         if (auto bufferizeToTensor = dyn_cast<bufferization::ToTensorOp>(
@@ -104,12 +110,12 @@ public:
           }
           return WalkResult::advance();
         }
-        if (auto whileOp =
-                dyn_cast<scf::WhileOp>(srcDefOp)) {
+        if (auto whileOp = dyn_cast<scf::WhileOp>(srcDefOp)) {
           return WalkResult::interrupt();
         }
         if (!isa<tensor::EmptyOp>(srcDefOp) &&
-            !(isa<scf::ForOp>(srcDefOp) && srcDefOp->hasAttr("ExtractedLoadOrStore")) &&
+            !(isa<scf::ForOp>(srcDefOp) &&
+              srcDefOp->hasAttr("ExtractedLoadOrStore")) &&
             !srcDefOp->hasAttr(tiledOp)) {
           if (strictMode) {
             return WalkResult::interrupt();
@@ -161,8 +167,9 @@ public:
     if (failed(pm.run(funcOp))) {
       return signalPassFailure();
     }
-    // Apply bubble up once more, because canonicalize might bring more
-    // opportunity.
+    // Apply bubble up once more; canonicalize/CSE are run by the outer
+    // pass pipeline (e.g. bind-sub-block) to avoid crashing on intermediate
+    // UCC propagators left in the IR.
     RewritePatternSet patterns2(funcOp.getContext());
     populateHoistAffinePattern(patterns2);
     if (!hacc::utils::isRegBasedArch(funcOp->getParentOfType<ModuleOp>()))
@@ -175,6 +182,17 @@ public:
     if (failed(applyPatternsGreedily(funcOp, std::move(patterns2), config))) {
       return signalPassFailure();
     }
+
+    // Apply post process for removing remaining upward propagation from
+    // bufferization bubble up
+    RewritePatternSet patterns3(funcOp.getContext());
+    patterns3.add<BufferizationPropagatePostProcessPattern>(
+        funcOp.getContext());
+
+    if (failed(applyPatternsGreedily(funcOp, std::move(patterns3), config))) {
+      return signalPassFailure();
+    }
+
     if (failed(verifyMarkedExtractSlicesAreBubbledUp(funcOp))) {
       return signalPassFailure();
     }
@@ -197,7 +215,6 @@ private:
     strategies.push_back(std::make_shared<ExtractSliceBubbleUpStrategy>());
     strategies.push_back(std::make_shared<InsertSliceBubbleUpStrategy>());
     strategies.push_back(std::make_shared<BitcastBubbleUpStrategy>());
-    strategies.push_back(std::make_shared<BufferizationBubbleUpStrategy>());
     strategies.push_back(std::make_shared<VTransposeBubbleUpStrategy>());
     strategies.push_back(std::make_shared<IfBubbleUpStrategy>());
     strategies.push_back(std::make_shared<VarangeBubbleUpStrategy>());
@@ -208,9 +225,11 @@ private:
     strategies.push_back(std::make_shared<IndirectLoadBubbleUpStrategy>());
     strategies.push_back(std::make_shared<GatherLoadBubbleUpStrategy>());
     strategies.push_back(std::make_shared<StrideLoadBubbleUpStrategy>());
-    
+    strategies.push_back(std::make_shared<BufferizationBubbleUpStrategy>());
 
     patterns.add<BubbleUpPattern>(context, std::move(strategies));
+    patterns.add<BufferizationPropagateUpPattern>(context);
+    patterns.add<BufferizationPropagateDownPattern>(context);
   }
 };
 

@@ -29,6 +29,7 @@
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Verifier.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
@@ -138,11 +139,7 @@ static bool hasPreloadWorkspaceMark(Value value) {
 }
 
 static bool isPreloadWorkspaceSubview(memref::SubViewOp subviewOp) {
-  // The preload-workspace mark is placed on the subview op itself by the
-  // producer (see CVPipelining::createAttrForPreloadWS). Also accept a marked
-  // source so subviews derived from an already-marked workspace are detected.
-  return subviewOp->hasAttr(hivm::PreloadWorkspaceAttr::name) ||
-         hasPreloadWorkspaceMark(subviewOp.getSource());
+  return hasPreloadWorkspaceMark(subviewOp.getSource());
 }
 
 static Value
@@ -270,6 +267,68 @@ static void rewriteBody(Block *body, PreloadInfo &info, OpBuilder &b) {
   }
 }
 
+static Value lookThroughScopeResult(Value value) {
+  while (auto scopeOp = value.getDefiningOp<scope::ScopeOp>()) {
+    auto returnOp =
+        cast<scope::ReturnOp>(scopeOp.getRegion().front().getTerminator());
+    value = returnOp.getResults()[cast<OpResult>(value).getResultNumber()];
+  }
+  return value;
+}
+
+static void emitRematerializationError(Operation *definingOp,
+                                       scope::ScopeOp scopeOp) {
+  if (!definingOp) {
+    scopeOp.emitOpError(
+        "cannot rematerialize a preload scope result through an internal "
+        "block argument");
+  } else {
+    definingOp->emitOpError(
+        "is not a supported view while rematerializing a preload scope "
+        "result");
+  }
+}
+
+static FailureOr<Value>
+rematerializeViewLikeResult(Value value, scope::ScopeOp scopeOp,
+                            const IRMapping &preloadMapping,
+                            IRMapping &viewMapping, OpBuilder &builder) {
+  if (Value mapped = viewMapping.lookupOrNull(value))
+    return mapped;
+
+  Value source = lookThroughScopeResult(value);
+  if (source != value) {
+    auto rematerialized = rematerializeViewLikeResult(
+        source, scopeOp, preloadMapping, viewMapping, builder);
+    if (failed(rematerialized))
+      return failure();
+    viewMapping.map(value, *rematerialized);
+    return *rematerialized;
+  }
+
+  Region *definingRegion = value.getParentRegion();
+  if (!definingRegion || !scopeOp.getRegion().isAncestor(definingRegion)) {
+    Value mapped = preloadMapping.lookupOrDefault(value);
+    viewMapping.map(value, mapped);
+    return mapped;
+  }
+
+  Operation *definingOp = value.getDefiningOp();
+  if (!definingOp || !isa<ViewLikeOpInterface>(definingOp)) {
+    emitRematerializationError(definingOp, scopeOp);
+    return failure();
+  }
+
+  for (Value operand : definingOp->getOperands()) {
+    if (failed(rematerializeViewLikeResult(operand, scopeOp, preloadMapping,
+                                           viewMapping, builder)))
+      return failure();
+  }
+
+  builder.clone(*definingOp, viewMapping);
+  return viewMapping.lookup(value);
+}
+
 static scf::IfOp rewriteScopeOp(Value cond, scope::ScopeOp scopeOp,
                                 PreloadInfo &info, ValueRange loopArgs,
                                 Location loc, OpBuilder &builder) {
@@ -300,6 +359,7 @@ static scf::IfOp rewriteScopeOp(Value cond, scope::ScopeOp scopeOp,
       },
       [&](OpBuilder &b, Location loc) {
         SmallVector<Value> newYields;
+        IRMapping viewMapping;
         for (auto [res, retRes] :
              llvm::zip_equal(scopeOp->getResults(), returnResults)) {
           if (!getLocalBuffer(retRes)) {
@@ -311,12 +371,24 @@ static scf::IfOp rewriteScopeOp(Value cond, scope::ScopeOp scopeOp,
               auto newRes = b.clone(*pointerCastOp)->getResult(0);
               newYields.push_back(newRes);
             } else {
-              llvm::report_fatal_error("Unhandled scope result case");
+              // Rematerialize the view chain independently in the skip branch.
+              auto rematerialized = rematerializeViewLikeResult(
+                  retRes, scopeOp, info.mappings[info.preloadNum], viewMapping,
+                  b);
+              if (failed(rematerialized))
+                llvm::report_fatal_error("Unhandled scope result case");
+              newYields.push_back(*rematerialized);
             }
           }
         }
         b.create<scf::YieldOp>(loc, newYields);
       });
+}
+
+static bool isSynchronizationOp(Operation *op) {
+  return isa<hivm::SetFlagOp, hivm::WaitFlagOp, hivm::PipeBarrierOp,
+             hivm::SyncBlockOp, hivm::SyncBlockSetOp,
+             hivm::SyncBlockWaitOp>(op);
 }
 
 static void rewritePreloadLoop(scf::ForOp forOp,
@@ -373,6 +445,10 @@ static void rewritePreloadLoop(scf::ForOp forOp,
 
         for (auto &bodyOp : forOp.getBody()->without_terminator()) {
           if (!scopeToIdx.contains(&bodyOp)) {
+            if (isSynchronizationOp(&bodyOp)) {
+              b.clone(bodyOp, info.mappings[maxPreloadNum - 1]);
+              continue;
+            }
             if (auto pointerCastOp = dyn_cast<hivm::PointerCastOp>(&bodyOp)) {
               if (getLocalBuffer(pointerCastOp)) {
                 for (int64_t preloadNum = maxPreloadNum - 1; preloadNum >= 0;
@@ -385,7 +461,7 @@ static void rewritePreloadLoop(scf::ForOp forOp,
             } else if (auto subviewOp = dyn_cast<memref::SubViewOp>(&bodyOp);
                       subviewOp && isPreloadWorkspaceSubview(subviewOp)) {
               for (int64_t preloadNum = maxPreloadNum - 1; preloadNum >= 0;
-                   preloadNum--) {
+                  preloadNum--) {
                 cloneWorkspaceSubview(subviewOp, preloadNum, info, b);
               }
               continue;
@@ -403,7 +479,11 @@ static void rewritePreloadLoop(scf::ForOp forOp,
           Value cond = getPreloadCondition(info, loc, b);
 
           auto newOp = rewriteScopeOp(cond, scopeOp, info, args, loc, b);
+          auto returnResults = cast<scope::ReturnOp>(
+                                   scopeOp.getRegion().front().getTerminator())
+                                   .getResults();
           auto scopeResIter = scopeOp.result_begin();
+          SmallVector<IRMapping> viewMappings(info.mappings.size());
           for (auto newRes : newOp->getResults()) {
             auto maybeLocalBuffer = getLocalBuffer(*scopeResIter);
             while (maybeLocalBuffer.has_value()) {
@@ -413,8 +493,24 @@ static void rewritePreloadLoop(scf::ForOp forOp,
               ++scopeResIter;
               maybeLocalBuffer = getLocalBuffer(*scopeResIter);
             }
-            for (auto &mapping : info.mappings)
-              mapping.map(*scopeResIter, newRes);
+
+            Value scopeRes = *scopeResIter;
+            auto resultNumber = cast<OpResult>(scopeRes).getResultNumber();
+            Value returnResult = returnResults[resultNumber];
+            Value source = lookThroughScopeResult(returnResult);
+            if (!isa_and_nonnull<ViewLikeOpInterface>(source.getDefiningOp())) {
+              for (auto &mapping : info.mappings)
+                mapping.map(scopeRes, newRes);
+            } else {
+              for (auto [mapping, viewMapping] :
+                   llvm::zip_equal(info.mappings, viewMappings)) {
+                auto rematerialized = rematerializeViewLikeResult(
+                    returnResult, scopeOp, mapping, viewMapping, b);
+                assert(succeeded(rematerialized) &&
+                       "Failed to rematerialize checked scope result");
+                mapping.map(scopeRes, *rematerialized);
+              }
+            }
             ++scopeResIter;
           }
           for (; scopeResIter != scopeOp.result_end(); ++scopeResIter) {
@@ -422,7 +518,6 @@ static void rewritePreloadLoop(scf::ForOp forOp,
             for (auto &mapping : info.mappings)
               mapping.map(*scopeResIter,
                           mapping.lookup(maybeLocalBuffer.value()));
-            ++scopeResIter;
           }
         }
 
@@ -516,7 +611,6 @@ static void cleanupPreloadWorkspaceMarks(Operation &op) {
 void CreatePreloadPass::runOnOperation() {
   auto moduleOp = getOperation();
   DenseMap<scf::ForOp, SmallVector<scope::ScopeOp, 4>> preload;
-  DenseSet<int64_t> preloadNumSet;
   moduleOp->walk([&](scope::ScopeOp scopeOp) {
     if (auto maxPreloadNumAttr = scopeOp->getAttrOfType<IntegerAttr>(
             hivm::MaxPreloadNumAttr::name)) {
@@ -532,7 +626,6 @@ void CreatePreloadPass::runOnOperation() {
       assert(preloadNum < static_cast<int64_t>(preloadVec.size()) &&
              "MaxPreloadNumAttr must be set");
       preloadVec[preloadNum] = scopeOp;
-      preloadNumSet.insert(preloadNum);
     }
   });
 
@@ -541,8 +634,15 @@ void CreatePreloadPass::runOnOperation() {
 
   for (auto &[forOp, scopes] : preload) {
     LDBG("Processing preload:\n" << forOp);
-    scopes.resize(preloadNumSet.size(), nullptr);
-    rewritePreloadLoop(forOp, scopes, preloadNumSet.size());
+    auto scopeIt = llvm::find_if(scopes, [](scope::ScopeOp scopeOp) {
+      return static_cast<bool>(scopeOp);
+    });
+    assert(scopeIt != scopes.end() && "Expected at least one preload scope");
+    auto maxPreloadNumAttr = (*scopeIt)->getAttrOfType<IntegerAttr>(
+        hivm::MaxPreloadNumAttr::name);
+    assert(maxPreloadNumAttr && "MaxPreloadNumAttr must be set");
+    rewritePreloadLoop(forOp, scopes,
+                       static_cast<size_t>(maxPreloadNumAttr.getInt()));
   }
 
   cleanupPreloadWorkspaceMarks(*moduleOp);

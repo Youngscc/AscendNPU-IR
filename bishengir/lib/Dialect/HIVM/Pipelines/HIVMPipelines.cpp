@@ -132,6 +132,10 @@ bufferizationPipeline(OpPassManager &pm,
     options.mergeLevel = 1;
     pm.addPass(hfusion::createMergeVecScopePass(options));
   }
+  // TODO: support process toTensorOp in one-shot-bufferize.
+  // Expose memref-level writes (e.g., hivm.hir.load) to tensor-level analysis
+  // by replacing to_tensor writable with hivm.hir.copy
+  pm.nest<func::FuncOp>().addPass(hivm::createExposeMemrefWriteToTensorPass());
   bufferization::OneShotBufferizationOptions oneShotOptions;
   oneShotOptions.bufferizeFunctionBoundaries = true;
   oneShotOptions.setFunctionBoundaryTypeConversion(
@@ -151,6 +155,10 @@ bufferizationPipeline(OpPassManager &pm,
       };
   oneShotOptions.analysisHeuristic =
       bufferization::OneShotBufferizationOptions::AnalysisHeuristic::TopDown;
+  // Run a first round of analysis + tensor copy insertion. The inserted
+  // copies (and the HIVM copy/store op's `to_be_replaced` cleanup in
+  // resolveConflicts) can expose conflicts that were previously masked.
+  pm.addPass(hivm::createTensorCopyInsertionPass(oneShotOptions));
   pm.addPass(bufferization::createOneShotBufferizePass(oneShotOptions));
   if (hivmPipelineOptions.enableVfMergeLevel == 2) {
     MergeVecScopeOptions options;
@@ -229,9 +237,10 @@ static void hivmPreBufferizationOptimizationPipeline(
   // A3 mem-based path still needs InsertFixpipe (MR 2052 / compile-bisheng-distributed).
   pm.addPass(mlir::hivm::createInsertFixpipePass());
   {
-    InlineFixpipeOptions opts;
-    opts.inlineQuantScale = hivmPipelineOptions.inlineQuantScaleInFixpipe;
-    pm.addPass(mlir::hivm::createInlineFixpipePass(opts));
+    InlineFixpipeOptions inlineFixpipeOpts;
+    inlineFixpipeOpts.inlineQuantScale =
+        hivmPipelineOptions.inlineQuantScaleInFixpipe;
+    pm.addPass(mlir::hivm::createInlineFixpipePass(inlineFixpipeOpts));
   }
   if (!hivmPipelineOptions.disableAutoCVWorkSpaceManage) {
     hivmAutoInsertLdStForMixCVPipeline(pm, hivmPipelineOptions);
@@ -248,9 +257,10 @@ static void hivmPreBufferizationOptimizationPipeline(
   pm.addPass(createInsertNZ2NDForDebugPass());
   pm.addPass(mlir::hivm::createInsertFixpipePass());
   {
-    InlineFixpipeOptions opts;
-    opts.inlineQuantScale = hivmPipelineOptions.inlineQuantScaleInFixpipe;
-    pm.addPass(mlir::hivm::createInlineFixpipePass(opts));
+    InlineFixpipeOptions inlineFixpipeOpts;
+    inlineFixpipeOpts.inlineQuantScale =
+        hivmPipelineOptions.inlineQuantScaleInFixpipe;
+    pm.addPass(mlir::hivm::createInlineFixpipePass(inlineFixpipeOpts));
   }
 
   if (!hivmPipelineOptions.disableAutoCVWorkSpaceManage) {
@@ -281,6 +291,7 @@ static void hivmPreBufferizationOptimizationPipeline(
         hivmPipelineOptions.setLocalMultibuffer;
     multiBufferOptions.workspaceMultiBufferNum =
         hivmPipelineOptions.setWorkspaceMultibuffer;
+    multiBufferOptions.enablePreload = hivmPipelineOptions.enablePreload;
     pm.addNestedPass<func::FuncOp>(
         createMarkMultiBufferPass(multiBufferOptions));
   }
@@ -332,7 +343,9 @@ static void hivmPreBufferizationOptimizationPipeline(
     planMemoryOption.memMode = MemPlanMode::GLOBAL_WORKSPACE_PLAN;
     planMemoryOption.enableGlobalReuse =
         hivmPipelineOptions.enableHIVMGlobalWorkspaceReuse;
-    pm.nest<func::FuncOp>().addPass(createPlanMemoryPass(planMemoryOption));
+  planMemoryOption.planMemoryStrategy =
+      hivmPipelineOptions.planMemoryStrategy;
+    pm.addPass(createPlanMemoryPass(planMemoryOption));
   }
   // cross-core sync (inject-block-sync) passes.
   hivmCrossCoreSyncPipeline(pm, hivmPipelineOptions);
@@ -479,6 +492,7 @@ static void hivmPostBufferizationOptimizationPipeline(
       hivmPipelineOptions.limitAutoMultiBufferBuffer;
   multiBufferOptions.localMultiBufferNum =
       hivmPipelineOptions.setLocalMultibuffer;
+  multiBufferOptions.enablePreload = hivmPipelineOptions.enablePreload;
   pm.nest<func::FuncOp>().addPass(
       createMarkMultiBufferPass(multiBufferOptions));
   PlanMemoryOptions planMemoryOption;
@@ -486,7 +500,11 @@ static void hivmPostBufferizationOptimizationPipeline(
       hivmPipelineOptions.enableMemoryDisplay;
   planMemoryOption.enablePrintMemoryAllocatedSize =
       hivmPipelineOptions.enablePrintMemoryAllocatedSize;
-  pm.nest<func::FuncOp>().addPass(createPlanMemoryPass(planMemoryOption));
+  planMemoryOption.disableTightlyCoupledBufferReuse =
+      hivmPipelineOptions.disableTightlyCoupledBufferReuse;
+  planMemoryOption.planMemoryStrategy =
+      hivmPipelineOptions.planMemoryStrategy;
+  pm.addPass(createPlanMemoryPass(planMemoryOption));
 
   // Lower hivm ops to loops
   pm.nest<func::FuncOp>().addPass(createHIVMLowerToLoopsPass());

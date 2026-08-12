@@ -1,5 +1,6 @@
 file(GLOB ALIGN_BUFFER ${CMAKE_CURRENT_SOURCE_DIR}/AlignBuffer/*.cpp)
-file(GLOB BUBBLE_UP_EXTRACT_SLICE ${CMAKE_CURRENT_SOURCE_DIR}/BubbleUpExtractSlice/*.cpp)
+file(GLOB BUBBLE_UP_EXTRACT_SLICE CONFIGURE_DEPENDS
+     ${CMAKE_CURRENT_SOURCE_DIR}/BubbleUpExtractSlice/*.cpp)
 file(GLOB GRAPH_SYNC_CONFLICT_SOLVER ${CMAKE_CURRENT_SOURCE_DIR}/GraphSyncSolver/*.cpp)
 file(GLOB INJECT_SYNC ${CMAKE_CURRENT_SOURCE_DIR}/InjectSync/*.cpp)
 file(GLOB INSERT_LOAD_STORE_FOR_MIX_CV ${CMAKE_CURRENT_SOURCE_DIR}/InsertLoadStoreForMixCV/*.cpp)
@@ -34,9 +35,9 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   BindSyncBlockLockArg.cpp
   BindWorkSpaceArg.cpp
   BufferizableOpInterfaceImpl.cpp
-  CloneSCFIfYieldOperand.cpp
   CloneTensorEmpty.cpp
   ComposeCollapseExpand.cpp
+  ComposeMemRefViews.cpp
   ConstantizeBufferSize.cpp
   ConvertNonContiguousReshapeToCopy.cpp
   ConvertToHIVMOp.cpp
@@ -55,10 +56,13 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   ConvertLayout/Propagate/PropagateConvertLayoutScfFor.cpp
   ConvertLayout/Propagate/PropagateConvertLayoutScfWhile.cpp
   ConvertLayout/Propagate/PropagateConvertLayoutExtractSlice.cpp
+  ConvertLayout/Propagate/PropagateConvertLayoutInsertSlice.cpp
+  ConvertLayout/Propagate/PropagateConvertLayoutVBrc.cpp
   CreatePreload.cpp
   CVPipelining.cpp
   EnableHIVMCCompatiblePrint.cpp
   EnableMultiBuffer.cpp
+  ExposeMemrefWriteToTensor.cpp
   FlattenOps.cpp
   HIVMAggregatedDecomposeOp.cpp
   HIVMBubbleUpExtractSlice.cpp
@@ -95,6 +99,7 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   InsertNZ2NDForDebug.cpp
   InsertL12UBForDebug.cpp
   InsertWorkSpaceForMixCV.cpp
+  LegalizeBoolForSimtVF.cpp
   LiftLowestStride.cpp
   LiftZeroRank.cpp
   LowerCreateSyncBlockLock.cpp
@@ -102,13 +107,14 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   MarkDisableLoad.cpp
   MarkMultiBuffer.cpp
   MarkSyncBlockLockWithSubblock.cpp
+  HIVMCanonicalizationPipeline.cpp
   MarkRealCoreType.cpp
   MarkTightlyCoupledBuffer.cpp
   MaterializeSimtVFMemScope.cpp
   MemoryDisplay.cpp
   NormalizeBitwiseSelect.cpp
   NormalizeConvOps.cpp
-  NormalizeLoopIterator.cpp
+  TensorCopyInsertion.cpp
   NormalizeMatmul.cpp
   OptMemPlanForPipeline.cpp
   OutlineAllocInVF.cpp
@@ -132,6 +138,7 @@ add_bishengir_dialect_library(BiShengIRHIVMTransforms
   TightlyCoupledBufferUtils.cpp
   TritonGlobalKernelArgsToHIVMOp.cpp
   UnitFlagInfoBase.cpp
+  VFOperandSubstitution.cpp
   AnalyzeArithVectorMask.cpp
   WriteBackShared.cpp
   ADDITIONAL_HEADER_DIRS

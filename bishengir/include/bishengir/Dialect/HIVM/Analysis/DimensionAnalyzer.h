@@ -35,6 +35,7 @@ public:
     RankReduced,
     Reduce,
     InvalidColumnSplit,
+    NotAligned,
   };
   explicit DimensionAnalyzer(Operation *op, int64_t tilingSize = 2);
   LogicalResult initialize() override;
@@ -140,7 +141,8 @@ protected:
   void processCollapseShapeOpLeftmostNonUnit(tensor::CollapseShapeOp op);
   template <typename T, typename = std::enable_if_t<
                             std::is_same_v<T, tensor::ExpandShapeOp> ||
-                            std::is_same_v<T, tensor::CollapseShapeOp>>>
+                            std::is_same_v<T, tensor::CollapseShapeOp> ||
+                            std::is_same_v<T, memref::CollapseShapeOp>>>
   void processReshapeOp(T op);
   void processScopeOp(scope::ScopeOp op);
   void processTilingDimMapping(tensor::ExpandShapeOp expandShapeOp,
@@ -150,6 +152,8 @@ protected:
 
   void startTransaction(Operation *op);
   bool finalizeTransaction();
+
+  bool isParallelOp(Operation *op) const;
 
   //===--------------------------------------------------------------------===//
   // Helper function
@@ -162,6 +166,7 @@ protected:
   void markDimensions();
 
   void markTransposedDim(hivm::VTransposeOp op);
+  void markUnalignedDim(hivm::CopyOp op);
 
   /// transfer marked information through the dimensions merged by
   /// structuralDsu_
@@ -233,10 +238,6 @@ protected:
   /// For transposed tensors: maps a \c equivalentDsu_ index to the
   /// pre-transpose axis index used when matching tiling dims.
   DenseMap<int64_t, int64_t> transposedDimMap;
-
-  /// \c parentIndex values where one store had two parallel axes mapping to the
-  /// same collapsed parent (possible broadcast / ambiguous tiling).
-  llvm::SmallDenseSet<int64_t> broadcastAxisCaseCandidate;
 
   int64_t tilingSize;
 

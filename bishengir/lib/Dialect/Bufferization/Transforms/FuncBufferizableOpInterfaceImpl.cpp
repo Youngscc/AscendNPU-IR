@@ -9,6 +9,7 @@
 
 #include "bishengir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
 #include "bishengir/Dialect/Utils/OpInterfaceUtils.h"
+#include "bishengir/Dialect/Utils/Util.h"
 
 #include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/Transforms/OneShotAnalysis.h"
@@ -19,8 +20,6 @@ using namespace mlir;
 using namespace mlir::bufferization;
 using namespace mlir::bufferization::func_ext;
 using namespace mlir::func;
-
-static constexpr llvm::StringLiteral KFoldOffsetMarker = "fold_offset_into_ptr";
 
 static FuncOp getCalledFunction(func::CallOp callOp) {
   SymbolRefAttr sym =
@@ -153,7 +152,7 @@ static LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
             dstStrides, [](int64_t s) { return !ShapedType::isDynamic(s); });
         if (srcStridesStatic && srcOffset == ShapedType::kDynamic &&
             dstStridesStatic && dstOffset == 0)
-          castOp->setAttr(KFoldOffsetMarker, rewriter.getUnitAttr());
+          castOp->setAttr(utils::KFoldOffsetMarker, rewriter.getUnitAttr());
       }
       /// Add KFoldOffsetMarker end
 
@@ -170,7 +169,55 @@ static LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
 
   return success();
 }
+
+static FailureOr<BaseMemRefType>
+getBufferType(Operation *op, Value value, const BufferizationOptions &options,
+              const SmallVector<Value> &invocationStack) {
+  auto callOp = cast<func::CallOp>(op);
+  FuncOp funcOp = getCalledFunction(callOp);
+  assert(funcOp && "expected CallOp to a FuncOp");
+
+  FunctionType funcType = funcOp.getFunctionType();
+  Type resultType =
+      funcType.getResult(cast<OpResult>(value).getResultNumber());
+  if (auto memRefType = dyn_cast<BaseMemRefType>(resultType))
+      return memRefType;
+
+  // Outlined callees may still have tensor signatures when one-shot
+  // bufferization resolves tensor copy conflicts inside enclosing loops.
+  // Resolve the buffer type by following the equivalence chain through the
+  // callee's body via the return operand.
+  if (funcOp && !funcOp.isExternal()) {
+    func::ReturnOp returnOp;
+    for (Block &block : funcOp.getBody()) {
+      if (auto candidate = dyn_cast<func::ReturnOp>(block.getTerminator())) {
+        returnOp = candidate;
+        break;
+      }
+    }
+    if (returnOp) {
+      Value returnVal =
+          returnOp.getOperand(cast<OpResult>(value).getResultNumber());
+      if (isa<TensorType>(returnVal.getType())) {
+        SmallVector<Value> mutableStack(invocationStack);
+        return bufferization::getBufferType(returnVal, options, mutableStack);
+      }
+    }
+  }
+
+  assert(isa<TensorType>(resultType) && "expected tensor result type");
+  auto memSpace = options.defaultMemorySpaceFn(cast<TensorType>(resultType));
+  if (!memSpace.has_value())
+      return op->emitError("could not infer memory space");
+  return getMemRefType(value, options, /*layout=*/{}, *memSpace);
+}
 } // namespace CallOpInterfaceOverwriter
+
+RegisterOpInterfaceOverride(
+    /*Op=*/func::CallOp, /*Interface=*/BufferizableOpInterface,
+    /*InterfaceMethod=*/getBufferType,
+    /*Impl=*/
+    &CallOpInterfaceOverwriter::getBufferType);
 
 RegisterOpInterfaceOverride(
     /*Op=*/func::CallOp, /*Interface=*/BufferizableOpInterface,

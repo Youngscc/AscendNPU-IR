@@ -167,6 +167,8 @@ def AutoVectorizeV2 : Pass<"hfusion-auto-vectorize-v2", "ModuleOp"> {
     Option<"emitTransformSequence", "emit-transform-sequence", "bool", "false",
            "Emit AutoVectorizeV2 payload tags and transform sequence without applying it.">,
     Option<"treeReduce", "tree-reduce", "bool", "false", "use tree reduce">,
+    Option<"enableCrossIfFusion", "enable-cross-if-fusion", "bool", "false",
+           "Enable fusion op cross region-bearing op in AutoVectorizeV2">,
   ];
 }
 
@@ -283,13 +285,19 @@ def Normalize : Pass<"hfusion-normalize-ops", "func::FuncOp"> {
   let summary = "Normalize Hfusion";
   let constructor = "mlir::hfusion::createHFusionNormalizeOpsPass()";
   let dependentDialects = ["hfusion::HFusionDialect", "hivm::HIVMDialect",
-                           "bufferization::BufferizationDialect"];
+                           "bufferization::BufferizationDialect",
+                           "scope::ScopeDialect"];
   let options = [
     Option<"useRegBase", "use-regbase", "bool", /*default=*/"false",
            "Forcefully use RegBase normalize implementation.">,
     Option<"enableHighPrecision", "enable-high-precision", "bool",
            /*default=*/"true",
-           "Enable high precision calculation for sin/cos in HFusion.">
+           "Enable high precision calculation for sin/cos in HFusion.">,
+    Option<
+      "enableFastDiv", "enable-fast-div", "bool",
+      /*default=*/"true",
+      "Enable conversion of div with constant denominator into mul "
+      "excluding cases when reciprocal value is denormal or inf value">
   ];
 }
 
@@ -660,6 +668,22 @@ def UpliftWhileToFor : Pass<"hfusion-uplift-while-to-for", "func::FuncOp"> {
   let dependentDialects = ["scf::SCFDialect", "arith::ArithDialect"];
 }
 
+def LoopInvariantPromotion
+    : Pass<"loop-invariant-promotion", "ModuleOp"> {
+  let summary = "promote transfer_read/transfer_write in loop";
+  let description = [{
+    Promotes loop-invariant transfer_read/transfer_write subsets of a loop
+    carried tensor into a loop-carried vector, then forwards constant fills:
+    a vector function that only stamps a splat constant into a `tensor.empty`
+    is replaced, in its readers, by the constant itself, so the filled tensor
+    no longer needs a UB buffer of its own.
+  }];
+  let constructor = "::mlir::hfusion::createLoopInvariantPromotionPass()";
+  let dependentDialects = ["scf::SCFDialect", "vector::VectorDialect",
+                           "tensor::TensorDialect", "arith::ArithDialect",
+                           "affine::AffineDialect", "func::FuncDialect"];
+}
+
 def HFusionGeneralizePass : Pass<"hfusion-generalize", "func::FuncOp"> {
   let summary = "Generalize named ops to generic ops";
   let constructor = "mlir::hfusion::createHFusionGeneralizePass()";
@@ -679,9 +703,9 @@ def PrepareI1Nx1ForVectorization
 }
 
 def SimplifyVFArgs : Pass<"hfusion-simplify-vf-arg", "ModuleOp"> {
-  let summary = "simplify vf function arguments";
+  let summary = "simplify and legalize vf function arguments";
   let constructor = "mlir::hfusion::createSimplifyVFArgsPass()";
-  let dependentDialects = ["func::FuncDialect"];
+  let dependentDialects = ["arith::ArithDialect", "func::FuncDialect"];
 }
 
 def MergeVecScope : Pass<"hfusion-merge-vf", "ModuleOp"> {

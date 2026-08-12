@@ -149,6 +149,7 @@ def LoadOp : HIVM_DmaOp<"load", [
     (`->` type($result_tensor)^)?
   }];
   let hasFolder = 1;
+  let hasCanonicalizer = 1;
   let hasVerifier = 1; // verify parameter according to hardware version
   let extraClassDeclaration = DmaOpBaseDecl;
 }
@@ -300,6 +301,10 @@ def FixpipeOp : HIVM_DmaOp<"fixpipe", [
     #### `dual_dst_mode`
     HIVM dual destination mode control. dual destination mode can be enabled only when nz2nd or normal data
     movement mode is enabled, and data movement is being performed from L0C to UB. Only supported on Ascend950 series.
+
+    #### `c0_pad_en`
+    Enable hardware C0 padding for the destination fractal layout (used with int8 channel merge when an odd
+    number of C0 blocks would otherwise leave an unmerged tail). Defaults to true (padding enabled).
   }];
   let arguments = (ins AnyShaped:$src,
                        AnyShaped:$dst,
@@ -318,6 +323,7 @@ def FixpipeOp : HIVM_DmaOp<"fixpipe", [
                        DefaultValuedOptionalAttr<HIVM_FixpipePreReluModeAttr,
                          "FixpipePreReluMode::NO_RELU">:$pre_relu,
                        DefaultValuedOptionalAttr<BoolAttr, "false">:$channel_split,
+                       DefaultValuedOptionalAttr<BoolAttr, "true">:$c0_pad_en,
                        OptionalAttr<UnitFlagArrayAttr>:$unit_flag_mode,
                        Optional<AnyFloat>:$quant_scale
   );
@@ -330,6 +336,7 @@ def FixpipeOp : HIVM_DmaOp<"fixpipe", [
                     CArg<"FixpipePreQuantModeAttr", "nullptr">:$pre_quant,
                     CArg<"FixpipePreReluModeAttr", "nullptr">:$pre_relu,
                     CArg<"BoolAttr", "nullptr">:$channel_split,
+                    CArg<"BoolAttr", "nullptr">:$c0_pad_en,
                     CArg<"Value", "nullptr">:$quant_scale)
     >,
     OpBuilder<(ins "Type":$result, "Value":$src, "Value":$dst,
@@ -339,6 +346,7 @@ def FixpipeOp : HIVM_DmaOp<"fixpipe", [
                     CArg<"FixpipePreQuantModeAttr", "nullptr">:$pre_quant,
                     CArg<"FixpipePreReluModeAttr", "nullptr">:$pre_relu,
                     CArg<"BoolAttr", "nullptr">:$channel_split,
+                    CArg<"BoolAttr", "nullptr">:$c0_pad_en,
                     CArg<"Value", "nullptr">:$quant_scale)
     >
   ];

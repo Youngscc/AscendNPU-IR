@@ -21,6 +21,7 @@
 #include "bishengir/Dialect/HACC/IR/HACCInterfaces.h"
 #include "bishengir/Dialect/HIVM/Analysis/VFInplaceReuseAnalyzer.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
+#include "bishengir/Dialect/HIVM/Transforms/InplaceReuseReachableMap.h"
 #include "bishengir/Dialect/Scope/IR/Scope.h"
 #include "bishengir/Dialect/HIVM/Transforms/OptMemPlanForPipeline.h"
 #include "bishengir/Dialect/HIVM/Transforms/Passes.h"
@@ -65,6 +66,9 @@ constexpr const int SPEC_LEVEL_1 = 1;
 
 /// pipe conflict opt.
 constexpr const int SPEC_LEVEL_2 = 2;
+
+/// pipe conflict opt in same loop.
+constexpr const int SPEC_LEVEL_3 = 3;
 
 /// plan information of alloc buffer.
 struct BufferInfo {
@@ -212,9 +216,9 @@ struct PlanRecord {
 using PlanRecHis = SmallVector<PlanRecord>;
 
 struct SpecInfo {
-  int maxLevel = SPEC_LEVEL_2;
+  int maxLevel = SPEC_LEVEL_3;
   int minLevel = SPEC_LEVEL_0;
-  int specLevel = SPEC_LEVEL_2;
+  int specLevel = SPEC_LEVEL_3;
   int childIdx = -1;
   int specStartIdx = 0;
   int rollbackIdx = -1;
@@ -300,7 +304,10 @@ public:
   SmallVector<ValuePair> inplacePairList;
 
   /// record marked buffer used in multi scope operations.
-  SmallVector<Value> preloadBuffers;
+  SetVector<Value> preloadBuffers;
+
+  /// record preload buffers by their enclosing preload loop.
+  DenseMap<Operation *, SetVector<Value>> preloadLoop2Buffers;
 
   /// Sorted positions (in scope-time units, mirroring
   /// GenerateBufferLife()'s scopeTime) of hivm sync ops in this func. Used
@@ -434,11 +441,13 @@ protected:
   /// Check if a buffer is a preload buffer.
   bool IsPreloadBuffer(Value buffer);
 
-  /// Update gen info of preload buffer to parent for op.
-  void UpdatePreloadBuffersGenInfo(OpInfo *opInfo);
+  /// Update gen info of preload buffers at their enclosing loop entry.
+  void UpdatePreloadBuffersGenInfo(
+      OpInfo *opInfo, const SetVector<Value> &preloadBufferValues);
 
-  /// Update kill info of preload buffer to parent for op.
-  void UpdatePreloadBuffersKillInfo(OpInfo *opInfo);
+  /// Update kill info of preload buffers at their enclosing loop exit.
+  void UpdatePreloadBuffersKillInfo(
+      OpInfo *opInfo, const SetVector<Value> &preloadBufferValues);
 
   /// Extend preload buffer lifetime from scope to parent for.
   void UpdatePreloadBuffersGenKillMap();
@@ -524,31 +533,18 @@ protected:
 /// Pair of StorageEntry.
 using StorageEntryPair = std::pair<const StorageEntry *, const StorageEntry *>;
 
-/// Memoization cache intended to prevent recomputation of
-/// MemPlan::IsInplaceReuseReachable when it called with the same value.
-class InplaceReuseReachableMap {
-public:
-  template <typename DstOpType>
-  void put(Value key, bool val);
-
-  template <typename DstOpType>
-  std::optional<bool> get(Value key);
-
-private:
-  DenseMap<Value, bool> storeReachable;
-  DenseMap<Value, bool> loadReachable;
-};
-
 class MemPlanRegBase {
 public:
 MemPlanRegBase(MemPlanMode planMode, bool enableGlobalReuse,
            bool enablePrintMemoryAllocatedSize, bool restrictInplaceAsISA,
-           int simtVFDynamicSize, bool disableVFReachableCheck)
+           int simtVFDynamicSize, bool disableVFReachableCheck,
+           PlanMemoryStrategy planMemoryStrategy = PlanMemoryStrategy::DEFAULT)
       : planMode(planMode), enableGlobalReuse(enableGlobalReuse),
         enablePrintMemoryAllocatedSize(enablePrintMemoryAllocatedSize),
         restrictInplaceAsISA(restrictInplaceAsISA),
         simtVFDynamicSize(simtVFDynamicSize),
         disableVFReachableCheck(disableVFReachableCheck),
+        planMemoryStrategy(planMemoryStrategy),
         vfInplaceReuseInfo(nullptr) {}
 
   LogicalResult plan(bool emitErrors = true);
@@ -621,6 +617,9 @@ protected:
   /// Disable VF reachable check. Default is false
   bool disableVFReachableCheck;
 
+  /// Strategy for reordering storage entries during plan memory.
+  PlanMemoryStrategy planMemoryStrategy;
+
   /// StorageEntry generate.
   void GenerateStorageEntry();
 
@@ -657,12 +656,9 @@ protected:
   /// Start plan.
   PlanStatus PlanMemAddressOfWholeLocalBuffer();
 
-  /// Plan memory only by level0 to report failure info.
-  void PlanMemAddressForLevel0(StorageEntry *rootStorageEntry);
-
-  /// Determine if the current space is enough to allocate all buffers.
-  bool IsEnoughForBuffersNoReuse(StorageEntry *rootStorageEntry,
-                                 size_t restBufferSize, size_t alignUnit);
+  /// Plan memory for single spaceLevel and return maxAllocBits
+  uint64_t PlanMemAddressForSingleLevel(StorageEntry *rootStorageEntry,
+                                        int specLevel);
 
   /// Adjust the allocation order of rootStoreEntry to prioritize the allocation
   /// of buffers corresponding to DMA.
@@ -687,6 +683,20 @@ protected:
                           StorageEntry *e, const SpecInfo &si, int localLevel);
 
   /// spec_level == SPEC_LEVEL_2, mte2/3 do not reuse with vector.
+  /// Check whether current buffer conflicts with the history buffers.
+  bool VerifyConflictStageCommon(
+      PlanRecHis &his, const StorageEntry *e, MemBoundListConstIter &start,
+      const MemBoundList &outline,
+      std::function<bool(const StorageEntry *, const StorageEntry *)>
+          conflictChecker);
+
+  /// spec_level == SPEC_LEVEL_3, do not reuse buffer when pipe conflicts.
+  bool VerifyConflictStage3(PlanRecHis &his, const StorageEntry *e,
+                            int specLevel, MemBoundListConstIter &start,
+                            const MemBoundList &outline);
+
+  /// spec_level == SPEC_LEVEL_2, do not reuse the buffer in same loop when pipe
+  /// conflicts between vector and dma.
   bool VerifyConflictStage2(PlanRecHis &his, const StorageEntry *e,
                             int specLevel, MemBoundListConstIter &start,
                             const MemBoundList &outline);
@@ -701,6 +711,9 @@ protected:
   /// check if e1 and e2 has pipe conflict.
   bool PipeConflict(const StorageEntry *e1, const StorageEntry *e2,
                     DenseMap<StorageEntryPair, bool> &conflictMap);
+
+  /// check if e1 and e2 has same parent loop.
+  bool PipeConflictInSameLoop(const StorageEntry *e1, const StorageEntry *e2);
 
   /// spec_level == SPEC_LEVEL_2, MTE2/MTE3 is pipe conflict with all existing
   /// allocation. check if current entry has OptDmaPipe-conflict with buffers
@@ -775,14 +788,11 @@ protected:
 
   /// the vf call `op` that can reuse dst address `gen` and src address `kill`
   /// in limited situation
-  bool IsReuseVFCall(Value gen, Value kill,
-                     InplaceReuseReachableMap &reachableMap) const;
+  bool IsReuseVFCall(Value gen, Value kill);
 
-  /// Determines whether the value `src` is reachable to an operand of a
-  /// `DstOpType` operation.
-  template <typename DstOpType>
-  bool IsInplaceReuseReachable(Value src,
-                               InplaceReuseReachableMap &reachableMap) const;
+  /// Determines whether the value `src` is reachable to an operand of an
+  /// operation with pipe type `Pipe`.
+  template <PIPE Pipe> bool IsInplaceReuseReachable(Value allocValue);
 
   /// Get overlap buffer life.
   DenseMap<ValuePair, BufferLife>
@@ -877,6 +887,9 @@ protected:
 
   /// Memory dma pipe first plan optimization.
   OptMemPlanForDma dmaFirstPipelineOpt;
+
+  /// Inplace reuse reachable map for checking if a buffer is used by hivmPipeOp
+  InplaceReuseReachableMap reachableMap;
 
   /// Map from the storage entry pair to its pipeDma conflict info.
   DenseMap<StorageEntryPair, bool> pipeDmaConflictMap;

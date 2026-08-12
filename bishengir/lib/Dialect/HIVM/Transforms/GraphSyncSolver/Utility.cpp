@@ -16,8 +16,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "bishengir/Dialect/HIVM/Transforms/GraphSyncSolver/Utility.h"
+#include "bishengir/Dialect/HACC/Utils/Utils.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Dialect/HIVM/Transforms/GraphSyncSolver/SyncSolverIR.h"
+#include "bishengir/Dialect/Utils/Util.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/Value.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -180,8 +183,26 @@ OperationBase *OperationBase::getParentWithOp(Operation *op,
   assert(op != nullptr);
   OperationBase *opBase = this;
   while (opBase != nullptr) {
-    if (opBase->op != nullptr && opBase->op == op) {
+    if (opBase->op == op) {
       return opBase;
+    }
+    if (opBase->cubeAnchorInfo.has_value()) {
+      if (opBase->cubeAnchorInfo->anchorBefore != nullptr &&
+          opBase->cubeAnchorInfo->anchorAfter != nullptr) {
+        if (opBase->cubeAnchorInfo->anchorBefore->op == op &&
+            opBase->cubeAnchorInfo->anchorAfter->op == op) {
+          return opBase;
+        }
+      }
+    }
+    if (opBase->vectorAnchorInfo.has_value()) {
+      if (opBase->vectorAnchorInfo->anchorBefore != nullptr &&
+          opBase->vectorAnchorInfo->anchorAfter != nullptr) {
+        if (opBase->vectorAnchorInfo->anchorBefore->op == op &&
+            opBase->vectorAnchorInfo->anchorAfter->op == op) {
+          return opBase;
+        }
+      }
     }
     opBase = opBase->parentOp;
   }
@@ -286,10 +307,16 @@ int64_t getHWAvailableEventIdNum(SyncMode syncMode, hivm::PIPE setPipe,
                                  hivm::PIPE waitPipe) {
   if (syncMode == SyncMode::INTRA_CORE_SYNC) {
     const llvm::DenseMap<std::tuple<PIPE, PIPE>, int64_t> reservedEventIdNum = {
-        {{hivm::PIPE::PIPE_V, hivm::PIPE::PIPE_S}, 1},
         {{hivm::PIPE::PIPE_S, hivm::PIPE::PIPE_V}, 1},
-        {{hivm::PIPE::PIPE_MTE2, hivm::PIPE::PIPE_V}, 1},
+        {{hivm::PIPE::PIPE_S, hivm::PIPE::PIPE_MTE2}, 1},
+        {{hivm::PIPE::PIPE_S, hivm::PIPE::PIPE_MTE3}, 1},
+        {{hivm::PIPE::PIPE_V, hivm::PIPE::PIPE_S}, 1},
+        {{hivm::PIPE::PIPE_V, hivm::PIPE::PIPE_MTE2}, 1},
+        {{hivm::PIPE::PIPE_V, hivm::PIPE::PIPE_MTE3}, 1},
         {{hivm::PIPE::PIPE_M, hivm::PIPE::PIPE_FIX}, 1},
+        {{hivm::PIPE::PIPE_MTE2, hivm::PIPE::PIPE_S}, 1},
+        {{hivm::PIPE::PIPE_MTE2, hivm::PIPE::PIPE_V}, 1},
+        {{hivm::PIPE::PIPE_MTE3, hivm::PIPE::PIPE_S}, 1},
         {{hivm::PIPE::PIPE_FIX, hivm::PIPE::PIPE_M}, 1},
     };
     int64_t eventIdNum = INTRA_CORE_EVENT_ID_NUM;
@@ -318,10 +345,16 @@ SmallVector<int64_t> getHWAvailableEventIds(SyncMode syncMode,
                                             hivm::PIPE waitPipe) {
   if (syncMode == SyncMode::INTRA_CORE_SYNC) {
     const llvm::DenseMap<std::tuple<PIPE, PIPE>, int64_t> reservedEventIdNum = {
-        {{hivm::PIPE::PIPE_V, hivm::PIPE::PIPE_S}, 1},
         {{hivm::PIPE::PIPE_S, hivm::PIPE::PIPE_V}, 1},
-        {{hivm::PIPE::PIPE_MTE2, hivm::PIPE::PIPE_V}, 1},
+        {{hivm::PIPE::PIPE_S, hivm::PIPE::PIPE_MTE2}, 1},
+        {{hivm::PIPE::PIPE_S, hivm::PIPE::PIPE_MTE3}, 1},
+        {{hivm::PIPE::PIPE_V, hivm::PIPE::PIPE_S}, 1},
+        {{hivm::PIPE::PIPE_V, hivm::PIPE::PIPE_MTE2}, 1},
+        {{hivm::PIPE::PIPE_V, hivm::PIPE::PIPE_MTE3}, 1},
         {{hivm::PIPE::PIPE_M, hivm::PIPE::PIPE_FIX}, 1},
+        {{hivm::PIPE::PIPE_MTE2, hivm::PIPE::PIPE_S}, 1},
+        {{hivm::PIPE::PIPE_MTE2, hivm::PIPE::PIPE_V}, 1},
+        {{hivm::PIPE::PIPE_MTE3, hivm::PIPE::PIPE_S}, 1},
         {{hivm::PIPE::PIPE_FIX, hivm::PIPE::PIPE_M}, 1},
     };
     int64_t eventIdNum = INTRA_CORE_EVENT_ID_NUM;
@@ -358,13 +391,13 @@ SmallVector<int64_t> getHWAvailableEventIds(SyncMode syncMode,
 }
 
 std::optional<int64_t> getStaticLoopCount(LoopLikeOpInterface forOp) {
-  if (!forOp) {
+  if (!isa<scf::ForOp>(forOp)) {
     return std::nullopt;
   }
-  std::optional<OpFoldResult> lb = forOp.getSingleLowerBound();
-  std::optional<OpFoldResult> ub = forOp.getSingleUpperBound();
-  std::optional<OpFoldResult> step = forOp.getSingleStep();
-  if (!lb || !ub || !step) {
+  auto lb = forOp.getSingleLowerBound();
+  auto ub = forOp.getSingleUpperBound();
+  auto step = forOp.getSingleStep();
+  if (!lb.has_value() || !ub.has_value() || !step.has_value()) {
     return std::nullopt;
   }
   return constantTripCount(lb.value(), ub.value(), step.value());
@@ -472,6 +505,26 @@ bool isEmptyScope(Scope *scope) {
     }
   }
   return true;
+}
+
+bool isWorkSpaceFuncArgument(func::FuncOp funcOp, BlockArgument funcArg) {
+  return hacc::utils::isKernelArg(funcOp, funcArg.getArgNumber(),
+                                  hacc::KernelArgType::kWorkspace);
+}
+
+llvm::SmallVector<int64_t> getAddresses(const llvm::SmallVector<Value> &addrs) {
+  llvm::SmallVector<int64_t> offsets;
+  for (auto addr : addrs) {
+    if (auto constOp = dyn_cast<arith::ConstantOp>(addr.getDefiningOp())) {
+      auto baseAddr =
+          static_cast<int64_t>(cast<IntegerAttr>(constOp.getValue()).getInt());
+      int64_t baseAddrInBits = baseAddr * utils::kBitsToByte;
+      offsets.push_back(baseAddrInBits);
+    } else {
+      offsets.push_back(ShapedType::kDynamic);
+    }
+  }
+  return offsets;
 }
 
 } // namespace mlir::hivm::syncsolver

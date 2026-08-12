@@ -177,6 +177,17 @@ def HIVM_DataLayoutAttr : HIVM_Attr<"DataLayout", "data_layout"> {
       }
     }
 
+    /// True if layout is a fractal MX scale layout.
+    bool isScaleFractalLayout() const {
+      switch (getDataLayout()) {
+        case hivm::DataLayout::SCALEA_zZ:
+        case hivm::DataLayout::SCALEB_nN:
+          return true;
+        default:
+          return false;
+      }
+    }
+
     using FractalSize = std::pair<int32_t, int32_t>;
 
     /// Extract exactly 2 fractal block sizes.
@@ -359,6 +370,15 @@ def HIVM_TCoreTypeMarkerAttr : HIVM_Attr<"TCoreTypeMarker", "tcore_type_marker">
 def HIVM_TPartOfMixAttr : HIVM_Attr<"TPartOfMix", "part_of_mix"> {
   let description = [{
       HIVM function is a part of mix kernel.
+  }];
+}
+
+def HIVM_AllowFlattenAttr : HIVM_Attr<"AllowFlatten", "allow_flatten"> {
+  let description = [{
+    Marks a scope whose body is safe for hfusion-flatten-ops /
+    propagate-reshape even when skip-scope is enabled. Used by software
+    atomic_xchg decomposition so multi-rank tensors inside the critical
+    section can be collapsed to reduce UB pressure.
   }];
 }
 
@@ -1316,6 +1336,15 @@ def HIVM_SyncBlockLockWithSubblockAttr
   }];
 }
 
+def HIVM_SyncBlockLockUnorderedAttr
+    : HIVM_Attr<"SyncBlockLockUnordered", "sync_block_lock_unordered"> {
+  let description = [{
+    Marks create_sync_block_lock / sync_block_lock / sync_block_unlock /
+    free_lock_var ops that should use the unordered (Lamport bakery,
+    arrival-order) lock instead of the ordered token ring.
+  }];
+}
+
 def HIVM_TileMixCubeNumAttr
     : HIVM_Attr<"TileMixCubeNum", "tile_mix_cube_num"> {
   let description = [{
@@ -1440,5 +1469,15 @@ def HIVM_MatmulLimitedInCubeAttr
             .It will bypass compiler analysis that might decompose matmul into
                 vector addition because of hardware constraints.}];
 }
+
+//===----------------------------------------------------------------------===//
+// InsertedAttr
+//===----------------------------------------------------------------------===//
+
+def HIVM_Inserted_Tensor : HIVM_Attr<"kInsertedTensor", "inserted-tensor"> {}
+def HIVM_Inserted_Copy : HIVM_Attr<"kInsertedCopy", "inserted-copy"> {}
+def HIVM_Inserted_Load : HIVM_Attr<"kInsertedLoad", "inserted-load"> {}
+def HIVM_Inserted_Store : HIVM_Attr<"kInsertedStore", "inserted-store"> {}
+def HIVM_Inserted_Fixpipe : HIVM_Attr<"kInsertedFixpipe", "inserted-fixpipe"> {}
 
 #endif // BISHENGIR_DIALECT_HIVM_IR_HIVMATTRS_TD

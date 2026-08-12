@@ -363,6 +363,75 @@ IRTranslator::getDecomposedMmadl1(hivm::MmadL1Op mmadl1Op,
   return outerScopeOp;
 }
 
+// Decompose MmadMxL1Ops into a small inline sequence in the IR for
+// easier sync handling with independent ScaleA/ScaleB eventIds.
+std::unique_ptr<OperationBase>
+IRTranslator::getDecomposedMmadMxL1(hivm::MmadMxL1Op mmadMxL1Op,
+                                    OperationBase *parentOp) {
+
+  auto outerScopeOp = std::make_unique<Scope>();
+  outerScopeOp->parentOp = parentOp;
+  outerScopeOp->op = mmadMxL1Op;
+
+  auto mmadMxL1LoopOp =
+      std::make_unique<MmadMxL1LoopOp>(mmadMxL1Op, outerScopeOp.get());
+  auto scopeOp = std::make_unique<Scope>();
+  scopeOp->parentOp = mmadMxL1LoopOp.get();
+  auto coreType = TCoreType::CUBE_OR_VECTOR;
+  if (options.isCrossCoreMode()) {
+    coreType = TCoreType::CUBE;
+  }
+
+  // Sub-op 1: LoadL0A — MTE1, read A
+  auto loadL0aOp = std::make_unique<LoadL0AOp>(
+      nullptr, scopeOp.get(), coreType, hivm::PIPE::PIPE_MTE1,
+      hivm::PIPE::PIPE_MTE1, getMemoryOps({mmadMxL1Op.getA()}),
+      SmallVector<Value>());
+  scopeOp->body.push_back(std::move(loadL0aOp));
+
+  // Sub-op 2: LoadL0AMx — MTE1, read ScaleA (NEW)
+  auto loadL0aMxOp = std::make_unique<LoadL0AMxOp>(
+      nullptr, scopeOp.get(), coreType, hivm::PIPE::PIPE_MTE1,
+      hivm::PIPE::PIPE_MTE1, getMemoryOps({mmadMxL1Op.getScaleA()}),
+      SmallVector<Value>());
+  scopeOp->body.push_back(std::move(loadL0aMxOp));
+
+  // Sub-op 3: LoadL0B — MTE1, read B
+  auto loadL0bOp = std::make_unique<LoadL0BOp>(
+      nullptr, scopeOp.get(), coreType, hivm::PIPE::PIPE_MTE1,
+      hivm::PIPE::PIPE_MTE1, getMemoryOps({mmadMxL1Op.getB()}),
+      SmallVector<Value>());
+  scopeOp->body.push_back(std::move(loadL0bOp));
+
+  // Sub-op 4: LoadL0BMx — MTE1, read ScaleB (NEW)
+  auto loadL0bMxOp = std::make_unique<LoadL0BMxOp>(
+      nullptr, scopeOp.get(), coreType, hivm::PIPE::PIPE_MTE1,
+      hivm::PIPE::PIPE_MTE1, getMemoryOps({mmadMxL1Op.getScaleB()}),
+      SmallVector<Value>());
+  scopeOp->body.push_back(std::move(loadL0bMxOp));
+
+  // Sub-op 5: MmadL0 — M, write C (no UnitFlag for MxL1)
+  auto mmadl0Op = std::make_unique<MmadL0Operation>(
+      mmadMxL1Op, scopeOp.get(), coreType, hivm::PIPE::PIPE_M,
+      hivm::PIPE::PIPE_M, SmallVector<Value>(),
+      getMemoryOps({mmadMxL1Op.getC()}));
+  // MmadMxL1Op does not support UnitFlag
+  mmadMxL1LoopOp->mmadL0Op = mmadl0Op.get();
+  scopeOp->body.push_back(std::move(mmadl0Op));
+  mmadMxL1LoopOp->body.push_back(std::move(scopeOp));
+
+  auto beforePlaceHolderOp =
+      std::make_unique<PlaceHolder>(nullptr, mmadMxL1LoopOp->parentOp);
+  beforePlaceHolderOp->beforeOp = mmadMxL1LoopOp.get();
+  auto afterPlaceHolderOp =
+      std::make_unique<PlaceHolder>(nullptr, mmadMxL1LoopOp->parentOp);
+  afterPlaceHolderOp->afterOp = mmadMxL1LoopOp.get();
+  outerScopeOp->body.push_back(std::move(beforePlaceHolderOp));
+  outerScopeOp->body.push_back(std::move(mmadMxL1LoopOp));
+  outerScopeOp->body.push_back(std::move(afterPlaceHolderOp));
+  return outerScopeOp;
+}
+
 bool IRTranslator::isVectorOpResult(Value value) {
   if (auto resultVal = dyn_cast<OpResult>(value)) {
     if (auto op = dyn_cast<CoreTypeInterface>(resultVal.getDefiningOp())) {
@@ -405,13 +474,11 @@ IRTranslator::getInferredPipe(Operation *op, TCoreType coreType,
       curPipe = PIPE::PIPE_MTE2;
     }
     if (isa<hivm::CopyOp, tensor::InsertSliceOp>(op) &&
-        (coreType == TCoreType::VECTOR) &&
-        (addressSpace == AddressSpace::L1)) {
+        (coreType == TCoreType::VECTOR) && (addressSpace == AddressSpace::L1)) {
       curPipe = PIPE::PIPE_MTE3;
     }
     if (isa<hivm::VBrcOp, hivm::CopyOp, tensor::InsertSliceOp>(op) &&
-        (coreType == TCoreType::VECTOR) &&
-        (addressSpace == AddressSpace::UB)) {
+        (coreType == TCoreType::VECTOR) && (addressSpace == AddressSpace::UB)) {
       curPipe = PIPE::PIPE_V;
     }
     if (curPipe.has_value()) {
@@ -431,6 +498,9 @@ IRTranslator::getDestinationStyleInterfaceOp(Operation *op,
     if (auto mmadl1Op = dyn_cast<hivm::MmadL1Op>(op)) {
       return getDecomposedMmadl1(mmadl1Op, parentOp);
     }
+    if (auto mmadMxL1Op = dyn_cast<hivm::MmadMxL1Op>(op)) {
+      return getDecomposedMmadMxL1(mmadMxL1Op, parentOp);
+    }
   }
   auto coreTypeVal = hivm::TCoreType::CUBE_OR_VECTOR;
   if (options.isCrossCoreMode()) {
@@ -442,8 +512,9 @@ IRTranslator::getDestinationStyleInterfaceOp(Operation *op,
   auto [readMemOps, writeMemOps] = getReadWriteMemoryOps(op);
   std::optional<hivm::PIPE> pipe;
   if (options.isCrossCoreMode()) {
-    if (isa<hivm::CopyOp, hivm::VBrcOp>(op) || (options.isRegBasedArch && isa<tensor::InsertSliceOp,
-            tensor::InsertOp>(op))) {
+    if (isa<hivm::CopyOp, hivm::VBrcOp>(op) ||
+        (options.isRegBasedArch &&
+         isa<tensor::InsertSliceOp, tensor::InsertOp>(op))) {
       if (auto pipeOpt = getInferredPipe(op, coreTypeVal, writeMemOps)) {
         pipe = pipeOpt.value();
       } else {
@@ -451,7 +522,8 @@ IRTranslator::getDestinationStyleInterfaceOp(Operation *op,
       }
     }
   }
-  hivm::PIPE pipeRead, pipeWrite;
+  hivm::PIPE pipeRead = hivm::PIPE::PIPE_UNASSIGNED;
+  hivm::PIPE pipeWrite = hivm::PIPE::PIPE_UNASSIGNED;
   if (pipe.has_value()) {
     pipeRead = pipe.value();
     pipeWrite = pipe.value();
@@ -533,13 +605,13 @@ IRTranslator::getTensorExtractOp(tensor::ExtractOp extractOp,
 
 std::unique_ptr<OperationBase>
 IRTranslator::getCallOp(func::CallOp callOp, OperationBase *parentOp) {
-  // TODO: A3/A5 DIFF
-  if (!options.isRegBasedArch) {
-    return nullptr;
-  }
   ModuleOp module = funcOp->getParentOfType<ModuleOp>();
   SymbolTable symtab(module);
   auto calledFuncOp = symtab.lookup<func::FuncOp>(callOp.getCallee());
+  // Track calls to vector functions and outlined SIMT vector functions:
+  // both run on the vector core and must participate in sync analysis as
+  // PIPE_V ops so the Solver can compute correct <src_pipe, dst_pipe>
+  // pairs against neighboring producers/consumers.
   if (!calledFuncOp ||
       (!calledFuncOp->hasAttr(hivm::VectorFunctionAttr::name) &&
        !hivm::util::isSIMTVF(calledFuncOp))) {
@@ -675,8 +747,8 @@ std::optional<int64_t> IRTranslator::getScopePreloadNum(Scope *scopeOp) {
   if (scopeOp->op == nullptr) {
     return {};
   }
-  if (auto intAttr = scopeOp->op->getAttrOfType<IntegerAttr>(
-          hivm::PreloadNumAttr::name)) {
+  if (auto intAttr =
+          scopeOp->op->getAttrOfType<IntegerAttr>(hivm::PreloadNumAttr::name)) {
     return intAttr.getInt();
   }
   return {};
@@ -757,12 +829,13 @@ std::unique_ptr<Scope> IRTranslator::funcIrBuilder(Region &region,
         }
         continue;
       }
-      if (isa<LoopLikeOpInterface>(op)) {
+      if (auto loopLikeOp = dyn_cast<LoopLikeOpInterface>(op)) {
         auto loopOp = std::make_unique<Loop>(&op, parScope);
         loopOp->isParallel = isParallelLoop(loopOp.get());
         loopOp->isCVUnrolledLoop = isCVUnrolledLoop(loopOp.get());
         loopOp->multibufferUnrollNum =
             getLoopMultibufferUnrollNum(loopOp.get());
+        loopOp->staticLoopCount = getStaticLoopCount(loopLikeOp);
         for (auto &region : op.getRegions()) {
           auto regionOp = funcIrBuilder(region, loopOp.get(), skipEmptyScopes);
           loopOp->body.push_back(std::move(regionOp));
@@ -785,6 +858,11 @@ std::unique_ptr<Scope> IRTranslator::funcIrBuilder(Region &region,
             std::make_unique<Scope>(OpType::SCOPE, scopeScopeOp, parScope);
         curScopeOp->preloadNum = getScopePreloadNum(curScopeOp.get());
         curScopeOp->maxPreloadNum = getScopeMaxPreloadNum(curScopeOp.get());
+        if (curScopeOp->preloadNum.has_value()) {
+          auto *parentLoopOp = curScopeOp->getNthParent(2);
+          assert(isa_and_present<Loop>(parentLoopOp));
+          cast<Loop>(parentLoopOp)->isCVPreloadingLoop = true;
+        }
         for (auto &region : scopeScopeOp->getRegions()) {
           auto regionOp = funcIrBuilder(region, curScopeOp.get());
           curScopeOp->body.push_back(std::move(regionOp));
@@ -910,9 +988,10 @@ void IRTranslator::generateProcessingOrders(Loop *loopOp, Occurrence *occ,
       occ->childOccs.begin() + childNum / 2, occ->childOccs.end());
   generateProcessingOrders(firstLoopIteration, isUseless);
   generateProcessingOrders(secondLoopIteration, true);
-  for (auto *occ2 : secondLoopIteration) {
-    for (auto *occ1 : llvm::reverse(firstLoopIteration)) {
-      generateProcessingOrders(occ1->childOccs, occ2->childOccs, isUseless);
+  for (auto *scopeOcc2 : secondLoopIteration) {
+    for (auto *scopeOcc1 : llvm::reverse(firstLoopIteration)) {
+      generateProcessingOrders(scopeOcc1->childOccs, scopeOcc2->childOccs,
+                               isUseless);
     }
   }
 }

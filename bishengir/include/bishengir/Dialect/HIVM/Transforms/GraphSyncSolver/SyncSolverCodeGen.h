@@ -64,17 +64,20 @@ private:
 
   // Cache mapping a loop + (eventIdA,eventIdB) pair to the created select Value
   // that chooses which buffer/event id to use at runtime.
-  llvm::DenseMap<std::pair<LoopLikeOpInterface, int64_t>,
+  llvm::DenseMap<std::tuple<LoopLikeOpInterface, int64_t>,
                  std::map<llvm::SmallVector<int64_t>, Value>>
       bufferSelectedMem;
 
   // Per-MMAD L1 op arguments collected during sync codegen insertion.
   llvm::DenseMap<hivm::MmadL1Op, MmadL1SyncArgs> mmadl1SyncArgsMap;
 
-  CustomMacroSyncCodegenState customMacroCodegen;
+  // Per-MMAD MxL1 op arguments collected during sync codegen insertion.
+  llvm::DenseMap<hivm::MmadMxL1Op, MmadMxL1SyncArgs> mmadMxL1SyncArgsMap;
 
   // Mapping to cache loop DB conditions used during codegen insertion.
   llvm::DenseMap<LoopLikeOpInterface, Value> loopDBCondMap;
+
+  CustomMacroSyncCodegenState customMacroCodegen;
 
 public:
   CodeGenerator(const SyncSolverOptions &options) : options(options) {}
@@ -132,19 +135,23 @@ private:
                                           OperationBase *opBase,
                                           SyncOp *syncOp);
 
+  llvm::SmallVector<int64_t>
+  getEventIdsWithOffset(const llvm::SmallVector<int64_t> &eventIds,
+                        int64_t offset);
+
   Value getNestedIndexModular(IRRewriter &rewriter,
-                              LoopLikeOpInterface multibufferLoop,
-                              int64_t eventIdNum, int64_t preloadOffset);
+                              LoopLikeOpInterface multibufferLoop, int64_t mod,
+                              int64_t offset = 0);
 
   Value getMultiBufferSelectOp(IRRewriter &rewriter, SetWaitOp *syncOp);
 
   Value getMultiBufferSelectOpConsecutive(IRRewriter &rewriter,
                                           SetWaitOp *syncOp);
 
-  Value getCVMultiBufferSelectOp(IRRewriter &rewriter, SetWaitOp *syncOp);
+  Value getCVPipeliningSelectOp(IRRewriter &rewriter, SetWaitOp *syncOp);
 
-  Value getCVMultiBufferSelectOpConsecutive(IRRewriter &rewriter,
-                                            SetWaitOp *syncOp);
+  Value getCVPipeliningSelectOpConsecutive(IRRewriter &rewriter,
+                                           SetWaitOp *syncOp);
 
   Value getMultiBufferBlockSelectOp(IRRewriter &rewriter, SetWaitOp *syncOp);
 
@@ -153,6 +160,12 @@ private:
   void insertPipeMPipeMte1OuterBwdPairs(IRRewriter &rewriter);
 
   void insertMmadL1SyncArgs(IRRewriter &rewriter);
+
+  llvm::LogicalResult handleMmadMxL1SyncOps(IRRewriter &rewriter,
+                                            OperationBase *opBase,
+                                            SyncOp *syncOp);
+
+  void insertMmadMxL1SyncArgs(IRRewriter &rewriter);
 
   void handleUnitFlagEnabledOps(IRRewriter &rewriter);
 

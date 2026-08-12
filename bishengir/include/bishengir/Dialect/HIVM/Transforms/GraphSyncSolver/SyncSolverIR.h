@@ -20,7 +20,6 @@
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Dialect/HIVM/Transforms/GraphSyncSolver/MemInfo.h"
 #include "bishengir/Dialect/HIVM/Transforms/UnitFlagInfoBase.h"
-#include "mlir/Interfaces/LoopLikeInterface.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Casting.h"
 #include <memory>
@@ -37,30 +36,6 @@ class RWOperation;
 class MmadL0Operation;
 using Body = std::vector<std::unique_ptr<OperationBase>>;
 
-// Currently gss-code-gen will handle offsetting induction variables for
-// multibuffer-enabled sync pairs, which can be done by create-preload.
-// TODO: move create-preload pass after gss in the hivm compilation pipeline and
-// let it handle preload-offset values.
-struct EventIdInfo {
-  int64_t eventIdNum{0};
-  int64_t eventIdRepeatNum{1};
-  int64_t preloadOffset1{0};
-  int64_t preloadOffset2{0};
-  Loop *multibufferLoop{nullptr};
-  Loop *multibufferUnrollLoop1{nullptr};
-  Loop *multibufferUnrollLoop2{nullptr};
-  bool cannotRepeatFlagId{false};
-  bool isCVPipeline{false};
-  bool isCVPreload{false};
-  EventIdInfo() {};
-  explicit EventIdInfo(int64_t eventIdNum) : eventIdNum(eventIdNum) {};
-
-  void useRepeatFlagId() {
-    eventIdRepeatNum = eventIdNum;
-    eventIdNum = 1;
-  }
-};
-
 enum struct OpType {
   OPERATION,
   PLACE_HOLDER,
@@ -71,6 +46,7 @@ enum struct OpType {
   LOOP,
   LOOP_END,
   MMAD_SCOPE,
+  MMAD_MX_SCOPE,
   CONDITION,
   SCOPE_END,
   SYNC_OP,
@@ -85,6 +61,8 @@ enum struct OpType {
   MMAD_LOAD_L0A_OPERATION,
   MMAD_LOAD_L0B_OPERATION,
   MMAD_LOAD_BIAS_OPERATION,
+  MMAD_LOAD_L0A_MX_OPERATION,
+  MMAD_LOAD_L0B_MX_OPERATION,
   RW_OPERATION_END
 };
 
@@ -210,6 +188,7 @@ public:
   Body body;
   std::optional<int64_t> preloadNum;
   std::optional<int64_t> maxPreloadNum;
+  bool haveCounter = false;
 
 public:
   Scope(const OpType &opType = OpType::SCOPE, Operation *op = nullptr,
@@ -247,7 +226,11 @@ private:
 public:
   bool isParallel{false};
   bool isCVUnrolledLoop{false};
+  bool isCVPreloadingLoop{false};
+  std::optional<int64_t> loopPreloadNum;
+
   std::optional<int64_t> multibufferUnrollNum;
+  std::optional<int64_t> staticLoopCount;
   Loop(Operation *op, OperationBase *parentOp)
       : Scope(OpType::LOOP, op, parentOp) {}
 
@@ -264,10 +247,23 @@ public:
   MmadL0Operation *mmadL0Op{nullptr};
 
   MmadL1LoopOp(Operation *op, OperationBase *parentOp)
-      : Scope(OpType::MMAD_SCOPE, op, parentOp){};
+      : Scope(OpType::MMAD_SCOPE, op, parentOp) {};
 
   static bool classof(const OperationBase *e) {
     return e->opType == OpType::MMAD_SCOPE;
+  }
+};
+
+class MmadMxL1LoopOp : public Scope {
+private:
+public:
+  MmadL0Operation *mmadL0Op{nullptr};
+
+  MmadMxL1LoopOp(Operation *op, OperationBase *parentOp)
+      : Scope(OpType::MMAD_MX_SCOPE, op, parentOp) {};
+
+  static bool classof(const OperationBase *e) {
+    return e->opType == OpType::MMAD_MX_SCOPE;
   }
 };
 
@@ -333,11 +329,6 @@ public:
   bool hasUnitFlagFeat{false};
   UnitFlagInfoBase mergedUnitFlagInfo;
 
-  const llvm::SmallVector<Value> readMemVals;
-  const llvm::SmallVector<Value> writeMemVals;
-  const llvm::SmallVector<llvm::SmallVector<int64_t>> testReadMemVals;
-  const llvm::SmallVector<llvm::SmallVector<int64_t>> testWriteMemVals;
-
 public:
   RWOperation(Operation *op, OperationBase *parentOp, hivm::TCoreType coreType,
               hivm::PIPE pipeRead, hivm::PIPE pipeWrite,
@@ -346,36 +337,20 @@ public:
               OpType opType = OpType::RW_OPERATION)
       : OperationBase(opType, op, parentOp), coreType(coreType),
         pipeRead(pipeRead), pipeWrite(pipeWrite), readMemInfo(readMemInfo),
-        writeMemInfo(writeMemInfo){};
+        writeMemInfo(writeMemInfo) {};
   RWOperation(Operation *op, OperationBase *parentOp, hivm::TCoreType coreType,
               hivm::PIPE pipeRead, hivm::PIPE pipeWrite,
               const llvm::SmallVector<Value> &readMemVals,
               const llvm::SmallVector<Value> &writeMemVals,
               OpType opType = OpType::RW_OPERATION)
       : OperationBase(opType, op, parentOp), coreType(coreType),
-        pipeRead(pipeRead), pipeWrite(pipeWrite), readMemVals(readMemVals),
-        writeMemVals(writeMemVals) {
+        pipeRead(pipeRead), pipeWrite(pipeWrite) {
+    assert(parentOp != nullptr);
     for (auto &val : readMemVals) {
-      readMemInfo.push_back(getMemInfo(val));
+      readMemInfo.push_back(MemInfo::getMemInfo(val));
     }
     for (auto &val : writeMemVals) {
-      writeMemInfo.push_back(getMemInfo(val));
-    }
-  };
-  RWOperation(
-      Operation *op, OperationBase *parentOp, hivm::TCoreType coreType,
-      hivm::PIPE pipeRead, hivm::PIPE pipeWrite,
-      const llvm::SmallVector<llvm::SmallVector<int64_t>> &testReadMemVals,
-      const llvm::SmallVector<llvm::SmallVector<int64_t>> &testWriteMemVals,
-      OpType opType = OpType::RW_OPERATION)
-      : OperationBase(opType, op, parentOp), coreType(coreType),
-        pipeRead(pipeRead), pipeWrite(pipeWrite),
-        testReadMemVals(testReadMemVals), testWriteMemVals(testWriteMemVals) {
-    for (auto &val : testReadMemVals) {
-      readMemInfo.push_back(getMemInfo(val));
-    }
-    for (auto &val : testWriteMemVals) {
-      writeMemInfo.push_back(getMemInfo(val));
+      writeMemInfo.push_back(MemInfo::getMemInfo(val));
     }
   };
 
@@ -432,6 +407,36 @@ public:
   }
 };
 
+class LoadL0AMxOp : public RWOperation {
+private:
+public:
+  LoadL0AMxOp(Operation *op, OperationBase *parentOp, hivm::TCoreType coreType,
+              hivm::PIPE pipeRead, hivm::PIPE pipeWrite,
+              const llvm::SmallVector<Value> &readMemVals,
+              const llvm::SmallVector<Value> &writeMemVals)
+      : RWOperation(op, parentOp, coreType, pipeRead, pipeWrite, readMemVals,
+                    writeMemVals, OpType::MMAD_LOAD_L0A_MX_OPERATION) {}
+
+  static bool classof(const OperationBase *e) {
+    return e->opType == OpType::MMAD_LOAD_L0A_MX_OPERATION;
+  }
+};
+
+class LoadL0BMxOp : public RWOperation {
+private:
+public:
+  LoadL0BMxOp(Operation *op, OperationBase *parentOp, hivm::TCoreType coreType,
+              hivm::PIPE pipeRead, hivm::PIPE pipeWrite,
+              const llvm::SmallVector<Value> &readMemVals,
+              const llvm::SmallVector<Value> &writeMemVals)
+      : RWOperation(op, parentOp, coreType, pipeRead, pipeWrite, readMemVals,
+                    writeMemVals, OpType::MMAD_LOAD_L0B_MX_OPERATION) {}
+
+  static bool classof(const OperationBase *e) {
+    return e->opType == OpType::MMAD_LOAD_L0B_MX_OPERATION;
+  }
+};
+
 class MmadL0Operation : public RWOperation {
 private:
 public:
@@ -445,6 +450,69 @@ public:
 
   static bool classof(const OperationBase *e) {
     return e->opType == OpType::MMAD_OPERATION;
+  }
+};
+
+struct MultiBufferInfo {
+  Scope *multibufferScope{nullptr};
+
+  MultiBufferInfo() {};
+  explicit MultiBufferInfo(Scope *multibufferScope)
+      : multibufferScope(multibufferScope) {};
+};
+
+struct CVPipeliningInfo {
+  Loop *cvPipeliningLoop1{nullptr};
+  Loop *cvPipeliningLoop2{nullptr};
+
+  CVPipeliningInfo() {};
+  explicit CVPipeliningInfo(Loop *cvPipeliningLoop1, Loop *cvPipeliningLoop2)
+      : cvPipeliningLoop1(cvPipeliningLoop1),
+        cvPipeliningLoop2(cvPipeliningLoop2) {};
+};
+
+struct CVPreloadingInfo {
+  Loop *cvPreloadingLoop{nullptr};
+  Scope *preloadScope1{nullptr};
+  Scope *preloadScope2{nullptr};
+  int64_t preloadOffset1{0};
+  int64_t preloadOffset2{0};
+  bool useUnlikely{false};
+
+  CVPreloadingInfo() {};
+  explicit CVPreloadingInfo(Loop *cvPreloadingLoop, Scope *preloadScope1,
+                            Scope *preloadScope2, int64_t preloadOffset1,
+                            int64_t preloadOffset2)
+      : cvPreloadingLoop(cvPreloadingLoop), preloadScope1(preloadScope1),
+        preloadScope2(preloadScope2), preloadOffset1(preloadOffset1),
+        preloadOffset2(preloadOffset2) {};
+};
+
+struct EventIdInfo {
+  int64_t eventIdNum{0};
+  int64_t eventIdRepeatNum{1};
+  std::optional<MultiBufferInfo> multiBufferInfo;
+  std::optional<CVPreloadingInfo> cvPreloadingInfo;
+  std::optional<CVPipeliningInfo> cvPipeliningInfo;
+  bool cannotRepeatFlagId{false};
+  bool isCVPipeline{false};
+  bool isCVPreload{false};
+
+  EventIdInfo() {};
+  explicit EventIdInfo(int64_t eventIdNum, int64_t eventIdRepeatNum = 1)
+      : eventIdNum(eventIdNum), eventIdRepeatNum(eventIdRepeatNum) {};
+
+  int64_t getEventIdNum() const { return eventIdNum * eventIdRepeatNum; }
+
+  void setEventIdNum(int64_t eventIdNum, int64_t eventIdRepeatNum = 1) {
+    this->eventIdNum = eventIdNum;
+    this->eventIdRepeatNum = eventIdRepeatNum;
+  }
+
+  void repeatEventId() {
+    assert(eventIdRepeatNum == 1);
+    eventIdRepeatNum = eventIdNum;
+    eventIdNum = 1;
   }
 };
 

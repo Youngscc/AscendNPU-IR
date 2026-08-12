@@ -732,7 +732,10 @@ void DelayedCrossCoreGSSPass::crossCoreGssRunOnOperation(
     options.alwaysUsePipeSAsWaitingPipe = true;
   }
   if (this->useDifferentMultiBufferFlagIds) {
-    options.useDifferentMultiBufferFlagIds = true;
+    options.enableRepeatFlagIdFeat = true;
+  }
+  if (this->enableCVPatterns) {
+    options.enableCVPatterns = true;
   }
   if (this->blockAllSync) {
     options.enableBlockAllMode = true;
@@ -776,16 +779,38 @@ void DelayedCrossCoreGSSPass::crossCoreGssRunOnOperation(
       }
       return loopOp;
     };
-    if (eventIdInfo.multibufferLoop) {
-      eventIdInfo.multibufferLoop = fixLoop(eventIdInfo.multibufferLoop);
+    auto fixScope = [coreType](Scope *scopeOp) -> Scope * {
+      if (!scopeOp) {
+        return nullptr;
+      }
+      if (coreType == hivm::TCoreType::CUBE) {
+        assert(scopeOp->cubeAnchorInfo.has_value());
+        auto *fixedScopeOp =
+            dyn_cast<Scope>(scopeOp->cubeAnchorInfo->anchorBefore);
+        assert(fixedScopeOp != nullptr);
+        return fixedScopeOp;
+      } else if (coreType == hivm::TCoreType::VECTOR) {
+        assert(scopeOp->vectorAnchorInfo.has_value());
+        auto *fixedScopeOp =
+            dyn_cast<Scope>(scopeOp->vectorAnchorInfo->anchorBefore);
+        assert(fixedScopeOp != nullptr);
+        return fixedScopeOp;
+      }
+      return scopeOp;
+    };
+    if (auto &multiBufferInfo = eventIdInfo.multiBufferInfo) {
+      multiBufferInfo->multibufferScope =
+          fixScope(multiBufferInfo->multibufferScope);
     }
-    if (eventIdInfo.multibufferUnrollLoop1) {
-      eventIdInfo.multibufferUnrollLoop1 =
-          fixLoop(eventIdInfo.multibufferUnrollLoop1);
+    if (auto &cvPipeliningInfo = eventIdInfo.cvPipeliningInfo) {
+      cvPipeliningInfo->cvPipeliningLoop1 =
+          fixLoop(cvPipeliningInfo->cvPipeliningLoop1);
+      cvPipeliningInfo->cvPipeliningLoop2 =
+          fixLoop(cvPipeliningInfo->cvPipeliningLoop2);
     }
-    if (eventIdInfo.multibufferUnrollLoop2) {
-      eventIdInfo.multibufferUnrollLoop2 =
-          fixLoop(eventIdInfo.multibufferUnrollLoop2);
+    if (auto &cvPreloadingInfo = eventIdInfo.cvPreloadingInfo) {
+      cvPreloadingInfo->cvPreloadingLoop =
+          fixLoop(cvPreloadingInfo->cvPreloadingLoop);
     }
   };
 

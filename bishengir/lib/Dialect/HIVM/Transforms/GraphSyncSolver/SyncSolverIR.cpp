@@ -48,8 +48,11 @@ std::string getOpTypeStr(OpType opType) {
       {OpType::WAIT_FLAG_OP, "WaitFlagOp"},
       {OpType::RW_OPERATION, "RWOperation"},
       {OpType::MMAD_OPERATION, "MmadOp"},
+      {OpType::MMAD_MX_SCOPE, "MmadMxLoop"},
       {OpType::MMAD_LOAD_L0A_OPERATION, "LoadMmadL0AOp"},
       {OpType::MMAD_LOAD_L0B_OPERATION, "LoadMmadL0BOp"},
+      {OpType::MMAD_LOAD_L0A_MX_OPERATION, "LoadMmadL0AMxOp"},
+      {OpType::MMAD_LOAD_L0B_MX_OPERATION, "LoadMmadL0BMxOp"},
       {OpType::MMAD_LOAD_BIAS_OPERATION, "LoadMmadBias"},
       {OpType::RW_OPERATION_END, "RW_OPERATION_END"},
   };
@@ -86,6 +89,8 @@ std::string PointerLikeInfo::str() {
     ret += stringifyEnum(addressSpace.value());
   }
   ret += comma.get();
+  ret += parentCounterScope ? parentCounterScope->str(0, false) : "null";
+  ret += comma.get();
   {
     Comma comma;
     ret += "[";
@@ -99,7 +104,17 @@ std::string PointerLikeInfo::str() {
     ret += comma.get();
     ret += std::to_string(allocateSize.value());
   }
+  ret += comma.get();
+  ret += std::string("isWorkSpace=") + (isWorkSpace ? "true" : "false");
+  ret += comma.get();
+  ret += std::string("isTightlyCoupledBuffer=") +
+         (isTightlyCoupledBuffer ? "true" : "false");
   ret += ")";
+  return ret;
+}
+
+std::string AllocLikeInfo::str() {
+  std::string ret = "AllocLikeInfo()";
   return ret;
 }
 
@@ -121,6 +136,10 @@ std::string MemInfo::str() {
   if (this->pointerLikeInfo) {
     ret += comma.get();
     ret += this->pointerLikeInfo->str();
+  }
+  if (this->allocLikeInfo) {
+    ret += comma.get();
+    ret += this->allocLikeInfo->str();
   }
   ret += ")";
   return ret;
@@ -178,6 +197,9 @@ std::string Loop::str(int indent, bool recursive) const {
   if (multibufferUnrollNum.has_value()) {
     ret += " multibuffer-unroll-num=" +
            std::to_string(multibufferUnrollNum.value());
+  }
+  if (staticLoopCount.has_value()) {
+    ret += " static-loop-count=" + std::to_string(staticLoopCount.value());
   }
   if (recursive) {
     ret += " {\n";

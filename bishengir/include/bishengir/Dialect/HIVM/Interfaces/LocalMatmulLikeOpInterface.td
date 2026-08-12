@@ -21,6 +21,9 @@ def HIVMLocalMatmulLikeOpInterface
   let description = [{
     Interface for local matmul-like ops that share A/B/C, init-condition,
     real-MKN, bias-mode, and layout behavior.
+
+    Ops implementing this interface should use `HIVMLocalMatmulLikeOpTraits`,
+    which bundles the common traits required alongside this interface.
   }];
   let methods = [
     InterfaceMethod<
@@ -44,6 +47,13 @@ def HIVMLocalMatmulLikeOpInterface
       /*args=*/(ins),
       /*methodBody=*/"",
       /*defaultImplementation=*/[{ return $_op.getC(); }]>,
+    InterfaceMethod<
+      /*desc=*/"Return the optional per-channel bias operand.",
+      /*retTy=*/"::mlir::Value",
+      /*methodName=*/"getMatmulPerChannelBias",
+      /*args=*/(ins),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{ return $_op.getPerChannelBias(); }]>,
     InterfaceMethod<
       /*desc=*/"Return the local matmul init condition operand.",
       /*retTy=*/"::mlir::Value",
@@ -97,6 +107,48 @@ def HIVMLocalMatmulLikeOpInterface
       /*methodName=*/"setInitCondition",
       /*args=*/(ins "::mlir::Value":$init)>,
     InterfaceMethod<
+      /*desc=*/"Set the local matmul A operand.",
+      /*retTy=*/"void",
+      /*methodName=*/"setMatmulA",
+      /*args=*/(ins "::mlir::Value":$a),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{ $_op.getAMutable().assign(a); }]>,
+    InterfaceMethod<
+      /*desc=*/"Set the local matmul B operand.",
+      /*retTy=*/"void",
+      /*methodName=*/"setMatmulB",
+      /*args=*/(ins "::mlir::Value":$b),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{ $_op.getBMutable().assign(b); }]>,
+    InterfaceMethod<
+      /*desc=*/"Set the local matmul C/init operand.",
+      /*retTy=*/"void",
+      /*methodName=*/"setMatmulC",
+      /*args=*/(ins "::mlir::Value":$c),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{ $_op.getCMutable().assign(c); }]>,
+    InterfaceMethod<
+      /*desc=*/"Set the local matmul A transpose attribute.",
+      /*retTy=*/"void",
+      /*methodName=*/"setMatmulATranspose",
+      /*args=*/(ins "::mlir::UnitAttr":$transpose),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{ $_op.setATransposeAttr(transpose); }]>,
+    InterfaceMethod<
+      /*desc=*/"Set the local matmul B transpose attribute.",
+      /*retTy=*/"void",
+      /*methodName=*/"setMatmulBTranspose",
+      /*args=*/(ins "::mlir::UnitAttr":$transpose),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{ $_op.setBTransposeAttr(transpose); }]>,
+    InterfaceMethod<
+      /*desc=*/"Set the optional per-channel bias operand.",
+      /*retTy=*/"void",
+      /*methodName=*/"setPerChannelBias",
+      /*args=*/(ins "::mlir::Value":$bias),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{ $_op.getPerChannelBiasMutable().assign(bias); }]>,
+    InterfaceMethod<
       /*desc=*/"Set the real-M/K/N operands.",
       /*retTy=*/"void",
       /*methodName=*/"setMatmulRealMKN",
@@ -117,11 +169,6 @@ def HIVMLocalMatmulLikeOpInterface
       /*desc=*/"Return whether bias should be decomposed by elementwise add.",
       /*retTy=*/"bool",
       /*methodName=*/"shouldDecomposeBiasByElementAdd",
-      /*args=*/(ins)>,
-    InterfaceMethod<
-      /*desc=*/"Return whether per-channel bias optimizations are supported.",
-      /*retTy=*/"bool",
-      /*methodName=*/"supportsPerChannelBias",
       /*args=*/(ins)>,
     InterfaceMethod<
       /*desc=*/"Return whether scale operands are present.",

@@ -173,10 +173,28 @@ static func::CallOp createLibCall(PatternRewriter &rewriter, Operation *op,
           mlir::hivm::TFuncCoreTypeAttr::name,
           hivm::TFuncCoreTypeAttr::get(op->getContext(), *funcCoreType));
 
-    // Only mark AIV (cube) lib calls as noinline; AIC (vector) lib calls are
-    // always inlined.
+    // Only mark AIV lib calls as noinline by default; other lib calls are
+    // always inlined. HIVM custom ops default to noinline unless explicitly
+    // marked always_inline with hivm.inline_mode.
     bool markNoInline =
         gMarkLibCallNoInline && funcCoreType == hivm::TFuncCoreType::AIV;
+    std::optional<hivm::InlineMode> inlineMode;
+    if (auto customOp = dyn_cast<hivm::CustomOp>(op))
+      inlineMode =
+          customOp.getInlineMode().value_or(hivm::InlineMode::NoInline);
+    else if (auto customMacroOp = dyn_cast<hivm::CustomMacroOp>(op))
+      inlineMode =
+          customMacroOp.getInlineMode().value_or(hivm::InlineMode::NoInline);
+    if (inlineMode) {
+      switch (*inlineMode) {
+      case hivm::InlineMode::AlwaysInline:
+        markNoInline = false;
+        break;
+      case hivm::InlineMode::NoInline:
+        markNoInline = true;
+        break;
+      }
+    }
 
     auto haccInlineAttr = hacc::stringifyHACCToLLVMIRTranslateAttr(
         markNoInline ? hacc::HACCToLLVMIRTranslateAttr::NOINLINE
@@ -417,10 +435,9 @@ public:
 
   LogicalResult matchAndRewrite(MmadMxL1Op op,
                                 PatternRewriter &rewriter) const final {
-    // inputs
-    SmallVector<Value> libParams{op.getC(),      op.getA(),      op.getB(),
-                                 op.getScaleA(), op.getScaleB(), op.getRealM(),
-                                 op.getRealK(),  op.getRealN()};
+    SmallVector<Value> libParams =
+        op.getInputOperands(/*includeSyncRelatedArgs=*/false);
+    libParams.insert(libParams.begin(), op.getC());
 
     // additional sync arguments
     SmallVector<Value> additionalArgs;
@@ -573,6 +590,8 @@ private:
         rewriter.create<arith::ConstantIntOp>(op->getLoc(), preReluVal, 64);
     Value channelSplit = rewriter.create<arith::ConstantIntOp>(
         op->getLoc(), op.getChannelSplit(), 1);
+    Value c0PadEn = rewriter.create<arith::ConstantIntOp>(
+        op->getLoc(), op.getC0PadEn(), 1);
     Value unitFlagMode = op.getUnitFlagModeLibValue(rewriter);
 
     genPreQuant(op, rewriter, preQuant);
@@ -588,6 +607,7 @@ private:
           op->getLoc(), rewriter.getF32FloatAttr(1.0)));
     additionalArgs.push_back(preRelu);
     additionalArgs.push_back(channelSplit);
+    additionalArgs.push_back(c0PadEn);
     additionalArgs.push_back(unitFlagMode);
 
     if (auto dualDstAttr = op.getDualDstModeAttr()) {

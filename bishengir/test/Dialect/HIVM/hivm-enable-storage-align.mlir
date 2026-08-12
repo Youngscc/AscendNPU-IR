@@ -278,6 +278,32 @@ func.func @test_cumsum_cumprod_unalignment(%arg0: memref<5x3x3x3x3x5xi32, #hivm.
 
 // -----
 
+// CHECK-LABEL: func @propagate_scf_for_yield_with_result_use
+func.func @propagate_scf_for_yield_with_result_use() -> memref<1x7xf32, #hivm.address_space<ub>> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %init_storage = memref.alloc() : memref<1x7x8xf32, #hivm.address_space<ub>>
+  %init_subview = memref.subview %init_storage[0, 0, 0] [1, 7, 1] [1, 1, 1] : memref<1x7x8xf32, #hivm.address_space<ub>> to memref<1x7xf32, strided<[56, 8]>, #hivm.address_space<ub>>
+  %init = builtin.unrealized_conversion_cast %init_subview : memref<1x7xf32, strided<[56, 8]>, #hivm.address_space<ub>> to memref<1x7xf32, #hivm.address_space<ub>>
+  // CHECK: %[[INIT_SUBVIEW:.*]] = memref.subview
+  // CHECK-SAME: memref<1x7xf32, strided<[56, 8]>, #hivm.address_space<ub>>
+  // CHECK: %[[FOR:.*]] = scf.for
+  // CHECK-SAME: iter_args(%{{.*}} = %[[INIT_SUBVIEW]]) -> (memref<1x7xf32, strided<[56, 8]>, #hivm.address_space<ub>>)
+  %0 = scf.for %i = %c0 to %c1 step %c1 iter_args(%iter = %init) -> (memref<1x7xf32, #hivm.address_space<ub>>) {
+    %alloc = memref.alloc() : memref<1x7xf32, #hivm.address_space<ub>>
+    annotation.mark %alloc {hivm.stride_align_dims = array<i32: 1>, hivm.stride_align_value_in_byte = array<i32: 32>} : memref<1x7xf32, #hivm.address_space<ub>>
+    // CHECK: %[[YIELD_SUBVIEW:.*]] = memref.subview
+    // CHECK-SAME: memref<1x7xf32, strided<[56, 8]>, #hivm.address_space<ub>>
+    // CHECK: scf.yield %[[YIELD_SUBVIEW]]
+    scf.yield %alloc : memref<1x7xf32, #hivm.address_space<ub>>
+  }
+  // CHECK: %[[RESULT_CAST:.*]] = builtin.unrealized_conversion_cast %[[FOR]] : memref<1x7xf32, strided<[56, 8]>, #hivm.address_space<ub>> to memref<1x7xf32, #hivm.address_space<ub>>
+  // CHECK: return %[[RESULT_CAST]]
+  return %0 : memref<1x7xf32, #hivm.address_space<ub>>
+}
+
+// -----
+
 module {
   func.func @test_propagate_unrealized_conversion(%arg0: memref<1x2x3x2x5x60000x7x2xi16, #hivm.address_space<gm>>, %ub: index, %size: index) {
     %c0 = arith.constant 0 : index
@@ -326,6 +352,52 @@ func.func @copy_before_collapse() {
 
 // -----
 
+// CHECK-LABEL: func.func @copy_before_multiple_collapse
+// CHECK-NOT: unrealized_conversion_cast
+// CHECK: %[[ALIGNED:.*]] = memref.alloc() : memref<2x2x2x16x1xbf16, #hivm.address_space<ub>>
+// CHECK: %[[SUBVIEW:.*]] = memref.subview %[[ALIGNED]]
+// CHECK-NOT: unrealized_conversion_cast
+// CHECK: %[[CONTIGUOUS_0:.*]] = memref.alloc() : memref<2x2x2x4xbf16, #hivm.address_space<ub>>
+// CHECK: hivm.hir.copy ins(%[[SUBVIEW]] : memref<2x2x2x4xbf16, strided<[64, 32, 16, 1]>, #hivm.address_space<ub>>) outs(%[[CONTIGUOUS_0]] : memref<2x2x2x4xbf16, #hivm.address_space<ub>>)
+// CHECK: memref.collapse_shape %[[CONTIGUOUS_0]] {{.*}} into memref<2x2x8xbf16, #hivm.address_space<ub>>
+// CHECK-NOT: unrealized_conversion_cast
+// CHECK: %[[CONTIGUOUS_1:.*]] = memref.alloc() : memref<2x2x2x4xbf16, #hivm.address_space<ub>>
+// CHECK: hivm.hir.copy ins(%[[SUBVIEW]] : memref<2x2x2x4xbf16, strided<[64, 32, 16, 1]>, #hivm.address_space<ub>>) outs(%[[CONTIGUOUS_1]] : memref<2x2x2x4xbf16, #hivm.address_space<ub>>)
+// CHECK: memref.collapse_shape %[[CONTIGUOUS_1]] {{.*}} into memref<2x16xbf16, #hivm.address_space<ub>>
+// CHECK-NOT: unrealized_conversion_cast
+// CHECK: %[[CONTIGUOUS_2:.*]] = memref.alloc() : memref<2x2x2x4xbf16, #hivm.address_space<ub>>
+// CHECK: hivm.hir.copy ins(%[[SUBVIEW]] : memref<2x2x2x4xbf16, strided<[64, 32, 16, 1]>, #hivm.address_space<ub>>) outs(%[[CONTIGUOUS_2]] : memref<2x2x2x4xbf16, #hivm.address_space<ub>>)
+// CHECK: memref.collapse_shape %[[CONTIGUOUS_2]] {{.*}} into memref<4x8xbf16, #hivm.address_space<ub>>
+// CHECK-NOT: unrealized_conversion_cast
+// CHECK: return
+func.func @copy_before_multiple_collapse() {
+  %src = memref.alloc() : memref<2x2x2x4xbf16, #hivm.address_space<ub>>
+  annotation.mark %src {hivm.stride_align_dims = array<i32: 2>, hivm.stride_align_value_in_byte = array<i32: 32>} : memref<2x2x2x4xbf16, #hivm.address_space<ub>>
+
+  %collapse0 = memref.collapse_shape %src [[0], [1], [2, 3]]
+    : memref<2x2x2x4xbf16, #hivm.address_space<ub>>
+    into memref<2x2x8xbf16, #hivm.address_space<ub>>
+  %collapse1 = memref.collapse_shape %src [[0], [1, 2, 3]]
+    : memref<2x2x2x4xbf16, #hivm.address_space<ub>>
+    into memref<2x16xbf16, #hivm.address_space<ub>>
+  %collapse2 = memref.collapse_shape %src [[0, 1], [2, 3]]
+    : memref<2x2x2x4xbf16, #hivm.address_space<ub>>
+    into memref<4x8xbf16, #hivm.address_space<ub>>
+
+  %dst0 = memref.alloc() : memref<2x2x8xbf16, #hivm.address_space<ub>>
+  %dst1 = memref.alloc() : memref<2x16xbf16, #hivm.address_space<ub>>
+  %dst2 = memref.alloc() : memref<4x8xbf16, #hivm.address_space<ub>>
+  memref.copy %collapse0, %dst0
+    : memref<2x2x8xbf16, #hivm.address_space<ub>> to memref<2x2x8xbf16, #hivm.address_space<ub>>
+  memref.copy %collapse1, %dst1
+    : memref<2x16xbf16, #hivm.address_space<ub>> to memref<2x16xbf16, #hivm.address_space<ub>>
+  memref.copy %collapse2, %dst2
+    : memref<4x8xbf16, #hivm.address_space<ub>> to memref<4x8xbf16, #hivm.address_space<ub>>
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func @test_collapse_borrow_unit_align_dim_multi_nonunit
 // CHECK: to memref<2x4xf32, strided<[{{[0-9]+}}, 1]>, #hivm.address_space<ub>>
 func.func @test_collapse_borrow_unit_align_dim_multi_nonunit() {
@@ -334,5 +406,20 @@ func.func @test_collapse_borrow_unit_align_dim_multi_nonunit() {
   %collapse = memref.collapse_shape %alloc [[0], [1, 2, 3]] : memref<2x1x1x4xf32, #hivm.address_space<ub>> into memref<2x4xf32, #hivm.address_space<ub>>
   %dst = memref.alloc() : memref<2x4xf32, #hivm.address_space<ub>>
   hivm.hir.vexp ins(%collapse : memref<2x4xf32, #hivm.address_space<ub>>) outs(%dst : memref<2x4xf32, #hivm.address_space<ub>>)
+  return
+}
+
+// -----
+
+// CHECK-LABEL: @test
+// CHECK: %[[ALLOC1:.*]] = memref.alloc() : memref<256x4x2x3x4x1xi8, #hivm.address_space<ub>>
+// CHECK: %[[ALLOC2:.*]] = memref.alloc() : memref<256x4x2x3x4x1xi8, #hivm.address_space<ub>>
+func.func @test() {
+  %alloc = memref.alloc() : memref<256x1x2x3x4xi8, #hivm.address_space<ub>>
+  annotation.mark %alloc {hivm.stride_align_dims = array<i32: 0>, hivm.stride_align_value_in_byte = array<i32: 32>} : memref<256x1x2x3x4xi8, #hivm.address_space<ub>>
+  %alloc1 = memref.alloc() : memref<256x1x2x3x4xi8, #hivm.address_space<ub>>
+  annotation.mark %alloc1 {hivm.stride_align_dims = array<i32: 0>, hivm.stride_align_value_in_byte = array<i32: 32>} : memref<256x1x2x3x4xi8, #hivm.address_space<ub>>
+  %dst = memref.alloc() : memref<256x1x2x3x4xi8, #hivm.address_space<ub>>
+  hivm.hir.vadd ins(%alloc, %alloc1 : memref<256x1x2x3x4xi8, #hivm.address_space<ub>>, memref<256x1x2x3x4xi8, #hivm.address_space<ub>>) outs(%dst : memref<256x1x2x3x4xi8, #hivm.address_space<ub>>)
   return
 }

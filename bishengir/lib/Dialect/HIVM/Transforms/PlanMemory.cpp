@@ -20,18 +20,21 @@
 #include "bishengir/Dialect/HIVM/IR/HIVMImpl.h"
 #include "bishengir/Dialect/HIVM/Transforms/AllocToPointerCast.h"
 #include "bishengir/Dialect/HIVM/Transforms/MemoryDisplay.h"
-#include "bishengir/Dialect/HIVM/Transforms/NormalizeLoopIterator.h"
+#include "bishengir/Dialect/HIVM/Utils/RegbaseUtils.h"
 #include "bishengir/Dialect/HIVM/Utils/Utils.h"
 #include "bishengir/Dialect/MemRefExt/IR/MemRefExtImpl.h"
 #include "bishengir/Dialect/Utils/Util.h"
 
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/LogicalResult.h"
+#include "llvm/Support/WithColor.h"
 #include <algorithm>
 
 #define DEBUG_TYPE "hivm-plan-memory"
@@ -47,15 +50,6 @@ using namespace hivm;
 using namespace util;
 
 namespace {
-/// TODO: Obtain information from the same platform in the future
-constexpr const int ubAlignSize = 32 * 8;
-constexpr const int ubSpaceSize = 192 * 1024 * 8;
-constexpr const int l1AlignSize = 32 * 8;
-constexpr const int l1SpaceSize = 512 * 1024 * 8;
-constexpr const int l0cAlignSize = 512 * 8;
-constexpr const int l0cSpaceSize = 128 * 1024 * 8;
-constexpr const int workSpaceAlignSize = 32 * 8;
-
 bool isReusableCastOp(hivm::VCastOp &castOp, Value output, Value input) {
   auto rank = dyn_cast<MemRefType>(output.getType()).getRank();
   if (rank > 1 || !isLastDimContiguous(output) || !isLastDimContiguous(input)) {
@@ -174,6 +168,34 @@ bool isStaticShapeSame(Operation *op, const Value &genBuffer,
   return true;
 }
 
+/// Get allocOp and CVMixId from markOp. If failed, it will return std::nullopt.
+std::optional<memref::AllocOp>
+getCVMixIdAndAllocOpFromMarkOp(annotation::MarkOp markOp, int32_t &cvMixId) {
+  if (!markOp->hasAttr(hivm::HIVMTightlyCoupledBufferAttr::name)) {
+    return std::nullopt;
+  }
+  // get cvMixId
+  auto attr = dyn_cast<hivm::HIVMTightlyCoupledBufferAttr>(
+      markOp->getAttr(hivm::HIVMTightlyCoupledBufferAttr::name));
+  if (!attr || !attr.getId().has_value()) {
+    LDBG("MarkOp for : " << markOp.getSrc());
+    LDBG("  Parse tightly_coupled_buffer attribute failed. No input or input "
+         "fromat error. Correct format should be: hivm.tightly_coupled_buffer"
+         " = #hivm.tightly_coupled_buffer<$id>\n");
+    return std::nullopt;
+  }
+  // get allocOp
+  if (!isa<MemRefType>(markOp.getSrc().getType())) {
+    return std::nullopt;
+  }
+  auto maybeAlloc = utils::tracebackMemRefToAlloc(markOp.getSrc());
+  if (!maybeAlloc.has_value()) {
+    return std::nullopt;
+  }
+  cvMixId = attr.getId().value();
+  return maybeAlloc;
+}
+
 } // namespace
 
 void MemLivenessAnalysis::build() {
@@ -213,7 +235,7 @@ void MemLivenessAnalysis::RecursionIR(Region *region, Liveness live) {
     }
 
     // process operation
-    auto curOpInfo = UpdateLinearOperation(op);
+    auto *curOpInfo = UpdateLinearOperation(op);
     auto aliasPairs = getOperationAliasInfo(op);
     if (!aliasPairs.empty() && !isa<arith::SelectOp>(op)) {
       for (auto aliasPair : aliasPairs) {
@@ -259,6 +281,14 @@ void MemLivenessAnalysis::RecursionIR(Region *region, Liveness live) {
                           condBrOp.getFalseDestOperands());
     } else if (auto brOp = dyn_cast<cf::BranchOp>(op)) {
       UpdateBranchOpAlias(brOp.getDest(), brOp.getDestOperands());
+    } else if (auto callOp = dyn_cast<func::CallOp>(op)) {
+      UpdateOpGenInfo(curOpInfo, llvm::to_vector(callOp->getOperands()));
+      UpdateOpTempGenInfo(curOpInfo);
+      OpKillHandle(curOpInfo, live, op->getBlock());
+    } else if (auto gpuLaunchOp = dyn_cast<gpu::LaunchFuncOp>(op)) {
+      UpdateOpGenInfo(curOpInfo, llvm::to_vector(gpuLaunchOp->getOperands()));
+      UpdateOpTempGenInfo(curOpInfo);
+      OpKillHandle(curOpInfo, live, op->getBlock());
     } else if (auto debugOp = dyn_cast<hivm::DebugOp>(op)) {
       OpKillHandle(curOpInfo, live, op->getBlock());
     } else if (failed(CheckIfUnknownOpTouchBuffer(op))) {
@@ -279,7 +309,7 @@ void MemLivenessAnalysis::UpdateInitAndResAlias(
   }
   for (auto [res, init] :
        llvm::zip(dstStyleOp->getResults(), dstStyleOp.getDpsInits())) {
-    auto iter = buffer2AliasVec.find(init);
+    auto *iter = buffer2AliasVec.find(init);
     if (iter == buffer2AliasVec.end()) {
       continue;
     }
@@ -292,7 +322,7 @@ void MemLivenessAnalysis::UpdateInitAndResAlias(
 
 OpInfo *MemLivenessAnalysis::UpdateLinearOperation(Operation *op) {
   auto opInfo = std::make_unique<OpInfo>(op, seqIndex++);
-  auto curOpInfo = opInfo.get();
+  auto *curOpInfo = opInfo.get();
   linearOperation.push_back(std::move(opInfo));
   return curOpInfo;
 }
@@ -325,12 +355,12 @@ void MemLivenessAnalysis::RecursiveForOp(scf::ForOp forOp, Liveness live) {
   //          ...
   //          scf.yield %alloc0 : memref<16xf16,#hivm.address_space<ub>>
   // need to handle kill buffer.
-  auto forBeginSeq = UpdateLinearOperation(forOp.getOperation());
+  auto *forBeginSeq = UpdateLinearOperation(forOp.getOperation());
   UpdateOpGenInfo(forBeginSeq, GetLiveBuffersInLoop(forOp, live));
   UpdateForOpInitArgsAlias(forOp);
   UpdateForOpBufferAlias(forOp);
   RecursionIR(&forOp.getRegion(), live);
-  auto forEndSeq = UpdateLinearOperation(forOp.getOperation());
+  auto *forEndSeq = UpdateLinearOperation(forOp.getOperation());
   OpKillHandle(forEndSeq, live, forOp->getBlock());
 }
 
@@ -393,13 +423,13 @@ void MemLivenessAnalysis::RecursiveWhileOp(scf::WhileOp whileOp,
   //          ...
   //          scf.yield %allocA
   // need to handle kill buffer.
-  auto whileBeginSeq = UpdateLinearOperation(whileOp.getOperation());
+  auto *whileBeginSeq = UpdateLinearOperation(whileOp.getOperation());
   UpdateOpGenInfo(whileBeginSeq, GetLiveBuffersInLoop(whileOp, live));
   UpdateWhileOpInitArgsAlias(whileOp);
   RecursionIR(&whileOp.getBefore(), live);
   RecursionIR(&whileOp.getAfter(), live);
   UpdateWhileOpBufferAlias(whileOp);
-  auto whileEndSeq = UpdateLinearOperation(whileOp.getOperation());
+  auto *whileEndSeq = UpdateLinearOperation(whileOp.getOperation());
   OpKillHandle(whileEndSeq, live, whileOp->getBlock());
 }
 
@@ -422,7 +452,7 @@ void MemLivenessAnalysis::UpdateIfOpBufferAlias(scf::IfOp ifOp,
   assert(ifOp->getResults().size() == yieldOp->getOperands().size());
   for (auto [i, arg] : llvm::enumerate(yieldOp->getOperands())) {
     // Multiple buffers involved, requiring one-to-one correspondence.
-    UpdateBufferAlias(ifOp->getResult(i), arg, /*hasCond=*/true);
+    UpdateBufferAlias(ifOp->getResult(i), arg);
   }
 }
 
@@ -434,10 +464,10 @@ void MemLivenessAnalysis::RecursiveIfOp(scf::IfOp ifOp, Liveness live) {
   //        scf.yield %alloc1 : memref<16xf16, #hivm.address_space<ub>>
   (void)UpdateLinearOperation(ifOp.getOperation());
   RecursionIR(&ifOp.getThenRegion(), live);
-  auto curIfElse = UpdateLinearOperation(ifOp.getOperation());
+  auto *curIfElse = UpdateLinearOperation(ifOp.getOperation());
   UpdateIfOpBufferAlias(ifOp, ifOp.thenYield());
 
-  auto curIfEnd = curIfElse;
+  auto *curIfEnd = curIfElse;
   if (ifOp.elseBlock()) {
     RecursionIR(&ifOp.getElseRegion(), live);
     curIfEnd = UpdateLinearOperation(ifOp.getOperation());
@@ -478,7 +508,7 @@ void MemLivenessAnalysis::RecursiveScopeOp(scope::ScopeOp scopeOp,
   RecursionIR(&scopeRegion, live);
   auto returnOp = cast<scope::ReturnOp>(scopeRegion.front().getTerminator());
   UpdateScopeOpBufferAlias(scopeOp, returnOp);
-  auto scopeEndSeq = UpdateLinearOperation(scopeOp.getOperation());
+  auto *scopeEndSeq = UpdateLinearOperation(scopeOp.getOperation());
   OpKillHandle(scopeEndSeq, live, scopeOp->getBlock());
 }
 
@@ -501,24 +531,21 @@ MemLivenessAnalysis::GetLiveBuffersInLoop(LoopLikeOpInterface loopOp,
   for (const Value &operand : currentLiveValuesShuffled) {
     auto aliasBuffers = GetAliasBuffers(operand);
     aliasBuffers.insert(operand);
-    for (auto Buffer : aliasBuffers) {
-      auto iter = buffer2status.find(Buffer);
+    for (auto buffer : aliasBuffers) {
+      auto iter = buffer2status.find(buffer);
       if (iter != buffer2status.end())
-        allocBeforeLoopBuffers.push_back(Buffer);
+        allocBeforeLoopBuffers.push_back(buffer);
     }
   }
   return allocBeforeLoopBuffers;
 }
 
-void MemLivenessAnalysis::UpdateMultiBufferInfo(annotation::MarkOp markOp) {
-  auto attrDict = markOp->getAttrDictionary();
-  if (attrDict.empty()) {
+void MemLivenessAnalysis::UpdateMultiBufferInfo(annotation::MarkOp markOp,
+                                                Value memrefVal) {
+  if (!markOp->hasAttr(hivm::MultiBufferAttr::name)) {
     return;
   }
-  if (!attrDict.contains(hivm::MultiBufferAttr::name)) {
-    return;
-  }
-  auto multiBufferValAttr = attrDict.get(hivm::MultiBufferAttr::name);
+  auto multiBufferValAttr = markOp->getAttr(hivm::MultiBufferAttr::name);
   assert(isa<IntegerAttr>(multiBufferValAttr) &&
          "multi buffer value must be integer!");
   auto valAttr = cast<IntegerAttr>(multiBufferValAttr);
@@ -526,7 +553,7 @@ void MemLivenessAnalysis::UpdateMultiBufferInfo(annotation::MarkOp markOp) {
     // Num is 1, which is a singebuffer and does not require any processing.
     return;
   }
-  buffer2MultiNum[markOp.getSrc()] = static_cast<uint64_t>(valAttr.getInt());
+  buffer2MultiNum[memrefVal] = static_cast<uint64_t>(valAttr.getInt());
 }
 
 LogicalResult
@@ -534,10 +561,6 @@ MemLivenessAnalysis::CheckLocalBufferAllocOp(Operation *op) const {
   auto allocOp = dyn_cast<memref::AllocOp>(op);
   assert(allocOp && "must be alloc op");
   auto memorySpaceAttr = GetBufferSpaceAttr(allocOp.getResult());
-
-  // TODO: Remove this after plan mem support SSBUF alloc
-  assert(!isSsbuffer(memorySpaceAttr) &&
-         "Alloc on SSBUFFER is not yet supported!");
   if (isLocalBuffer(memorySpaceAttr)) {
     return success();
   }
@@ -546,12 +569,6 @@ MemLivenessAnalysis::CheckLocalBufferAllocOp(Operation *op) const {
 }
 
 bool MemLivenessAnalysis::isSkippableOp(Operation *op) const {
-  // TODO: Remove this after plan mem support SSBUF alloc
-  if (auto pointerCastOp = llvm::dyn_cast<PointerCastOp>(op);
-      pointerCastOp && isOpTouchSsbufferOnly(pointerCastOp)) {
-    return true;
-  }
-
   return isa<func::ReturnOp, scf::YieldOp, memref::DimOp, hivm::DCCIOp,
              scope::ReturnOp>(op);
 }
@@ -574,7 +591,7 @@ void MemLivenessAnalysis::UpdateExtraBufferIgnoreInplace(
     const ValueRange &results) {
   // mark the temp buffer as ignoring inplace
   for (Value operand : results) {
-    auto it = bufferInfos.find(operand);
+    auto *it = bufferInfos.find(operand);
     assert(it != bufferInfos.end());
     it->second.ignoreInplace = true;
   }
@@ -643,7 +660,7 @@ void MemLivenessAnalysis::UpdateBufferAlias(Value buffer, Value aliasBuffer,
 
   // mark the alias buffer as ignoring Inplace if it is not generated by
   // memref.alloc.
-  auto it = bufferInfos.find(aliasBuffer);
+  auto *it = bufferInfos.find(aliasBuffer);
   if (isIgnoreInplace && it != bufferInfos.end()) {
     it->second.ignoreInplace = true;
   }
@@ -661,7 +678,7 @@ MemLivenessAnalysis::FindBufferCondPair(Value buffer, Value aliasValue) {
 
 SmallVector<BufferCondPair>
 MemLivenessAnalysis::GetAliasBufferCondPairs(Value aliasBuffer) {
-  auto trueVar = buffer2AliasVec.find(aliasBuffer);
+  auto *trueVar = buffer2AliasVec.find(aliasBuffer);
   if (trueVar != buffer2AliasVec.end()) {
     return trueVar->second;
   }
@@ -715,16 +732,16 @@ void MemLivenessAnalysis::UpdateOpGenInfo(OpInfo *opInfo,
 }
 
 void MemLivenessAnalysis::UpdateOperandGenInfo(OpInfo *opInfo, Value operand) {
-  auto iter_buffer = buffer2status.find(operand);
-  if (iter_buffer == buffer2status.end())
+  auto iterBuffer = buffer2status.find(operand);
+  if (iterBuffer == buffer2status.end())
     return;
-  if (iter_buffer->second == BufferStatus::DEFFINED) {
+  if (iterBuffer->second == BufferStatus::DEFFINED) {
     if (IsPreloadBuffer(operand)) {
       return; // skip gen for multi scope used buffer
     }
     genKillMap[opInfo].gen.push_back(operand);
-    buffer2status[iter_buffer->first] = BufferStatus::GENED;
-  } else if (iter_buffer->second == BufferStatus::KILLED) {
+    buffer2status[iterBuffer->first] = BufferStatus::GENED;
+  } else if (iterBuffer->second == BufferStatus::KILLED) {
     llvm::report_fatal_error(
         "The buffer memory has been released and cannot be used again! ");
   }
@@ -764,13 +781,87 @@ void MemLivenessAnalysis::UpdatePreloadBuffers(annotation::MarkOp markOp,
 
 void MemLivenessAnalysis::ProcessMarkOp(annotation::MarkOp markOp,
                                         OpInfo *curOpInfo, Liveness live) {
-  UpdateMultiBufferInfo(markOp);
+  if (!isa<MemRefType>(markOp.getSrc().getType())) {
+    return;
+  }
+  // global workspace plan
+  if (!isLocalMemPlan()) {
+    UpdateMultiBufferInfo(markOp, markOp.getSrc());
+    return;
+  }
+  // get allocOp
   auto maybeAlloc = utils::tracebackMemRefToAlloc(markOp.getSrc());
   if (!maybeAlloc.has_value()) {
     return;
   }
+  UpdateMultiBufferInfo(markOp, maybeAlloc.value().getResult());
   UpdatePreloadBuffers(markOp, maybeAlloc.value());
+  UpdateMemoryUniqueBufferInfo(markOp, maybeAlloc.value());
+  if (ProcessMarkOpForTightlyCoupledCV(markOp, maybeAlloc.value())) {
+    UpdateOpGenInfo(curOpInfo, maybeAlloc.value()->getResults());
+  }
+  // TODO: Update buffer kill time when RecursionIR visits any user of the
+  // buffer, rather than only getting buffer kill time in last user
   UpdateOpKillInfo(curOpInfo, maybeAlloc.value(), live);
+}
+
+void MemLivenessAnalysis::UpdateMemoryUniqueBufferInfo(
+    annotation::MarkOp markOp, memref::AllocOp allocOp) {
+  if (!markOp->hasAttr(hivm::HIVMMemoryUniqueAttr::getMnemonic())) {
+    return;
+  }
+  auto allocValue = allocOp.getResult();
+  auto *it = bufferInfos.find(allocValue);
+  if (it == bufferInfos.end()) {
+    llvm::report_fatal_error("Use allocOp before defined!");
+  }
+  it->second.memoryUnique = true;
+}
+
+bool MemLivenessAnalysis::ProcessMarkOpForTightlyCoupledCV(
+    annotation::MarkOp markOp, memref::AllocOp allocOp) {
+  // Check CV mix id
+  if (!markOp->hasAttr(hivm::HIVMTightlyCoupledBufferAttr::name)) {
+    return false;
+  }
+  auto attr = markOp->getAttrOfType<hivm::HIVMTightlyCoupledBufferAttr>(
+      hivm::HIVMTightlyCoupledBufferAttr::name);
+  if (!attr.getId().has_value()) {
+    LDBG("MarkOp for : " << markOp.getSrc());
+    LDBG(" Parse tightly_coupled_buffer attribute failed. No input or input "
+         "fromat error. Correct format should be: hivm.tightly_coupled_buffer"
+         " = #hivm.tightly_coupled_buffer<$id>\n");
+    return false;
+  }
+  auto allocValue = allocOp.getResult();
+  auto *it = bufferInfos.find(allocValue);
+  if (it == bufferInfos.end()) {
+    llvm::report_fatal_error("Use allocOp before defined!");
+  }
+  it->second.cvMixId = attr.getId().value();
+  auto addressSpace = getHIVMAddressSpace(allocValue.getType());
+  auto funcType = queryFuncCoreType(func_);
+  if ((funcType == TFuncCoreType::AIC && addressSpace == AddressSpace::UB) ||
+      (funcType == TFuncCoreType::AIV && addressSpace == AddressSpace::L1)) {
+    skipMemPlan.insert(allocValue);
+    LDBG(allocValue << " Skip mem plan\n");
+  }
+  if ((funcType == TFuncCoreType::AIV && addressSpace == AddressSpace::UB) ||
+      (funcType == TFuncCoreType::AIC && addressSpace == AddressSpace::L1)) {
+    if (disableTightlyCoupledBufferReuse) {
+      auto *it = bufferInfos.find(allocValue);
+      if (it == bufferInfos.end()) {
+        llvm::report_fatal_error("Use allocOp before defined!");
+      }
+      it->second.memoryUnique = true;
+    }
+    LDBG(allocValue << "set memory unique\n");
+    // AllocOp will be writed in another scope and read in current scope, so we
+    // will update its genInfo in markOp.
+    LDBG(allocValue << " Manually run UpdateOpGenInfo\n");
+    return true;
+  }
+  return false;
 }
 
 void MemLivenessAnalysis::UpdatePreloadBuffersGenInfo(
@@ -965,11 +1056,6 @@ bool MemLivenessAnalysis::AllDeadAfter(Operation *op, SetVector<Value> aliasVec,
 BufferInfo MemLivenessAnalysis::GenerateBufferInfo(Operation *op,
                                                    Value operand) {
   auto memorySpaceAttr = GetBufferSpaceAttr(operand);
-  // TODO: Remove this after plan mem support SSBUF alloc
-  if (isSsbuffer(memorySpaceAttr)) {
-    llvm_unreachable("Alloc-like on SSBUF is not yet supported!");
-  }
-
   if (isLocalMemPlan() && isLocalBuffer(memorySpaceAttr)) {
     assert(memorySpaceAttr.has_value() && "buffer must has space!");
     return GetBufferInfo(op, operand,
@@ -1005,9 +1091,9 @@ BufferInfo MemLivenessAnalysis::GetBufferInfo(Operation *op, Value operand,
 
 void MemLivenessAnalysis::InitializeInplacePairList() {
   LDBG("-------------------------- AliasPair --------------------------\n");
-  for (auto &bufferInfo : bufferInfos) {
-    assert(memref_ext::isDefiningOpAllocLike(bufferInfo.first));
-    auto iter = buffer2AliasVec.find(bufferInfo.first);
+  for (auto &[buffer, bufferInfo] : bufferInfos) {
+    assert(memref_ext::isDefiningOpAllocLike(buffer));
+    auto *iter = buffer2AliasVec.find(buffer);
     if (iter == buffer2AliasVec.end()) {
       continue;
     }
@@ -1017,23 +1103,26 @@ void MemLivenessAnalysis::InitializeInplacePairList() {
         continue;
       }
       if (count(inplacePairList.begin(), inplacePairList.end(),
-                std::make_pair(bufferInfo.first, aliasBuffer)) ||
+                std::make_pair(buffer, aliasBuffer)) ||
           count(inplacePairList.begin(), inplacePairList.end(),
-                std::make_pair(aliasBuffer, bufferInfo.first))) {
+                std::make_pair(aliasBuffer, buffer))) {
         continue;
       }
       LDBG("inplace pair: (buffer: "
-           << bufferInfo.first << ", alias buffer: " << aliasBuffer << ")"
+           << buffer << ", alias buffer: " << aliasBuffer << ")"
            << " , condition: " << aliasBufferPair.second << "\n");
       if (aliasBufferPair.second) {
         continue;
       }
-      inplacePairList.emplace_back(
-          std::make_pair(bufferInfo.first, aliasBuffer));
-      auto it = bufferInfos.find(aliasBuffer);
-      assert(it != bufferInfos.end() && "buffer Info need define before! ");
-      it->second.ignoreInplace = true;
-      bufferInfo.second.ignoreInplace = true;
+      auto *it = bufferInfos.find(aliasBuffer);
+      assert(it != bufferInfos.end() && "buffer Info need define before!");
+      auto &aliasBufferInfo = it->second;
+      if (aliasBufferInfo.memoryUnique || bufferInfo.memoryUnique) {
+        continue;
+      }
+      inplacePairList.emplace_back(std::make_pair(buffer, aliasBuffer));
+      aliasBufferInfo.ignoreInplace = true;
+      bufferInfo.ignoreInplace = true;
     }
   }
 }
@@ -1064,9 +1153,71 @@ void MemLivenessAnalysis::GenerateBufferLife() {
   }
 }
 
+//===----------------------------------------------------------------------===//
+// This file contains code from the LLVM Project.
+// Original License: Apache License v2.0 with LLVM Exceptions
+// Original Copyright: NA
+// Original Source:
+// https://github.com/llvm/llvm-project/blob/main/mlir/lib/Analysis/Liveness.cpp
+//===----------------------------------------------------------------------===//
+// Similar to Liveness::currentlyLiveValues but using SetVector instead of
+// ValueSetT=SmallPtrSet. Needed to make the pass output deterministic.
+mlir::SetVector<Value> MemLivenessAnalysis::currentlyLiveValuesOrdered(
+    const LivenessBlockInfo *livenessInfo, Operation *op) const {
+  mlir::SetVector<Value> liveSet;
+
+  // Given a value, check which ops are within its live range. For each of
+  // those ops, add the value to the set of live values as-of that op.
+  auto addValueToCurrentlyLiveSets = [&](Value value) {
+    // Determine the live range of this value inside this block.
+    Operation *startOfLiveRange = value.getDefiningOp();
+    Operation *endOfLiveRange = nullptr;
+    // If it's a live in or a block argument, then the start is the beginning
+    // of the block.
+    if (livenessInfo->isLiveIn(value) || isa<BlockArgument>(value))
+      startOfLiveRange = &livenessInfo->getBlock()->front();
+    else
+      startOfLiveRange =
+          livenessInfo->getBlock()->findAncestorOpInBlock(*startOfLiveRange);
+
+    // If it's a live out, then the end is the back of the block.
+    if (livenessInfo->isLiveOut(value))
+      endOfLiveRange = &livenessInfo->getBlock()->back();
+
+    // We must have at least a startOfLiveRange at this point. Given this, we
+    // can use the existing getEndOperation to find the end of the live range.
+    if (startOfLiveRange && !endOfLiveRange)
+      endOfLiveRange = livenessInfo->getEndOperation(value, startOfLiveRange);
+
+    assert(endOfLiveRange && "Must have endOfLiveRange at this point!");
+    // If this op is within the live range, insert the value into the set.
+    if (!(op->isBeforeInBlock(startOfLiveRange) ||
+          endOfLiveRange->isBeforeInBlock(op)))
+      liveSet.insert(value);
+  };
+
+  // Handle block arguments if any.
+  for (Value arg : livenessInfo->getBlock()->getArguments())
+    addValueToCurrentlyLiveSets(arg);
+
+  // Handle live-ins. Between the live ins and all the op results that gives us
+  // every value in the block.
+  for (Value in : livenessInfo->in())
+    addValueToCurrentlyLiveSets(in);
+
+  // Now walk the block and handle all values used in the block and values
+  // defined by the block.
+  for (Operation &walkOp :
+       llvm::make_range(livenessInfo->getBlock()->begin(), ++op->getIterator()))
+    for (auto result : walkOp.getResults())
+      addValueToCurrentlyLiveSets(result);
+
+  return liveSet;
+}
+
 std::shared_ptr<BufferLife>
 StorageEntry::GetBufferLifeByValue(const Value v) const {
-  auto find = std::find_if(
+  auto *find = std::find_if(
       bufferLifeVec.begin(), bufferLifeVec.end(),
       [v](std::shared_ptr<BufferLife> life) { return life->buffer == v; });
   if (find != bufferLifeVec.end()) {
@@ -1249,6 +1400,46 @@ bool MemPlan::IsReuseHIVMOp(Operation *op, const Value &genBuffer,
   return isReusableOperands(op, hivmOp);
 }
 
+template <PIPE Pipe> bool MemPlan::IsInplaceReuseReachable(Value allocValue) {
+  if (disableVFReachableCheck) {
+    return false;
+  }
+  if (auto computedReachable = reachableMap.get<Pipe>(allocValue)) {
+    return computedReachable.value();
+  }
+  if (dmaFirstPipelineOpt.IsDmaBuffer(Pipe, allocValue)) {
+    reachableMap.put<Pipe>(allocValue, true);
+    LDBG(allocValue << " is reachable to " << stringifyPIPE(Pipe) << "\n");
+    return true;
+  }
+  reachableMap.put<Pipe>(allocValue, false);
+  LDBG(allocValue << " is not reachable to " << stringifyPIPE(Pipe) << "\n");
+  return false;
+}
+
+bool MemPlan::IsReuseVFCall(Value gen, Value kill) {
+  auto genAlloc = utils::tracebackMemRefToAlloc(gen);
+  auto killAlloc = utils::tracebackMemRefToAlloc(kill);
+  if (!genAlloc.has_value() || !killAlloc.has_value()) {
+    return false;
+  }
+  auto genRoot = genAlloc.value().getResult();
+  auto killRoot = killAlloc.value().getResult();
+  auto genReachStore = IsInplaceReuseReachable<PIPE::PIPE_MTE3>(genRoot);
+  auto killReachLoad = IsInplaceReuseReachable<PIPE::PIPE_MTE2>(killRoot);
+  auto loopParent = genAlloc.value()->getParentOfType<LoopLikeOpInterface>();
+
+  // When `gen` reaches `store` and `kill` reaches `load`, inplace-reuse for
+  // `gen` and `kill` can cause mte2/mte3 pipeline stalls, because we need extra
+  // synchronization on the same ub address between loop interations.
+  if (genReachStore && killReachLoad && loopParent) {
+    LDBG("can't reuse " << genRoot << " and " << killRoot << "\n");
+    return false;
+  }
+  LDBG("can reuse " << genRoot << " and " << killRoot << "\n");
+  return true;
+}
+
 SmallVector<ValuePair> MemPlan::GenerateInplaceList() {
   SmallVector<ValuePair> inplaceList;
   DenseMap<Operation *, bool> hasTouchOp;
@@ -1261,27 +1452,69 @@ SmallVector<ValuePair> MemPlan::GenerateInplaceList() {
     if (hasTouchOp[operationSeq->operation]) {
       continue;
     }
-    for (const Value &genBuffer : it->second.gen) {
-      auto genBufferIter = bufferInfos.find(genBuffer);
+    Operation *op = it->first->operation;
+    bool isVFCallReusable = vfInplaceReuseInfo && hivm::isVFCall(op) &&
+                            !VFCallInplaceReuseInfo::hasAliasArgRisk(op);
+    DenseMap<ValuePair, bool> vfReuseCache;
+
+    auto isVFInplacePair = [&](Value genBuffer, Value killBuffer) {
+      if (!isVFCallReusable ||
+          !vfInplaceReuseInfo->isInplaceReusable(op, genBuffer, killBuffer)) {
+        return false;
+      }
+
+      // use cache to avoid redundant traversal
+      ValuePair pair = {genBuffer, killBuffer};
+      auto cached = vfReuseCache.find(pair);
+      if (cached != vfReuseCache.end()) {
+        return cached->second;
+      }
+      return vfReuseCache
+          .try_emplace(pair, IsReuseVFCall(genBuffer, killBuffer))
+          .first->second;
+    };
+
+    SmallVector<Value> sortedGen(it->second.gen.begin(), it->second.gen.end());
+    llvm::stable_sort(sortedGen, [&](Value a, Value b) {
+      return bufferInfos[a].constBits > bufferInfos[b].constBits;
+    });
+
+    DenseSet<Value> reusedKill;
+    for (const Value &genBuffer : sortedGen) {
+      auto *genBufferIter = bufferInfos.find(genBuffer);
       assert(genBufferIter != bufferInfos.end() &&
              "genBuffer should be find in bufferInfos");
       if (genBufferIter->second.ignoreInplace) {
         continue;
       }
       for (const Value &killBuffer : it->second.kill) {
-        auto killBufferIter = bufferInfos.find(killBuffer);
+        auto *killBufferIter = bufferInfos.find(killBuffer);
         assert(killBufferIter != bufferInfos.end() &&
                "killBuffer should be find in bufferInfos");
         if (killBufferIter->second.ignoreInplace) {
           continue;
         }
-        bool canInplace =
-            killBufferIter->second.constBits >=
-                genBufferIter->second.constBits &&
-            IsReuseHIVMOp(it->first->operation, genBuffer, killBuffer) &&
-            !InplaceStallPipeline(genBuffer, killBuffer, inplaceList);
-        if (canInplace) {
-          inplaceList.emplace_back(std::make_pair(genBuffer, killBuffer));
+        if (reusedKill.contains(killBuffer))
+          continue;
+
+        int64_t genBits = genBufferIter->second.constBits;
+        int64_t killBits = killBufferIter->second.constBits;
+        if (killBits < genBits) {
+          continue;
+        }
+
+        if (isVFInplacePair(genBuffer, killBuffer)) {
+          reusedKill.insert(killBuffer);
+          reachableMap.unite(genBuffer, killBuffer);
+          inplaceList.emplace_back(genBuffer, killBuffer);
+          break;
+        }
+
+        if (IsReuseHIVMOp(op, genBuffer, killBuffer) &&
+            !InplaceStallPipeline(genBuffer, killBuffer, inplaceList)) {
+          reusedKill.insert(killBuffer);
+          reachableMap.unite(genBuffer, killBuffer);
+          inplaceList.emplace_back(genBuffer, killBuffer);
           break;
         }
       }
@@ -1339,7 +1572,7 @@ void MemPlan::GenerateStorageEntry() {
     if (it == genKillMap.end())
       continue;
     for (const Value &genBuffer : it->second.gen) {
-      auto iter = bufferInfos.find(genBuffer);
+      auto *iter = bufferInfos.find(genBuffer);
       if (iter == bufferInfos.end()) {
         continue;
       }
@@ -1434,7 +1667,7 @@ void MemPlan::MergeInplaceSE() {
       buffer2storageEntry[buffer] = killSE;
     }
     // remove the alloc info of dst after successful merging
-    auto e = std::find_if(StorageEntryVec.begin(), StorageEntryVec.end(),
+    auto *e = std::find_if(StorageEntryVec.begin(), StorageEntryVec.end(),
                           [genSE](std::unique_ptr<StorageEntry> &se) {
                             return se.get() == genSE;
                           });
@@ -1443,9 +1676,9 @@ void MemPlan::MergeInplaceSE() {
 }
 
 PlanStatus MemPlan::PlanLocalMemAddress() {
+  dmaFirstPipelineOpt.build(func_);
   // merge from the first storage entry
   MergeInplaceSE();
-  dmaFirstPipelineOpt.build(func_);
   ExpandMultiBufferStorageEntry();
   MergeSameScopeSE();
   return PlanMemAddressOfWholeLocalBuffer();
@@ -1468,11 +1701,11 @@ void MemPlan::MergeSameWorkSpaceArgSE() {
         iter->bufInfo->operation);
     assert(allocWorkspaceOp && "only allocWorkspaceOp will plan");
     Value workspaceArg = allocWorkspaceOp.getWorkspaceArg();
-    auto iter_arg = workSpaceArg2rootStorageEntry.find(workspaceArg);
-    if (iter_arg == workSpaceArg2rootStorageEntry.end()) {
+    auto *iterArg = workSpaceArg2rootStorageEntry.find(workspaceArg);
+    if (iterArg == workSpaceArg2rootStorageEntry.end()) {
       workSpaceArg2rootStorageEntry[workspaceArg] = iter.get();
     } else {
-      iter_arg->second->mergedChildren.push_back(iter.get());
+      iterArg->second->mergedChildren.push_back(iter.get());
     }
   }
 }
@@ -1549,19 +1782,6 @@ void MemPlan::ExpandMultiBufferStorageEntry() {
   }
 }
 
-bool MemPlan::IsEnoughForBuffersNoReuse(StorageEntry *rootStorageEntry,
-                                        size_t restBufferSize,
-                                        size_t alignUnit) {
-  auto iter =
-      bufferScope2RequiredSize.find(rootStorageEntry->bufInfo->bufferScope);
-  assert(iter != bufferScope2RequiredSize.end());
-  if (iter->second <= restBufferSize) {
-    PlanBuffersWithoutReuse(rootStorageEntry, alignUnit);
-    return true;
-  }
-  return false;
-}
-
 void MemPlan::PlanBuffersWithoutReuse(StorageEntry *rootStorageEntry,
                                       size_t alignUnit) {
   uint offset = 0;
@@ -1576,31 +1796,31 @@ void MemPlan::PlanBuffersWithoutReuse(StorageEntry *rootStorageEntry,
 void MemPlan::MergeSameScopeSE() {
   // Construct root StorageEntry and collect the same scope StorageEntry
   for (auto &iter : StorageEntryVec) {
-    auto iter_scope =
+    auto *iterScope =
         memscope2rootStorageEntry.find(iter->bufInfo->bufferScope);
-    if (iter_scope == memscope2rootStorageEntry.end()) {
+    if (iterScope == memscope2rootStorageEntry.end()) {
       memscope2rootStorageEntry[iter->bufInfo->bufferScope] = iter.get();
     } else {
-      iter_scope->second->mergedChildren.push_back(iter.get());
+      iterScope->second->mergedChildren.push_back(iter.get());
     }
   }
 
   // set bufferScope2RequiredSize for all StorageEntry
-  for (auto &rootStorageEntry : memscope2rootStorageEntry) {
-    auto bufferSpaceInfo = GetBufferSpaceInfo(rootStorageEntry.first);
-    size_t accumulateSize = AlignUp(rootStorageEntry.second->bufInfo->constBits,
-                                    bufferSpaceInfo.first);
-    for (auto &childrenStorageEntry : rootStorageEntry.second->mergedChildren) {
+  for (auto [memScope, rootStorageEntry] : memscope2rootStorageEntry) {
+    auto bufferSpaceInfo = GetBufferSpaceInfo(memScope);
+    size_t accumulateSize =
+        AlignUp(rootStorageEntry->bufInfo->constBits, bufferSpaceInfo.first);
+    for (auto &childrenStorageEntry : rootStorageEntry->mergedChildren) {
       size_t curStorageSize = AlignUp(childrenStorageEntry->bufInfo->constBits,
                                       bufferSpaceInfo.first);
       accumulateSize = accumulateSize + curStorageSize;
     }
-    bufferScope2RequiredSize[rootStorageEntry.first] = accumulateSize;
+    bufferScope2RequiredSize[memScope] = accumulateSize;
   }
 }
 
-void mlir::hivm::MemPlan::PlanMemAddressForLevel0(
-    StorageEntry *rootStorageEntry) {
+uint64_t MemPlan::PlanMemAddressForSingleLevel(StorageEntry *rootStorageEntry,
+                                               int specLevel) {
   // get the buffer info for a given scope.
   auto bufferSpaceInfo =
       GetBufferSpaceInfo(rootStorageEntry->bufInfo->bufferScope);
@@ -1611,8 +1831,9 @@ void mlir::hivm::MemPlan::PlanMemAddressForLevel0(
   MemBoundList outline;
   PlanRecHis history;
   SpecInfo si;
-  si.specLevel = SPEC_LEVEL_0;
-  si.maxLevel = SPEC_LEVEL_0;
+  si.specLevel = specLevel;
+  si.maxLevel = specLevel;
+  si.minLevel = specLevel;
   int childrenNum = static_cast<int>(rootStorageEntry->mergedChildren.size());
   outline.push_back(
       std::make_shared<MemoryBound>(BufferLifeVec(), 0, maxBits, nullptr));
@@ -1637,43 +1858,47 @@ void mlir::hivm::MemPlan::PlanMemAddressForLevel0(
     maxAllocBits =
         std::max(maxAllocBits, child->bitsOffset + child->alignedConstBits);
   }
-  failApplyBufferInfo[rootStorageEntry->bufInfo->bufferScope] = maxAllocBits;
+  return maxAllocBits;
 }
 
 PlanStatus MemPlan::PlanMemAddressOfWholeLocalBuffer() {
   // Start plan
-  for (auto &it : memscope2rootStorageEntry) {
-    StorageEntry *rootStorageEntry = it.second;
+  for (auto [memScope, rootStorageEntry] : memscope2rootStorageEntry) {
     assert(rootStorageEntry && "Root StorageEntry should not be null");
     // get the buffer info for a given scope.
-    auto bufferSpaceInfo =
-        GetBufferSpaceInfo(rootStorageEntry->bufInfo->bufferScope);
+    auto bufferSpaceInfo = GetBufferSpaceInfo(memScope);
     size_t align = bufferSpaceInfo.first;
     size_t maxBits = bufferSpaceInfo.second;
-    if (rootStorageEntry->mergedChildren.empty()) {
-      // Only one buffer needs to be allocated within the same scope, allocate
-      // directly.
-      uint64_t needAlignedBits =
-          AlignUp(rootStorageEntry->bufInfo->constBits, align);
-      if (needAlignedBits > maxBits) {
-        failApplyBufferInfo[rootStorageEntry->bufInfo->bufferScope] =
-            needAlignedBits;
-        return PlanStatus::PLAN_FAILED;
-      }
-      rootStorageEntry->bitsOffset = 0;
-      continue;
-    }
-    if (IsEnoughForBuffersNoReuse(rootStorageEntry, maxBits, align)) {
+    // No reuse plan
+    auto iter = bufferScope2RequiredSize.find(memScope);
+    assert(iter != bufferScope2RequiredSize.end());
+    if (iter->second <= maxBits) {
       ReportMemLifeDebugInfo(rootStorageEntry);
+      PlanBuffersWithoutReuse(rootStorageEntry, align);
+      LDBG("\nApply no reuse plan strategy for " << memScope << " memScope\n");
       continue;
+    } else if (rootStorageEntry->mergedChildren.empty()) {
+      failApplyBufferInfo[memScope] = iter->second;
+      return PlanStatus::PLAN_FAILED;
     }
-    rootStorageEntry = GetReorderRootStorageEntry(rootStorageEntry);
-    ReportMemLifeDebugInfo(rootStorageEntry);
-    // memory outline in a given buffer scope.
+
     MemBoundList outline;
     PlanRecHis history;
     SpecInfo si;
     si.specLevel = si.maxLevel;
+    // No reuse dma buffer plan
+    rootStorageEntry = GetReorderRootStorageEntry(rootStorageEntry);
+    ReportMemLifeDebugInfo(rootStorageEntry);
+    LDBG("\nTry no pipe stall plan strategy for " << memScope << " memScope\n");
+    auto maxAllocBits =
+        PlanMemAddressForSingleLevel(rootStorageEntry, si.maxLevel);
+    if (maxAllocBits <= maxBits) {
+      ReportAllocatedEntryDebugInfo(rootStorageEntry, false);
+      continue;
+    }
+    memscope2allocatedEntry.erase(memScope);
+    // memory outline in a given buffer scope.
+    LDBG("\nTry multi level plan strategy for " << memScope << " memScope\n");
     int childrenNum = static_cast<int>(rootStorageEntry->mergedChildren.size());
     outline.push_back(
         std::make_shared<MemoryBound>(BufferLifeVec(), 0, maxBits, nullptr));
@@ -1706,13 +1931,8 @@ PlanStatus MemPlan::PlanMemAddressOfWholeLocalBuffer() {
         }
         if (as == PlanStatus::PLAN_FAILED) {
           ReportAllocatedEntryDebugInfo(rootStorageEntry, true);
-          PlanMemAddressForLevel0(rootStorageEntry);
-          hivm::AddressSpace bufferScope =
-              rootStorageEntry->bufInfo->bufferScope;
-          auto iter = memscope2rootFailStorageEntry.find(bufferScope);
-          if (iter == memscope2rootFailStorageEntry.end()) {
-            memscope2rootFailStorageEntry[bufferScope] = rootStorageEntry;
-          }
+          failApplyBufferInfo[memScope] =
+              PlanMemAddressForSingleLevel(rootStorageEntry, SPEC_LEVEL_0);
           return as;
         }
       }
@@ -1722,6 +1942,10 @@ PlanStatus MemPlan::PlanMemAddressOfWholeLocalBuffer() {
       curEntry = rootStorageEntry->mergedChildren[si.childIdx];
     }
     ReportAllocatedEntryDebugInfo(rootStorageEntry, false);
+    llvm::WithColor::warning(llvm::outs())
+        << "[hivm-plan-memory] There reused some dma buffers in " << memScope
+        << " address space, which may stall pipe. Not reusing dma buffer needs "
+        << maxAllocBits << " bits while " << maxBits << " bits available!\n";
   }
   planStatus = PlanStatus::PLAN_SUCCESS;
   return planStatus;
@@ -1731,8 +1955,8 @@ void MemPlan::ReportMemLifeDebugInfo(const StorageEntry *rootStorageEntry) {
   LDBG("\n");
   LDBG("-------------------------- Buffer2Life --------------------------\n");
   MemLifeDebugInfo(rootStorageEntry);
-  for (auto &StorageEntry : rootStorageEntry->mergedChildren) {
-    MemLifeDebugInfo(StorageEntry);
+  for (auto &storageEntry : rootStorageEntry->mergedChildren) {
+    MemLifeDebugInfo(storageEntry);
   }
 }
 
@@ -1774,36 +1998,58 @@ MemPlan::GetReorderRootStorageEntry(StorageEntry *rootStorageEntry) {
                              rootStorageEntry->mergedChildren.begin(),
                              rootStorageEntry->mergedChildren.end());
 
-  // reorder storage entrys: dma touched buffers + other buffers + scalar
-  // touched buffers
-  SmallVector<StorageEntry *> reorderedStorageEntryVec;
+  // reorder storage entrys: mem unique buffers + dma touched buffers + other
+  // buffers + scalar touched buffers. Dma touched buffers and scalar touched
+  // buffers will only exist in UB.
+  SmallVector<StorageEntry *> memUniqueStorageEntryVec;
+  SmallVector<StorageEntry *> touchDmaStorageEntryVec;
   SmallVector<StorageEntry *> touchPipeScalarStorageEntryVec;
-  for (auto &storageEntry : origStorageEntryVec) {
+  SmallVector<StorageEntry *> otherStorageEntryVec;
+  for (auto *storageEntry : origStorageEntryVec) {
     if (!storageEntry) {
       continue;
     }
-    for (auto &buffer : storageEntry->inplaceBuffers) {
-      if (dmaFirstPipelineOpt.IsDmaBuffer(buffer)) {
-        reorderedStorageEntryVec.push_back(storageEntry);
-        break;
-      }
-      if (dmaFirstPipelineOpt.IsScalarBuffer(buffer)) {
-        touchPipeScalarStorageEntryVec.push_back(storageEntry);
-        break;
-      }
+    bool isOtherBuffer =
+        llvm::all_of(storageEntry->inplaceBuffers, [&](Value &buffer) {
+          auto *it = bufferInfos.find(buffer);
+          assert(it != bufferInfos.end() &&
+                 "buffer should be find in bufferInfos");
+          if (it->second.memoryUnique) {
+            memUniqueStorageEntryVec.push_back(storageEntry);
+            return false;
+          }
+          if (dmaFirstPipelineOpt.IsDmaBuffer(buffer)) {
+            touchDmaStorageEntryVec.push_back(storageEntry);
+            return false;
+          }
+          if (dmaFirstPipelineOpt.IsScalarBuffer(buffer)) {
+            touchPipeScalarStorageEntryVec.push_back(storageEntry);
+            return false;
+          }
+          return true;
+        });
+    if (isOtherBuffer) {
+      otherStorageEntryVec.push_back(storageEntry);
     }
   }
-  for (auto &storageEntry : origStorageEntryVec) {
-    auto it1 = std::find(reorderedStorageEntryVec.begin(),
-                         reorderedStorageEntryVec.end(), storageEntry);
-    auto it2 = std::find(touchPipeScalarStorageEntryVec.begin(),
-                         touchPipeScalarStorageEntryVec.end(), storageEntry);
-    if (it1 == reorderedStorageEntryVec.end() &&
-        it2 == touchPipeScalarStorageEntryVec.end()) {
-      reorderedStorageEntryVec.push_back(storageEntry);
-    }
+  if (planMemoryStrategy == PlanMemoryStrategy::LARGEST_FIRST) {
+    auto storageEntryVecOrderCmp = [](StorageEntry *a, StorageEntry *b) {
+      return a->bufInfo->constBits > b->bufInfo->constBits;
+    };
+    llvm::sort(touchDmaStorageEntryVec.begin(), touchDmaStorageEntryVec.end(),
+               storageEntryVecOrderCmp);
+    llvm::sort(touchPipeScalarStorageEntryVec.begin(),
+               touchPipeScalarStorageEntryVec.end(), storageEntryVecOrderCmp);
+    llvm::sort(otherStorageEntryVec.begin(), otherStorageEntryVec.end(),
+               storageEntryVecOrderCmp);
   }
-
+  auto reorderedStorageEntryVec = memUniqueStorageEntryVec;
+  reorderedStorageEntryVec.insert(reorderedStorageEntryVec.end(),
+                                  touchDmaStorageEntryVec.begin(),
+                                  touchDmaStorageEntryVec.end());
+  reorderedStorageEntryVec.insert(reorderedStorageEntryVec.end(),
+                                  otherStorageEntryVec.begin(),
+                                  otherStorageEntryVec.end());
   reorderedStorageEntryVec.insert(reorderedStorageEntryVec.end(),
                                   touchPipeScalarStorageEntryVec.begin(),
                                   touchPipeScalarStorageEntryVec.end());
@@ -1824,8 +2070,8 @@ void MemPlan::ReorderContinuousFirstBufferOtherBufferEntry(
     SmallVector<StorageEntry *> &storageEntryVec) {
   SmallVector<StorageEntry *> reorderedStorageEntryVec;
   for (auto &storageEntry : storageEntryVec) {
-    auto it = std::find(reorderedStorageEntryVec.begin(),
-                        reorderedStorageEntryVec.end(), storageEntry);
+    auto *it = std::find(reorderedStorageEntryVec.begin(),
+                         reorderedStorageEntryVec.end(), storageEntry);
     if (it == reorderedStorageEntryVec.end()) {
       reorderedStorageEntryVec.push_back(storageEntry);
       // Add all relation entries for otherbuffer
@@ -1834,7 +2080,7 @@ void MemPlan::ReorderContinuousFirstBufferOtherBufferEntry(
         if (!relationEntry) {
           continue;
         }
-        auto relationIt =
+        auto *relationIt =
             std::find(reorderedStorageEntryVec.begin(),
                       reorderedStorageEntryVec.end(), relationEntry);
         if (relationIt == reorderedStorageEntryVec.end()) {
@@ -1957,7 +2203,7 @@ LogicalResult MemPlan::SpecAlloc(MemBoundList &outline, PlanRecHis &his,
       }
       LDBG("APPLY_SPEC_LEVEL:  " << localLevel << "\n");
       if (localLevel == SPEC_LEVEL_0) {
-        for (const auto &pair : stallPipelineInplacePairs) {
+        for ([[maybe_unused]] const auto &pair : stallPipelineInplacePairs) {
           LDBG("Store/Load inplace reuse buffer pair: " << pair.first << " and "
                                                         << pair.second << "\n");
         }
@@ -2000,7 +2246,7 @@ bool MemPlan::VerifyConflictStage1(
   if (outlineInfo.mem_start != outlineInfo.mem_end) {
     return true;
   }
-  auto reuseBoundStorageEntry = (*outlineInfo.mem_start)->lastStorageEntry;
+  auto *reuseBoundStorageEntry = (*outlineInfo.mem_start)->lastStorageEntry;
   if (!reuseBoundStorageEntry) {
     // This area has not been planed, so there is no need to consider it.
     return true;
@@ -2409,6 +2655,15 @@ bool MemPlan::IsSamePlanAsLastRollBack(uint64_t allocOffset, int curChildIdx,
 inline bool MemPlan::VerifyConflictStage0(
     StorageEntry *e, const std::shared_ptr<MemoryBound> &last,
     SmallVector<ValuePair> &stallPipelineInplacePairs) {
+  if (e->bufferLifeVec.empty() || last->bufferLifeVec.empty()) {
+    return false;
+  }
+  auto *bufferInfoIt1 = bufferInfos.find(e->bufferLifeVec[0]->buffer);
+  auto *bufferInfoIt2 = bufferInfos.find(last->bufferLifeVec[0]->buffer);
+  if (bufferInfoIt1->second.memoryUnique ||
+      bufferInfoIt2->second.memoryUnique) {
+    return true;
+  }
   // level_0: offset = 0, offset means life distance
   DenseMap<ValuePair, BufferLife> intersection =
       GetOverlapBufferLife(e->bufferLifeVec, last->bufferLifeVec);
@@ -2444,8 +2699,8 @@ bool MemPlan::IsInplacableBufferPairMatched(
   auto iter2 = buffer2storageEntry.find(conflictBuffer);
   assert(iter != buffer2storageEntry.end() &&
          iter2 != buffer2storageEntry.end());
-  auto storageEntry = iter->second;
-  auto conflictStorageEntry = iter2->second;
+  auto *storageEntry = iter->second;
+  auto *conflictStorageEntry = iter2->second;
   assert(storageEntry != nullptr && conflictStorageEntry != nullptr);
   for (const auto &inplaceBuffer : storageEntry->inplaceBuffers) {
     for (const auto &conflictInplaceBuffer :
@@ -2487,9 +2742,6 @@ MemPlan::GetOverlapBufferLife(const BufferLifeVec &b1,
   size_t j = 0;
   size_t b1Len = b1.size();
   size_t b2Len = b2.size();
-  if (b1Len == 0 || b2Len == 0) {
-    return intersection;
-  }
   while (i < b1Len && j < b2Len) {
     auto lo = std::max(b1[i]->allocTime, b2[j]->allocTime);
     auto hi = std::min(b1[i]->freeTime, b2[j]->freeTime);
@@ -2577,6 +2829,86 @@ void MemPlan::ReportAllocatedEntryDebugInfo(
 #endif
 }
 
+LogicalResult MemPlan::DynamicSetUbSpaceSize(
+    hacc::HACCTargetDeviceSpecInterface specInterface, func::FuncOp funcOp) {
+  auto aUBSize =
+      specInterface.getSpecForIdentifierEnum(hacc::DeviceSpec::UB_SIZE);
+  ubSpaceSize = cast<IntegerAttr>(aUBSize.getValue()).getInt();
+  if (!hacc::utils::isRegBasedArch(funcOp->getParentOfType<ModuleOp>())) {
+    return success();
+  }
+  if (const auto vfModeAttr =
+          funcOp->getAttrOfType<VFModeAttr>(VFModeAttr::name)) {
+    if (vfModeAttr.getValue() == VFMode::SIMT ||
+        vfModeAttr.getValue() == VFMode::MIX) {
+      constexpr int numBitsInByte = 8;
+      constexpr int numByteInKB = 1024;
+      auto simtVFUbSize = this->simtVFDynamicSize * numByteInKB * numBitsInByte;
+      auto minimalDCacheSize =
+          cast<IntegerAttr>(specInterface
+                                .getSpecForIdentifierEnum(
+                                    hacc::DeviceSpec::MINIMAL_D_CACHE_SIZE)
+                                .getValue())
+              .getInt();
+      auto maximumDCacheSize =
+          cast<IntegerAttr>(specInterface
+                                .getSpecForIdentifierEnum(
+                                    hacc::DeviceSpec::MAXIMUM_D_CACHE_SIZE)
+                                .getValue())
+              .getInt();
+      if (simtVFUbSize < (ubSpaceSize - maximumDCacheSize) ||
+          simtVFUbSize > (ubSpaceSize - minimalDCacheSize)) {
+        funcOp->emitError()
+            << "PlanMemory Fail : SimtVFDynamicSize have to in range ["
+            << (ubSpaceSize - maximumDCacheSize) / numByteInKB / numBitsInByte
+            << ", "
+            << (ubSpaceSize - minimalDCacheSize) / numByteInKB / numBitsInByte
+            << "], but got " << simtVFDynamicSize << "!";
+        return failure();
+      }
+      ubSpaceSize = simtVFUbSize;
+      return success();
+    }
+  }
+  return success();
+}
+
+LogicalResult MemPlan::InitMemSpecsFromModule(func::FuncOp funcOp) {
+  auto moduleOp = utils::getTopLevelModuleOp(funcOp);
+  auto maybeSpecInterface = hacc::utils::getNPUTargetSpec(moduleOp);
+  if (!maybeSpecInterface.has_value()) {
+    return failure();
+  }
+  auto specInterface = maybeSpecInterface.value();
+
+  if (failed(DynamicSetUbSpaceSize(specInterface, funcOp))) {
+    return failure();
+  }
+
+  auto aL1Size =
+      specInterface.getSpecForIdentifierEnum(hacc::DeviceSpec::L1_SIZE);
+  l1SpaceSize = cast<IntegerAttr>(aL1Size.getValue()).getInt();
+  auto aL0ASize =
+      specInterface.getSpecForIdentifierEnum(hacc::DeviceSpec::L0A_SIZE);
+  l0aSpaceSize = cast<IntegerAttr>(aL0ASize.getValue()).getInt();
+  auto aL0BSize =
+      specInterface.getSpecForIdentifierEnum(hacc::DeviceSpec::L0B_SIZE);
+  l0bSpaceSize = cast<IntegerAttr>(aL0BSize.getValue()).getInt();
+  auto aL0CSize =
+      specInterface.getSpecForIdentifierEnum(hacc::DeviceSpec::L0C_SIZE);
+  l0cSpaceSize = cast<IntegerAttr>(aL0CSize.getValue()).getInt();
+  auto aUBAlignSize =
+      specInterface.getSpecForIdentifierEnum(hacc::DeviceSpec::UB_ALIGN_SIZE);
+  ubAlignSize = cast<IntegerAttr>(aUBAlignSize.getValue()).getInt();
+  auto aL1AlignSize =
+      specInterface.getSpecForIdentifierEnum(hacc::DeviceSpec::L1_ALIGN_SIZE);
+  l1AlignSize = cast<IntegerAttr>(aL1AlignSize.getValue()).getInt();
+  auto aL0cAlignSize =
+      specInterface.getSpecForIdentifierEnum(hacc::DeviceSpec::L0C_ALIGN_SIZE);
+  l0cAlignSize = cast<IntegerAttr>(aL0cAlignSize.getValue()).getInt();
+  return success();
+}
+
 void MemPlan::RollBackForAllocFail(StatusWrapper &statusWrapper,
                                    const size_t maxBits) {
   while (ContinueRollBack(statusWrapper)) {
@@ -2659,208 +2991,71 @@ public:
   void runOnOperation() override;
 
 private:
-  void populateBufferAddressToAllocOp(
-      RewritePatternSet &patterns,
-      DenseMap<Value, SmallVector<uint64_t>> buffer2Offsets) {
+  void markTempBufForMemoryDisplay(func::FuncOp funcOp);
+  // Returning nullopt means that memory plan for funcOp failed
+  std::optional<DenseMap<Value, SmallVector<uint64_t>>>
+  planMemoryForFuncOp(func::FuncOp &funcOp,
+                      VFInplaceReuseAnalysis &vfInplaceReuseAnalysis);
+
+  void updateId2Offsets(func::FuncOp &funcOp,
+                        DenseMap<Value, SmallVector<uint64_t>> &buffer2Offsets,
+                        DenseMap<int32_t, SmallVector<uint64_t>> &id2Offsets);
+
+  void updateBuffer2OffsetsForFuncOp(
+      func::FuncOp &funcOp,
+      DenseMap<Value, SmallVector<uint64_t>> &buffer2Offsets,
+      DenseMap<int32_t, SmallVector<uint64_t>> &id2Offsets);
+
+  LogicalResult populateBufferAddressToAllocOp(
+      func::FuncOp &funcOp,
+      const DenseMap<Value, SmallVector<uint64_t>> &buffer2Offsets) {
     if (this->memMode == MemPlanMode::LOCAL_MEM_PLAN) {
-      patterns.add<MemrefAllocaOpToPointerCastOpPattern>(patterns.getContext(),
-                                                         buffer2Offsets);
-    } else {
-      assert(this->memMode == MemPlanMode::GLOBAL_WORKSPACE_PLAN);
-      patterns.add<UpdateWorkSpaceAllocaOpOffsetPattern>(patterns.getContext(),
-                                                         buffer2Offsets);
+      // Convert every memref.alloc into an hivm.hir.pointer_cast bound to its
+      // planned address(es).
+      return walkAllocToPointerCast(funcOp, buffer2Offsets);
     }
+    assert(this->memMode == MemPlanMode::GLOBAL_WORKSPACE_PLAN);
+    // Attach the planned offset(s) to every memref_ext.alloc_workspace.
+    return walkUpdateAllocWorkspaceOffset(funcOp, buffer2Offsets);
   }
   bool checkSimilarPointerCastOps(hivm::PointerCastOp op1,
                                   hivm::PointerCastOp op2) const;
-  LogicalResult fixMultibufferEnabledPointerCastOps(Operation *funcOp) const;
+  void fixMultibufferEnabledPointerCastOps(Operation *funcOp) const;
 };
 } // namespace
 
-bool PlanMemoryPass::checkSimilarPointerCastOps(hivm::PointerCastOp op1,
-                                                hivm::PointerCastOp op2) const {
-  return (op1->getNumResults() == op2->getNumResults() &&
-          llvm::equal(op1->getResultTypes(), op2->getResultTypes())) &&
-         (op1->getNumOperands() == op2->getNumOperands() &&
-          llvm::equal(op1->getOperands(), op2->getOperands()));
-}
-
-LogicalResult
-PlanMemoryPass::fixMultibufferEnabledPointerCastOps(Operation *funcOp) const {
-  llvm::MapVector<PointerCastOp, annotation::MarkOp> markedOps;
-
-  funcOp->walk<WalkOrder::PreOrder>([&](annotation::MarkOp markOp) {
-    auto attrDict = markOp->getAttrDictionary();
-    if (attrDict.contains(hivm::MultiBufferAttr::name)) {
-      if (auto pointerCastOp =
-              dyn_cast<hivm::PointerCastOp>(markOp.getSrc().getDefiningOp())) {
-        markedOps[pointerCastOp] = markOp;
-      }
-    }
-  });
-
-  for (auto [pointerCastOp, markedOp] : markedOps) {
-    auto loopOp = pointerCastOp->getParentOfType<LoopLikeOpInterface>();
-    if (!loopOp)
-      continue;
-    Block *targetBlock = nullptr;
-    if (auto forOp = dyn_cast<scf::ForOp>(loopOp.getOperation())) {
-      targetBlock = forOp.getBody();
-    } else if (auto whileOp = dyn_cast<scf::WhileOp>(loopOp.getOperation())) {
-      // scf.while body lives in the after region; the before region only runs
-      // the condition test, so hoisting pointer_cast there would evaluate it
-      // every guard check, breaking semantics.
-      targetBlock = &whileOp.getAfter().front();
-    } else {
-      continue;
-    }
-    pointerCastOp->moveBefore(&targetBlock->front());
-    markedOp->moveAfter(pointerCastOp);
-  }
-
-  std::vector<PointerCastOp> visitedOps;
-  funcOp->walk<WalkOrder::PreOrder>([&](hivm::PointerCastOp pointerCastOp) {
-    if (markedOps.contains(pointerCastOp)) {
-      visitedOps.push_back(pointerCastOp);
-    } else {
-      for (auto it = visitedOps.rbegin(); it != visitedOps.rend(); it++) {
-        if (!it->getOperation()->getParentOp()->isAncestor(pointerCastOp)) {
-          continue;
-        }
-        if (checkSimilarPointerCastOps(pointerCastOp, *it)) {
-          pointerCastOp.replaceAllUsesWith(it->getOperation());
-          break;
-        }
-      }
-    }
-  });
-
-  return llvm::success();
-}
-
-static void markTempBufForMemoryDisplay(func::FuncOp funcOp) {
-  funcOp.getBody().walk<WalkOrder::PreOrder>([&](Operation *op) {
-    if (auto extraBufferOp = dyn_cast_if_present<ExtraBufferOpInterface>(op)) {
-      for (auto value : extraBufferOp.getExtraBuffers()) {
-        auto maybeAlloc = utils::tracebackMemRefToAlloc(value);
-        if (maybeAlloc.has_value()) {
-          maybeAlloc.value()->setAttr(
-              "is_tmpbuf", mlir::BoolAttr::get(funcOp.getContext(), true));
-        }
-      }
-    }
-  });
-}
-
-void MemPlan::SetMemscope2rootSuccessStorageEntry() {
-  for (auto &it : memscope2rootStorageEntry) {
-    if (memscope2rootFailStorageEntry.find(it.first) ==
-        memscope2rootFailStorageEntry.end()) {
-      memscope2rootSuccessStorageEntry[it.first] = it.second;
-    }
-  }
-}
-
-//===----------------------------------------------------------------------===//
-// This file contains code from the LLVM Project.
-// Original License: Apache License v2.0 with LLVM Exceptions
-// Original Copyright: NA
-// Original Source:
-// https://github.com/llvm/llvm-project/blob/main/mlir/lib/Analysis/Liveness.cpp
-//===----------------------------------------------------------------------===//
-// Similar to Liveness::currentlyLiveValues but using SetVector instead of
-// ValueSetT=SmallPtrSet. Needed to make the pass output deterministic.
-mlir::SetVector<Value> MemLivenessAnalysis::currentlyLiveValuesOrdered(
-    const LivenessBlockInfo *livenessInfo, Operation *op) const {
-  mlir::SetVector<Value> liveSet;
-
-  // Given a value, check which ops are within its live range. For each of
-  // those ops, add the value to the set of live values as-of that op.
-  auto addValueToCurrentlyLiveSets = [&](Value value) {
-    // Determine the live range of this value inside this block.
-    Operation *startOfLiveRange = value.getDefiningOp();
-    Operation *endOfLiveRange = nullptr;
-    // If it's a live in or a block argument, then the start is the beginning
-    // of the block.
-    if (livenessInfo->isLiveIn(value) || isa<BlockArgument>(value))
-      startOfLiveRange = &livenessInfo->getBlock()->front();
-    else
-      startOfLiveRange =
-          livenessInfo->getBlock()->findAncestorOpInBlock(*startOfLiveRange);
-
-    // If it's a live out, then the end is the back of the block.
-    if (livenessInfo->isLiveOut(value))
-      endOfLiveRange = &livenessInfo->getBlock()->back();
-
-    // We must have at least a startOfLiveRange at this point. Given this, we
-    // can use the existing getEndOperation to find the end of the live range.
-    if (startOfLiveRange && !endOfLiveRange)
-      endOfLiveRange = livenessInfo->getEndOperation(value, startOfLiveRange);
-
-    assert(endOfLiveRange && "Must have endOfLiveRange at this point!");
-    // If this op is within the live range, insert the value into the set.
-    if (!(op->isBeforeInBlock(startOfLiveRange) ||
-          endOfLiveRange->isBeforeInBlock(op)))
-      liveSet.insert(value);
-  };
-
-  // Handle block arguments if any.
-  for (Value arg : livenessInfo->getBlock()->getArguments())
-    addValueToCurrentlyLiveSets(arg);
-
-  // Handle live-ins. Between the live ins and all the op results that gives us
-  // every value in the block.
-  for (Value in : livenessInfo->in())
-    addValueToCurrentlyLiveSets(in);
-
-  // Now walk the block and handle all values used in the block and values
-  // defined by the block.
-  for (Operation &walkOp :
-       llvm::make_range(livenessInfo->getBlock()->begin(), ++op->getIterator()))
-    for (auto result : walkOp.getResults())
-      addValueToCurrentlyLiveSets(result);
-
-  return liveSet;
-}
-
-void PlanMemoryPass::runOnOperation() {
-  auto funcOp = getOperation();
-  if (hacc::utils::isHost(funcOp))
-    return;
-
-  if (this->memMode == MemPlanMode::LOCAL_MEM_PLAN) {
-    RewritePatternSet normalizeLoopIterPatterns(&getContext());
-    populateNormalizeLoopIneratorPattern(normalizeLoopIterPatterns);
-    if (failed(applyPatternsGreedily(funcOp,
-                                     std::move(normalizeLoopIterPatterns)))) {
-      return signalPassFailure();
-    }
-  }
-
+std::optional<DenseMap<Value, SmallVector<uint64_t>>>
+PlanMemoryPass::planMemoryForFuncOp(
+    func::FuncOp &funcOp, VFInplaceReuseAnalysis &vfInplaceReuseAnalysis) {
   // Add a attr to the memref alloc for the tempbuf.
   if (this->enableMemoryDisplay) {
     markTempBufForMemoryDisplay(funcOp);
   }
 
   constexpr int kPlanRetryCount = 20;
-  DenseMap<Value, SmallVector<uint64_t>> plannedBuffer2Offsets;
 
-  // The current plan-memory algorithm is sensitive to the order in which some
-  // candidate buffers are considered. We retry planning with different
-  // deterministic shuffle seeds to improve the chance of finding a valid plan
-  // without making the pass behavior non-reproducible.
-  // TODO: Remove the retry loop once the plan-memory algorithm is improved to
-  // produce a stable valid plan in a single attempt.
+  // The current plan-memory algorithm is sensitive to the order in which
+  // some candidate buffers are considered. We retry planning with different
+  // deterministic shuffle seeds to improve the chance of finding a valid
+  // plan without making the pass behavior non-reproducible.
+  // TODO: Remove the retry loop once the plan-memory algorithm is improved
+  // to produce a stable valid plan in a single attempt.
   for (int attempt = 0; attempt < kPlanRetryCount; ++attempt) {
     LDBG("Memory planning attempt " << attempt + 1 << "/" << kPlanRetryCount
                                     << "\n");
 
     MemLivenessAnalysis memLiveness(funcOp, this->memMode,
+                                    this->disableTightlyCoupledBufferReuse,
                                     /*randomSeed=*/attempt);
     memLiveness.build();
 
     MemPlan memPlan(this->memMode, this->enableGlobalReuse,
-                    this->enableMemoryDisplay, this->restrictInplaceAsISA);
+                    this->enableMemoryDisplay, this->restrictInplaceAsISA,
+                    this->simtVFDynamicSize, this->disableVFReachableCheck,
+                    this->planMemoryStrategy);
+    if (failed(memPlan.InitMemSpecsFromModule(funcOp))) {
+      return std::nullopt;
+    }
     memPlan.func_ = funcOp;
     memPlan.SetLinearOperation(memLiveness.linearOperation);
     memPlan.SetBufferInfos(memLiveness.bufferInfos);
@@ -2868,10 +3063,11 @@ void PlanMemoryPass::runOnOperation() {
     memPlan.SetGenKillMap(memLiveness.genKillMap);
     memPlan.SetBuffer2MultiNum(memLiveness.buffer2MultiNum);
     memPlan.SetInplacePairList(memLiveness.inplacePairList);
+    memPlan.SetVFInplaceReuseInfo(
+        vfInplaceReuseAnalysis.getVFCallInplaceReuseInfo(funcOp));
 
     const bool isLastAttempt = attempt == kPlanRetryCount - 1;
     if (succeeded(memPlan.plan(/*emitErrors=*/isLastAttempt))) {
-      plannedBuffer2Offsets = memPlan.GetBuffer2Offsets();
       if (this->enablePrintMemoryAllocatedSize) {
         auto storageEntries = memPlan.GetMemscope2rootStorageEntry();
         auto ubIt = storageEntries.find(hivm::AddressSpace::UB);
@@ -2895,36 +3091,200 @@ void PlanMemoryPass::runOnOperation() {
             memPlan.GetBuffer2Offsets(), memPlan.errorInfo, false);
         createJsonForMemoryDisplay(funcOp, memoryDisplayInfoList);
       }
-      break;
+      return memPlan.GetBuffer2Offsets();
     }
 
-    if (isLastAttempt) {
-      if (memPlan.enableMemoryDisplay) {
-        SmallVector<MemoryDisplayInfo> memoryDisplayInfoList;
-        // Collect plan fail memory info for memory display tools.
-        collectMemoryInfoForDebug(
-            memoryDisplayInfoList, memPlan.GetMemscope2rootFailStorageEntry(),
-            memPlan.GetBuffer2Offsets(), memPlan.errorInfo, true);
-        memPlan.SetMemscope2rootSuccessStorageEntry();
-        // Collect plan success memory info for memory display tools.
-        collectMemoryInfoForDebug(memoryDisplayInfoList,
-                                  memPlan.GetMemscope2rootSuccessStorageEntry(),
-                                  memPlan.GetBuffer2Offsets(),
-                                  memPlan.errorInfo, false);
-        createJsonForMemoryDisplay(funcOp, memoryDisplayInfoList);
+    if (isLastAttempt && memPlan.enableMemoryDisplay) {
+      SmallVector<MemoryDisplayInfo> memoryDisplayInfoList;
+      // Collect plan fail memory info for memory display tools.
+      collectMemoryInfoForDebug(
+          memoryDisplayInfoList, memPlan.GetMemscope2rootFailStorageEntry(),
+          memPlan.GetBuffer2Offsets(), memPlan.errorInfo, true);
+      memPlan.SetMemscope2rootSuccessStorageEntry();
+      // Collect plan success memory info for memory display tools.
+      collectMemoryInfoForDebug(
+          memoryDisplayInfoList, memPlan.GetMemscope2rootSuccessStorageEntry(),
+          memPlan.GetBuffer2Offsets(), memPlan.errorInfo, false);
+      createJsonForMemoryDisplay(funcOp, memoryDisplayInfoList);
+    }
+  }
+  return std::nullopt;
+}
+
+void PlanMemoryPass::updateId2Offsets(
+    func::FuncOp &funcOp,
+    DenseMap<Value, SmallVector<uint64_t>> &buffer2Offsets,
+    DenseMap<int32_t, SmallVector<uint64_t>> &id2Offsets) {
+  auto funcType = queryFuncCoreType(funcOp);
+
+  funcOp->walk([&](annotation::MarkOp markOp) {
+    int32_t cvMixId;
+    auto maybeAlloc = getCVMixIdAndAllocOpFromMarkOp(markOp, cvMixId);
+    if (!maybeAlloc.has_value()) {
+      return WalkResult::advance();
+    }
+    auto allocOpTypeValue = maybeAlloc.value().getResult();
+    auto addressSpace = getHIVMAddressSpace(allocOpTypeValue.getType());
+    if ((funcType == TFuncCoreType::AIV && addressSpace == AddressSpace::UB) ||
+        (funcType == TFuncCoreType::AIC && addressSpace == AddressSpace::L1)) {
+      id2Offsets[cvMixId] = buffer2Offsets[allocOpTypeValue];
+      LDBG("id2Offsets add key: " << cvMixId << " vector_size: "
+                                  << id2Offsets[cvMixId].size() << "\n");
+    }
+    return WalkResult::advance();
+  });
+}
+
+void PlanMemoryPass::updateBuffer2OffsetsForFuncOp(
+    func::FuncOp &funcOp,
+    DenseMap<Value, SmallVector<uint64_t>> &buffer2Offsets,
+    DenseMap<int32_t, SmallVector<uint64_t>> &id2Offsets) {
+  auto funcType = queryFuncCoreType(funcOp);
+
+  funcOp->walk([&](annotation::MarkOp markOp) {
+    int32_t cvMixId;
+    auto maybeAlloc = getCVMixIdAndAllocOpFromMarkOp(markOp, cvMixId);
+    if (!maybeAlloc.has_value()) {
+      return WalkResult::advance();
+    }
+    auto allocOpTypeValue = maybeAlloc.value().getResult();
+    auto addressSpace = getHIVMAddressSpace(allocOpTypeValue.getType());
+    if ((funcType == TFuncCoreType::AIC && addressSpace == AddressSpace::UB) ||
+        (funcType == TFuncCoreType::AIV && addressSpace == AddressSpace::L1)) {
+      buffer2Offsets[allocOpTypeValue] = id2Offsets[cvMixId];
+      LDBG("id2Offsets use key: " << cvMixId << " vector_size: "
+                                  << id2Offsets[cvMixId].size() << "\n");
+    }
+    return WalkResult::advance();
+  });
+}
+
+bool PlanMemoryPass::checkSimilarPointerCastOps(hivm::PointerCastOp op1,
+                                                hivm::PointerCastOp op2) const {
+  return (op1->getNumResults() == op2->getNumResults() &&
+          llvm::equal(op1->getResultTypes(), op2->getResultTypes())) &&
+         (op1->getNumOperands() == op2->getNumOperands() &&
+          llvm::equal(op1->getOperands(), op2->getOperands()));
+}
+
+void PlanMemoryPass::fixMultibufferEnabledPointerCastOps(
+    Operation *funcOp) const {
+  llvm::MapVector<PointerCastOp, annotation::MarkOp> markedOps;
+
+  funcOp->walk<WalkOrder::PreOrder>([&](annotation::MarkOp markOp) {
+    auto attrDict = markOp->getAttrDictionary();
+    if (attrDict.contains(hivm::MultiBufferAttr::name)) {
+      if (auto pointerCastOp =
+              dyn_cast<hivm::PointerCastOp>(markOp.getSrc().getDefiningOp())) {
+        markedOps[pointerCastOp] = markOp;
       }
-      return signalPassFailure();
+    }
+  });
+
+  for (auto [pointerCastOp, markedOp] : markedOps) {
+    auto loopOp = pointerCastOp->getParentOfType<LoopLikeOpInterface>();
+    if (!loopOp)
+      continue;
+    Block *targetBlock = nullptr;
+    if (auto forOp = dyn_cast<scf::ForOp>(loopOp.getOperation())) {
+      targetBlock = forOp.getBody();
+    } else if (auto whileOp = dyn_cast<scf::WhileOp>(loopOp.getOperation())) {
+      // Hoist within the while region that already owns the pointer_cast.
+      // Moving a before-region cast into after (or vice versa) breaks dominance
+      // for uses that stay in the original region.
+      if (whileOp.getAfter().isAncestor(pointerCastOp->getParentRegion())) {
+        targetBlock = whileOp.getAfterBody();
+      } else {
+        targetBlock = whileOp.getBeforeBody();
+      }
+    } else {
+      llvm::report_fatal_error("Unsupported loop parent for pointer cast op "
+                               "with multibuffer attribute");
+    }
+    pointerCastOp->moveBefore(&targetBlock->front());
+    markedOp->moveAfter(pointerCastOp);
+  }
+
+  std::vector<PointerCastOp> visitedOps;
+  funcOp->walk<WalkOrder::PreOrder>([&](hivm::PointerCastOp pointerCastOp) {
+    if (markedOps.contains(pointerCastOp)) {
+      visitedOps.push_back(pointerCastOp);
+    } else {
+      for (auto it = visitedOps.rbegin(); it != visitedOps.rend(); it++) {
+        if (!it->getOperation()->getParentOp()->isAncestor(pointerCastOp)) {
+          continue;
+        }
+        if (checkSimilarPointerCastOps(pointerCastOp, *it)) {
+          pointerCastOp.replaceAllUsesWith(it->getOperation());
+          break;
+        }
+      }
+    }
+  });
+}
+
+void PlanMemoryPass::markTempBufForMemoryDisplay(func::FuncOp funcOp) {
+  funcOp.getBody().walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (auto extraBufferOp = dyn_cast_if_present<ExtraBufferOpInterface>(op)) {
+      for (auto value : extraBufferOp.getExtraBuffers()) {
+        auto maybeAlloc = utils::tracebackMemRefToAlloc(value);
+        if (maybeAlloc.has_value()) {
+          maybeAlloc.value()->setAttr(
+              "is_tmpbuf", mlir::BoolAttr::get(funcOp.getContext(), true));
+        }
+      }
+    }
+  });
+}
+
+void MemPlan::SetMemscope2rootSuccessStorageEntry() {
+  for (auto &it : memscope2rootStorageEntry) {
+    if (memscope2rootFailStorageEntry.find(it.first) ==
+        memscope2rootFailStorageEntry.end()) {
+      memscope2rootSuccessStorageEntry[it.first] = it.second;
     }
   }
+}
 
-  RewritePatternSet patterns(&getContext());
-  populateBufferAddressToAllocOp(patterns, plannedBuffer2Offsets);
-  if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
-    return signalPassFailure();
-  }
+void PlanMemoryPass::runOnOperation() {
+  ModuleOp moduleOp = getOperation();
+  VFInplaceReuseAnalysis vfInplaceReuseAnalysis(moduleOp);
+  // Map all funcs to buffer2Offsets obtained in PlanMemoryForFuncOp,
+  // because in the second walk, buffer2Offset is needed to populate
+  // bufferAddress to allocOp.
+  DenseMap<func::FuncOp, DenseMap<Value, SmallVector<uint64_t>>>
+      buffer2OffsetMap;
+  // map cvMixId to the address will be used in both aic and aiv.
+  DenseMap<int32_t, SmallVector<uint64_t>> id2Offsets;
+  // planMem for variables and update Id2Offsets.
+  for (auto funcOp : moduleOp.getOps<func::FuncOp>()) {
+    if (hacc::utils::isHost(funcOp))
+      continue;
+    if (hivm::isVF(funcOp))
+      continue;
+    LDBG("\n-----funcOp " << funcOp.getName() << " mem plan start !! -----\n");
+    auto plannedBuffer2Offsets =
+        planMemoryForFuncOp(funcOp, vfInplaceReuseAnalysis);
+    if (plannedBuffer2Offsets.has_value()) {
+      buffer2OffsetMap[funcOp] = plannedBuffer2Offsets.value();
+    } else {
+      signalPassFailure();
+      return;
+    }
+    LDBG("\n-----------------Update Id2Offsets start !! ------------------\n");
+    updateId2Offsets(funcOp, plannedBuffer2Offsets.value(), id2Offsets);
+  };
 
-  if (failed(fixMultibufferEnabledPointerCastOps(funcOp))) {
-    return signalPassFailure();
+  // Update buffer2Offsets and populate bufferAddress to allocOp.
+  LDBG("\n----------------Second traversal of func !! --------------------\n");
+  for (auto [funcOp, buffer2Offsets] : buffer2OffsetMap) {
+    LDBG("\n------------funcOp : " << funcOp.getName() << "---------------\n");
+    updateBuffer2OffsetsForFuncOp(funcOp, buffer2Offsets, id2Offsets);
+    if (failed(populateBufferAddressToAllocOp(funcOp, buffer2Offsets))) {
+      signalPassFailure();
+      return;
+    }
+    fixMultibufferEnabledPointerCastOps(funcOp);
   }
 }
 

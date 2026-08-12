@@ -355,8 +355,13 @@ markWorkspaceOps(Operation *op,
     if (!alloc)
       return success();
 
+    unsigned expectedUsers = 1;
+    for (Operation *user : alloc.getResult().getUsers()) {
+      if (isa<annotation::MarkOp>(user))
+        expectedUsers++;
+    }
     if (!toTensor.getResult().hasOneUse() ||
-        llvm::range_size(alloc.getResult().getUsers()) != 2)
+        llvm::range_size(alloc.getResult().getUsers()) != expectedUsers)
       return alloc->emitWarning(
           "Expecting alloc_workspace and its tensor to only have one user "
           "(excluding annotation.mark)");
@@ -413,13 +418,14 @@ void WorklistBuilder::warnHintOverride(Value v) {
   if (!warnedOverrideMarks.insert(mark).second)
     return;
 
-  // Prefer printing on the LoadOp for source-location clarity: it's the op
-  // that would have been cloned across stages had the hint not vetoed it.
+  // Prefer printing on the load-like writer for source-location clarity:
+  // it's the op that would have been cloned across stages had the hint not
+  // vetoed it.
   Operation *warnTarget = mark.getOperation();
   if (auto tt = dyn_cast_or_null<bufferization::ToTensorOp>(v.getDefiningOp()))
     if (auto it = outputMemrefMap.find(tt); it != outputMemrefMap.end())
-      if (auto load = dyn_cast<LoadOp>(it->second.getOperation()))
-        warnTarget = load.getOperation();
+      if (isLoadLikeOp(it->second.getOperation()))
+        warnTarget = it->second.getOperation();
 
   auto diag = warnTarget->emitWarning()
               << "[cv-pipelining] " << CVPipelineLazyLoadAttrName
@@ -441,8 +447,8 @@ void WorklistBuilder::warnHintIgnoredForCrossCore(Value v) {
   Operation *warnTarget = mark;
   if (auto tt = dyn_cast_or_null<bufferization::ToTensorOp>(v.getDefiningOp()))
     if (auto it = outputMemrefMap.find(tt); it != outputMemrefMap.end())
-      if (auto load = dyn_cast<LoadOp>(it->second.getOperation()))
-        warnTarget = load;
+      if (isLoadLikeOp(it->second.getOperation()))
+        warnTarget = it->second.getOperation();
 
   auto diag = warnTarget->emitWarning()
               << "[cv-pipelining] " << CVPipelineLazyLoadAttrName
@@ -494,13 +500,14 @@ void WorklistBuilder::diagnoseLazyLoadHints() {
       continue;
     }
 
-    // (3) The to_tensor must be backed by a `hivm.hir.load`.
+    // (3) The to_tensor must be backed by a load-like writer.
     auto it = outputMemrefMap.find(tt);
     if (it == outputMemrefMap.end() ||
-        !isa<LoadOp>(it->second.getOperation())) {
+        !isLoadLikeOp(it->second.getOperation())) {
       probe->emitWarning()
           << "[cv-pipelining] `" << CVPipelineLazyLoadAttrName
-          << "` hint is ignored: tensor is not backed by `hivm.hir.load`";
+          << "` hint is ignored: tensor is not backed by a load-like op "
+             "(`hivm.hir.load` or `hivm.hir.nd2nz`)";
       continue;
     }
   }
@@ -576,23 +583,23 @@ FailureOr<bool> WorklistBuilder::shouldLazyLoadFor(Operation *op) {
     auto it = outputMemrefMap.find(asTT);
     if (it == outputMemrefMap.end())
       return false;
-    if (!isa<LoadOp>(it->second.getOperation()))
+    if (!isLoadLikeOp(it->second.getOperation()))
       return false;
     tt = asTT;
-  } else if (auto load = dyn_cast<LoadOp>(op)) {
+  } else if (isLoadLikeOp(op)) {
     for (auto &kv : outputMemrefMap) {
-      if (kv.second.getOperation() == load.getOperation()) {
+      if (kv.second.getOperation() == op) {
         tt = kv.first;
         break;
       }
     }
     if (!tt) {
-      // No backing to_tensor; the load is tensor-form or otherwise opaque
-      // to outputMemrefMap.  Still auto-enable lazy load when the load's
-      // own tensor result has consumers on both cores.
-      if (load->getNumResults() > 0 &&
-          isa<TensorType>(load->getResult(0).getType())) {
-        FailureOr<bool> crossCore = isCrossCoreLoad(load->getResult(0));
+      // No backing to_tensor; the load-like op is tensor-form or otherwise
+      // opaque to outputMemrefMap. Still auto-enable lazy load when its own
+      // tensor result has consumers on both cores.
+      if (op->getNumResults() > 0 &&
+          isa<TensorType>(op->getResult(0).getType())) {
+        FailureOr<bool> crossCore = isCrossCoreLoad(op->getResult(0));
         if (failed(crossCore))
           return failure();
         if (*crossCore)
@@ -895,7 +902,7 @@ LogicalResult WorklistBuilder::traceDependentOps(WorkItem &item) {
         // don't include it here
         if (!item.ops.contains(op)) {
           // With lazy loading (kernel-level switch, per-tensor compile
-          // hint, or auto cross-core legality), allow Load ops to be
+          // hint, or auto cross-core legality), allow load-like ops to be
           // cloned into multiple work items so each stage loads
           // independently from GM.
           if (!isLoadLikeOp(op))
@@ -927,8 +934,8 @@ LogicalResult WorklistBuilder::traceDependentOps(WorkItem &item) {
     // Determine whether a to_tensor should be skipped because it has already
     // been allocated to another work item.  The default guard fires for all
     // to_tensor ops, but with lazy loading we lift the restriction for
-    // to_tensor ops whose backing writer is a LoadOp: those are cloned into
-    // every consuming work item independently.  Lazy loading can be enabled
+    // to_tensor ops whose backing writer is load-like: those are cloned into
+    // every consuming work item independently. Lazy loading can be enabled
     // either by the kernel-level switch or by a per-tensor compile hint
     // (annotation.mark on the tensor result).
     bool skipToTensor =
@@ -1379,6 +1386,13 @@ FailureOr<WorklistBuildResult> WorklistBuilder::build() {
       if (failed(markWorkspaceOps(&op, workspaceAllocs, numMultibuffer)))
         return failure();
     }
+    SmallVector<bishengir::memref_ext::AllocWorkspaceOp> incomplete;
+    for (auto &[alloc, info] : workspaceAllocs) {
+      if (!info.marker)
+        incomplete.push_back(alloc);
+    }
+    for (auto alloc : incomplete)
+      workspaceAllocs.erase(alloc);
   }
 
   // Return COPIES rather than moves: post-build consumers (e.g. CVPipelining

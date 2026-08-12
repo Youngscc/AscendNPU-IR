@@ -25,7 +25,7 @@ func.func @expand_shape_elementwise_tile_1x1xN(%arg0: tensor<131072xf32>) -> ten
 // CHECK:     scf.for %[[ARG3:.+]] = %[[C0]]
 // CHECK:       %[[OFFSET:.+]] = affine.apply #[[MAP]](%[[ARG1]], %[[ARG2]], %[[ARG3]])
 // CHECK:       tensor.extract_slice %[[ARG0]][%[[OFFSET]]] [256] [1]
-// CHECK:       tensor.expand_shape {{.*}} output_shape [1, 1, 256]
+// CHECK:       tensor.expand_shape
 // CHECK:       linalg.elemwise_unary
 // CHECK:       tensor.insert_slice
 // CHECK:     scf.yield

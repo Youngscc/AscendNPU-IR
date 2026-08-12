@@ -151,19 +151,19 @@ func.func @test_hivm_reinterpret_cast() {
 // CHECK-LABEL: func.func @test_load_pad_fold
 func.func @test_load_pad_fold(%arg0 : tensor<1x1x2047xf32>) -> tensor<4093xf32> {
     //CHECK-DAG: %[[cst_0:.*]] = arith.constant 0.000000e+00 : f32
-    //CHECK-DAG: %[[cst_2046:.*]] = arith.constant 2046 : index
-    //CHECK-DAG: %[[cst_0i:.*]] = arith.constant 0 : index
+    //CHECK-DAG: %[[cst_1020:.*]] = arith.constant 1020 : index
+    //CHECK-DAG: %[[cst_1026:.*]] = arith.constant 1026 : index
     //CHECK-DAG: %[[source:.*]] = tensor.collapse_shape {{.*}}
     //CHECK-DAG: %[[empty:.*]] = tensor.empty() : tensor<4093xf32>
-    //CHECK-DAG: %[[padload:.*]] = hivm.hir.load ins(%[[source]] : tensor<2047xf32>) outs(%[[empty]] : tensor<4093xf32>) pad_mode = <PadValue> pad_value = %[[cst_0]]  : f32 left_padding_num = %[[cst_2046]]  : index right_padding_num = %[[cst_0i]] : index -> tensor<4093xf32>
+    //CHECK-DAG: %[[padload:.*]] = hivm.hir.load ins(%[[source]] : tensor<2047xf32>) outs(%[[empty]] : tensor<4093xf32>) pad_mode = <PadValue> pad_value = %[[cst_0]]  : f32 left_padding_num = %[[cst_1020]]  : index right_padding_num = %[[cst_1026]]  : index -> tensor<4093xf32>
     //CHECK: return %[[padload]] : tensor<4093xf32>
-    %right = arith.constant 0 : index
+    %right = arith.constant 1026 : index
     %cst = arith.constant 0.000000e+00 : f32
     %0 = tensor.empty() : tensor<2047xf32>
     %collapsed = tensor.collapse_shape %arg0 [[0, 1, 2]] : tensor<1x1x2047xf32> into tensor<2047xf32>
     %1 = hivm.hir.load ins(%collapsed : tensor<2047xf32>) outs(%0 : tensor<2047xf32>) -> tensor<2047xf32>
     %3 = tensor.empty() : tensor<4093xf32>
-    %padded = hivm.hir.vpad ins(%1 : tensor<2047xf32>) outs(%3 : tensor<4093xf32>) low[2046] high[%right] pad_value %cst : f32 -> tensor<4093xf32>
+    %padded = hivm.hir.vpad ins(%1 : tensor<2047xf32>) outs(%3 : tensor<4093xf32>) low[1020] high[%right] pad_value %cst : f32 -> tensor<4093xf32>
     return %padded : tensor<4093xf32>
 }
 
@@ -191,19 +191,19 @@ func.func @test_load_pad_one_side(%arg0 : tensor<1x1x2047xf32>) -> tensor<4093xf
 //CHECK-LABEL: func.func @test_load_pad_left_dynamic_right_static
 func.func @test_load_pad_left_dynamic_right_static(%arg0 : tensor<1x1x2047xf32>) -> tensor<4093xf32> {
   //CHECK-DAG: %[[cst_0:.*]] = arith.constant 0.000000e+00 : f32
-  //CHECK-DAG: %[[cst_2046:.*]] = arith.constant 2046 : index
-  //CHECK-DAG: %[[cst_0i:.*]] = arith.constant 0 : index
+  //CHECK-DAG: %[[cst_1020:.*]] = arith.constant 1020 : index
+  //CHECK-DAG: %[[cst_1026:.*]] = arith.constant 1026 : index
   //CHECK-DAG: %[[source:.*]] = tensor.collapse_shape {{.*}}
   //CHECK-DAG: %[[empty:.*]] = tensor.empty() : tensor<4093xf32>
-  //CHECK-DAG: %[[padload:.*]] = hivm.hir.load ins(%[[source]] : tensor<2047xf32>) outs(%[[empty]] : tensor<4093xf32>) pad_mode = <PadValue> pad_value = %[[cst_0]]  : f32 left_padding_num = %[[cst_0i]]  : index right_padding_num = %[[cst_2046]]  : index -> tensor<4093xf32>
+  //CHECK-DAG: %[[padload:.*]] = hivm.hir.load ins(%[[source]] : tensor<2047xf32>) outs(%[[empty]] : tensor<4093xf32>) pad_mode = <PadValue> pad_value = %[[cst_0]]  : f32 left_padding_num = %[[cst_1020]]  : index right_padding_num = %[[cst_1026]]  : index -> tensor<4093xf32>
   //CHECK: return %[[padload]] : tensor<4093xf32>
-  %left = arith.constant 0 : index
+  %left = arith.constant 1020 : index
   %cst = arith.constant 0.000000e+00 : f32
   %src  = tensor.empty() : tensor<2047xf32>
   %collapsed = tensor.collapse_shape %arg0 [[0,1,2]] : tensor<1x1x2047xf32> into tensor<2047xf32>
   %load  = hivm.hir.load ins(%collapsed : tensor<2047xf32>) outs(%src : tensor<2047xf32>) -> tensor<2047xf32>
   %out   = tensor.empty() : tensor<4093xf32>
-  %padded = hivm.hir.vpad ins(%load : tensor<2047xf32>) outs(%out : tensor<4093xf32>) low[%left] high[2046] pad_value %cst : f32 -> tensor<4093xf32>
+  %padded = hivm.hir.vpad ins(%load : tensor<2047xf32>) outs(%out : tensor<4093xf32>) low[%left] high[1026] pad_value %cst : f32 -> tensor<4093xf32>
   return %padded : tensor<4093xf32>
 }
 
@@ -234,10 +234,9 @@ return %padded : tensor<4093xf32>
 // CHECK-LABEL: func.func @test_load_pad_zero_cases
 func.func @test_load_pad_zero_cases(%arg0 : tensor<1x1x2047xf32>) -> tensor<4093xf32> {
 // CHECK-DAG: %[[cst_0:.*]] = arith.constant 0.000000e+00 : f32
-// CHECK-DAG: %[[pad_i:.*]] = arith.constant 0 : index
 // CHECK-DAG: %[[source:.*]] = tensor.collapse_shape {{.*}}
 // CHECK-DAG: %[[empty:.*]] = tensor.empty() : tensor<4093xf32>
-// CHECK-DAG: %[[padload:.*]] = hivm.hir.load ins(%[[source]] : tensor<2047xf32>) outs(%[[empty]] : tensor<4093xf32>) pad_mode = <PadValue> pad_value = %[[cst_0]] : f32 left_padding_num = %[[pad_i]] : index right_padding_num = %[[pad_i]] : index -> tensor<4093xf32>
+// CHECK-DAG: %[[padload:.*]] = hivm.hir.load ins(%[[source]] : tensor<2047xf32>) outs(%[[empty]] : tensor<4093xf32>) pad_mode = <PadValue> pad_value = %[[cst_0]] : f32 -> tensor<4093xf32>
 // CHECK: return %[[padload]] : tensor<4093xf32>
 %cst_f = arith.constant 0.000000e+00 : f32          
 %right_dyn = arith.constant 0 : index             
@@ -537,6 +536,25 @@ func.func @keep_hivm_debug_assert_nonconst(%cond: i1) {
 
 // -----
 
+// VSort canonicalization: when sort_axis points to a dimension of size 1 and
+// src/dst have identical layouts, the vsort is redundant (sorting 1 element is
+// a no-op). It should be replaced by a CopyOp (buffer) or src (tensor).
+
+// CHECK-LABEL: func.func @test_vsort_sort_axis_1_dim_size_1_memref
+// CHECK: (%[[SRC:.*]]: memref<23x1xf32, strided<[32, 1]>, #hivm.address_space<ub>>, %[[DST:.*]]: memref<23x1xf32, strided<[32, 1]>, #hivm.address_space<ub>>)
+// CHECK: hivm.hir.copy ins(%[[SRC]] : memref<23x1xf32, strided<[32, 1]>, #hivm.address_space<ub>>) outs(%[[DST]] : memref<23x1xf32, strided<[32, 1]>, #hivm.address_space<ub>>)
+// CHECK-NOT: hivm.hir.vsort
+func.func @test_vsort_sort_axis_1_dim_size_1_memref(
+    %arg0 : memref<23x1xf32, strided<[32, 1]>, #hivm.address_space<ub>>,
+    %arg1 : memref<23x1xf32, strided<[32, 1]>, #hivm.address_space<ub>>) {
+  hivm.hir.vsort ins(%arg0 : memref<23x1xf32, strided<[32, 1]>, #hivm.address_space<ub>>)
+                  outs(%arg1 : memref<23x1xf32, strided<[32, 1]>, #hivm.address_space<ub>>)
+                  descending = true sort_axis = 1
+  return
+}
+
+// -----
+
 // Constant i1 on a print debug must not be removed.
 // CHECK-LABEL: func.func @keep_hivm_debug_print_const_i1
 // CHECK: hivm.hir.debug {debugtype = "print"
@@ -545,3 +563,109 @@ func.func @keep_hivm_debug_print_const_i1() {
   hivm.hir.debug {debugtype = "print", hex = false, prefix = "", tcoretype = #hivm.tcore_type<CUBE_OR_VECTOR>} %true : i1
   return
 }
+
+// -----
+
+// CHECK-LABEL: func.func @test_vsort_sort_axis_1_dim_size_1_tensor
+// CHECK-NOT: hivm.hir.vsort
+// CHECK: return %[[ARG0:.*]]
+func.func @test_vsort_sort_axis_1_dim_size_1_tensor(
+    %arg0 : tensor<23x1xf32>,
+    %arg1 : tensor<23x1xf32>) -> tensor<23x1xf32> {
+  %0 = hivm.hir.vsort ins(%arg0 : tensor<23x1xf32>)
+                       outs(%arg1 : tensor<23x1xf32>)
+                       descending = true sort_axis = 1 -> tensor<23x1xf32>
+  return %0 : tensor<23x1xf32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_vsort_sort_axis_neg1_dim_size_1_tensor
+// CHECK-NOT: hivm.hir.vsort
+// CHECK: return %[[ARG0:.*]]
+func.func @test_vsort_sort_axis_neg1_dim_size_1_tensor(
+    %arg0 : tensor<1x1xf32>,
+    %arg1 : tensor<1x1xf32>) -> tensor<1x1xf32> {
+  %0 = hivm.hir.vsort ins(%arg0 : tensor<1x1xf32>)
+                       outs(%arg1 : tensor<1x1xf32>)
+                       descending = false sort_axis = -1 -> tensor<1x1xf32>
+  return %0 : tensor<1x1xf32>
+}
+
+// -----
+
+// VSort should NOT be eliminated when sort_axis points to a non-1-sized dimension
+// CHECK-LABEL: func.func @test_vsort_sort_axis_non_one_dim
+// CHECK: hivm.hir.vsort
+func.func @test_vsort_sort_axis_non_one_dim(
+    %arg0 : memref<23x4xf32, #hivm.address_space<ub>>,
+    %arg1 : memref<23x4xf32, #hivm.address_space<ub>>) {
+  hivm.hir.vsort ins(%arg0 : memref<23x4xf32, #hivm.address_space<ub>>)
+                  outs(%arg1 : memref<23x4xf32, #hivm.address_space<ub>>)
+                  descending = true sort_axis = 1
+  return
+}
+
+// -----
+
+// VSort should NOT be eliminated when dst has an index output (sort with index)
+// CHECK-LABEL: func.func @test_vsort_with_index
+// CHECK: hivm.hir.vsort
+func.func @test_vsort_with_index(
+    %arg0 : memref<23x1xf32, strided<[32, 1]>, #hivm.address_space<ub>>,
+    %arg1 : memref<23x1xf32, strided<[32, 1]>, #hivm.address_space<ub>>,
+    %arg2 : memref<23x1xi32, strided<[32, 1]>, #hivm.address_space<ub>>) {
+  hivm.hir.vsort ins(%arg0 : memref<23x1xf32, strided<[32, 1]>, #hivm.address_space<ub>>)
+                  outs(%arg1, %arg2 : memref<23x1xf32, strided<[32, 1]>, #hivm.address_space<ub>>, memref<23x1xi32, strided<[32, 1]>, #hivm.address_space<ub>>)
+                  descending = true sort_axis = 1
+  return
+}
+
+// -----
+
+// VSort on 1D memref with sort_axis=0, dim size=1
+// CHECK-LABEL: func.func @test_vsort_1d_dim_size_1_memref
+// CHECK: (%[[SRC:.*]]: memref<1xf32, #hivm.address_space<ub>>, %[[DST:.*]]: memref<1xf32, #hivm.address_space<ub>>)
+// CHECK: hivm.hir.copy ins(%[[SRC]] : memref<1xf32, #hivm.address_space<ub>>) outs(%[[DST]] : memref<1xf32, #hivm.address_space<ub>>)
+// CHECK-NOT: hivm.hir.vsort
+func.func @test_vsort_1d_dim_size_1_memref(
+    %arg0 : memref<1xf32, #hivm.address_space<ub>>,
+    %arg1 : memref<1xf32, #hivm.address_space<ub>>) {
+  hivm.hir.vsort ins(%arg0 : memref<1xf32, #hivm.address_space<ub>>)
+                  outs(%arg1 : memref<1xf32, #hivm.address_space<ub>>)
+                  descending = true sort_axis = 0
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_drop_load_left_pad_zero
+// CHECK: hivm.hir.load
+// CHECK-NOT: left_padding_num
+func.func @test_drop_load_left_pad_zero(%src: memref<?x256xf16, #hivm.address_space<gm>>, %dst: memref<?x256xf16, #hivm.address_space<ub>>) {
+  %c0 = arith.constant 0 : index
+  hivm.hir.load ins(%src : memref<?x256xf16, #hivm.address_space<gm>>) outs(%dst : memref<?x256xf16, #hivm.address_space<ub>>) left_padding_num = %c0 : index
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_drop_load_right_pad_zero
+// CHECK: hivm.hir.load
+// CHECK-NOT: right_padding_num
+func.func @test_drop_load_right_pad_zero(%src: memref<?x256xf16, #hivm.address_space<gm>>, %dst: memref<?x256xf16, #hivm.address_space<ub>>) {
+  %c0 = arith.constant 0 : index
+  hivm.hir.load ins(%src : memref<?x256xf16, #hivm.address_space<gm>>) outs(%dst : memref<?x256xf16, #hivm.address_space<ub>>) right_padding_num = %c0 : index
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_keep_load_left_pad_nonzero
+// CHECK: hivm.hir.load{{.*}}left_padding_num = %{{.*}} : index
+func.func @test_keep_load_left_pad_nonzero(%src: memref<?x256xf16, #hivm.address_space<gm>>, %dst: memref<?x256xf16, #hivm.address_space<ub>>) {
+  %c1 = arith.constant 1 : index
+  hivm.hir.load ins(%src : memref<?x256xf16, #hivm.address_space<gm>>) outs(%dst : memref<?x256xf16, #hivm.address_space<ub>>) left_padding_num = %c1 : index
+  return
+}
+

@@ -53,6 +53,8 @@ namespace mlir {
 
 namespace hfusion {
 
+constexpr llvm::StringLiteral kFillVFAttrName = "hfusion.has_fill";
+
 class OutlineFuncOptions : public HFusionOpFusionOptions {
 public:
   OutlineFuncOptions(const HFusionOpFusionOptions &options, func::FuncOp funcOp)
@@ -167,7 +169,8 @@ std::unique_ptr<Pass>
 createHFusionNormalizeOpsPass(const NormalizeOptions &options = {});
 
 /// Run the RegBase normalize.
-LogicalResult runNormalizeRegBase(Operation *op, bool enableHighPrecision);
+LogicalResult runNormalizeRegBase(Operation *op, bool enableHighPrecision,
+                                  bool enableFastDiv);
 
 /// Create a pass to normalize slice operations, including
 /// extract_slice/insert_slice.
@@ -281,6 +284,10 @@ std::unique_ptr<Pass> createRemoveMaskFromUnalignedReductionLoopPass();
 
 // Create a pass to remove redundant transfer_write and transfer_read pair
 std::unique_ptr<Pass> createRemoveRedundantWriteAndReadPairPass();
+
+// Create a pass to hoist loop-carried transfer_read/transfer_write pairs out of
+// scf.for loops, keeping the temporary value in registers across iterations.
+std::unique_ptr<Pass> createLoopInvariantPromotionPass();
 
 //===----------------------------------------------------------------------===//
 // Registration

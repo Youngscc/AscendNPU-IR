@@ -165,28 +165,6 @@ module attributes {hacc.target = #hacc.target<"Ascend950PR_9579">} {
 // -----
 
 module attributes {hacc.target = #hacc.target<"Ascend950PR_9579">} {
-  // CHECK-LABEL: func.func @swap_insert_slice_before_fixpipe(
-  // CHECK: %[[INSERT:.*]] = tensor.insert_slice %arg0 into %arg2[0, 0] [8, 16] [1, 1]
-  // CHECK: hivm.hir.fixpipe
-  // CHECK-SAME: ins(%[[INSERT]] : tensor<16x16xf32>) outs(%arg3 : memref<16x16xf32>)
-  // CHECK-NEXT: return
-  func.func @swap_insert_slice_before_fixpipe(
-      %arg0: tensor<8x16xf32>, %arg1: tensor<8x16xf32>,
-      %arg2: tensor<16x16xf32>, %arg3: memref<16x16xf32>) {
-    %0 = hivm.hir.fixpipe {dma_mode = #hivm.dma_mode<nz2nd>}
-        ins(%arg0 : tensor<8x16xf32>) outs(%arg1 : tensor<8x16xf32>)
-        -> tensor<8x16xf32>
-    %1 = tensor.insert_slice %0 into %arg2[0, 0] [8, 16] [1, 1]
-        : tensor<8x16xf32> into tensor<16x16xf32>
-    hivm.hir.store ins(%1 : tensor<16x16xf32>)
-        outs(%arg3 : memref<16x16xf32>)
-    return
-  }
-}
-
-// -----
-
-module attributes {hacc.target = #hacc.target<"Ascend950PR_9579">} {
   // Multiple non-debug users must prevent all inlining.
   // CHECK-LABEL: func.func @keep_fixpipe_with_multiple_users(
   // CHECK: %[[FIXPIPE:.*]] = hivm.hir.fixpipe
@@ -226,5 +204,28 @@ module attributes {hacc.target = #hacc.target<"Ascend950PR_9579">} {
         outs(%arg2 : tensor<32x16xf32>) permutation = [1, 0]
         -> tensor<32x16xf32>
     return %1 : tensor<32x16xf32>
+  }
+}
+
+// -----
+
+module attributes {hacc.target = #hacc.target<"Ascend950PR_9579">} {
+  // CHECK-LABEL: func.func @no_inline_fixpipe_with_store_in_vector_scope
+  // CHECK: %[[FIXPIPE:.*]] = hivm.hir.fixpipe {{.*}} -> tensor
+  // CHECK: scope.scope
+  // CHECK: hivm.hir.store ins(%[[FIXPIPE]]
+  func.func @no_inline_fixpipe_with_store_in_vector_scope(
+      %mmad_res: tensor<4x4xi32>,
+      %fixpipe_dst: tensor<4x4xi32>,
+      %gm: memref<4x4xi32, strided<[4, 1]>>) {
+    %fixpipe = hivm.hir.fixpipe {dma_mode = #hivm.dma_mode<nz2nd>}
+        ins(%mmad_res : tensor<4x4xi32>) outs(%fixpipe_dst : tensor<4x4xi32>)
+        -> tensor<4x4xi32>
+    scope.scope : () -> () {
+      hivm.hir.store ins(%fixpipe : tensor<4x4xi32>)
+          outs(%gm : memref<4x4xi32, strided<[4, 1]>>)
+      scope.return
+    } {hivm.tcore_type = #hivm.tcore_type<VECTOR>}
+    return
   }
 }

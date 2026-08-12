@@ -117,6 +117,10 @@ static bool isCVCases(ModuleOp moduleOp) {
 }
 
 void VFFusionPass::runOnOperation() {
+  // TODO: dirty hack to make behaviour of AllOp same as disabled vf-fusion
+  if (fusionMode == FusionMode::AllOp) {
+    return;
+  }
   ModuleOp moduleOp = getOperation();
   RewritePatternSet patterns(&getContext());
   OpBuilder builder(moduleOp.getContext());
@@ -192,9 +196,6 @@ void VFFusionPass::runOnOperation() {
     case FusionMode::AllOp:
       return WalkResult(
           this->tryToFuse<AllOpKind>(funcOp.getOperation(), builder));
-    case FusionMode::NMostOp:
-      return WalkResult(
-          this->tryToFuse<NMostOpKind>(funcOp.getOperation(), builder));
     case FusionMode::MaxParallel:
       return WalkResult(
           this->tryToFuse<MaxParallelKind>(funcOp.getOperation(), builder));

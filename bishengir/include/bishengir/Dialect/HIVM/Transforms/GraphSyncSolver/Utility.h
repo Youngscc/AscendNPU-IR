@@ -139,8 +139,8 @@ struct SyncSolverOptions {
   // Reuse existing sync pairs to save event ids.
   bool reuseSyncPairToSaveEventIds{false};
 
-  // Use different flag-ids for multibuffer backward sync pairs.
-  bool useDifferentMultiBufferFlagIds{false};
+  // Repeat the same flag-id for multi-id pairs.
+  bool enableRepeatFlagIdFeat{false};
 
   // Ignore workspace function arguments.
   bool intraCoreIgnoreWorkSpaceFunctionArguments{false};
@@ -157,6 +157,9 @@ struct SyncSolverOptions {
   // Enable block-all mode.
   bool enableBlockAllMode{false};
 
+  // Enable CV patterns.
+  bool enableCVPatterns{false};
+
   SyncSolverOptions(SyncMode syncMode, bool isMemBasedArch, bool isRegBasedArch)
       : syncMode(syncMode), isMemBasedArch(isMemBasedArch),
         isRegBasedArch(isRegBasedArch) {
@@ -164,7 +167,7 @@ struct SyncSolverOptions {
     alwaysUsePipeSAsWaitingPipe =
         !isTestMode() && isCrossCoreMode() && isMemBasedArch;
     reuseSyncPairToSaveEventIds = isIntraCoreMode();
-    useDifferentMultiBufferFlagIds = !isCrossCoreMode();
+    enableRepeatFlagIdFeat = isCrossCoreMode();
   }
 
   bool isCrossCoreMode() const {
@@ -184,6 +187,15 @@ struct SyncSolverOptions {
 };
 
 struct Occurrence;
+
+struct SetWaitPairInfo {
+  Occurrence *setOcc{nullptr};
+  Occurrence *waitOcc{nullptr};
+  bool isForwardPair{false};
+  bool isBackwardPair{false};
+  bool isCVPreloading{false};
+  bool isCVPipelining{false};
+};
 
 struct ProcessingOrder {
   Occurrence *occ1{nullptr};
@@ -303,6 +315,7 @@ struct ConflictPair {
   int startIndex{-1};
   int endIndex{-1};
   bool isInnerBackward{false};
+  bool isBackwardPair{false};
   bool isUseless{false};
   bool dontReuse{false};
   bool dontCheckForConflict{false};
@@ -315,6 +328,7 @@ struct ConflictPair {
   Occurrence *backwardSyncLoopOcc{nullptr};
   EventIdInfo eventIdInfo;
   EventIdNode *eventIdNode{nullptr};
+  std::optional<SetWaitPairInfo> setWaitPairInfo;
   // When set, GraphSyncSolver must assign this event id for the conflict
   // (from CustomMacroOp sync_event_slots with an optional pinned event).
   std::optional<int64_t> pinnedEventId;
@@ -352,17 +366,21 @@ struct ConflictPair {
     auto clonedConflictPair = std::make_unique<ConflictPair>(
         op1, op2, setOp, waitOp, setOcc, waitOcc, setCorePipeInfo,
         waitCorePipeInfo, startIndex, endIndex);
+    clonedConflictPair->isBackwardPair = isBackwardPair;
     clonedConflictPair->isInnerBackward = isInnerBackward;
     clonedConflictPair->isUseless = isUseless;
     clonedConflictPair->dontReuse = dontReuse;
+    clonedConflictPair->dontCheckForConflict = dontCheckForConflict;
     clonedConflictPair->couldNotRun = couldNotRun;
     clonedConflictPair->setOnLastIterOnly = setOnLastIterOnly;
     clonedConflictPair->waitOnFirstIterOnly = waitOnFirstIterOnly;
     clonedConflictPair->replacedWithUnitFlag = replacedWithUnitFlag;
+    clonedConflictPair->movedToOuterLoop = movedToOuterLoop;
     clonedConflictPair->backwardSyncLoopOp = backwardSyncLoopOp;
     clonedConflictPair->backwardSyncLoopOcc = backwardSyncLoopOcc;
     clonedConflictPair->eventIdInfo = eventIdInfo;
     clonedConflictPair->eventIdNode = eventIdNode;
+    clonedConflictPair->setWaitPairInfo = setWaitPairInfo;
     clonedConflictPair->pinnedEventId = pinnedEventId;
     return clonedConflictPair;
   }
@@ -461,6 +479,22 @@ struct MmadL1SyncArgs {
   Value bwdPipeMPipeMTE1Event1;
 };
 
+struct MmadMxL1SyncArgs {
+  MmadMxL1SyncArgs() = default;
+
+  // Wait side (MTE2→MTE1) — each stream independent
+  Value l0WaitL1AEvent;      // Wait A
+  Value l0WaitL1ScaleAEvent; // Wait ScaleA
+  Value l0WaitL1BEvent;      // Wait B
+  Value l0WaitL1ScaleBEvent; // Wait ScaleB
+
+  // Set side (MTE1→MTE2) — each stream independent
+  Value l1AWaitL0Event;      // Set A
+  Value l1ScaleAWaitL0Event; // Set ScaleA
+  Value l1BWaitL0Event;      // Set B
+  Value l1ScaleBWaitL0Event; // Set ScaleB
+};
+
 // Check if two integer ranges intersect.
 bool checkRangesIntersect(int l1, int r1, int l2, int r2);
 
@@ -523,7 +557,39 @@ llvm::FailureOr<std::pair<OpTy, OpTy>> getFirstLastOp(Operation *parentOp) {
   return std::make_pair(firstOp, lastOp);
 }
 
+// Variadic version of getFirstLastOp that matches any of OpTys without a full
+// tree traversal — uses interrupt() to stop at the first/last match.
+template <typename... OpTys>
+llvm::FailureOr<std::pair<Operation *, Operation *>>
+getFirstLastOpOfTypes(Operation *parentOp) {
+  Operation *firstOp = nullptr;
+  Operation *lastOp = nullptr;
+  parentOp->walk<WalkOrder::PreOrder, ForwardIterator>([&](Operation *op) {
+    if (isa<OpTys...>(op)) {
+      firstOp = op;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  if (firstOp == nullptr) {
+    return llvm::failure();
+  }
+  parentOp->walk<WalkOrder::PostOrder, ReverseIterator>([&](Operation *op) {
+    if (isa<OpTys...>(op)) {
+      lastOp = op;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  assert(lastOp != nullptr);
+  return std::make_pair(firstOp, lastOp);
+}
+
 bool isEmptyScope(Scope *scope);
+
+bool isWorkSpaceFuncArgument(func::FuncOp funcOp, BlockArgument funcArg);
+
+llvm::SmallVector<int64_t> getAddresses(const llvm::SmallVector<Value> &addrs);
 
 } // namespace mlir::hivm::syncsolver
 

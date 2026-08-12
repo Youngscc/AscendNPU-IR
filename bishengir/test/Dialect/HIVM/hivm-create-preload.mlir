@@ -38,10 +38,9 @@ module attributes {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #h
 // CHECK:             %[[PRELOAD3_UB:.*]] = arith.cmpi slt, %[[PRELOAD3_IND_VAR]], %[[C8192_I32]] : i32
 // CHECK:             %[[PRELOAD3_COND:.*]] = arith.andi %[[PRELOAD3_LB]], %[[PRELOAD3_UB]] : i1
 // CHECK:             %[[ITER2_RET:.*]] = scf.if %[[PRELOAD3_COND]] -> (i32) {
-// CHECK:               %[[VAL_92:.*]] = arith.divsi %[[PRELOAD3_IND_VAR]], %[[C512_I32]] : i32
-// CHECK:               %[[VAL_93:.*]] = arith.remsi %[[VAL_92]], %[[C4_I32]] : i32
-// CHECK:               %[[PRELOAD3_OFFSET:.*]] = arith.index_cast %[[VAL_93]] : i32 to index
-// CHECK:               %[[VAL_95:.*]] = memref.subview %[[PRELOAD_WORKSPACE3]]{{\[}}%[[PRELOAD3_OFFSET]], 0, 0] [1, 128, 512] [1, 1, 1] : memref<4x128x512xf32, #hivm.address_space<gm>> to memref<1x128x512xf32, strided<[65536, 512, 1], offset: ?>, #hivm.address_space<gm>>
+// With !1511 detection, only source-marked workspace roots rotate; master marks
+// the preload subview itself, so the static subview is preserved.
+// CHECK:               %[[VAL_95:.*]] = memref.subview %[[PRELOAD_WORKSPACE3]][0, 0, 0] [1, 128, 512] [1, 1, 1] {{{.*}}hivm.preload_workspace{{.*}}}
 // CHECK:               %[[PRELOAD3_ITER2:.*]] = arith.addi %[[ITER2]], %[[C512_I32]] : i32
 // CHECK:               scf.yield %[[PRELOAD3_ITER2]] : i32
 // CHECK:             } else {
@@ -51,11 +50,8 @@ module attributes {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #h
 // CHECK:             %[[PRELOAD1_UB:.*]] = arith.cmpi slt, %[[PRELOAD1_IND_VAR]], %[[C8192_I32]] : i32
 // CHECK:             %[[PRELOAD1_COND:.*]] = arith.andi %[[PRELOAD1_LB]], %[[PRELOAD1_UB]] : i1
 // CHECK:             %[[ITER1_RET:.*]] = scf.if %[[PRELOAD1_COND]] -> (i32) {
-// CHECK:               %[[VAL_113:.*]] = arith.divsi %[[PRELOAD1_IND_VAR]], %[[C512_I32]] : i32
-// CHECK:               %[[VAL_114:.*]] = arith.remsi %[[VAL_113]], %[[C4_I32]] : i32
-// CHECK:               %[[PRELOAD1_OFFSET:.*]] = arith.index_cast %[[VAL_114]] : i32 to index
-// CHECK-DAG:           %[[VAL_116:.*]] = memref.subview %[[PRELOAD_WORKSPACE1]]{{\[}}%[[PRELOAD1_OFFSET]], 0, 0] [1, 128, 512] [1, 1, 1] : memref<4x128x512xbf16, #hivm.address_space<gm>> to memref<128x512xbf16, strided<[512, 1], offset: ?>, #hivm.address_space<gm>>
-// CHECK-DAG:           %[[VAL_118:.*]] = memref.subview %[[PRELOAD_WORKSPACE2]]{{\[}}%[[PRELOAD1_OFFSET]], 0, 0] [1, 128, 128] [1, 1, 1] : memref<4x128x128xf32, #hivm.address_space<gm>> to memref<1x128x128xf32, strided<[16384, 128, 1], offset: ?>, #hivm.address_space<gm>>
+// CHECK-DAG:           %[[VAL_116:.*]] = memref.subview %[[PRELOAD_WORKSPACE1]][0, 0, 0] [1, 128, 512] [1, 1, 1] {{{.*}}hivm.preload_workspace{{.*}}}
+// CHECK-DAG:           %[[VAL_118:.*]] = memref.subview %[[PRELOAD_WORKSPACE2]][0, 0, 0] [1, 128, 128] [1, 1, 1] {{{.*}}hivm.preload_workspace{{.*}}}
 // CHECK:               %[[PRELOAD1_ITER1:.*]] = arith.addi %[[ITER1]], %[[C512_I32]] : i32
 // CHECK:               scf.yield %[[PRELOAD1_ITER1]] : i32
 // CHECK:             } else {
@@ -241,12 +237,9 @@ module attributes {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #h
 // CHECK:               %[[PRELOAD2_UB:.*]] = arith.cmpi slt, %[[PRELOAD2_IND_VAR]], %[[C8192_I32]] : i32
 // CHECK:               %[[PRELOAD2_COND:.*]] = arith.andi %[[PRELOAD2_LB]], %[[PRELOAD2_UB]] : i1
 // CHECK:               %[[ITER1_RET:.*]] = scf.if %[[PRELOAD2_COND]] -> (memref<64xf32, #hivm.address_space<ub>>) {
-// CHECK:                 %[[VAL_113:.*]] = arith.divsi %[[PRELOAD2_IND_VAR]], %[[C512_I32]] : i32
-// CHECK:                 %[[VAL_114:.*]] = arith.remsi %[[VAL_113]], %[[C4_I32]] : i32
-// CHECK:                 %[[PRELOAD2_OFFSET:.*]] = arith.index_cast %[[VAL_114]] : i32 to index
-// CHECK:                 %[[VAL_116:.*]] = memref.subview %[[PRELOAD_WORKSPACE1]]{{\[}}%[[PRELOAD2_OFFSET]], 0, 0] [1, 128, 512] [1, 1, 1] : memref<4x128x512xbf16, #hivm.address_space<gm>> to memref<1x128x512xbf16, strided<[65536, 512, 1], offset: ?>, #hivm.address_space<gm>>
+// CHECK:                 %[[VAL_116:.*]] = memref.subview %[[PRELOAD_WORKSPACE1]][0, 0, 0] [1, 128, 512] [1, 1, 1] {{{.*}}hivm.preload_workspace{{.*}}}
 // CHECK:                 %[[VAL_120:.*]] = memref.subview %[[PRELOAD_WORKSPACE3]][0, %[[VAL_69:.*]], 0] [4, 64, 512] [1, 1, 1] {to_be_bubbled_slice} : memref<4x128x512xf32, #hivm.address_space<gm>> to memref<4x64x512xf32, strided<[65536, 512, 1], offset: ?>, #hivm.address_space<gm>>
-// CHECK:                 %[[VAL_121:.*]] = memref.subview %[[VAL_120]]{{\[}}%[[PRELOAD2_OFFSET]], 0, 0] [1, 64, 512] [1, 1, 1] : memref<4x64x512xf32, strided<[65536, 512, 1], offset: ?>, #hivm.address_space<gm>> to memref<64x512xf32, strided<[512, 1], offset: ?>, #hivm.address_space<gm>>
+// CHECK:                 %[[VAL_121:.*]] = memref.subview %[[VAL_120]][0, 0, 0] [1, 64, 512] [1, 1, 1] {{{.*}}hivm.preload_workspace{{.*}}}
 // CHECK:                 %[[PRELOAD2_ITER1:.*]] = hivm.hir.pointer_cast(%[[ITER1_ADDR]]) : memref<64xf32, #hivm.address_space<ub>>
 // CHECK:                 scf.for %[[VAL_125:.*]] = %[[VAL_50:.*]] to %[[VAL_36:.*]] step %[[VAL_51:.*]] {
 // CHECK:                   %[[VAL_160:.*]] = memref.subview %[[PRELOAD2_LOCAL_BUFFER1]]{{\[}}%[[VAL_129:.*]]] [16] [1] : memref<64xf32, #hivm.address_space<ub>> to memref<16xf32, strided<[1], offset: ?>, #hivm.address_space<ub>>
@@ -263,10 +256,7 @@ module attributes {dlti.target_system_spec = #dlti.target_system_spec<"NPU" : #h
 // CHECK:                 %[[VAL_171:.*]] = memref.expand_shape %[[PRELOAD0_LOCAL_BUFFER1]] {{\[\[}}0, 1]] output_shape [64, 1] : memref<64xf32, #hivm.address_space<ub>> into memref<64x1xf32, #hivm.address_space<ub>>
 // CHECK:                 hivm.hir.vmul ins(%[[ITER2]], %[[VAL_171]] : memref<64x128xf32, #hivm.address_space<ub>>, memref<64x1xf32, #hivm.address_space<ub>>) outs(%[[VAL_172:.*]] : memref<64x128xf32, #hivm.address_space<ub>>) temp_buffer(%[[VAL_173:.*]] : memref<512xf32, #hivm.address_space<ub>>) broadcast = [1]
 // CHECK:                 %[[VAL_174:.*]] = memref.subview %[[PRELOAD_WORKSPACE2]][0, %[[VAL_69]], 0] [4, 64, 128] [1, 1, 1] {to_be_bubbled_slice} : memref<4x128x128xf32, #hivm.address_space<gm>> to memref<4x64x128xf32, strided<[16384, 128, 1], offset: ?>, #hivm.address_space<gm>>
-// CHECK:                 %[[VAL_175:.*]] = arith.divsi %[[PRELOAD0_IND_VAR]], %[[C512_I32]] : i32
-// CHECK:                 %[[VAL_176:.*]] = arith.remsi %[[VAL_175]], %[[C4_I32]] : i32
-// CHECK:                 %[[PRELOAD0_OFFSET:.*]] = arith.index_cast %[[VAL_176]] : i32 to index
-// CHECK:                 %[[VAL_178:.*]] = memref.subview %[[VAL_174]]{{\[}}%[[PRELOAD0_OFFSET]], 0, 0] [1, 64, 128] [1, 1, 1] : memref<4x64x128xf32, strided<[16384, 128, 1], offset: ?>, #hivm.address_space<gm>> to memref<64x128xf32, strided<[128, 1], offset: ?>, #hivm.address_space<gm>>
+// CHECK:                 %[[VAL_178:.*]] = memref.subview %[[VAL_174]][0, 0, 0] [1, 64, 128] [1, 1, 1] {{{.*}}hivm.preload_workspace{{.*}}}
 // CHECK:                 %[[PRELOAD0_ITER2:.*]] = hivm.hir.pointer_cast(%[[ITER2_ADDR]]) : memref<64x128xf32, #hivm.address_space<ub>>
 // CHECK:                 scf.yield %[[PRELOAD0_ITER2]] : memref<64x128xf32, #hivm.address_space<ub>>
 // CHECK:               } else {
@@ -717,3 +707,186 @@ module {
   // CHECK: }
   // CHECK: return %[[RESULTS]]#0, %[[RESULTS]]#1 : i32, i32
 }
+// -----
+
+// Synchronization operations that are direct children of a preload loop
+// coordinate the expanded loop. They must remain single operations instead of
+// being cloned once for every preload mapping.
+
+// CHECK-LABEL: func.func @test_sync_outside_preload_scope
+// CHECK: scf.for %[[NEW_IV:.*]] =
+// CHECK-COUNT-1: hivm.hir.sync_block_set[<CUBE>, <PIPE_S>, <PIPE_S>] flag = 15
+// CHECK-COUNT-1: hivm.hir.sync_block_wait[<CUBE>, <PIPE_S>, <PIPE_S>] flag = 14
+// CHECK-COUNT-1: hivm.hir.set_flag[<PIPE_MTE1>, <PIPE_MTE3>, <EVENT_ID0>]
+// CHECK-COUNT-1: hivm.hir.wait_flag[<PIPE_MTE1>, <PIPE_MTE3>, <EVENT_ID0>]
+// CHECK-COUNT-1: hivm.hir.pipe_barrier[<PIPE_ALL>]
+// CHECK-COUNT-1: %[[DYNAMIC_FLAG:.*]] = arith.extsi %[[NEW_IV]] : i32 to i64
+// CHECK-COUNT-1: hivm.hir.sync_block_set[<CUBE>, <PIPE_MTE1>, <PIPE_MTE3>] flag = %[[DYNAMIC_FLAG]]
+func.func @test_sync_outside_preload_scope() {
+  %c0 = arith.constant 0 : i32
+  %c4 = arith.constant 4 : i32
+  %c1 = arith.constant 1 : i32
+
+  scf.for %i = %c0 to %c4 step %c1 : i32 {
+    scope.scope : () -> () {
+      "test.stage1"(%i) : (i32) -> ()
+      scope.return
+    } {
+      no_inline,
+      hivm.preload_num = 1 : i32,
+      hivm.max_preload_num = 2 : i32
+    }
+
+    hivm.hir.sync_block_set[<CUBE>, <PIPE_S>, <PIPE_S>] flag = 15
+    hivm.hir.sync_block_wait[<CUBE>, <PIPE_S>, <PIPE_S>] flag = 14
+    hivm.hir.set_flag[<PIPE_MTE1>, <PIPE_MTE3>, <EVENT_ID0>]
+    hivm.hir.wait_flag[<PIPE_MTE1>, <PIPE_MTE3>, <EVENT_ID0>]
+    hivm.hir.pipe_barrier[<PIPE_ALL>]
+    %dynamic_flag = arith.extsi %i : i32 to i64
+    hivm.hir.sync_block_set[<CUBE>, <PIPE_MTE1>, <PIPE_MTE3>]
+      flag = %dynamic_flag
+
+    scope.scope : () -> () {
+      "test.stage0"(%i) : (i32) -> ()
+      scope.return
+    } {
+      no_inline,
+      hivm.preload_num = 0 : i32,
+      hivm.max_preload_num = 2 : i32
+    }
+  }
+  return
+}
+
+// -----
+
+// Each parent loop must use its own declared preload depth. Collecting preload
+// numbers module-wide would truncate the second loop to depth 2 and drop stage 3.
+
+// CHECK-LABEL: func.func @test_preload_depth_is_per_loop
+func.func @test_preload_depth_is_per_loop() {
+  %c0 = arith.constant 0 : i32
+  %c16 = arith.constant 16 : i32
+  %c1 = arith.constant 1 : i32
+
+  // CHECK-DAG: %[[C18:.*]] = arith.constant 18 : i32
+  // CHECK-DAG: %[[C20:.*]] = arith.constant 20 : i32
+  // CHECK: scf.for {{.*}} to %[[C18]] step
+  scf.for %i = %c0 to %c16 step %c1 : i32 {
+    scope.scope : () -> () {
+      "test.stage1"(%i) : (i32) -> ()
+      scope.return
+    } {
+      no_inline,
+      hivm.preload_num = 1 : i32,
+      hivm.max_preload_num = 2 : i32
+    }
+  }
+
+  // CHECK: scf.for {{.*}} to %[[C20]] step
+  // CHECK: "test.stage3"
+  scf.for %i = %c0 to %c16 step %c1 : i32 {
+    scope.scope : () -> () {
+      "test.stage3"(%i) : (i32) -> ()
+      scope.return
+    } {
+      no_inline,
+      hivm.preload_num = 3 : i32,
+      hivm.max_preload_num = 4 : i32
+    }
+  }
+
+  return
+}
+
+// -----
+
+// A scope result that is an arbitrary-depth chain of views rooted at a preload
+// local buffer. The preload skip (else) branch must rematerialize each view
+// instead of aborting with "Unhandled scope result case".
+
+// CHECK-LABEL: func.func @test_nested_subview_local_buffer_result
+func.func @test_nested_subview_local_buffer_result() {
+  %c0 = arith.constant 0 : i32
+  %c16 = arith.constant 16 : i32
+  %c1 = arith.constant 1 : i32
+  %a0 = arith.constant 61696 : i64
+  %a1 = arith.constant 65792 : i64
+  %a2 = arith.constant 69888 : i64
+  // CHECK: scf.for
+  scf.for %i = %c0 to %c16 step %c1  : i32 {
+    // CHECK: %[[MAPPING0_BUFFER:.*]] = hivm.hir.pointer_cast
+    %buf = hivm.hir.pointer_cast(%a0, %a1, %a2) : memref<64x256x1xi1, #hivm.address_space<ub>>
+    annotation.mark %buf {hivm.preload_local_buffer = 1 : i32, hivm.multi_buffer = 3 : i32} : memref<64x256x1xi1, #hivm.address_space<ub>>
+    // CHECK: scf.if
+    // CHECK: %[[RE0:.*]] = memref.subview %[[MAPPING0_BUFFER]]
+    // CHECK: %[[RE1:.*]] = memref.subview %[[RE0]]
+    // CHECK: "test.consume"(%[[RE1]])
+    %s0 = scope.scope : () -> memref<64x64xi1, strided<[256, 1]>, #hivm.address_space<ub>> {
+      %nested = scope.scope : () -> memref<64x64xi1, strided<[256, 1]>, #hivm.address_space<ub>> {
+        %sv0 = memref.subview %buf[0, 0, 0] [64, 128, 1] [1, 1, 1] : memref<64x256x1xi1, #hivm.address_space<ub>> to memref<64x128x1xi1, strided<[256, 1, 1]>, #hivm.address_space<ub>>
+        %sv1 = memref.subview %sv0[0, 0, 0] [64, 64, 1] [1, 1, 1] : memref<64x128x1xi1, strided<[256, 1, 1]>, #hivm.address_space<ub>> to memref<64x64xi1, strided<[256, 1]>, #hivm.address_space<ub>>
+        "test.use"(%sv1) : (memref<64x64xi1, strided<[256, 1]>, #hivm.address_space<ub>>) -> ()
+        scope.return %sv1 : memref<64x64xi1, strided<[256, 1]>, #hivm.address_space<ub>>
+      }
+      scope.return %nested : memref<64x64xi1, strided<[256, 1]>, #hivm.address_space<ub>>
+    } {no_inline, hivm.preload_num = 0 : i32, hivm.max_preload_num = 2 : i32}
+    "test.consume"(%s0) : (memref<64x64xi1, strided<[256, 1]>, #hivm.address_space<ub>>) -> ()
+  }
+  return
+}
+
+// -----
+
+// A view returned by a scope must use the preload-local buffer selected for
+// each mapping, rather than becoming one shared conditional result.
+
+// CHECK-LABEL: func.func @test_preload_local_view_uses_mapping
+func.func @test_preload_local_view_uses_mapping() {
+  %c0_i64 = arith.constant 0 : i64
+  %c128_i64 = arith.constant 128 : i64
+  %c0 = arith.constant 0 : i32
+  %c4 = arith.constant 4 : i32
+  %c1 = arith.constant 1 : i32
+
+  scf.for %i = %c0 to %c4 step %c1 : i32 {
+    %buffer = hivm.hir.pointer_cast(%c0_i64, %c128_i64)
+      : memref<2x64xi1, #hivm.address_space<ub>>
+    annotation.mark %buffer {
+      hivm.multi_buffer = 2 : i32,
+      hivm.preload_local_buffer = 1 : i32
+    } : memref<2x64xi1, #hivm.address_space<ub>>
+
+    %view = scope.scope : () -> memref<1x64xi1, strided<[64, 1]>, #hivm.address_space<ub>> {
+      "test.produce"(%i) : (i32) -> ()
+      %subview = memref.subview %buffer[0, 0] [1, 64] [1, 1]
+        : memref<2x64xi1, #hivm.address_space<ub>>
+          to memref<1x64xi1, strided<[64, 1]>, #hivm.address_space<ub>>
+      scope.return %subview
+        : memref<1x64xi1, strided<[64, 1]>, #hivm.address_space<ub>>
+    } {
+      no_inline,
+      hivm.preload_num = 1 : i32,
+      hivm.max_preload_num = 2 : i32
+    }
+
+    scope.scope : () -> () {
+      "test.consume"(%view)
+        : (memref<1x64xi1, strided<[64, 1]>, #hivm.address_space<ub>>) -> ()
+      scope.return
+    } {
+      no_inline,
+      hivm.preload_num = 0 : i32,
+      hivm.max_preload_num = 2 : i32
+    }
+  }
+  return
+}
+
+// CHECK: %[[MAPPING1_BUFFER:.*]] = hivm.hir.pointer_cast
+// CHECK: %[[MAPPING0_BUFFER:.*]] = hivm.hir.pointer_cast
+// CHECK: scf.if {{.*}} {
+// CHECK:   "test.produce"
+// CHECK: }
+// CHECK: %[[MAPPING0_VIEW:.*]] = memref.subview %[[MAPPING0_BUFFER]]
+// CHECK: "test.consume"(%[[MAPPING0_VIEW]])

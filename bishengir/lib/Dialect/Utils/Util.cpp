@@ -16,6 +16,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "bishengir/Dialect/Utils/Util.h"
+#include "mlir/Interfaces/CallInterfaces.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "bishengir/Config/bishengir-config.h"
 #include "bishengir/Dialect/Annotation/IR/Annotation.h"
 #include "bishengir/Dialect/HACC/IR/HACC.h"
@@ -51,6 +53,31 @@ using namespace mlir::utils::debugger;
 namespace mlir {
 
 namespace {
+
+/// Recursively traces backward through defining ops to find whether a tensor
+/// value originates from a bufferization::ToTensorOp (i.e., a memref→tensor
+/// conversion). Returns the ToTensorOp if found, or nullptr otherwise.
+/// The visited set prevents infinite loops in cyclic IR.
+static Operation* canTraceToMemRefToTensor(
+    Value tensor, SmallPtrSetImpl<Operation *> &visited) {
+  // Skip block arguments (no defining op).
+  Operation *def = tensor.getDefiningOp();
+  if (!def)
+    return nullptr;
+  if (!visited.insert(def).second)
+    return nullptr;
+  // Found the source: memref→tensor conversion.
+  if (auto toTensor = dyn_cast<bufferization::ToTensorOp>(def)) {
+    return toTensor;
+  }
+
+  // Recursively trace through operands of the current defining op.
+  for (auto operand : def->getOperands()) {
+    if (auto toTensor = canTraceToMemRefToTensor(operand, visited))
+      return toTensor;
+  }
+  return nullptr;
+}
 
 SmallVector<Value> tracebackImpl(Value memrefVal) {
   // case 1: v is the iter_arg of a scf.for
@@ -142,7 +169,20 @@ SmallVector<Value> tracebackImpl(Value memrefVal) {
 #else
   } else if (auto op = dyn_cast<bufferization::ToBufferOp>(def)) {
 #endif
-    result.emplace_back(op.getTensor());
+    llvm::SmallPtrSet<Operation *, 16> visited;
+    // For the tensor from to_memref, if it could be traced back to to_tensor,
+    // we use the memref from to_tensor as the new source to trace
+    if (auto toTensor = canTraceToMemRefToTensor(op.getTensor(), visited)) {
+#ifndef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
+      result.emplace_back(
+          dyn_cast<bufferization::ToTensorOp>(toTensor).getMemref());
+#else
+      result.emplace_back(
+          dyn_cast<bufferization::ToTensorOp>(toTensor).getBuffer());
+#endif
+    } else {
+      result.emplace_back(op.getTensor());
+    }
   }
 
   return result;
@@ -173,6 +213,15 @@ std::string getPrettyOpName(Operation *op) {
 }
 } // namespace debugger
 
+/*
+* @param[in] alignTargets - target axes which need to be aligned
+* @param[out] alignUnits - vector of multipliers which make memref/tensor aligned by applying them to shape
+* @param[in] shapes - shapes of tensor/memref which needs to be aligned
+* @param[in, out] innerAlignedUnits - inner axis which are already aligned.
+* @param[in, out] shapeAccumulation - total number of elements of inner axes
+* @param[in] alignTargetDim - axis which need to be aligned
+* @param[in] alignUnitsDim - axis of alignUnits which contain multiplier to make axis aligned
+*/
 void setAlignUnits(const SmallVectorImpl<int> &alignTargets,
                    SmallVector<int> &alignUnits, ArrayRef<int64_t> shapes,
                    int &innerAlignedUnits, int &shapeAccumulation,
@@ -194,7 +243,7 @@ void setAlignUnits(const SmallVectorImpl<int> &alignTargets,
     }
     alignUnits[alignUnitsDim] = newAlignedUnits / innerAlignedUnits;
   }
-  innerAlignedUnits = newAlignedUnits;
+  innerAlignedUnits = std::max(innerAlignedUnits, std::lcm(shapeAccumulation, innerAlignedUnits));
   if (!ShapedType::isDynamic(shapes[alignTargetDim])) {
     shapeAccumulation = shapeAccumulation * std::lcm(shapes[alignTargetDim],
                                                      alignUnits[alignUnitsDim]);
@@ -302,22 +351,6 @@ Value createEmptyOp(OpBuilder &builder, Location loc, Value source) {
 #endif // BISHENGIR_BUILD_STANDALONE_IR_ONLY
   }
   return memref::createMemRefAllocOp(builder, loc, source);
-}
-
-Value createAllocTensorOp(OpBuilder &builder, Location loc, Value source) {
-  auto shapedType = cast<ShapedType>(source.getType());
-  auto targetElemType = getElementTypeOrSelf(source);
-
-  ArrayRef<int64_t> staticShapes = shapedType.getShape();
-  SmallVector<Value, 2> dynamicSizes;
-  for (size_t i = 0; i < staticShapes.size(); i++) {
-    if (staticShapes[i] == ShapedType::kDynamic) {
-      Operation *dynDimOp = builder.create<tensor::DimOp>(loc, source, i);
-      dynamicSizes.push_back(dynDimOp->getResults()[0]);
-    }
-  }
-  return builder.create<bufferization::AllocTensorOp>(
-      loc, RankedTensorType::get(staticShapes, targetElemType), dynamicSizes);
 }
 
 tensor::EmptyOp createStaticShapeEmptyOp(OpBuilder &builder, Location loc,
@@ -1309,10 +1342,27 @@ utils::tracebackMemRefToAllocOrBlockArgument(Value memrefVal) {
 }
 
 SmallVector<Value> utils::tracebackMemRefAllocAndAlias(Value memrefVal) {
-  return utils::tracebackMemRefVecByTargetFn(memrefVal, [](Value val) {
-    return utils::isAllocLikeOp(val) || utils::isCollapseShapeOp(val) ||
-           utils::isExpandShapeOp(val);
-  });
+  auto allocOpAliases =
+      utils::tracebackMemRefVecByTargetFn(memrefVal, [](Value val) {
+        return utils::isAllocLikeOp(val) || utils::isCollapseShapeOp(val) ||
+               utils::isExpandShapeOp(val);
+      });
+
+  // If there is alloc ->... ->collapse ->... ->copy, the annotations marked on
+  // alloc will be lost.
+  SmallVector<Value> roots;
+  for (Value alias : allocOpAliases) {
+    if (utils::isAllocLikeOp(alias))
+      continue;
+    for (Value root : utils::tracebackMemRefVec(alias)) {
+      if (utils::isAllocLikeOp(root) &&
+          !llvm::is_contained(allocOpAliases, root) &&
+          !llvm::is_contained(roots, root))
+        roots.push_back(root);
+    }
+  }
+  allocOpAliases.append(roots);
+  return allocOpAliases;
 }
 
 namespace reshape_utils {
@@ -1741,6 +1791,39 @@ bool isValidTwoDimVectorType(VectorType vType) {
     return false;
 
   return true;
+}
+
+
+void collectAllEffects(
+    Operation *op, SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  if (auto callOp = dyn_cast<CallOpInterface>(op)) {
+    for (Value arg : callOp.getArgOperands()) {
+      if (isa<MemRefType>(arg.getType())) {
+        auto addEffect = [&](auto effectType, Value v) {
+          if (auto res = llvm::dyn_cast<OpResult>(v)) {
+            effects.emplace_back(effectType, res, 0, true);
+          } else if (auto bArg = llvm::dyn_cast<BlockArgument>(v)) {
+            effects.emplace_back(effectType, bArg, 0, true);
+          }
+        };
+
+        addEffect(MemoryEffects::Write::get(), arg);
+      }
+    }
+    return;
+  }
+
+  if (auto interface = dyn_cast<MemoryEffectOpInterface>(op)) {
+    interface.getEffects(effects);
+  }
+
+  if (op->hasTrait<mlir::OpTrait::HasRecursiveMemoryEffects>()) {
+    for (Region &region : op->getRegions()) {
+      for (Operation &innerOp : region.getOps()) {
+        collectAllEffects(&innerOp, effects);
+      }
+    }
+  }
 }
 
 } // namespace utils
