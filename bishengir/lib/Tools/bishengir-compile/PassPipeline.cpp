@@ -159,7 +159,6 @@ public:
     };
 
     SmallVector<Pass::Option<unsigned> *> sharedWithHIVMCompileUnsigned = {
-        &setCVPipelineDepth,
         &setLocalMultibuffer,
         &setWorkspaceMultibuffer,
         &tileMixVectorLoop,

@@ -587,12 +587,6 @@ def SetLocalMultibuffer : HIVMOptimizationControlOptions<
   let passGroup = ["HFUSION", "HIVM"];
 }
 
-def SetCVPipelineDepth : HIVMOptimizationControlOptions<
-  "Override the CV software-pipeline unroll depth, defaults to 4.",
-  "unsigned",
-  "4"
->;
-
 def EnableHIVMGlobalWorkspaceReuse : HIVMOptimizationControlOptions<
   "Enable global workspace reuse.",
   "bool",

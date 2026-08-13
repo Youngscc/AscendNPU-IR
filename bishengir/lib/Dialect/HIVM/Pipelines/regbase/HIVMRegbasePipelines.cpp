@@ -402,8 +402,6 @@ static void hivmPreBufferizationOptimizationPipeline(
     if (hivmPipelineOptions.setCVPipelineMode != CVPipelineMode::Off) {
       CVPipeliningOptions pipelineOptions;
       pipelineOptions.setDepthInUnrollMode =
-          hivmPipelineOptions.setCVPipelineDepth;
-      pipelineOptions.setNumMultibufferInUnrollMode =
           hivmPipelineOptions.setWorkspaceMultibuffer;
       pipelineOptions.enableLazyLoading = hivmPipelineOptions.enableLazyLoading;
       pipelineOptions.pipelineMode = hivmPipelineOptions.setCVPipelineMode;

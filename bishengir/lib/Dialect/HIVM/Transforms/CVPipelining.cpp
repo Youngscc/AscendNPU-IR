@@ -69,11 +69,10 @@ struct AtomicEffect {
 };
 
 struct CVPipelineImpl {
-  CVPipelineImpl(LoopLikeOpInterface loop, int pipelineDepth, int multibuffer,
+  CVPipelineImpl(LoopLikeOpInterface loop, int multibuffer,
                  CVPipelineMode pipelineMode, bool enableLazyLoading)
       : pipelineLoop(loop), newLoop(nullptr), builder(loop->getContext()),
-        pipelineDepth(pipelineDepth), numMultibuffer(multibuffer),
-        pipelineMode(pipelineMode),
+        numMultibuffer(multibuffer), pipelineMode(pipelineMode),
         wlBuilder(cast<scf::ForOp>(loop.getOperation()), multibuffer,
                   enableLazyLoading),
         yieldedVals(loop.getYieldedValues().begin(),
@@ -186,10 +185,7 @@ private:
 
   OpBuilder builder;
 
-  // Number of in-flight iterations scheduled by the unrolled pipeline.
-  int pipelineDepth;
-
-  // Number of physical storage slots used by multibuffered values.
+  // Number of multibuffer/pipeline stages/unroll iterations
   int numMultibuffer;
 
   // Pipeline mode for CV-pipelining.
@@ -459,26 +455,16 @@ static Operation *getContainedParent(Operation *containing, Operation *inner) {
 }
 
 // Implementation of slice operations
-static Value createBufferSlot(OpBuilder &builder, Location loc, Value iv,
-                              int numMultibuffer) {
-  if (!iv.getType().isIndex())
-    iv = builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), iv);
-  if (numMultibuffer == 1)
-    return builder.create<arith::ConstantIndexOp>(loc, 0);
-  Value bufferCount =
-      builder.create<arith::ConstantIndexOp>(loc, numMultibuffer);
-  return builder.create<arith::RemUIOp>(loc, iv, bufferCount);
-}
-
 static tensor::InsertSliceOp createInsertSlice(OpBuilder &builder, Location loc,
                                                Value src, Value into,
-                                               Value iv,
-                                               int numMultibuffer) {
+                                               Value iv) {
   auto const1 = builder.getIndexAttr(1);
   auto const0 = builder.getIndexAttr(0);
   auto originalType = cast<TensorType>(src.getType());
   SmallVector<OpFoldResult> offsets, sizes, strides;
-  offsets.push_back(createBufferSlot(builder, loc, iv, numMultibuffer));
+  if (!iv.getType().isIndex())
+    iv = builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), iv);
+  offsets.push_back(iv);
   offsets.append(originalType.getRank(), const0);
 
   sizes.push_back(const1);
@@ -497,14 +483,15 @@ static tensor::InsertSliceOp createInsertSlice(OpBuilder &builder, Location loc,
 
 static tensor::ExtractSliceOp createExtractSlice(OpBuilder &builder,
                                                  Location loc, Value from,
-                                                 Type to, Value iv,
-                                                 int numMultibuffer) {
+                                                 Type to, Value iv) {
   auto const1 = builder.getIndexAttr(1);
   auto const0 = builder.getIndexAttr(0);
   SmallVector<OpFoldResult> offsets, sizes, strides;
   auto newType = cast<TensorType>(from.getType());
 
-  offsets.push_back(createBufferSlot(builder, loc, iv, numMultibuffer));
+  if (!iv.getType().isIndex())
+    iv = builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), iv);
+  offsets.push_back(iv);
   offsets.append(newType.getRank() - 1, const0);
   sizes.push_back(const1);
   for (int i = 1; i < newType.getRank(); ++i) {
@@ -551,14 +538,14 @@ static void createAttrForPreloadWS(OpBuilder &builder, Value markedVal) {
 }
 
 static Value createWorkspaceSubview(OpBuilder &builder, Location loc,
-                                    Value from, Value iv, int numMultibuffer,
+                                    Value from, Value iv,
                                     bool isPreload = false) {
   auto const1 = builder.getIndexAttr(1);
   auto const0 = builder.getIndexAttr(0);
   SmallVector<OpFoldResult> offsets, sizes, strides;
   auto newType = cast<MemRefType>(from.getType());
 
-  offsets.push_back(createBufferSlot(builder, loc, iv, numMultibuffer));
+  offsets.push_back(iv);
   offsets.append(newType.getRank() - 1, const0);
   sizes.push_back(const1);
   for (int i = 1; i < newType.getRank(); ++i) {
@@ -583,7 +570,7 @@ static Value createWorkspaceSubview(OpBuilder &builder, Location loc,
 static void
 processWorkspaceOutputs(OpBuilder &builder, WorkItem *item,
                         DenseMap<Value, Value> &expandedWorkspaceMap,
-                        const IRMapping &loopMap, int numMultibuffer) {
+                        const IRMapping &loopMap) {
   scf::ForOp forOp = item->forOp;
   for (Operation *output : item->workspaceOutputs) {
     auto dpsOp = cast<DestinationStyleOpInterface>(output);
@@ -593,8 +580,7 @@ processWorkspaceOutputs(OpBuilder &builder, WorkItem *item,
     builder.setInsertionPoint(store);
     Location loc = store->getLoc();
     Value newDst =
-        createWorkspaceSubview(builder, loc, newAlloc, forOp.getInductionVar(),
-                               numMultibuffer);
+        createWorkspaceSubview(builder, loc, newAlloc, forOp.getInductionVar());
     if (auto storeOp = dyn_cast<StoreOp>(store))
       builder.create<StoreOp>(loc, TypeRange{}, storeOp.getSrc(), newDst);
     else if (auto fixpipe = dyn_cast<FixpipeOp>(store))
@@ -624,8 +610,7 @@ processWorkspaceOutputs(OpBuilder &builder, WorkItem *item,
         continue;
       builder.setInsertionPoint(userOp);
       Value sliceOp = createExtractSlice(builder, loc, workspaceOp,
-                                         operand->get().getType(), sliceIdx,
-                                         numMultibuffer);
+                                         operand->get().getType(), sliceIdx);
       operand->set(sliceOp);
     }
     store->erase();
@@ -647,9 +632,8 @@ static void processWorkspaceOutputUsers(
       builder.setInsertionPoint(owner);
       Value sliceIdx;
       if (isa<scf::YieldOp>(owner)) {
-        Value one = builder.create<arith::ConstantIndexOp>(owner->getLoc(), 1);
-        sliceIdx = builder.create<arith::SubIOp>(
-            owner->getLoc(), item->forOp.getUpperBound(), one);
+        sliceIdx = builder.create<arith::ConstantIndexOp>(owner->getLoc(),
+                                                          numMultibuffer - 1);
       } else {
         // The nearest enclosing scf.for may be a loop cloned from the
         // original pipeline body.  Its IV indexes data *within* one stage
@@ -664,8 +648,7 @@ static void processWorkspaceOutputUsers(
       Value alloc = getAllocWorkspace(operand.get());
       Value mappedTensor = expandedWorkspaceMap.lookup(alloc);
       Value slice = createExtractSlice(builder, owner->getLoc(), mappedTensor,
-                                       operand.get().getType(), sliceIdx,
-                                       numMultibuffer);
+                                       operand.get().getType(), sliceIdx);
       replacements.emplace_back(&operand, slice);
     }
   }
@@ -705,7 +688,7 @@ Value CVPipelineImpl::createSubview(OpBuilder &builder, Location loc,
   auto targetTy = cast<MemRefType>(to);
   if (!iv.getType().isIndex())
     iv = builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), iv);
-  offsets.push_back(createBufferSlot(builder, loc, iv, numMultibuffer));
+  offsets.push_back(iv);
   offsets.append(targetTy.getRank(), const0);
   sizes.push_back(const1);
   for (int64_t dim : targetTy.getShape()) {
@@ -1403,12 +1386,12 @@ LogicalResult CVPipelineImpl::createNewLoops() {
   Location loc = pipelineLoop->getLoc();
   Type origTy = originStep.getType();
   Value unrollVal = builder.create<arith::ConstantOp>(
-      loc, origTy, builder.getIntegerAttr(origTy, pipelineDepth));
+      loc, origTy, builder.getIntegerAttr(origTy, numMultibuffer));
   Value newStep = builder.create<arith::MulIOp>(loc, originStep, unrollVal);
   Value c1 = builder.create<arith::ConstantIndexOp>(loc, 1);
   Value c0 = builder.create<arith::ConstantIndexOp>(loc, 0);
   Value pipelineIters =
-      builder.create<arith::ConstantIndexOp>(loc, pipelineDepth);
+      builder.create<arith::ConstantIndexOp>(loc, numMultibuffer);
   newLoop =
       builder.create<scf::ForOp>(loc, lb, ub, newStep, pipelineLoop.getInits());
   newLoop->setAttr(hivm::kCVUnrolledLoopName, builder.getUnitAttr());
@@ -1464,9 +1447,7 @@ LogicalResult CVPipelineImpl::createNewLoops() {
         {NamedAttribute(builder.getStringAttr(kPipelinedLoopCoreTypeAttrName),
                         TCoreTypeAttr::get(ctx, item->core)),
          NamedAttribute(builder.getStringAttr(kMultibufferUnrollAttrName),
-                        builder.getI32IntegerAttr(numMultibuffer)),
-         NamedAttribute(builder.getStringAttr(kCVPipelineDepthAttrName),
-                        builder.getI32IntegerAttr(pipelineDepth))});
+                        builder.getI32IntegerAttr(numMultibuffer))});
     builder.setInsertionPointToStart(item->forOp.getBody());
     Value workItemIV = item->forOp.getInductionVar();
     item->reconstructedIV = builder.create<affine::AffineApplyOp>(
@@ -1520,7 +1501,7 @@ FailureOr<Value> CVPipelineImpl::updateMaskingSubview(OpBuilder &builder,
   Attribute cst1Attr = builder.getI64IntegerAttr(1);
   if (!iv.getType().isIndex())
     iv = builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), iv);
-  offsets.push_back(createBufferSlot(builder, loc, iv, numMultibuffer));
+  offsets.push_back(iv);
   offsets.append(subview.getMixedOffsets());
   sizes.push_back(cst1Attr);
   sizes.append(subview.getMixedSizes());
@@ -1580,7 +1561,7 @@ LogicalResult CVPipelineImpl::migrateOps() {
 
     // Replace workspace stores in c220
     processWorkspaceOutputs(builder, item.get(), expandedWorkspaceMap,
-                            item->irMap, numMultibuffer);
+                            item->irMap);
 
     auto *argIt =
         item->forOp.getRegionIterArgs().begin() + item->yieldedOutputs.size();
@@ -1626,8 +1607,7 @@ LogicalResult CVPipelineImpl::migrateOps() {
         Location loc = clonedFor->getLoc();
         Value newResult = *resIt;
         Value extracted =
-            createExtractSlice(builder, loc, *argIt, orig.getType(), iv,
-                               numMultibuffer);
+            createExtractSlice(builder, loc, *argIt, orig.getType(), iv);
         OpOperand &initOperand = clonedFor.getInitsMutable()[resultIdx];
         initOperand.set(extracted);
         // Also retype the matching iter_arg so the body uses the slice type.
@@ -1635,8 +1615,7 @@ LogicalResult CVPipelineImpl::migrateOps() {
         Value newOutput = clonedFor->getResult(resultIdx);
         newOutput.setType(extracted.getType());
         builder.setInsertionPointAfterValue(newOutput);
-        Value yieldVal = createInsertSlice(builder, loc, newOutput, *argIt, iv,
-                                           numMultibuffer);
+        Value yieldVal = createInsertSlice(builder, loc, newOutput, *argIt, iv);
         orig.replaceUsesWithIf(newOutput, [&](OpOperand &use) {
           return item->forOp->isAncestor(use.getOwner());
         });
@@ -1657,8 +1636,7 @@ LogicalResult CVPipelineImpl::migrateOps() {
           Value userIV = cast<scf::ForOp>(ownerLoop).getInductionVar();
           builder.setInsertionPoint(owner);
           Value perStage = createExtractSlice(builder, loc, newResult,
-                                              orig.getType(), userIV,
-                                              numMultibuffer);
+                                              orig.getType(), userIV);
           use->set(perStage);
         }
         continue;
@@ -1689,14 +1667,12 @@ LogicalResult CVPipelineImpl::migrateOps() {
         Value init = initOperand->get();
         if (isFreshOutputInit(init)) {
           Value extracted =
-              createExtractSlice(builder, loc, *argIt, orig.getType(), iv,
-                                 numMultibuffer);
+              createExtractSlice(builder, loc, *argIt, orig.getType(), iv);
           initOperand->set(extracted);
         }
         Value newOutput = dps->getResult(0);
         builder.setInsertionPointAfterValue(newOutput);
-        Value yieldVal = createInsertSlice(builder, loc, newOutput, *argIt, iv,
-                                           numMultibuffer);
+        Value yieldVal = createInsertSlice(builder, loc, newOutput, *argIt, iv);
         orig.replaceUsesWithIf(newOutput, [&](OpOperand &use) {
           return item->forOp->isAncestor(use.getOwner());
         });
@@ -1829,8 +1805,7 @@ LogicalResult CVPipelineImpl::migrateOps() {
         Value userIV = cast<scf::ForOp>(ownerLoop).getInductionVar();
         builder.setInsertionPoint(owner);
         Value newUse = createExtractSlice(builder, owner->getLoc(), newResult,
-                                          use->get().getType(), userIV,
-                                          numMultibuffer);
+                                          use->get().getType(), userIV);
         use->set(newUse);
       }
     }
@@ -1879,7 +1854,6 @@ LogicalResult CVPipelineImpl::migrateOpsForPreload(OpBuilder &builder) {
       Value sliceIdx = builder.create<arith::ConstantIndexOp>(loc, 0);
       Value newDst =
           createWorkspaceSubview(builder, loc, expandedIt->second, sliceIdx,
-                                 numMultibuffer,
                                  /*isPreload=*/true);
       cloneStoreLikeToWorkspace(builder, storeLikeOp, newDst);
 
@@ -1896,8 +1870,7 @@ LogicalResult CVPipelineImpl::migrateOpsForPreload(OpBuilder &builder) {
         Value loadSliceIdx = builder.create<arith::ConstantIndexOp>(loc, 0);
         Value sliceOp =
             createExtractSlice(builder, loc, workspaceTensor,
-                               operand.get().getType(), loadSliceIdx,
-                               numMultibuffer);
+                               operand.get().getType(), loadSliceIdx);
         createAttrForPreloadWS(builder, sliceOp);
         operand.set(sliceOp);
       }
@@ -2552,8 +2525,6 @@ LogicalResult CVPipelineImpl::run() {
   opToWorkItemMap = buildResult->opToWorkItemMap;
   outputMemrefMap = buildResult->outputMemrefMap;
   numMultibuffer = buildResult->resolvedMultibuffer;
-  if (pipelineDepth < 1)
-    pipelineDepth = numMultibuffer;
   workspaceAllocs = buildResult->workspaceAllocs;
 
   if (failed(absorbMergerOpsIntoWorkItems())) {
@@ -2652,17 +2623,7 @@ void CVPipeliningPass::runOnOperation() {
   func::FuncOp func = getOperation();
   SmallVector<scf::ForOp> pipelineCandidates;
 
-  int pipelineDepth = this->setDepthInUnrollMode;
-  int numMultibuffer = this->setNumMultibufferInUnrollMode;
-  if (numMultibuffer == -1)
-    numMultibuffer = pipelineDepth;
-
-  if (pipelineDepth < -1 || numMultibuffer < -1) {
-    func.emitError("[cv-pipelining] depth and buffer count must be positive, "
-                   "or -1 for automatic inference");
-    return signalPassFailure();
-  }
-  if (pipelineDepth == 1 || pipelineDepth == 0)
+  if (this->setDepthInUnrollMode == 1 || this->setDepthInUnrollMode == 0)
     return;
 
   // Disable CVP once batchmatmul is found
@@ -2682,8 +2643,8 @@ void CVPipeliningPass::runOnOperation() {
       continue;
 
     auto parentLoop = loop->getParentOfType<scf::ForOp>();
-    CVPipelineImpl impl(loop, pipelineDepth, numMultibuffer,
-                        this->pipelineMode, this->enableLazyLoading);
+    CVPipelineImpl impl(loop, this->setDepthInUnrollMode, this->pipelineMode,
+                        this->enableLazyLoading);
 
     // Mark all parent loops to not attempt pipelining to save compile time
     if (impl.run().succeeded())

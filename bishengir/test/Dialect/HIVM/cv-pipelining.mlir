@@ -1,23 +1,7 @@
-// RUN: bishengir-opt -cv-pipelining="set-depth-in-unroll-mode=2 set-num-multibuffer-in-unroll-mode=2" -allow-unregistered-dialect -split-input-file -verify-diagnostics %s | FileCheck %s --check-prefixes=CHECK,CHECK-HINT,CHECK-NEG-HINT
+// RUN: bishengir-opt -cv-pipelining="set-depth-in-unroll-mode=2" -allow-unregistered-dialect -split-input-file -verify-diagnostics %s | FileCheck %s --check-prefixes=CHECK,CHECK-HINT,CHECK-NEG-HINT
 // RUN: bishengir-opt -cv-pipelining="set-depth-in-unroll-mode=2 enable-lazy-loading=true" -allow-unregistered-dialect -split-input-file -verify-diagnostics %s | FileCheck %s --check-prefixes=CHECK,CHECK-LAZY,CHECK-HINT
-// RUN: bishengir-opt -cv-pipelining="set-depth-in-unroll-mode=2 set-num-multibuffer-in-unroll-mode=3" -allow-unregistered-dialect -split-input-file %s | FileCheck %s --check-prefix=CHECK-SPLIT
-// RUN: bishengir-opt -cv-pipelining="set-depth-in-unroll-mode=3 set-num-multibuffer-in-unroll-mode=2" -allow-unregistered-dialect -split-input-file %s | FileCheck %s --check-prefix=CHECK-RING2
-// RUN: bishengir-opt -cv-pipelining="set-depth-in-unroll-mode=4 set-num-multibuffer-in-unroll-mode=1" -allow-unregistered-dialect -split-input-file %s | FileCheck %s --check-prefix=CHECK-RING1
 
 // CHECK-LABEL: func.func @test_pipeline
-// CHECK-SPLIT-LABEL: func.func @test_pipeline
-// CHECK-SPLIT: memref<3x16x16xf16>
-// CHECK-SPLIT: cv_pipeline_depth = 2 : i32
-// CHECK-SPLIT-SAME: multibuffer_unroll_factor = 3 : i32
-// CHECK-RING2-LABEL: func.func @test_pipeline
-// CHECK-RING2: memref<2x16x16xf16>
-// CHECK-RING2: arith.remui
-// CHECK-RING2: cv_pipeline_depth = 3 : i32
-// CHECK-RING2-SAME: multibuffer_unroll_factor = 2 : i32
-// CHECK-RING1-LABEL: func.func @test_pipeline
-// CHECK-RING1: memref<1x16x16xf16>
-// CHECK-RING1: cv_pipeline_depth = 4 : i32
-// CHECK-RING1-SAME: multibuffer_unroll_factor = 1 : i32
 // CHECK: scf.for
 // CHECK: scf.for
 // CHECK: hivm.loop_core_type = #hivm.tcore_type<CUBE>
@@ -108,10 +92,7 @@ func.func @test_pipeline(%arg0: memref<?xi8> {hacc.arg_type = #hacc.arg_type<wor
 // CHECK: scf.for %[[VECTOR_STAGE:[a-zA-Z0-9_]+]] =
 // Original nested loop: this IV only selects data within the stage.
 // CHECK:   scf.for %[[INNER_TILE:[a-zA-Z0-9_]+]] =
-// The workspace ring slot is the work-item stage modulo the physical buffer
-// count, even when depth and buffer count happen to be equal in this run.
-// CHECK:     %[[VECTOR_SLOT:.*]] = arith.remui %[[VECTOR_STAGE]],
-// CHECK:     tensor.extract_slice {{.*}}[%[[VECTOR_SLOT]], 0, 0]
+// CHECK:     tensor.extract_slice {{.*}}[%[[VECTOR_STAGE]], 0, 0]
 // CHECK: pipeline.veconly
 // CHECK: hivm.loop_core_type = #hivm.tcore_type<VECTOR>
 func.func @test_nested_cross_workitems(%arg0: memref<?xi8> {hacc.arg_type = #hacc.arg_type<workspace>}) attributes {WorkspaceArgIdx = 0 : i16, func_dyn_memref_args = dense<[true]> : vector<1xi1>, global_kernel = "local", hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<MIX>, mix_mode = "mix"} {

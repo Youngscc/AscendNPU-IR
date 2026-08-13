@@ -1258,11 +1258,6 @@ def CVPipelining : Pass<"cv-pipelining", "func::FuncOp"> {
   let options = [Option<"setDepthInUnrollMode", "set-depth-in-unroll-mode", "int",
                         /*default=*/"-1",
                         "Specify pipeline depth for cv-pipelining.">,
-                 Option<"setNumMultibufferInUnrollMode",
-                        "set-num-multibuffer-in-unroll-mode", "int",
-                        /*default=*/"-1",
-                        "Specify the physical buffer multiplicity independently "
-                        "from pipeline depth.">,
                  Option<"pipelineMode", "pipeline-mode", "CVPipelineMode",
                         "CVPipelineMode::Unroll",
                         "Pipeline mode for CV-pipelining.",
