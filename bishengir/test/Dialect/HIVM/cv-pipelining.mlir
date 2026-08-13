@@ -108,7 +108,10 @@ func.func @test_pipeline(%arg0: memref<?xi8> {hacc.arg_type = #hacc.arg_type<wor
 // CHECK: scf.for %[[VECTOR_STAGE:[a-zA-Z0-9_]+]] =
 // Original nested loop: this IV only selects data within the stage.
 // CHECK:   scf.for %[[INNER_TILE:[a-zA-Z0-9_]+]] =
-// CHECK:     tensor.extract_slice {{.*}}[%[[VECTOR_STAGE]], 0, 0]
+// The workspace ring slot is the work-item stage modulo the physical buffer
+// count, even when depth and buffer count happen to be equal in this run.
+// CHECK:     %[[VECTOR_SLOT:.*]] = arith.remui %[[VECTOR_STAGE]],
+// CHECK:     tensor.extract_slice {{.*}}[%[[VECTOR_SLOT]], 0, 0]
 // CHECK: pipeline.veconly
 // CHECK: hivm.loop_core_type = #hivm.tcore_type<VECTOR>
 func.func @test_nested_cross_workitems(%arg0: memref<?xi8> {hacc.arg_type = #hacc.arg_type<workspace>}) attributes {WorkspaceArgIdx = 0 : i16, func_dyn_memref_args = dense<[true]> : vector<1xi1>, global_kernel = "local", hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<MIX>, mix_mode = "mix"} {

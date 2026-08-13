@@ -29,8 +29,10 @@ module {
     return
   }
 
-  // The ordinary local count must not replace the dedicated preload-local
-  // count, even though the preload buffer is also the destination of a load.
+  // The ordinary local count must not replace the independently inferred
+  // preload-local count, even though the preload buffer is also the
+  // destination of a load. Here, producer preload 2 and consumer preload 0
+  // require three buffers.
   // ONE-LABEL: func.func @preload_local
   // THREE-LABEL: func.func @preload_local
   // FOUR-LABEL: func.func @preload_local
@@ -42,9 +44,9 @@ module {
     scf.for %i = %c0 to %c4 step %c1 {
       %preloaded = scope.scope : () -> memref<16xf16, #hivm.address_space<ub>> {
         %buffer = memref.alloc() : memref<16xf16, #hivm.address_space<ub>>
-        // ONE: annotation.mark %{{.*}} {hivm.multi_buffer = 4 : i32, hivm.preload_local_buffer = 1 : i32}
-        // THREE: annotation.mark %{{.*}} {hivm.multi_buffer = 4 : i32, hivm.preload_local_buffer = 1 : i32}
-        // FOUR: annotation.mark %{{.*}} {hivm.multi_buffer = 4 : i32, hivm.preload_local_buffer = 1 : i32}
+        // ONE: annotation.mark %{{.*}} {hivm.multi_buffer = 3 : i32, hivm.preload_local_buffer = 1 : i32}
+        // THREE: annotation.mark %{{.*}} {hivm.multi_buffer = 3 : i32, hivm.preload_local_buffer = 1 : i32}
+        // FOUR: annotation.mark %{{.*}} {hivm.multi_buffer = 3 : i32, hivm.preload_local_buffer = 1 : i32}
         hivm.hir.load
             ins(%input : memref<16xf16, #hivm.address_space<gm>>)
             outs(%buffer : memref<16xf16, #hivm.address_space<ub>>)
