@@ -11,6 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "bishengir/Conversion/SSBufferToLegacyLLVM/SSBufferToLegacyLLVM.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Pass/PassManager.h"
 #include "bishengir/Tools/Utils/Utils.h"
@@ -192,6 +193,12 @@ runExternalHIVMC(ModuleOp &module,
     }
   }
   inputFile = inputFileHandler->outputFilename();
+
+  if (failed(convertSSBufferToLegacyLLVM(module))) {
+    llvm::errs()
+        << "[ERROR] Failed to lower SSBuffer accesses for legacy hivmc-a5.\n";
+    return failure();
+  }
 
   module.print(inputFileHandler->os(), mlir::OpPrintingFlags().enableDebugInfo(
                                          config.getEnableSanitizer() ||

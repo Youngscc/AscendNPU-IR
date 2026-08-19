@@ -140,6 +140,21 @@ def ConvertHIVMToStandard : Pass<"convert-hivm-to-std", "ModuleOp"> {
 }
 
 //===----------------------------------------------------------------------===//
+// SSBufferToLegacyLLVM
+//===----------------------------------------------------------------------===//
+
+def ConvertSSBufferToLegacyLLVM : Pass<"convert-ssbuffer-to-legacy-llvm", "ModuleOp"> {
+  let summary = "Lower SSBuffer memrefs to the legacy LLVM address space used by hivmc";
+  let constructor = "mlir::createConvertSSBufferToLegacyLLVMPass()";
+  let dependentDialects = [
+    "annotation::AnnotationDialect",
+    "hivm::HIVMDialect",
+    "LLVM::LLVMDialect",
+    "memref::MemRefDialect"
+  ];
+}
+
+//===----------------------------------------------------------------------===//
 // HIVMToTritonGPU
 //===----------------------------------------------------------------------===//
 

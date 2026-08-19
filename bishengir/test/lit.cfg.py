@@ -152,5 +152,8 @@ if config.bishengir_enable_triton_compile:
 if shutil.which('hivmc'):
     config.available_features.add('hivmc')
 
+if shutil.which('hivmc-a5'):
+    config.available_features.add('hivmc-a5')
+
 if config.shmem_build_template:
     config.available_features.add('shmem')
